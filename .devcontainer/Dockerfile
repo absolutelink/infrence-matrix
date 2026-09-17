@@ -7,13 +7,15 @@ RUN tar -C / -Jxpf /tmp/s6-overlay-noarch.tar.xz
 ADD https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-x86_64.tar.xz /tmp
 RUN tar -C / -Jxpf /tmp/s6-overlay-x86_64.tar.xz
 
-# COPY rootfs/ /
-# COPY additional-services/ /etc/s6-overlay/s6-rc.d/
+COPY rootfs/ /
+COPY additional-services/ /etc/s6-overlay/s6-rc.d/
 
-# RUN apt-get update \
-#     && apt-get install -y --no-install-recommends ca-certificates curl \
-#     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-#     && apt-get install -y --no-install-recommends nodejs \
-#     && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
 
-ENTRYPOINT ["/init"]
+ENTRYPOINT ["docker-entrypoint"]
+
+CMD ["/init"]
