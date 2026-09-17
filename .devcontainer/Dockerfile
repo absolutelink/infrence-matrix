@@ -11,7 +11,7 @@ COPY rootfs/ /
 COPY additional-services/ /etc/s6-overlay/s6-rc.d/
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl postgresql postgresql-contrib \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*

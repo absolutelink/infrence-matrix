@@ -1,0 +1,32 @@
+#!/command/with-contenv /bin/sh
+set -e
+
+# Create postgres user if not exists
+if ! id -u postgres >/dev/null 2>&1; then
+    adduser -D -s /bin/sh -h /var/lib/postgresql postgres
+fi
+
+# Ensure data directory exists with correct permissions
+DATA_DIR="/var/lib/postgresql/data"
+mkdir -p "$DATA_DIR"
+chown -R postgres:postgres "$DATA_DIR"
+chmod 700 "$DATA_DIR"
+
+# Ensure run directory exists with correct permissions for lock file
+RUN_DIR="/var/run/postgresql"
+mkdir -p "$RUN_DIR"
+chown -R postgres:postgres "$RUN_DIR"
+chmod 775 "$RUN_DIR"
+
+# Add postgresql binaries to PATH
+export PATH="/usr/lib/postgresql/17/bin:$PATH"
+
+# Initialize database if not exists
+if [ ! -f "$DATA_DIR/PG_VERSION" ]; then
+    echo "Initializing PostgreSQL database..."
+    su - postgres -c "export PATH=/usr/lib/postgresql/17/bin:\$PATH && initdb -D $DATA_DIR"
+fi
+
+# Start PostgreSQL
+echo "Starting PostgreSQL..."
+exec su - postgres -c "export PATH=/usr/lib/postgresql/17/bin:\$PATH && postgres -D $DATA_DIR"
