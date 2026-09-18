@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y \
 
 # Install Python dependencies
 COPY pyproject.toml .
-RUN pip install uv && uv sync --frozen
+RUN pip install uv && uv sync
 
 # Copy application code
 COPY app/ ./app/
