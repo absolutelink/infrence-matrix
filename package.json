@@ -12,5 +12,8 @@
     "test:ui": "bun run --filter frontend test:ui",
     "email:dev": "bun run --filter emails dev",
     "email:export": "bun run --filter emails export"
+  },
+  "dependencies": {
+    "dev": "^0.1.5"
   }
 }

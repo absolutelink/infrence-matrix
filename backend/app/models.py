@@ -44,7 +44,7 @@ class User(UserBase, table=True):
     )
     hashed_password: str
     created_at: datetime = Field(default_factory=get_datetime_utc)
-    items: list[Item] = Relationship(
+    items: list["Item"] = Relationship(
         back_populates="owner",
         sa_relationship_kwargs={"lazy": "selectin"},
     )
@@ -79,7 +79,7 @@ class Item(ItemBase, table=True):
         foreign_key="user.id",
         ondelete="CASCADE",
     )
-    owner: User | None = Relationship(
+    owner: "User" = Relationship(
         back_populates="items",
         sa_relationship_kwargs={"lazy": "selectin"},
     )
@@ -183,7 +183,7 @@ class Agent(SQLModel, table=True):
     created_at: datetime = Field(default_factory=get_datetime_utc)
 
     # Relationships
-    servers: list[ServerInstance] = Relationship(
+    servers: list["ServerInstance"] = Relationship(
         back_populates="agent",
         sa_relationship_kwargs={"lazy": "selectin"},
     )
@@ -230,18 +230,58 @@ class Model(SQLModel, table=True):
     downloaded_at: datetime = Field(default_factory=get_datetime_utc)
     updated_at: datetime | None = None
 
-    conversations: list[Conversation] = Relationship(
+    conversations: list["Conversation"] = Relationship(
         back_populates="model",
         sa_relationship_kwargs={"lazy": "selectin"},
     )
-    server_instances: list[ServerInstance] = Relationship(
+    server_instances: list["ServerInstance"] = Relationship(
         back_populates="model",
         sa_relationship_kwargs={"lazy": "selectin"},
     )
-    cache_entries: list[PromptCache] = Relationship(
+    cache_entries: list["PromptCache"] = Relationship(
         back_populates="model",
         sa_relationship_kwargs={"lazy": "selectin"},
     )
+
+
+class ModelCreate(SQLModel):
+    """Model creation model."""
+    name: str = Field(max_length=512)
+    path: str = Field(max_length=1024)
+    size_bytes: int
+    architecture: str
+    parameter_count: int | None = None
+    quantization: str
+    supports_embeddings: bool = False
+    supports_vision: bool = False
+    context_length: int
+    license: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    description: str | None = None
+    source: str
+    source_repo_id: str | None = None
+    source_url: str | None = None
+    source_file: str | None = None
+
+
+class ModelUpdate(SQLModel):
+    """Model update model."""
+    name: str | None = Field(default=None, max_length=512)
+    path: str | None = Field(default=None, max_length=1024)
+    size_bytes: int | None = None
+    architecture: str | None = None
+    parameter_count: int | None = None
+    quantization: str | None = None
+    supports_embeddings: bool | None = None
+    supports_vision: bool | None = None
+    context_length: int | None = None
+    license: str | None = None
+    tags: list[str] | None = None
+    description: str | None = None
+    source: str | None = None
+    source_repo_id: str | None = None
+    source_url: str | None = None
+    source_file: str | None = None
 
 
 # ============================================================================
@@ -301,18 +341,18 @@ class Conversation(SQLModel, table=True):
     created_at: datetime = Field(default_factory=get_datetime_utc)
     completed_at: datetime | None = None
 
-    model: Model | None = Relationship(
+    model: "Model" = Relationship(
         back_populates="conversations",
         sa_relationship_kwargs={"lazy": "selectin"},
     )
-    children: list[Conversation] = Relationship(
+    children: list["Conversation"] = Relationship(
         back_populates="parent",
         sa_relationship_kwargs={
             "lazy": "selectin",
             "remote_side": "Conversation.id",
         },
     )
-    parent: Conversation | None = Relationship(
+    parent: "Conversation" = Relationship(
         back_populates="children",
         sa_relationship_kwargs={"lazy": "selectin"},
     )
@@ -402,7 +442,7 @@ class PromptCache(SQLModel, table=True):
     )
     cache_path: str
 
-    model: Model | None = Relationship(
+    model: "Model" = Relationship(
         back_populates="cache_entries",
         sa_relationship_kwargs={"lazy": "selectin"},
     )
@@ -517,11 +557,11 @@ class ServerInstance(SQLModel, table=True):
     )
     proxy_url: str | None = None
 
-    agent: Agent | None = Relationship(
+    agent: "Agent" = Relationship(
         back_populates="servers",
         sa_relationship_kwargs={"lazy": "selectin"},
     )
-    model: Model | None = Relationship(
+    model: "Model" = Relationship(
         back_populates="server_instances",
         sa_relationship_kwargs={"lazy": "selectin"},
     )
@@ -578,6 +618,24 @@ class AudioJob(SQLModel, table=True):
 
     processing_time_ms: int | None = None
 
+    input_file: "File" = Relationship(
+        back_populates="audio_jobs",
+        sa_relationship_kwargs={
+            "lazy": "selectin",
+            "foreign_keys": "[AudioJob.input_file_id]",
+        },
+    )
+    output_file: "File" = Relationship(
+        back_populates="audio_output_jobs",
+        sa_relationship_kwargs={
+            "lazy": "selectin",
+            "foreign_keys": "[AudioJob.output_file_id]",
+        },
+    )
+    model: "Model" = Relationship(
+        sa_relationship_kwargs={"lazy": "selectin"},
+    )
+
 
 # ============================================================================
 # BatchJob - Tracks batch processing jobs
@@ -628,6 +686,28 @@ class BatchJob(SQLModel, table=True):
 
     error_message: str | None = None
 
+    input_file: "File" = Relationship(
+        back_populates="batch_jobs",
+        sa_relationship_kwargs={
+            "lazy": "selectin",
+            "foreign_keys": "[BatchJob.input_file_id]",
+        },
+    )
+    output_file: "File" = Relationship(
+        back_populates="batch_output_jobs",
+        sa_relationship_kwargs={
+            "lazy": "selectin",
+            "foreign_keys": "[BatchJob.output_file_id]",
+        },
+    )
+    results_file: "File" = Relationship(
+        back_populates="batch_results_jobs",
+        sa_relationship_kwargs={
+            "lazy": "selectin",
+            "foreign_keys": "[BatchJob.results_file_id]",
+        },
+    )
+
 
 # ============================================================================
 # File - Tracks uploaded files
@@ -665,18 +745,39 @@ class File(SQLModel, table=True):
     created_at: datetime = Field(default_factory=get_datetime_utc)
     expires_at: datetime | None = None
 
-    audio_jobs: list[AudioJob] = Relationship(
+    audio_jobs: list["AudioJob"] = Relationship(
         back_populates="input_file",
         sa_relationship_kwargs={
             "lazy": "selectin",
             "foreign_keys": "AudioJob.input_file_id",
         },
     )
-    batch_jobs: list[BatchJob] = Relationship(
+    audio_output_jobs: list["AudioJob"] = Relationship(
+        back_populates="output_file",
+        sa_relationship_kwargs={
+            "lazy": "selectin",
+            "foreign_keys": "AudioJob.output_file_id",
+        },
+    )
+    batch_jobs: list["BatchJob"] = Relationship(
         back_populates="input_file",
         sa_relationship_kwargs={
             "lazy": "selectin",
             "foreign_keys": "BatchJob.input_file_id",
+        },
+    )
+    batch_output_jobs: list["BatchJob"] = Relationship(
+        back_populates="output_file",
+        sa_relationship_kwargs={
+            "lazy": "selectin",
+            "foreign_keys": "BatchJob.output_file_id",
+        },
+    )
+    batch_results_jobs: list["BatchJob"] = Relationship(
+        back_populates="results_file",
+        sa_relationship_kwargs={
+            "lazy": "selectin",
+            "foreign_keys": "BatchJob.results_file_id",
         },
     )
 

@@ -25,13 +25,15 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "Inference Matrix"
     BACKEND_HOST: str = "0.0.0.0"
     BACKEND_PORT: int = 8000
-    FRONTEND_HOST: str = "http://localhost:3000"
+    FRONTEND_HOST: str = "http://localhost:5174"
+    FRONTEND_HOSTS: str = "http://localhost:5174,http://localhost:3000,http://127.0.0.1:5174,http://127.0.0.1:3000"
+    CORS_ALLOW_ALL_ORIGINS: bool = True
     API_V1_STR: str = "/api/v1"
     FASTAPI_ENV: Literal["development", "production"] | None = "development"
 
     # Database
     POSTGRES_USER: str = "inference"
-    POSTGRES_PASSWORD: str = Field(..., min_length=1)
+    POSTGRES_PASSWORD: str = Field(default="", min_length=0)
     POSTGRES_DB: str = "inference_matrix"
     POSTGRES_HOST: str = "postgres"
     POSTGRES_PORT: int = 5432
@@ -41,6 +43,18 @@ class Settings(BaseSettings):
     def DATABASE_URL(self) -> PostgresDsn:
         return PostgresDsn.build(
             scheme="postgresql+psycopg",
+            username=self.POSTGRES_USER,
+            password=self.POSTGRES_PASSWORD,
+            host=self.POSTGRES_HOST,
+            port=self.POSTGRES_PORT,
+            path=self.POSTGRES_DB,
+        )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def SYNC_DATABASE_URL(self) -> PostgresDsn:
+        return PostgresDsn.build(
+            scheme="postgresql+psycopg2",
             username=self.POSTGRES_USER,
             password=self.POSTGRES_PASSWORD,
             host=self.POSTGRES_HOST,

@@ -1,5 +1,7 @@
 FROM mcr.microsoft.com/devcontainers/python:3-3.14-trixie
 
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
 ARG S6_OVERLAY_VERSION=3.2.3.0
 
 ADD https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz /tmp
@@ -15,6 +17,8 @@ RUN apt-get update \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g bun
 
 ENTRYPOINT ["docker-entrypoint"]
 
