@@ -1,4 +1,4 @@
-FROM python:3.14-slim as base
+FROM python:3.14-slim AS base
 
 WORKDIR /app
 
@@ -8,8 +8,8 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-COPY pyproject.toml uv.lock ./
-RUN pip install uv && uv sync --frozen
+COPY pyproject.toml ./
+RUN pip install uv && uv pip install --system -e .
 
 # Copy application code
 COPY app/ ./app/
