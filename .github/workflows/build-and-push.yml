@@ -9,8 +9,8 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  FRONTEND_IMAGE: inference-matrix/frontend
-  AGENT_IMAGE: inference-matrix/agent
+  FRONTEND_IMAGE: ${{ github.repository_owner }}/frontend
+  AGENT_IMAGE: ${{ github.repository_owner }}/agent
 
 jobs:
   build-frontend:
