@@ -1,16 +1,22 @@
 # API Endpoints Specification
 
-Inference Matrix provides an OpenAI-compatible REST API. All endpoints support optional authentication via API keys.
+Inference Matrix provides an OpenAI-compatible REST API through the Frontend Service. The Frontend Service communicates with Agent Services to manage inference.
 
-## Base URL
+## Base URLs
 
+**Frontend Service:**
 ```
 http://localhost:8000/v1
 ```
 
+**Agent Service (internal):**
+```
+http://agent-hostname:8080/api
+```
+
 ## Authentication
 
-API keys are passed via the `Authorization` header:
+API keys are passed via the `Authorization` header to the Frontend Service:
 
 ```bash
 Authorization: Bearer YOUR_API_KEY
@@ -18,15 +24,19 @@ Authorization: Bearer YOUR_API_KEY
 
 Authentication is optional and can be enabled/disabled via configuration.
 
+**Agent Service has no authentication** (trusted internal network).
+
 ---
 
-## Models
+## Frontend Service API
 
-### List Models
+### Models
+
+#### List Models
 
 **GET** `/v1/models`
 
-Returns a list of available models.
+Returns a list of available models across all Agents.
 
 **Response:**
 ```json
@@ -34,10 +44,11 @@ Returns a list of available models.
   "object": "list",
   "data": [
     {
-      "id": "llama-3.2-3b-instruct.Q4_K_M.gguf",
+      "id": "llama-3-8b.Q4_K_M.gguf",
       "object": "model",
       "created": 1234567890,
-      "owned_by": "inference-matrix"
+      "owned_by": "inference-matrix",
+      "agent_id": "agent-uuid"
     }
   ]
 }
@@ -45,9 +56,9 @@ Returns a list of available models.
 
 ---
 
-## Chat Completions
+### Chat Completions
 
-### Create Chat Completion
+#### Create Chat Completion
 
 **POST** `/v1/chat/completions`
 
@@ -56,20 +67,26 @@ Creates a model response for the given chat conversation.
 **Request Body:**
 ```json
 {
-  "model": "llama-3.2-3b-instruct.Q4_K_M.gguf",
+  "model": "llama-3-8b.Q4_K_M.gguf",
+  "agent_id": "agent-uuid",
   "messages": [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": "Hello!"}
   ],
   "stream": false,
   "temperature": 0.7,
-  "max_tokens": 512
+  "max_tokens": 512,
+  "prompt_cache_options": {
+    "enabled": true,
+    "ttl": 1800
+  }
 }
 ```
 
 **Parameters:**
 - `model` (string, required): Model ID to use
-- `messages` (array, required): List of messages (system, user, assistant)
+- `agent_id` (string, optional): Which Agent to use (required if model exists on multiple Agents)
+- `messages` (array, required): List of messages
 - `stream` (boolean, optional): Enable SSE streaming (default: false)
 - `temperature` (number, optional): Sampling temperature (0-2)
 - `max_tokens` (number, optional): Maximum tokens to generate
@@ -78,7 +95,9 @@ Creates a model response for the given chat conversation.
 - `presence_penalty` (number, optional): Presence penalty (-2 to 2)
 - `stop` (string|array, optional): Stop sequences
 - `tools` (array, optional): Tool definitions for function calling
-- `tool_choice` (string|object, optional): Tool choice strategy
+- `prompt_cache_options` (object, optional): Cache configuration
+  - `enabled`: boolean
+  - `ttl`: seconds
 
 **Response (non-streaming):**
 ```json
@@ -86,7 +105,7 @@ Creates a model response for the given chat conversation.
   "id": "chatcmpl-abc123",
   "object": "chat.completion",
   "created": 1234567890,
-  "model": "llama-3.2-3b-instruct.Q4_K_M.gguf",
+  "model": "llama-3-8b.Q4_K_M.gguf",
   "choices": [
     {
       "index": 0,
@@ -114,11 +133,19 @@ data: {"id":"chatcmpl-abc123","choices":[{"delta":{"content":"!"},"index":0}]}
 data: [DONE]
 ```
 
+**Flow:**
+1. Frontend checks if server is running for model on specified Agent
+2. If not running: Frontend → Agent: POST /api/servers/start
+3. Frontend → Agent: POST /proxy/{server_id}/cache/load (if cache enabled)
+4. Frontend → Agent: POST /proxy/{server_id}/v1/chat/completions
+5. Agent proxies to llama.cpp, streams SSE back
+6. Frontend → Agent: POST /proxy/{server_id}/cache/save (if cache enabled)
+
 ---
 
-## Completions (Legacy)
+### Completions (Legacy)
 
-### Create Completion
+#### Create Completion
 
 **POST** `/v1/completions`
 
@@ -127,21 +154,13 @@ Creates a completion for the given prompt (GPT-3 style legacy endpoint).
 **Request Body:**
 ```json
 {
-  "model": "llama-3.2-3b-instruct.Q4_K_M.gguf",
+  "model": "llama-3-8b.Q4_K_M.gguf",
+  "agent_id": "agent-uuid",
   "prompt": "Once upon a time",
   "max_tokens": 100,
   "temperature": 0.7
 }
 ```
-
-**Parameters:**
-- `model` (string, required): Model ID to use
-- `prompt` (string|array, required): Prompt text or tokens
-- `stream` (boolean, optional): Enable SSE streaming
-- `max_tokens` (number, optional): Maximum tokens to generate
-- `temperature` (number, optional): Sampling temperature
-- `top_p` (number, optional): Nucleus sampling
-- `stop` (string|array, optional): Stop sequences
 
 **Response:**
 ```json
@@ -149,7 +168,7 @@ Creates a completion for the given prompt (GPT-3 style legacy endpoint).
   "id": "cmpl-abc123",
   "object": "text_completion",
   "created": 1234567890,
-  "model": "llama-3.2-3b-instruct.Q4_K_M.gguf",
+  "model": "llama-3-8b.Q4_K_M.gguf",
   "choices": [
     {
       "text": ", there lived a brave knight...",
@@ -167,9 +186,9 @@ Creates a completion for the given prompt (GPT-3 style legacy endpoint).
 
 ---
 
-## Embeddings
+### Embeddings
 
-### Create Embedding
+#### Create Embedding
 
 **POST** `/v1/embeddings`
 
@@ -178,16 +197,12 @@ Creates embeddings for the given input text.
 **Request Body:**
 ```json
 {
-  "model": "nomic-embed-text-v1.5.Q4_K_M.gguf",
+  "model": "nomic-embed-text.Q4_K_M.gguf",
+  "agent_id": "agent-uuid",
   "input": "The quick brown fox jumps over the lazy dog",
   "encoding_format": "float"
 }
 ```
-
-**Parameters:**
-- `model` (string, required): Embedding model ID
-- `input` (string|array, required): Input text(s) to embed
-- `encoding_format` (string, optional): `float` or `base64` (default: float)
 
 **Response:**
 ```json
@@ -200,7 +215,7 @@ Creates embeddings for the given input text.
       "index": 0
     }
   ],
-  "model": "nomic-embed-text-v1.5.Q4_K_M.gguf",
+  "model": "nomic-embed-text.Q4_K_M.gguf",
   "usage": {
     "prompt_tokens": 9,
     "total_tokens": 9
@@ -210,9 +225,9 @@ Creates embeddings for the given input text.
 
 ---
 
-## Responses API
+### Responses API
 
-### Create Response
+#### Create Response
 
 **POST** `/v1/responses`
 
@@ -221,7 +236,8 @@ Creates a response using the new Responses API with support for tree-structured 
 **Request Body:**
 ```json
 {
-  "model": "llama-3.2-3b-instruct.Q4_K_M.gguf",
+  "model": "llama-3-8b.Q4_K_M.gguf",
+  "agent_id": "agent-uuid",
   "input": [
     {"type": "message", "role": "user", "content": "Hello!"}
   ],
@@ -229,39 +245,9 @@ Creates a response using the new Responses API with support for tree-structured 
   "stream": false,
   "temperature": 0.7,
   "max_output_tokens": 512,
-  "tools": [],
-  "tool_choice": "auto",
-  "reasoning": {
-    "effort": "medium",
-    "summary": "concise"
-  }
+  "store": true
 }
 ```
-
-**Parameters:**
-- `model` (string, required): Model ID to use
-- `input` (string|array, required): Input items (messages, function calls, etc.)
-- `previous_response_id` (string, optional): ID of prior response for multi-turn
-- `include` (array, optional): Additional fields to include
-- `tools` (array, optional): Available tools
-- `tool_choice` (string|object, optional): Tool selection
-- `metadata` (object, optional): Custom metadata (16 key-value pairs)
-- `temperature` (number, optional): Sampling temperature
-- `top_p` (number, optional): Nucleus sampling
-- `max_output_tokens` (number, optional): Max tokens to generate
-- `reasoning` (object, optional): Reasoning configuration
-  - `effort`: `none`|`low`|`medium`|`high`|`xhigh`
-  - `summary`: `concise`|`detailed`|`auto`
-- `stream` (boolean, optional): Enable SSE streaming
-- `store` (boolean, optional): Store response for retrieval (default: true)
-- `truncation` (string, optional): `auto`|`disabled`
-
-**Input Item Types:**
-- `message` (user/assistant/system/developer)
-- `function_call`
-- `function_call_output`
-- `reasoning`
-- `compaction`
 
 **Response:**
 ```json
@@ -269,8 +255,7 @@ Creates a response using the new Responses API with support for tree-structured 
   "id": "resp_abc123",
   "object": "response",
   "created_at": 1234567890,
-  "model": "llama-3.2-3b-instruct.Q4_K_M.gguf",
-  "input": [...],
+  "model": "llama-3-8b.Q4_K_M.gguf",
   "output": [
     {
       "type": "message",
@@ -293,46 +278,15 @@ Creates a response using the new Responses API with support for tree-structured 
 }
 ```
 
-**Streaming Events:**
-- `response.created`
-- `response.in_progress`
-- `response.output_item.added`
-- `response.output_item.done`
-- `response.completed`
-
 ---
 
-## Files
+### Files
 
-### List Files
-
-**GET** `/v1/files`
-
-Returns a list of uploaded files.
-
-**Response:**
-```json
-{
-  "object": "list",
-  "data": [
-    {
-      "id": "file-abc123",
-      "object": "file",
-      "bytes": 1234567,
-      "created_at": 1234567890,
-      "filename": "dataset.jsonl",
-      "purpose": "batch",
-      "status": "uploaded"
-    }
-  ]
-}
-```
-
-### Upload File
+#### Upload File
 
 **POST** `/v1/files`
 
-Uploads a file.
+Uploads a file for batch processing or retrieval.
 
 **Request Body (multipart/form-data):**
 - `file` (file, required): File to upload
@@ -351,40 +305,17 @@ Uploads a file.
 }
 ```
 
-### Retrieve File
+#### List Files
 
-**GET** `/v1/files/{file_id}`
+**GET** `/v1/files`
 
-Returns information about a specific file.
-
-**Response:** Same structure as List Files
-
-### Delete File
-
-**DELETE** `/v1/files/{file_id}`
-
-Deletes a file.
-
-**Response:**
-```json
-{
-  "id": "file-abc123",
-  "object": "file",
-  "deleted": true
-}
-```
-
-### Retrieve File Content
-
-**GET** `/v1/files/{file_id}/content`
-
-Returns the content of a file.
+Returns a list of uploaded files.
 
 ---
 
-## Batches
+### Batches
 
-### Create Batch
+#### Create Batch
 
 **POST** `/v1/batches`
 
@@ -399,11 +330,6 @@ Creates a batch job for async processing.
 }
 ```
 
-**Parameters:**
-- `input_file_id` (string, required): File ID with batch requests
-- `endpoint` (string, required): Target endpoint
-- `completion_window` (string, optional): Max processing time
-
 **Response:**
 ```json
 {
@@ -417,41 +343,21 @@ Creates a batch job for async processing.
 }
 ```
 
-### Retrieve Batch
-
-**GET** `/v1/batches/{batch_id}`
-
-Returns information about a batch job.
-
-### Cancel Batch
-
-**POST** `/v1/batches/{batch_id}/cancel`
-
-Cancels a batch job.
-
-### List Batches
-
-**GET** `/v1/batches`
-
-Returns a list of batch jobs.
-
 ---
 
-## Audio
+### Audio
 
-### Create Transcription
+#### Create Transcription
 
 **POST** `/v1/audio/transcriptions`
 
-Transcribes audio to text.
+Transcribes audio to text using system Whisper.
 
 **Request Body (multipart/form-data):**
 - `file` (file, required): Audio file (wav, mp3, etc.)
 - `model` (string, required): Whisper model ID
-- `language` (string, optional): Language code (e.g., "en")
-- `prompt` (string, optional): Transcription hint
+- `language` (string, optional): Language code
 - `response_format` (string, optional): `json`|`text`|`srt`|`verbose_json`
-- `temperature` (number, optional): Sampling temperature
 
 **Response:**
 ```json
@@ -460,27 +366,13 @@ Transcribes audio to text.
 }
 ```
 
-### Create Translation
+#### Create Translation
 
 **POST** `/v1/audio/translations`
 
 Translates audio to English text.
 
-**Request Body (multipart/form-data):**
-- `file` (file, required): Audio file
-- `model` (string, required): Whisper model ID
-- `prompt` (string, optional): Translation hint
-- `response_format` (string, optional): `json`|`text`|`srt`|`verbose_json`
-- `temperature` (number, optional): Sampling temperature
-
-**Response:**
-```json
-{
-  "text": "Hello, this is the translated text."
-}
-```
-
-### Create Speech
+#### Create Speech
 
 **POST** `/v1/audio/speech`
 
@@ -492,19 +384,387 @@ Generates speech from text (TTS).
   "model": "tts-model",
   "input": "Hello, this is text to speech.",
   "voice": "alloy",
-  "response_format": "mp3",
-  "speed": 1.0
+  "response_format": "mp3"
 }
 ```
 
-**Parameters:**
-- `model` (string, required): TTS model ID
-- `input` (string, required): Text to synthesize
-- `voice` (string, optional): Voice ID
-- `response_format` (string, optional): `mp3`|`wav`|`flac`|`opus`
-- `speed` (number, optional): Speech speed (0.25-4.0)
-
 **Response:** Audio file (binary)
+
+---
+
+## Agent Service API
+
+### Agent Registration
+
+#### Register Agent
+
+**POST** `/api/agents/register`
+
+Called by Agent on startup to register with Frontend.
+
+**Request Body:**
+```json
+{
+  "agent_id": "agent-uuid",
+  "name": "inference-agent-1",
+  "host": "agent-hostname",
+  "port": 8080,
+  "gpu_info": {
+    "name": "NVIDIA RTX 4090",
+    "vram_total": 24576000000,
+    "backend": "cuda"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "registered": true,
+  "frontend_version": "1.0.0"
+}
+```
+
+---
+
+### Server Management
+
+#### Start Server
+
+**POST** `/api/servers/start`
+
+Start a llama.cpp server for a model.
+
+**Request Body:**
+```json
+{
+  "model_id": "uuid",
+  "model_path": "/models/llama-3-8b.Q4_K_M.gguf",
+  "config": {
+    "gpu_layers": 35,
+    "context_size": 4096,
+    "batch_size": 512,
+    "cache_prompt": true,
+    "flash_attn": true
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "server_id": "server-uuid",
+  "status": "starting",
+  "proxy_url": "http://agent:8080/proxy/server-uuid"
+}
+```
+
+#### Stop Server
+
+**POST** `/api/servers/{server_id}/stop`
+
+Stop a running llama.cpp server.
+
+**Request Body:**
+```json
+{
+  "force": false
+}
+```
+
+**Response:**
+```json
+{
+  "status": "stopped"
+}
+```
+
+#### List Servers
+
+**GET** `/api/servers`
+
+List all running servers on this Agent.
+
+**Response:**
+```json
+{
+  "servers": [
+    {
+      "server_id": "uuid",
+      "model_id": "uuid",
+      "model_path": "/models/llama-3-8b.Q4_K_M.gguf",
+      "status": "running",
+      "port": 8081,
+      "uptime_seconds": 300,
+      "requests_total": 150
+    }
+  ]
+}
+```
+
+---
+
+### GPU Information
+
+#### Get GPU Info
+
+**GET** `/api/gpu/info`
+
+Get GPU information and current usage.
+
+**Response:**
+```json
+{
+  "gpus": [
+    {
+      "id": 0,
+      "name": "NVIDIA RTX 4090",
+      "vram_total": 24576000000,
+      "vram_used": 8589934592,
+      "vram_free": 15986065408,
+      "utilization": 45,
+      "temperature": 65,
+      "backend": "cuda"
+    }
+  ]
+}
+```
+
+---
+
+### Model Management
+
+#### List Models
+
+**GET** `/api/models`
+
+List all model files available on this Agent.
+
+**Response:**
+```json
+{
+  "models": [
+    {
+      "filename": "llama-3-8b.Q4_K_M.gguf",
+      "path": "/models/llama-3-8b.Q4_K_M.gguf",
+      "size_bytes": 4916677728,
+      "architecture": "llama",
+      "quantization": "Q4_K_M",
+      "parameter_count": 8000000000
+    }
+  ]
+}
+```
+
+#### Download Model
+
+**POST** `/api/models/download`
+
+Download a model from HuggingFace or ModelScope.
+
+**Request Body:**
+```json
+{
+  "source": "huggingface",
+  "repo_id": "TheBloke/Llama-3-8B-Instruct-GGUF",
+  "filename": "llama-3-8b-instruct.Q4_K_M.gguf"
+}
+```
+
+**Response:**
+```json
+{
+  "job_id": "download-uuid",
+  "status": "downloading",
+  "progress_percent": 0.0
+}
+```
+
+#### Delete Model
+
+**DELETE** `/api/models/{filename}`
+
+Delete a model file from disk.
+
+**Response:**
+```json
+{
+  "deleted": true
+}
+```
+
+---
+
+### Health Check
+
+#### Get Health
+
+**GET** `/api/health`
+
+Check Agent health status.
+
+**Response:**
+```json
+{
+  "status": "healthy",
+  "uptime_seconds": 3600,
+  "running_servers": 2,
+  "gpu_status": "normal"
+}
+```
+
+---
+
+### WebSocket
+
+#### Status Stream
+
+**WS** `/api/ws/status`
+
+Persistent WebSocket connection for real-time events.
+
+**Headers:**
+```
+X-Agent-ID: agent-uuid
+```
+
+**Events (Agent → Frontend):**
+
+Server started:
+```json
+{
+  "event": "server.started",
+  "data": {
+    "server_id": "uuid",
+    "model_id": "uuid",
+    "port": 8081,
+    "proxy_url": "http://agent:8080/proxy/server-uuid"
+  }
+}
+```
+
+Server stopped:
+```json
+{
+  "event": "server.stopped",
+  "data": {
+    "server_id": "uuid",
+    "reason": "graceful"
+  }
+}
+```
+
+GPU usage update:
+```json
+{
+  "event": "gpu.usage",
+  "data": {
+    "gpu_id": 0,
+    "vram_used": 8589934592,
+    "vram_free": 15986065408,
+    "utilization": 45
+  }
+}
+```
+
+Download progress:
+```json
+{
+  "event": "download.progress",
+  "data": {
+    "job_id": "uuid",
+    "progress_percent": 45.5,
+    "bytes_downloaded": 2200000000,
+    "total_bytes": 4916677728,
+    "speed_mbps": 12.5
+  }
+}
+```
+
+---
+
+## llama.cpp Proxy Endpoints (on Agent)
+
+All llama.cpp API calls are proxied through the Agent:
+
+### Chat Completions Proxy
+
+**POST** `/proxy/{server_id}/v1/chat/completions`
+
+Proxied to llama.cpp's `/v1/chat/completions` endpoint.
+
+### Completions Proxy
+
+**POST** `/proxy/{server_id}/v1/completions`
+
+Proxied to llama.cpp's `/v1/completions` endpoint.
+
+### Embeddings Proxy
+
+**POST** `/proxy/{server_id}/v1/embeddings`
+
+Proxied to llama.cpp's `/v1/embeddings` endpoint.
+
+### Cache Operations
+
+#### Load Cache
+
+**POST** `/proxy/{server_id}/cache/load`
+
+Load prompt cache from disk.
+
+**Request Body:**
+```json
+{
+  "cache_key": "conversation:uuid",
+  "cache_path": "/cache/server-uuid/cache-abc123.cache"
+}
+```
+
+**Response:**
+```json
+{
+  "loaded": true,
+  "tokens_cached": 256
+}
+```
+
+#### Save Cache
+
+**POST** `/proxy/{server_id}/cache/save`
+
+Save prompt cache to disk.
+
+**Request Body:**
+```json
+{
+  "cache_key": "conversation:uuid",
+  "cache_path": "/cache/server-uuid/cache-abc123.cache",
+  "ttl_seconds": 1800
+}
+```
+
+**Response:**
+```json
+{
+  "saved": true,
+  "cache_id": "cache-uuid",
+  "size_bytes": 1048576
+}
+```
+
+#### Delete Cache
+
+**DELETE** `/proxy/{server_id}/cache/{cache_id}`
+
+Delete cached prompt from disk.
+
+**Response:**
+```json
+{
+  "deleted": true
+}
+```
 
 ---
 
@@ -529,15 +789,7 @@ All endpoints return errors in the following format:
 - `404` - Not Found (model/resource not found)
 - `429` - Rate Limit Exceeded
 - `500` - Internal Server Error
-- `503` - Service Unavailable (model loading)
-
-**Error Types:**
-- `invalid_request_error` - Invalid parameters
-- `authentication_error` - Invalid API key
-- `not_found_error` - Resource not found
-- `rate_limit_error` - Too many requests
-- `server_error` - Internal error
-- `model_error` - Model loading/execution error
+- `503` - Service Unavailable (model loading or Agent offline)
 
 ---
 

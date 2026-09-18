@@ -2,327 +2,636 @@
 
 ## Overview
 
-Inference Matrix is an OpenAI API-compatible inference server that routes requests to llama.cpp servers. It's designed for single-user home server deployments with full local model management.
+Inference Matrix is an OpenAI API-compatible inference server with a distributed architecture. It consists of two services:
+
+1. **Frontend Service** - WebUI, API endpoints, database, and orchestration
+2. **Agent Service** - Hardware-local inference management with llama.cpp
+
+Designed for single-user home server deployments with support for multiple inference agents.
 
 ## System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      WebUI (React)                          │
-│            Model Management & Monitoring Dashboard          │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    FastAPI Backend                          │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │              OpenAI-Compatible API                    │  │
-│  │  /v1/models                                           │  │
-│  │  /v1/chat/completions (SSE streaming)                 │  │
-│  │  /v1/completions                                      │  │
-│  │  /v1/embeddings                                       │  │
-│  │  /v1/responses (tree-structured conversations)        │  │
-│  │  /v1/files                                            │  │
-│  │  /v1/batches                                          │  │
-│  │  /v1/audio/transcriptions                             │  │
-│  │  /v1/audio/translations                               │  │
-│  │  /v1/audio/speech                                     │  │
-│  └───────────────────────────────────────────────────────┘  │
-│                              │                                │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │              Management Services                      │  │
-│  │  • llama-server Process Manager                       │  │
-│  │  • Model Download Manager (HF + ModelScope)           │  │
-│  │  • Prompt Cache Manager                               │  │
-│  │  • GPU Configuration Manager                          │  │
-│  └───────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-         │                              │
-         ▼                              ▼
-┌─────────────────┐          ┌─────────────────────────────────┐
-│   PostgreSQL    │          │      llama.cpp Servers          │
-│  • Models       │          │  (One subprocess per model)     │
-│  • Conversations│          │  • Auto start on demand         │
-│  • API Keys     │          │  • Auto shutdown on inactivity  │
-│  • Cache Meta   │          │  • Configurable GPU layers      │
-│  • DownloadJobs │          │  • Global + per-model config    │
-│  • ServerInstances       │
-│  • AudioJobs    │          └─────────────────────────────────┘
-│  • BatchJobs    │
-│  • Files        │
-└─────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                    FRONTEND SERVICE                              │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │                 React WebUI                                │  │
+│  │       Model Management & Monitoring Dashboard              │  │
+│  └────────────────────────────────────────────────────────────┘  │
+│                              │                                     │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │              FastAPI Backend                               │  │
+│  │  ┌──────────────────────────────────────────────────────┐  │  │
+│  │  │           OpenAI-Compatible API                      │  │  │
+│  │  │  /v1/models                                          │  │  │
+│  │  │  /v1/chat/completions (SSE streaming)                │  │  │
+│  │  │  /v1/completions                                     │  │  │
+│  │  │  /v1/embeddings                                      │  │  │
+│  │  │  /v1/responses                                       │  │  │
+│  │  │  /v1/files                                           │  │  │
+│  │  │  /v1/batches                                         │  │  │
+│  │  │  /v1/audio/*                                         │  │  │
+│  │  └──────────────────────────────────────────────────────┘  │  │
+│  │                              │                               │  │
+│  │  ┌──────────────────────────────────────────────────────┐  │  │
+│  │  │           Management Services                        │  │  │
+│  │  │  • Agent Manager (registration, discovery)           │  │  │
+│  │  │  • Model Download Manager (HF + ModelScope)          │  │  │
+│  │  │  • Prompt Cache Manager                              │  │  │
+│  │  │  • Conversation Manager                              │  │  │
+│  │  └──────────────────────────────────────────────────────┘  │  │
+│  └────────────────────────────────────────────────────────────┘  │
+│                              │                                     │
+│         PostgreSQL Database  │                                     │
+│  • Models                    │                                     │
+│  • Conversations             │                                     │
+│  • APIKeys                   │                                     │
+│  • PromptCache (metadata)    │                                     │
+│  • DownloadJobs              │                                     │
+│  • ServerInstances           │                                     │
+│  • Agents                    │                                     │
+│  • AudioJobs, BatchJobs, Files                                     │
+└──────────────────────────────────────────────────────────────────┘
+         │
+         │ REST + WebSocket
+         │ (Agent API)
+         ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                    AGENT SERVICE (can be multiple)               │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │           Agent Management API                             │  │
+│  │  • POST /servers/start - Start llama.cpp                   │  │
+│  │  • POST /servers/stop - Stop server                        │  │
+│  │  • GET /servers - List running servers                     │  │
+│  │  • GET /gpu/info - GPU information                         │  │
+│  │  • GET /models - List model files                          │  │
+│  │  • POST /models/download - Download model                  │  │
+│  │  • DELETE /models/{id} - Delete model                      │  │
+│  │  • WS /ws/status - Real-time events                        │  │
+│  └────────────────────────────────────────────────────────────┘  │
+│                              │                                     │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │           llama.cpp Proxy                                  │  │
+│  │  • Proxies all llama.cpp HTTP API calls                   │  │
+│  │  • Forwards inference requests                            │  │
+│  │  • Handles cache save/load                                │  │
+│  └────────────────────────────────────────────────────────────┘  │
+│                              │                                     │
+│         llama.cpp Servers    │                                     │
+│  (One subprocess per model)  │                                     │
+│  • Auto start on demand      │                                     │
+│  • Auto shutdown on inactivity                                     │
+│  • Configurable GPU layers                                         │
+│  • Prompt caching to disk                                          │
+└──────────────────────────────────────────────────────────────────┘
+         │
+         ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                    HARDWARE RESOURCES                            │
+│  • GPU (CUDA/Metal/Vulkan)                                       │
+│  • CPU                                                           │
+│  • Disk (models + cache)                                         │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-## Core Components
+## Service Components
 
-### 1. FastAPI Backend
+### Frontend Service
 
 **Technology Stack:**
-- Python 3.14+
-- FastAPI for REST API
-- SQLModel for ORM
-- PostgreSQL for metadata storage
+- Python 3.14+ with FastAPI
+- React + TypeScript + shadcn/ui
+- PostgreSQL with SQLModel ORM
 - JWT + API Key authentication (optional)
 
 **Responsibilities:**
+- Serve React WebUI
 - OpenAI-compatible API endpoints
-- Request routing to llama-server instances
-- Model lifecycle management
+- Agent registration and discovery
+- Model download management
 - Conversation state management
 - File storage management
+- Batch processing
+- Audio processing (via system Whisper)
+- Prompt cache metadata tracking
 
-### 2. llama-server Process Manager
+**Key Features:**
+- Multi-agent support (manual selection)
+- Agent health monitoring via WebSocket
+- Centralized database for all metadata
+- Optional authentication
 
-**Architecture:**
-- One llama-server subprocess per loaded model
-- Dynamic port allocation
-- Automatic lifecycle management:
-  - Start on first request
-  - Auto-shutdown after configurable inactivity timeout
-- Health monitoring and automatic restart on failure
+### Agent Service
 
-**Configuration:**
-- Global defaults (context size, GPU layers, batch size)
-- Per-model overrides stored in PostgreSQL
-- User-configurable via WebUI
+**Technology Stack:**
+- Python 3.14+ with FastAPI
+- llama.cpp subprocess management
+- WebSocket for real-time events
+- psutil for system monitoring
 
-### 3. Model Management
+**Responsibilities:**
+- Auto-register with Frontend on startup
+- Manage llama.cpp server lifecycle
+- Proxy llama.cpp HTTP API for Frontend
+- GPU monitoring and reporting
+- Model file management (download, delete, validate)
+- Real-time status updates via WebSocket
+- Minimal status WebUI for debugging
 
-**Supported Formats:**
-- GGUF only (llama.cpp native format)
+**Key Features:**
+- No authentication (trusted internal network)
+- Full llama.cpp management
+- GPU acceleration support (CUDA/Metal/Vulkan)
+- Prompt cache file storage
+- Multi-server support (one per model)
 
-**Download Sources:**
-- HuggingFace Hub (primary)
-- ModelScope (secondary)
-- Extensible architecture for additional sources
+## Communication Patterns
 
-**Features:**
-- Progress tracking
-- Pause/resume support
-- Automatic retry on failure
-- Model validation after download
-- Metadata extraction (size, architecture, capabilities)
+### Agent Registration Flow
 
-**Storage:**
-- Local filesystem only
-- Structured directory hierarchy
-- Database-tracked metadata
+```
+1. Agent Service starts
+   ↓
+2. Agent reads Frontend URL from config
+   ↓
+3. Agent → Frontend: POST /api/agents/register
+   {
+     "agent_id": "agent-uuid",
+     "host": "agent-hostname",
+     "port": 8080,
+     "gpu_info": {...}
+   }
+   ↓
+4. Frontend stores Agent in database
+   ↓
+5. Frontend → Agent: WebSocket connection established
+   ↓
+6. Agent streams real-time status updates
+```
 
-### 4. Prompt Cache Manager
+### Inference Request Flow
 
-**Caching Strategies:**
+```
+1. User sends chat completion request
+   ↓
+2. Frontend checks if server is running for model
+   ↓ (if not running)
+3. Frontend → Agent: POST /servers/start
+   {
+     "model_id": "uuid",
+     "config": { gpu_layers, context_size, ... }
+   }
+   ↓
+4. Agent starts llama.cpp subprocess
+   ↓
+5. Agent → Frontend (WS): server.started
+   {
+     "server_id": "uuid",
+     "status": "running",
+     "proxy_url": "http://agent:8080/proxy/server-uuid"
+   }
+   ↓
+6. Frontend → Agent: POST /proxy/{server_id}/cache/load
+   (Load prompt cache from disk if needed)
+   ↓
+7. Frontend → Agent: POST /proxy/{server_id}/chat/completions
+   (Inference request)
+   ↓
+8. Agent proxies to llama.cpp, streams SSE back to Frontend
+   ↓
+9. Frontend → Agent: POST /proxy/{server_id}/cache/save
+   (Save cache to disk after inference)
+```
 
-**Chat Completions (`/v1/chat/completions`):**
-- Conversation-based caching
-- Cache invalidated on new messages
-- Automatic management
+### Cache Management Flow
 
-**Responses API (`/v1/responses`):**
-- Hierarchical caching
-- System prompt + conversation segments
-- Tree-structure aware
+```
+Frontend decides when to:
+- Load cache: Before first inference in conversation
+- Save cache: After inference completes
+- Delete cache: When conversation deleted
 
-**Implementation:**
-- Native llama.cpp prompt caching
-- Hybrid tracking in PostgreSQL
-- Cache metadata (hit rates, size, TTL)
+All cache operations go through Agent proxy:
+- POST /proxy/{server_id}/cache/load
+- POST /proxy/{server_id}/cache/save
+- DELETE /proxy/{server_id}/cache/{cache_id}
 
-### 5. GPU Configuration
-
-**Features:**
-- Auto-detection of available GPUs (CUDA, Metal, Vulkan)
-- User-configurable via WebUI
-- Per-model GPU layer allocation
-- VRAM monitoring
-
-### 6. Audio Processing
-
-**Implementation:**
-- System-level Whisper installation
-- Separate from llama.cpp inference
-- Endpoints:
-  - `/v1/audio/transcriptions` - Speech-to-text
-  - `/v1/audio/translations` - Audio translation
-  - `/v1/audio/speech` - Text-to-speech (future TTS integration)
+Cache files stored on Agent machine:
+/agent-cache/{server_id}/{cache_id}.cache
+```
 
 ## Data Models
 
 ### PostgreSQL Schema
 
-```
-Models:
-  - id, name, path, size, architecture, quantization
-  - capabilities, license, tags, benchmarks
-  - source, source_id, downloaded_at
+```sql
+-- Agents table (new)
+agents:
+  - id: UUID (primary key)
+  - name: str
+  - host: str (hostname or IP)
+  - port: int
+  - status: str (online, offline, unreachable)
+  - gpu_info: JSON
+  - last_seen: datetime
+  - websocket_connected: bool
+  - created_at: datetime
 
-Conversations:
-  - id, parent_id (tree structure), response_id
-  - input_items, output_items
-  - model_id, metadata, created_at
+-- Updated ServerInstances
+server_instances:
+  - id: UUID
+  - agent_id: UUID (foreign key → agents)  -- NEW
+  - model_id: UUID (foreign key → models)
+  - port: int (port on Agent machine)
+  - proxy_url: str  -- NEW
+  - status: str
+  - ... (other fields unchanged)
 
-APIKeys:
-  - id, key_hash, name, permissions
-  - created_at, last_used_at, expires_at
-
-PromptCache:
-  - id, cache_key, cache_type (conversation/hierarchical)
-  - model_id, content_hash, llama_cache_id
-  - hits, size_bytes, created_at, expires_at
-
-DownloadJobs:
-  - id, model_id, source, status
-  - progress_percent, bytes_downloaded, total_bytes
-  - pause_token, retry_count, error_message
-
-ServerInstances:
-  - id, model_id, port, pid
-  - config_json, status, started_at, last_request_at
-
-AudioJobs:
-  - id, job_type (transcription/translation/speech)
-  - file_path, model_id, status, result_path
-  - created_at, completed_at
-
-BatchJobs:
-  - id, input_file_id, output_file_id
-  - endpoint, status, created_at, completed_at
-
-Files:
-  - id, filename, path, size, mime_type
-  - purpose (batch/retrieval/etc.), created_at
+-- PromptCache (metadata only)
+prompt_cache:
+  - id: UUID
+  - cache_key: str
+  - model_id: UUID
+  - agent_id: UUID  -- Which agent stores the cache file
+  - content_hash: str
+  - hits: int
+  - size_bytes: int
+  - cache_path: str  -- Path on Agent machine
+  - created_at: datetime
+  - expires_at: datetime
 ```
 
-## API Design
+## Agent API Specification
 
-### Authentication
+### REST Endpoints
 
-**Optional Authentication:**
-- API keys stored in PostgreSQL (OpenAI-style)
-- JWT tokens for admin UI access
-- Configurable enforcement per endpoint
+**Agent Registration (called by Agent)**
+```
+POST /api/agents/register
+Body: {
+  "agent_id": "uuid",
+  "name": "agent-name",
+  "host": "hostname",
+  "port": 8080,
+  "gpu_info": {
+    "name": "NVIDIA RTX 4090",
+    "vram_total": 24576000000,
+    "backend": "cuda"
+  }
+}
+Response: { "registered": true, "frontend_version": "1.0.0" }
+```
 
-### Streaming
+**Server Management**
+```
+POST /api/servers/start
+Body: {
+  "model_id": "uuid",
+  "model_path": "/models/llama-3-8b.Q4_K_M.gguf",
+  "config": {
+    "gpu_layers": 35,
+    "context_size": 4096,
+    "batch_size": 512,
+    "cache_prompt": true
+  }
+}
+Response: {
+  "server_id": "uuid",
+  "status": "starting",
+  "proxy_url": "http://agent:8080/proxy/server-uuid"
+}
 
-**Server-Sent Events (SSE):**
-- Primary streaming method for chat completions
-- OpenAI-compatible event format
-- Supports `stream_options.include_usage`
+POST /api/servers/{server_id}/stop
+Body: { "force": false }
+Response: { "status": "stopped" }
 
-### Error Handling
+GET /api/servers
+Response: {
+  "servers": [
+    {
+      "server_id": "uuid",
+      "model_id": "uuid",
+      "status": "running",
+      "port": 8081,
+      "uptime_seconds": 300
+    }
+  ]
+}
+```
 
-**Response Format:**
+**GPU Information**
+```
+GET /api/gpu/info
+Response: {
+  "gpus": [
+    {
+      "id": 0,
+      "name": "NVIDIA RTX 4090",
+      "vram_total": 24576000000,
+      "vram_used": 8589934592,
+      "vram_free": 15986065408,
+      "utilization": 45,
+      "backend": "cuda"
+    }
+  ]
+}
+```
+
+**Model Management**
+```
+GET /api/models
+Response: {
+  "models": [
+    {
+      "filename": "llama-3-8b.Q4_K_M.gguf",
+      "path": "/models/llama-3-8b.Q4_K_M.gguf",
+      "size_bytes": 4916677728,
+      "architecture": "llama",
+      "quantization": "Q4_K_M"
+    }
+  ]
+}
+
+POST /api/models/download
+Body: {
+  "source": "huggingface",
+  "repo_id": "TheBloke/Llama-3-8B-Instruct-GGUF",
+  "filename": "llama-3-8b-instruct.Q4_K_M.gguf"
+}
+Response: { "job_id": "uuid", "status": "downloading" }
+
+DELETE /api/models/{filename}
+Response: { "deleted": true }
+```
+
+**Health Check**
+```
+GET /api/health
+Response: {
+  "status": "healthy",
+  "uptime_seconds": 3600,
+  "running_servers": 2
+}
+```
+
+### WebSocket Events
+
+**Connection**
+```
+WS /api/ws/status
+Headers: { "X-Agent-ID": "agent-uuid" }
+
+Frontend maintains persistent WebSocket connection to each Agent
+```
+
+**Events (Agent → Frontend)**
 ```json
+// Server started
 {
-  "error": {
-    "message": "Human-readable error message",
-    "type": "error_type",
-    "code": "machine_readable_code",
-    "param": "parameter_name"
+  "event": "server.started",
+  "data": {
+    "server_id": "uuid",
+    "model_id": "uuid",
+    "port": 8081,
+    "proxy_url": "http://agent:8080/proxy/server-uuid"
+  }
+}
+
+// Server stopped
+{
+  "event": "server.stopped",
+  "data": {
+    "server_id": "uuid",
+    "reason": "graceful" | "crash" | "inactivity"
+  }
+}
+
+// Server health update
+{
+  "event": "server.health",
+  "data": {
+    "server_id": "uuid",
+    "status": "healthy" | "unhealthy",
+    "requests_total": 150,
+    "tokens_generated": 45000
+  }
+}
+
+// GPU usage update
+{
+  "event": "gpu.usage",
+  "data": {
+    "gpu_id": 0,
+    "vram_used": 8589934592,
+    "vram_free": 15986065408,
+    "utilization": 45
+  }
+}
+
+// Download progress
+{
+  "event": "download.progress",
+  "data": {
+    "job_id": "uuid",
+    "progress_percent": 45.5,
+    "bytes_downloaded": 2200000000,
+    "total_bytes": 4916677728,
+    "speed_mbps": 12.5
+  }
+}
+
+// Agent status change
+{
+  "event": "agent.status",
+  "data": {
+    "status": "online" | "offline" | "reconnecting"
   }
 }
 ```
 
-**HTTP Status Codes:**
-- 200: Success
-- 400: Bad Request (invalid parameters)
-- 401: Unauthorized (invalid API key)
-- 404: Not Found (model/resource not found)
-- 429: Rate Limit Exceeded
-- 500: Internal Server Error
-- 503: Service Unavailable (model loading)
+## llama.cpp Proxy
+
+The Agent proxies all llama.cpp HTTP API calls:
+
+**Proxy Endpoints (on Agent)**
+```
+POST /proxy/{server_id}/v1/chat/completions
+POST /proxy/{server_id}/v1/completions
+POST /proxy/{server_id}/v1/embeddings
+POST /proxy/{server_id}/cache/load
+POST /proxy/{server_id}/cache/save
+DELETE /proxy/{server_id}/cache/{cache_id}
+```
+
+**Proxy Behavior:**
+- Agent forwards request to llama.cpp subprocess
+- Streams SSE responses back to Frontend in real-time
+- Handles connection pooling and retries
+- Adds authentication headers if needed
+- Logs all proxied requests for debugging
 
 ## Deployment Architecture
-
-### Single-User Home Server
-
-**Resource Management:**
-- Configurable model concurrency limits
-- Memory-aware model loading
-- GPU memory monitoring
-- Automatic model unloading under pressure
-
-**Storage:**
-- Models: Local filesystem (`/models`)
-- Files: Local filesystem (`/files`)
-- Database: PostgreSQL (Docker volume)
-- Cache: llama.cpp native + PostgreSQL metadata
 
 ### Docker Compose Setup
 
 ```yaml
 services:
-  backend:
-    # FastAPI application
+  # Frontend Service
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"  # WebUI
+      - "8000:8000"  # API
     volumes:
-      - ./models:/models
-      - ./files:/files
-      - ./cache:/cache
+      - ./data:/data
+      - ./models:/models:ro  # Read-only, models synced from Agent
+    environment:
+      - DATABASE_URL=postgresql+psycopg://...
+      - AGENT_DISCOVERY_URL=http://agent:8080
     depends_on:
       - postgres
-  
+
+  # Agent Service
+  agent:
+    build: ./agent
+    ports:
+      - "8080:8080"  # Agent API
+    volumes:
+      - ./models:/models
+      - ./cache:/cache
+    environment:
+      - FRONTEND_URL=http://frontend:8000
+      - AGENT_ID=agent-1
+    devices:
+      - /dev/nvidia0:/dev/nvidia0  # GPU passthrough
+      - /dev/nvidiactl:/dev/nvidiactl
+      - /dev/nvidia-uvm:/dev/nvidia-uvm
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Database
   postgres:
-    # PostgreSQL database
+    image: postgres:16
     volumes:
       - postgres_data:/var/lib/postgresql/data
-  
-  frontend:
-    # React WebUI
-    # Served by backend in production
+    environment:
+      - POSTGRES_USER=inference
+      - POSTGRES_PASSWORD=secret
+      - POSTGRES_DB=inference_matrix
+
+volumes:
+  postgres_data:
 ```
 
-## Monitoring & Observability
+### Multi-Agent Deployment
 
-**Metrics Exposed:**
-- VRAM usage per model
-- Tokens/second generation rate
-- Request queue depth
-- Cache hit/miss rates
-- Download progress
-- Server instance status
+```yaml
+# Add multiple agents for different hardware
+services:
+  agent-gpu-nvidia:
+    # ... NVIDIA GPU config
 
-**Export Formats:**
-- Prometheus metrics endpoint
-- JSON API endpoints
-- WebSocket real-time updates (WebUI)
+  agent-gpu-amd:
+    # ... AMD GPU config
+    environment:
+      - AGENT_ID=agent-amd
 
-## Backup & Recovery
+  agent-cpu-only:
+    # ... CPU-only config
+    environment:
+      - AGENT_ID=agent-cpu
+```
 
-**Backup Components:**
-- PostgreSQL database (all metadata)
-- Model configurations
-- Conversation history
-- API keys
-- Download job state
+## Failure Handling
 
-**Recovery Process:**
-1. Restore PostgreSQL from backup
-2. Verify model files exist
-3. Re-register models in database
-4. Resume interrupted downloads
+### Agent Unavailable
+
+**Detection:**
+- Frontend monitors WebSocket connection
+- Heartbeat every 30 seconds
+- Mark Agent as "offline" after 90 seconds no contact
+
+**Recovery:**
+1. Frontend marks all Agent's servers as "orphaned"
+2. Existing llama.cpp servers continue running (no management)
+3. New inference requests to that Agent are queued
+4. When Agent reconnects:
+   - Re-synchronize server state
+   - Resume queued requests
+   - Update server health status
+
+### llama.cpp Server Crash
+
+**Detection:**
+- Agent monitors subprocess health
+- Health check every 10 seconds
+
+**Recovery:**
+1. Agent detects crash
+2. Agent → Frontend (WS): server.stopped (reason: crash)
+3. Frontend can request restart: POST /servers/start
+4. Agent restarts llama.cpp with same config
+5. Agent → Frontend (WS): server.started
+
+### Frontend Unavailable
+
+**Agent Behavior:**
+1. Agent continues running all llama.cpp servers
+2. Agent retries WebSocket connection every 30 seconds
+3. Agent buffers events in memory (max 1000 events)
+4. When Frontend reconnects:
+   - Agent replays buffered events
+   - Re-synchronizes state
 
 ## Security Considerations
 
-**Local Deployment Focus:**
-- Optional authentication (trusted network assumed)
+**Internal Network Trust:**
+- No authentication between Frontend and Agent
+- Assumes trusted internal network
+- Firewall rules should restrict access
+
+**External Access:**
+- Frontend exposes API to external clients (with optional auth)
+- Agent should NEVER be exposed externally
+- All external traffic goes through Frontend
+
+**Data Protection:**
 - API keys hashed in database (argon2)
 - No secrets in logs
-- HTTPS termination at Traefik (if exposed)
+- HTTPS at Frontend level (Traefik)
 
-**Model Security:**
-- Model file validation after download
-- Hash verification (when available from source)
-- Quarantine for untrusted models
+## Monitoring & Observability
+
+**Frontend Metrics:**
+- Agent connection status (per Agent)
+- Server count and status
+- Request latency (end-to-end)
+- Cache hit/miss rates
+- Token generation rates
+
+**Agent Metrics:**
+- GPU VRAM usage
+- GPU utilization
+- llama.cpp process health
+- Model download progress
+- Cache file sizes
+
+**Export Formats:**
+- Prometheus metrics endpoint (Frontend)
+- WebSocket real-time updates (Agent → Frontend)
+- Structured JSON logs
 
 ## Extensibility
 
-**Plugin Architecture:**
-- Model download sources (extensible)
-- Audio processing backends
-- Monitoring exporters
-- Backup storage providers
-
 **Future Enhancements:**
-- Multi-user support with quotas
-- Cluster deployment (distributed inference)
-- Additional model formats (beyond GGUF)
-- Native TTS integration
+- Automatic agent load balancing
+- Agent failover and high availability
+- Distributed cache storage
+- Multi-tenant support
+- Additional model formats
+- Native TTS integration on Agent
