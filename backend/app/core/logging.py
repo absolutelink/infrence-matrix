@@ -1,12 +1,12 @@
 """Logging configuration for Inference Matrix."""
 
 import logging
-
-from app.core.config import settings
+import os
 
 # Configure root logger
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
+    level=getattr(logging, log_level, logging.INFO),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
