@@ -1,10 +1,69 @@
+# Git
 .git
-**/__pycache__
-**/.venv
-backend/htmlcov
-frontend/blob-report
-frontend/dist
-frontend/node_modules
-frontend/playwright-report
-frontend/test-results
-node_modules
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Test
+tests/
+test/
+*.test.py
+*.spec.py
+
+# Docs
+*.md
+docs/
+CONTRIBUTING.md
+LICENSE
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.docker/
+
+# Other
+*.bak
+*.tmp
+.cache/
+.mypy_cache/
+.ruff_cache/
