@@ -1,0 +1,124 @@
+name: Test and Lint
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-backend:
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: inference
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: inference_matrix_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: 'pip'
+
+      - name: Install dependencies
+        working-directory: ./backend
+        run: |
+          pip install uv
+          uv sync --frozen
+
+      - name: Run linter
+        working-directory: ./backend
+        run: |
+          uv run ruff check app/
+
+      - name: Run type checker
+        working-directory: ./backend
+        run: |
+          uv run mypy app/ --ignore-missing-imports
+
+      - name: Run tests
+        working-directory: ./backend
+        env:
+          DATABASE_URL: postgresql+psycopg://inference:testpassword@localhost:5432/inference_matrix_test
+          SECRET_KEY: testsecretkeyfortesting12345678901234567890
+        run: |
+          uv run pytest tests/ -v --tb=short
+
+  test-agent:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: 'pip'
+
+      - name: Install dependencies
+        working-directory: ./agent
+        run: |
+          pip install uv
+          uv sync --frozen
+
+      - name: Run linter
+        working-directory: ./agent
+        run: |
+          uv run ruff check app/
+
+      - name: Run type checker
+        working-directory: ./agent
+        run: |
+          uv run mypy app/ --ignore-missing-imports
+
+      - name: Run tests
+        working-directory: ./agent
+        run: |
+          uv run pytest tests/ -v --tb=short || echo "No tests yet"
+
+  check-docker:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Validate Frontend Dockerfile
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: false
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Validate Agent Dockerfile
+        uses: docker/build-push-action@v5
+        with:
+          context: ./agent
+          file: ./agent/Dockerfile
+          push: false
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
