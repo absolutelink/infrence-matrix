@@ -83,3 +83,4 @@ error-on-warning = true
 
 [tool.fastapi]
 entrypoint = "app.main:app"
+    "prometheus-client>=0.19.0,<1.0.0",

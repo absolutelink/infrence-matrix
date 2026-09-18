@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.routes import items, login, private, users, utils, agents
+from app.api.routes import items, login, private, users, utils, agents, metrics
 from app.api.routes.v1 import (
     audio_router,
     batches_router,
@@ -19,6 +19,7 @@ api_router.include_router(users.router)
 api_router.include_router(utils.router)
 api_router.include_router(items.router)
 api_router.include_router(agents.router, prefix="/api", tags=["agents"])
+api_router.include_router(metrics.router, tags=["metrics"])
 
 api_router.include_router(models_router, prefix="/v1", tags=["v1/models"])
 api_router.include_router(chat_completions_router, prefix="/v1", tags=["v1/chat/completions"])

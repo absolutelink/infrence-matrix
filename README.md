@@ -311,3 +311,60 @@ MIT License - see [LICENSE](LICENSE) file for details.
 ---
 
 **Built with ❤️ for local AI inference**
+
+## Monitoring & Observability
+
+### Prometheus Metrics
+
+Access metrics at: `http://localhost:8000/metrics`
+
+**Available metrics:**
+- Agent count and status
+- Server count by agent
+- Inference request latency (histogram)
+- Tokens generated
+- VRAM usage per GPU
+- Prompt cache size
+
+**Prometheus configuration:**
+```yaml
+scrape_configs:
+  - job_name: 'inference-matrix'
+    static_configs:
+      - targets: ['frontend:8000']
+    metrics_path: '/metrics'
+```
+
+### Real-Time Monitoring
+
+- **WebUI Dashboard** - Live agent status, GPU usage, server health
+- **WebSocket Events** - Real-time updates for server lifecycle, downloads, GPU metrics
+- **Health Checks** - `/api/health` on both frontend and agent services
+
+### Logging
+
+```bash
+# View logs
+docker compose logs -f frontend
+docker compose logs -f agent
+
+# Filter by level
+docker compose logs frontend | grep ERROR
+```
+
+See `docs/monitoring-guide.md` for complete monitoring documentation.
+
+---
+
+## Documentation
+
+- **[Architecture](docs/architecture.md)** - System design and components
+- **[API Reference](docs/api-endpoints.md)** - Complete API specification
+- **[Deployment](docs/deployment.md)** - Production deployment guide
+- **[User Guide](docs/user-guide.md)** - WebUI usage
+- **[Troubleshooting](docs/troubleshooting.md)** - Common issues and solutions
+- **[Monitoring](docs/monitoring-guide.md)** - Observability setup
+
+---
+
+**Built with ❤️ for distributed AI inference**
