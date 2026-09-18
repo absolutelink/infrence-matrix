@@ -4,18 +4,8 @@ WORKDIR /app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
-    cmake \
     curl \
-    git \
     && rm -rf /var/lib/apt/lists/*
-
-# Install llama.cpp with CUDA support
-RUN git clone https://github.com/ggerganov/llama.cpp.git /opt/llama.cpp \
-    && cd /opt/llama.cpp \
-    && cmake -B build -DLLAMA_CUDA=ON \
-    && cmake --build build --config Release \
-    && cp build/bin/llama-server /usr/local/bin/ \
-    && rm -rf /opt/llama.cpp
 
 # Install Python dependencies
 COPY pyproject.toml .
