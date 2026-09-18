@@ -1,0 +1,320 @@
+"""Manages Agent registration, discovery, and WebSocket connections."""
+
+import asyncio
+from typing import Dict, Optional
+from datetime import datetime
+
+import httpx
+from websockets.client import connect, WebSocketClientProtocol
+
+from app.core.config import settings
+from app.models import Agent
+from app.core.logging import logger
+from app.db.session import AsyncSessionMaker
+
+
+class AgentManager:
+    """Manages Agent lifecycle and WebSocket connections."""
+
+    def __init__(self) -> None:
+        self.agents: Dict[str, Agent] = {}  # agent_id -> Agent
+        self.ws_connections: Dict[str, WebSocketClientProtocol] = {}
+        self._reconnect_tasks: Dict[str, asyncio.Task] = {}
+        self._event_buffers: Dict[str, list] = {}
+
+    async def register_agent(self, agent_data: dict) -> Agent:
+        """Register an Agent with the Frontend."""
+        async with AsyncSessionMaker() as session:
+            agent_id = agent_data["agent_id"]
+
+            # Check if agent already exists
+            existing = await session.get(Agent, agent_id)
+
+            if existing:
+                # Update existing agent
+                existing.status = "online"
+                existing.host = agent_data["host"]
+                existing.port = agent_data["port"]
+                existing.gpu_info = agent_data.get("gpu_info", {})
+                existing.last_seen = datetime.utcnow()
+                session.add(existing)
+                agent = existing
+                logger.info(f"Updated existing agent {agent_id}")
+            else:
+                # Create new agent
+                agent = Agent(
+                    id=agent_id,
+                    name=agent_data["name"],
+                    host=agent_data["host"],
+                    port=agent_data["port"],
+                    gpu_info=agent_data.get("gpu_info", {}),
+                    status="online",
+                    last_seen=datetime.utcnow(),
+                )
+                session.add(agent)
+                logger.info(f"Registered new agent {agent_id}")
+
+            await session.commit()
+            await session.refresh(agent)
+
+            self.agents[str(agent.id)] = agent
+            self._event_buffers[str(agent.id)] = []
+
+            # Start WebSocket connection
+            asyncio.create_task(self.connect_websocket(agent))
+
+            return agent
+
+    async def connect_websocket(self, agent: Agent) -> None:
+        """Establish WebSocket connection to Agent."""
+        ws_url = f"ws://{agent.host}:{agent.port}/api/ws/status"
+        agent_id = str(agent.id)
+
+        while True:
+            try:
+                async with connect(ws_url, extra_headers={"X-Agent-ID": agent_id}) as websocket:
+                    self.ws_connections[agent_id] = websocket
+                    agent.websocket_connected = True
+                    logger.info(f"WebSocket connected to agent {agent_id}")
+
+                    # Listen for events
+                    async for message in websocket:
+                        await self._handle_agent_event(agent_id, message)
+
+            except Exception as e:
+                agent.websocket_connected = False
+                logger.error(f"WebSocket error for agent {agent_id}: {e}")
+                self._schedule_reconnect(agent)
+                break
+
+    def _schedule_reconnect(self, agent: Agent) -> None:
+        """Schedule WebSocket reconnection."""
+        agent_id = str(agent.id)
+
+        if agent_id in self._reconnect_tasks:
+            return
+
+        task = asyncio.create_task(self._reconnect_loop(agent))
+        self._reconnect_tasks[agent_id] = task
+
+    async def _reconnect_loop(self, agent: Agent) -> None:
+        """Attempt to reconnect to Agent."""
+        agent_id = str(agent.id)
+        attempts = 0
+
+        while attempts < settings.AGENT_MAX_RECONNECT_ATTEMPTS:
+            try:
+                await asyncio.sleep(settings.WS_RECONNECT_INTERVAL)
+
+                # Try to reconnect
+                ws_url = f"ws://{agent.host}:{agent.port}/api/ws/status"
+                async with connect(ws_url, extra_headers={"X-Agent-ID": agent_id}) as websocket:
+                    self.ws_connections[agent_id] = websocket
+                    agent.websocket_connected = True
+                    agent.status = "online"
+                    logger.info(f"Reconnected to agent {agent_id}")
+
+                    # Exit reconnect loop
+                    self._reconnect_tasks.pop(agent_id, None)
+                    asyncio.create_task(self._listen_websocket(agent_id, websocket))
+                    return
+
+            except Exception as e:
+                attempts += 1
+                logger.warning(f"Reconnect attempt {attempts} failed for agent {agent_id}: {e}")
+
+        # Max attempts reached
+        agent.status = "unreachable"
+        self._reconnect_tasks.pop(agent_id, None)
+        logger.error(f"Max reconnect attempts reached for agent {agent_id}")
+
+    async def _listen_websocket(self, agent_id: str, websocket: WebSocketClientProtocol) -> None:
+        """Listen for WebSocket events."""
+        try:
+            async for message in websocket:
+                await self._handle_agent_event(agent_id, message)
+        except Exception as e:
+            logger.error(f"WebSocket listen error for agent {agent_id}: {e}")
+            agent = self.agents.get(agent_id)
+            if agent:
+                agent.websocket_connected = False
+                self._schedule_reconnect(agent)
+
+    async def _handle_agent_event(self, agent_id: str, event: dict) -> None:
+        """Process event from Agent."""
+        # Buffer event
+        if agent_id in self._event_buffers:
+            buffer = self._event_buffers[agent_id]
+            buffer.append(event)
+            if len(buffer) > 1000:
+                buffer.pop(0)
+
+        # Update database based on event type
+        event_type = event.get("event")
+        event_data = event.get("data", {})
+
+        logger.debug(f"Received event from agent {agent_id}: {event_type}")
+
+        if event_type == "server.started":
+            await self._handle_server_started(agent_id, event_data)
+        elif event_type == "server.stopped":
+            await self._handle_server_stopped(agent_id, event_data)
+        elif event_type == "gpu.usage":
+            await self._handle_gpu_usage(agent_id, event_data)
+        elif event_type == "download.progress":
+            await self._handle_download_progress(agent_id, event_data)
+
+    async def _handle_server_started(self, agent_id: str, data: dict) -> None:
+        """Handle server.started event."""
+        # Update ServerInstance in database
+        async with AsyncSessionMaker() as session:
+            from app.models import ServerInstance
+            from sqlalchemy import select
+
+            server_id = data.get("server_id")
+            if server_id:
+                result = await session.execute(
+                    select(ServerInstance).where(ServerInstance.id == server_id)
+                )
+                server = result.scalar_one_or_none()
+
+                if server:
+                    server.status = "running"
+                    server.health_status = "healthy"
+                    server.last_health_check = datetime.utcnow()
+                    session.add(server)
+                    await session.commit()
+                    logger.info(f"Server {server_id} marked as running")
+
+    async def _handle_server_stopped(self, agent_id: str, data: dict) -> None:
+        """Handle server.stopped event."""
+        async with AsyncSessionMaker() as session:
+            from app.models import ServerInstance
+            from sqlalchemy import select
+
+            server_id = data.get("server_id")
+            if server_id:
+                result = await session.execute(
+                    select(ServerInstance).where(ServerInstance.id == server_id)
+                )
+                server = result.scalar_one_or_none()
+
+                if server:
+                    server.status = "stopped"
+                    session.add(server)
+                    await session.commit()
+                    logger.info(f"Server {server_id} marked as stopped")
+
+    async def _handle_gpu_usage(self, agent_id: str, data: dict) -> None:
+        """Handle gpu.usage event."""
+        # Update agent GPU info
+        agent = self.agents.get(agent_id)
+        if agent:
+            gpu_info = agent.gpu_info
+            gpu_info["vram_used"] = data.get("vram_used")
+            gpu_info["vram_free"] = data.get("vram_free")
+            gpu_info["utilization"] = data.get("utilization")
+            agent.gpu_info = gpu_info
+            agent.last_seen = datetime.utcnow()
+
+    async def _handle_download_progress(self, agent_id: str, data: dict) -> None:
+        """Handle download.progress event."""
+        # Update DownloadJob in database
+        async with AsyncSessionMaker() as session:
+            from app.models import DownloadJob
+            from sqlalchemy import select
+
+            job_id = data.get("job_id")
+            if job_id:
+                result = await session.execute(
+                    select(DownloadJob).where(DownloadJob.id == job_id)
+                )
+                job = result.scalar_one_or_none()
+
+                if job:
+                    job.progress_percent = data.get("progress_percent", 0)
+                    job.bytes_downloaded = data.get("bytes_downloaded", 0)
+                    job.current_speed = data.get("speed_mbps", 0) * 1_000_000
+                    session.add(job)
+                    await session.commit()
+
+    async def send_to_agent(
+        self,
+        agent_id: str,
+        method: str,
+        path: str,
+        json: Optional[dict] = None,
+        timeout: float = 30.0,
+    ) -> dict:
+        """Send HTTP request to Agent."""
+        agent = self.agents.get(agent_id)
+        if not agent:
+            raise ValueError(f"Agent {agent_id} not found")
+
+        if agent.status != "online":
+            raise RuntimeError(f"Agent {agent_id} is {agent.status}")
+
+        url = f"http://{agent.host}:{agent.port}/api{path}"
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            try:
+                response = await client.request(
+                    method=method,
+                    url=url,
+                    json=json,
+                )
+                response.raise_for_status()
+                return response.json()
+            except httpx.HTTPError as e:
+                logger.error(f"HTTP error to agent {agent_id}: {e}")
+                raise
+            except Exception as e:
+                logger.error(f"Error sending to agent {agent_id}: {e}")
+                raise
+
+    async def get_agent(self, agent_id: str) -> Optional[Agent]:
+        """Get agent by ID."""
+        return self.agents.get(agent_id)
+
+    async def list_agents(self) -> list:
+        """List all registered agents."""
+        return [
+            {
+                "id": str(agent.id),
+                "name": agent.name,
+                "host": agent.host,
+                "port": agent.port,
+                "status": agent.status,
+                "websocket_connected": agent.websocket_connected,
+                "gpu_info": agent.gpu_info,
+                "last_seen": agent.last_seen,
+            }
+            for agent in self.agents.values()
+        ]
+
+    async def cleanup_offline_agents(self) -> None:
+        """Mark agents as offline if not seen recently."""
+        async with AsyncSessionMaker() as session:
+            from sqlalchemy import select, update
+
+            # Find agents not seen in last 5 minutes
+            cutoff = datetime.utcnow()
+
+            stmt = (
+                update(Agent)
+                .where(Agent.last_seen < cutoff)
+                .where(Agent.status == "online")
+                .values(status="offline")
+            )
+
+            await session.execute(stmt)
+            await session.commit()
+
+            # Update local cache
+            for agent in self.agents.values():
+                if agent.last_seen and agent.last_seen < cutoff:
+                    agent.status = "offline"
+
+
+# Global instance
+agent_manager = AgentManager()

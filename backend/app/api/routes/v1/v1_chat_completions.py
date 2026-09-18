@@ -1,4 +1,4 @@
-"""V1 Chat Completions endpoint - OpenAI-compatible chat API."""
+"""V1 Chat Completions endpoint - OpenAI-compatible chat API with Agent support."""
 
 import json
 import logging
@@ -9,11 +9,13 @@ from typing import Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app.api.deps import get_db
-from app.models import Model, ServerInstance
+from app.models import Model, ServerInstance, Agent
+from app.services.agent_manager import agent_manager
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,7 @@ class ChatMessage(BaseModel):
 class ChatCompletionRequest(BaseModel):
     """Chat completion request."""
     model: str
+    agent_id: str | None = None  # Optional: specify which agent to use
     messages: list[ChatMessage]
     stream: bool = False
     temperature: float = Field(default=0.7, ge=0, le=2)
@@ -39,6 +42,7 @@ class ChatCompletionRequest(BaseModel):
     stop: str | list[str] | None = None
     tools: list[dict[str, str]] | None = None
     tool_choice: str | dict[str, str] | None = None
+    prompt_cache_options: dict | None = None
 
 
 class ChatChoice(BaseModel):
@@ -72,11 +76,6 @@ class StreamChoice(BaseModel):
     finish_reason: str | None = None
 
 
-def _convert_messages_to_llama_format(messages: list[ChatMessage]) -> list[dict[str, str]]:
-    """Convert messages to llama.cpp format."""
-    return [{"role": msg.role, "content": msg.content} for msg in messages]
-
-
 class ChatCompletionChunk(BaseModel):
     """Chat completion chunk for streaming."""
     id: str
@@ -86,55 +85,63 @@ class ChatCompletionChunk(BaseModel):
     choices: list[StreamChoice]
 
 
+def _convert_messages_to_llama_format(messages: list[ChatMessage]) -> list[dict[str, str]]:
+    """Convert messages to llama.cpp format."""
+    return [{"role": msg.role, "content": msg.content} for msg in messages]
 
 
-
-async def _stream_completion(
-    server_port: int,
+async def _stream_completion_via_agent(
+    agent_id: str,
+    server: ServerInstance,
     request: ChatCompletionRequest,
     request_id: str,
 ) -> AsyncGenerator[str]:
-    """Stream completion from llama-server."""
+    """Stream completion via Agent proxy."""
     messages = _convert_messages_to_llama_format(request.messages)
-
+    
     payload = {
         "messages": messages,
         "temperature": request.temperature,
         "max_tokens": request.max_tokens,
         "stream": True,
     }
-
-    if request.top_p is not None:
-        payload["top_p"] = request.top_p
-    if request.frequency_penalty is not None:
-        payload["frequency_penalty"] = request.frequency_penalty
-    if request.presence_penalty is not None:
-        payload["presence_penalty"] = request.presence_penalty
-    if request.stop is not None:
-        payload["stop"] = request.stop
-
+    
+    # Add optional parameters
+    for key in ["top_p", "frequency_penalty", "presence_penalty", "stop"]:
+        value = getattr(request, key)
+        if value is not None:
+            payload[key] = value
+    
     created = int(time.time())
-
+    
     try:
+        # Get agent
+        agent = await agent_manager.get_agent(agent_id)
+        if not agent:
+            raise ValueError(f"Agent {agent_id} not found")
+        
+        # Stream through agent proxy
         async with httpx.AsyncClient(timeout=300.0) as client:
+            proxy_url = f"http://{agent.host}:{agent.port}/proxy/{server.id}/v1/chat/completions"
+            
             async with client.stream(
                 "POST",
-                f"http://localhost:{server_port}/completion",
+                proxy_url,
                 json=payload,
             ) as response:
                 response.raise_for_status()
-
+                
                 async for line in response.aiter_lines():
                     if line.startswith("data: "):
                         data = line[6:]
                         if data.strip() == "[DONE]":
                             yield "data: [DONE]\n\n"
                             break
-
+                        
                         try:
                             chunk_data = json.loads(data)
                             delta = {"content": chunk_data.get("content", "")}
-
+                            
                             stream_chunk = ChatCompletionChunk(
                                 id=request_id,
                                 created=created,
@@ -145,160 +152,171 @@ async def _stream_completion(
                                     finish_reason=chunk_data.get("finish_reason"),
                                 )],
                             )
-
+                            
                             yield f"data: {stream_chunk.model_dump_json()}\n\n"
-
+                            
                         except json.JSONDecodeError:
+                            logger.warning(f"Invalid JSON in stream: {data}")
                             continue
-
-    except httpx.HTTPError as e:
+                            
+    except Exception as e:
         logger.error(f"Streaming error: {e}")
         error_chunk = {
-            "error": {
-                "message": str(e),
-                "type": "server_error",
-            }
+            "error": {"message": str(e), "type": "server_error"}
         }
         yield f"data: {json.dumps(error_chunk)}\n\n"
 
 
-async def _get_completion(
-    server_port: int,
-    request: ChatCompletionRequest,
-    request_id: str,
-) -> ChatCompletionResponse:
-    """Get non-streaming completion from llama-server."""
-    messages = _convert_messages_to_llama_format(request.messages)
-
-    payload = {
-        "messages": messages,
-        "temperature": request.temperature,
-        "max_tokens": request.max_tokens,
-        "stream": False,
-    }
-
-    if request.top_p is not None:
-        payload["top_p"] = request.top_p
-    if request.frequency_penalty is not None:
-        payload["frequency_penalty"] = request.frequency_penalty
-    if request.presence_penalty is not None:
-        payload["presence_penalty"] = request.presence_penalty
-    if request.stop is not None:
-        payload["stop"] = request.stop
-
-    try:
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            response = await client.post(
-                f"http://localhost:{server_port}/completion",
-                json=payload,
+async def _get_or_create_server(model: Model, agent_id: str | None = None) -> ServerInstance:
+    """Get existing server or create new one via Agent."""
+    async with Session() as session:
+        # Try to find existing server
+        if agent_id:
+            # Look for server on specific agent
+            stmt = select(ServerInstance).where(
+                ServerInstance.model_id == model.id,
+                ServerInstance.agent_id == agent_id,
+                ServerInstance.status == "running",
             )
-            response.raise_for_status()
-            result = response.json()
-
-            created = int(time.time())
-            content = result.get("content", "")
-
-            prompt_tokens = result.get("prompt_tokens", 0)
-            completion_tokens = result.get("completion_tokens", 0)
-
-            return ChatCompletionResponse(
-                id=request_id,
-                created=created,
-                model=request.model,
-                choices=[ChatChoice(
-                    index=0,
-                    message=ChatMessage(role="assistant", content=content),
-                    finish_reason=result.get("finish_reason", "stop"),
-                )],
-                usage=UsageInfo(
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    total_tokens=prompt_tokens + completion_tokens,
-                ),
+        else:
+            # Find any running server for this model
+            stmt = select(ServerInstance).where(
+                ServerInstance.model_id == model.id,
+                ServerInstance.status == "running",
             )
+        
+        result = session.exec(stmt)
+        server = result.first()
+        
+        if server:
+            logger.info(f"Using existing server {server.id}")
+            return server
+        
+        # Need to start a new server
+        logger.info("No existing server found, starting new one")
+        
+        # Find an agent
+        if agent_id:
+            agent = await agent_manager.get_agent(agent_id)
+            if not agent:
+                raise HTTPException(404, f"Agent {agent_id} not found")
+        else:
+            # Find first online agent
+            agents = await agent_manager.list_agents()
+            if not agents:
+                raise HTTPException(503, "No agents available")
+            agent = await agent_manager.get_agent(agents[0]["id"])
+        
+        if not agent or agent.status != "online":
+            raise HTTPException(503, "No online agents available")
+        
+        # Start server via agent
+        start_response = await agent_manager.send_to_agent(
+            agent.id,
+            "POST",
+            "/servers/start",
+            {
+                "model_id": str(model.id),
+                "model_path": model.path,
+                "config": {
+                    "gpu_layers": 35,
+                    "context_size": model.context_length or 4096,
+                    "batch_size": 512,
+                    "cache_prompt": True,
+                }
+            }
+        )
+        
+        # Create ServerInstance record
+        server = ServerInstance(
+            model_id=model.id,
+            agent_id=agent.id,
+            port=8081,  # Default agent port
+            proxy_url=start_response.get("proxy_url"),
+            status="starting",
+            inactivity_timeout_seconds=300,
+        )
+        session.add(server)
+        session.commit()
+        session.refresh(server)
+        
+        logger.info(f"Started new server {server.id} on agent {agent.id}")
+        return server
 
-    except httpx.HTTPError as e:
-        logger.error(f"Completion error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get completion: {e}")
 
-
-async def _find_model_server(
-    db: Session,
-    model_name: str,
-) -> int:
-    """Find or start a server for the model."""
-    statement = select(Model).where(Model.name == model_name)
-    model = db.exec(statement).first()
-
-    if not model:
-        raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found")
-
-    from app.services.llama_server import ServerConfig, llama_server_manager
-
-    statement = select(ServerInstance).where(
-        ServerInstance.model_id == model.id,
-        ServerInstance.status == "running",
-    )
-    instance = db.exec(statement).first()
-
-    if instance:
-        health = await llama_server_manager.check_health(instance.port)
-        if health == "healthy":
-            return instance.port
-
-    config = ServerConfig(
-        model_path=model.path,
-        port=8080,
-    )
-
-    new_instance = ServerInstance(
-        model_id=model.id,
-        port=config.port,
-        status="starting",
-        inactivity_timeout_seconds=300,
-    )
-
-    if await llama_server_manager.start_server(config, new_instance):
-        db.add(new_instance)
-        db.commit()
-        return config.port
-
-    raise HTTPException(status_code=503, detail="Failed to start model server")
-
-
-@router.post("/v1/chat/completions")
+@router.post("")
 async def create_chat_completion(
     request: ChatCompletionRequest,
     db: Session = Depends(get_db),
-):
-    """
-    Create a chat completion.
-
-    Supports both streaming (SSE) and non-streaming responses.
-    """
-    request_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-
+) -> ChatCompletionResponse | StreamingResponse:
+    """Create chat completion via Agent proxy."""
+    request_id = f"chatcmpl-{uuid.uuid4()}"
+    created = int(time.time())
+    
+    # Get model
+    model = db.exec(select(Model).where(Model.name == request.model)).first()
+    if not model:
+        raise HTTPException(404, f"Model {request.model} not found")
+    
+    # Get or create server
     try:
-        server_port = await _find_model_server(db, request.model)
+        server = await _get_or_create_server(model, request.agent_id)
     except HTTPException:
         raise
-
+    except Exception as e:
+        logger.error(f"Server creation failed: {e}")
+        raise HTTPException(503, f"Failed to start server: {e}")
+    
     if request.stream:
-        from fastapi.responses import StreamingResponse
-
-        async def generate() -> AsyncGenerator[str]:
-            async for chunk in _stream_completion(server_port, request, request_id):
-                yield chunk
-
+        # Stream response
         return StreamingResponse(
-            generate(),
+            _stream_completion_via_agent(
+                str(server.agent_id),
+                server,
+                request,
+                request_id,
+            ),
             media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Request-ID": request_id,
-            },
         )
-    else:
-        response = await _get_completion(server_port, request, request_id)
-        return response
+    
+    # Non-streaming response
+    try:
+        agent = await agent_manager.get_agent(str(server.agent_id))
+        if not agent:
+            raise ValueError("Agent not found")
+        
+        response = await agent_manager.send_to_agent(
+            str(server.agent_id),
+            "POST",
+            f"/proxy/{server.id}/v1/chat/completions",
+            {
+                "messages": _convert_messages_to_llama_format(request.messages),
+                "temperature": request.temperature,
+                "max_tokens": request.max_tokens,
+                "stream": False,
+            },
+            timeout=300.0,
+        )
+        
+        return ChatCompletionResponse(
+            id=request_id,
+            created=created,
+            model=request.model,
+            choices=[ChatChoice(
+                index=0,
+                message=ChatMessage(
+                    role="assistant",
+                    content=response["choices"][0]["message"]["content"],
+                ),
+                finish_reason=response["choices"][0].get("finish_reason"),
+            )],
+            usage=UsageInfo(
+                prompt_tokens=response.get("usage", {}).get("prompt_tokens", 0),
+                completion_tokens=response.get("usage", {}).get("completion_tokens", 0),
+                total_tokens=response.get("usage", {}).get("total_tokens", 0),
+            ) if response.get("usage") else None,
+        )
+        
+    except Exception as e:
+        logger.error(f"Completion error: {e}")
+        raise HTTPException(500, f"Inference failed: {e}")

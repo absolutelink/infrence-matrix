@@ -155,6 +155,41 @@ class UpdatePassword(SQLModel):
 
 
 # ============================================================================
+# Agent - Tracks registered inference agents
+# ============================================================================
+class Agent(SQLModel, table=True):
+    __tablename__ = "agents"
+    __table_args__ = (
+        Index("idx_agents_status", "status"),
+        Index("idx_agents_name", "name", unique=True),
+    )
+
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        primary_key=True,
+        sa_type=UUID(as_uuid=True),  # type: ignore[call-arg,arg-type]
+    )
+
+    name: str = Field(max_length=255, unique=True, index=True)
+    host: str
+    port: int
+
+    status: str = "offline"
+    gpu_info: dict = Field(default_factory=dict, sa_column=Column(JSON))
+
+    last_seen: datetime | None = None
+    websocket_connected: bool = False
+
+    created_at: datetime = Field(default_factory=get_datetime_utc)
+
+    # Relationships
+    servers: list[ServerInstance] = Relationship(
+        back_populates="agent",
+        sa_relationship_kwargs={"lazy": "selectin"},
+    )
+
+
+# ============================================================================
 # Model - Registry of available models
 # ============================================================================
 class Model(SQLModel, table=True):
@@ -476,6 +511,16 @@ class ServerInstance(SQLModel, table=True):
     error_message: str | None = None
     restart_count: int = 0
 
+    agent_id: uuid.UUID = Field(
+        foreign_key="agents.id",
+        ondelete="CASCADE",
+    )
+    proxy_url: str | None = None
+
+    agent: Agent | None = Relationship(
+        back_populates="servers",
+        sa_relationship_kwargs={"lazy": "selectin"},
+    )
     model: Model | None = Relationship(
         back_populates="server_instances",
         sa_relationship_kwargs={"lazy": "selectin"},
