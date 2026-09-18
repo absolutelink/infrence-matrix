@@ -1,0 +1,7 @@
+#!/command/with-contenv /bin/sh
+export USER=vscode
+export HOME=/home/vscode
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
+export BASH_DEFAULT_TIMEOUT_MS=6000000
+export BASH_MAX_TIMEOUT_MS=6000000
+exec s6-setuidgid vscode /usr/bin/opencode serve

@@ -1,4 +1,4 @@
-FROM python:3.14-slim
+FROM mcr.microsoft.com/devcontainers/python:3-3.14-trixie
 
 ARG S6_OVERLAY_VERSION=3.2.3.0
 
@@ -11,13 +11,10 @@ COPY rootfs/ /
 COPY additional-services/ /etc/s6-overlay/s6-rc.d/
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git cmake \
-    && apt-get install -y --no-install-recommends postgresql postgresql-contrib \
+    && apt-get install -y --no-install-recommends ca-certificates curl postgresql postgresql-contrib \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
-
-RUN useradd -m -s /bin/bash vscode
 
 ENTRYPOINT ["docker-entrypoint"]
 

@@ -24,8 +24,7 @@ class Settings(BaseSettings):
     DEFAULT_BATCH_SIZE: int = 512
     SERVER_INACTIVITY_TIMEOUT: int = 300
 
-    # GPU
-    GPU_BACKEND: str = "auto"  # auto, cuda, metal, vulkan
+
 
     # Storage
     MODELS_PATH: str = "/models"
