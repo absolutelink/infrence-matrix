@@ -56,4 +56,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 WORKDIR /app/backend/
 
-CMD ["fastapi", "run", "--workers", "4"]
+# Make prestart script executable
+RUN chmod +x scripts/prestart.sh
+
+# Run migrations and start server
+CMD ["sh", "-c", "scripts/prestart.sh && fastapi run app/main.py --workers 4"]
