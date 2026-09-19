@@ -2,10 +2,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Agent service configuration."""
-
     model_config = SettingsConfigDict(
-        env_file="../.env",
+        env_file=".env",
         env_ignore_empty=True,
         extra="ignore",
     )
@@ -15,7 +13,8 @@ class Settings(BaseSettings):
     AGENT_NAME: str = "inference-agent"
 
     # Frontend connection
-    FRONTEND_URL: str = "http://frontend:8000"
+    FRONTEND_URL: str
+    FRONTEND_API_KEY: str | None = None
 
     # llama.cpp
     LLAMA_SERVER_PATH: str = "/usr/local/bin/llama-server"
@@ -24,7 +23,8 @@ class Settings(BaseSettings):
     DEFAULT_BATCH_SIZE: int = 512
     SERVER_INACTIVITY_TIMEOUT: int = 300
 
-
+    # GPU
+    GPU_BACKEND: str = "auto"
 
     # Storage
     MODELS_PATH: str = "/models"
@@ -34,10 +34,6 @@ class Settings(BaseSettings):
     WS_HEARTBEAT_INTERVAL: int = 30
     WS_RECONNECT_INTERVAL: int = 5
     WS_MAX_BUFFER_EVENTS: int = 1000
-
-    # Server
-    HOST: str = "0.0.0.0"
-    PORT: int = 8080
 
 
 settings = Settings()

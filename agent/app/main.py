@@ -1,22 +1,21 @@
+"""FastAPI application factory."""
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.routes import servers, models, gpu, websocket, proxy
 from app.core.config import settings
-from app.core.logging import logger
-from app.api.routes import servers, models, gpu, websocket
 
 
-def create_application() -> FastAPI:
-    """Create and configure FastAPI application."""
-
-    application = FastAPI(
+def create_app() -> FastAPI:
+    """Create and configure the FastAPI application."""
+    app = FastAPI(
         title="Inference Matrix Agent",
-        description="Manages llama.cpp servers for Inference Matrix",
+        description="Agent service for distributed inference",
         version="0.1.0",
     )
 
-    # CORS (for local development)
-    application.add_middleware(
+    app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
         allow_credentials=True,
@@ -24,33 +23,17 @@ def create_application() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Include routers
-    application.include_router(servers.router, prefix="/api")
-    application.include_router(models.router, prefix="/api")
-    application.include_router(gpu.router, prefix="/api")
-    application.include_router(websocket.router, prefix="/api")
+    app.include_router(servers.router)
+    app.include_router(models.router)
+    app.include_router(gpu.router)
+    app.include_router(websocket.router)
+    app.include_router(proxy.router)
 
-    # Health check
-    @application.get("/api/health")
+    @app.get("/health")
     async def health_check() -> dict:
-        return {
-            "status": "healthy",
-            "agent_id": settings.AGENT_ID,
-        }
+        return {"status": "healthy"}
 
-    @application.on_event("startup")
-    async def startup_event() -> None:
-        logger.info(f"Starting Agent {settings.AGENT_ID}")
-        # Register with Frontend
-        # from app.services.frontend_client import frontend_client
-        # await frontend_client.register()
-
-    @application.on_event("shutdown")
-    async def shutdown_event() -> None:
-        logger.info("Shutting down Agent")
-        # Cleanup: stop all servers
-
-    return application
+    return app
 
 
-app = create_application()
+app = create_app()

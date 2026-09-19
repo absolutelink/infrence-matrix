@@ -1,6 +1,6 @@
 # Deployment Guide
 
-This guide covers deploying Inference Matrix for home server use with Docker Compose.
+This guide covers deploying Inference Matrix for home server use with Docker Compose, including the distributed Agent architecture.
 
 ## Prerequisites
 
@@ -13,9 +13,19 @@ This guide covers deploying Inference Matrix for home server use with Docker Com
 - At least 8GB RAM (16GB+ recommended)
 - Sufficient disk space for models (varies by model size)
 
+## Architecture Overview
+
+Inference Matrix uses a split-service architecture:
+
+- **Frontend Service** - WebUI, API, database, and orchestration
+- **Agent Service** - Runs on GPU-equipped machines, manages llama.cpp servers
+- **PostgreSQL** - Central database for state management
+
+Multiple Agents can be deployed across different machines to distribute inference workloads.
+
 ## Quick Start
 
-### 1. Clone and Configure
+### 1. Clone and configure
 
 ```bash
 git clone <repository-url> inference-matrix
@@ -53,6 +63,11 @@ LLAMA_SERVER_PATH=/usr/local/bin/llama-server
 DEFAULT_GPU_LAYERS=35
 DEFAULT_CONTEXT_SIZE=4096
 SERVER_INACTIVITY_TIMEOUT=300
+
+# Agent configuration (for Agent service)
+AGENT_ID=agent-1
+AGENT_NAME=GPU-Agent-1
+FRONTEND_URL=http://frontend:8000
 ```
 
 ### 3. Start Services
@@ -61,11 +76,14 @@ SERVER_INACTIVITY_TIMEOUT=300
 docker compose up -d
 ```
 
+This starts the Frontend Service, Agent Service, and PostgreSQL database.
+
 ### 4. Access the Application
 
 - **WebUI**: http://localhost:3000
 - **API**: http://localhost:8000
 - **API Docs**: http://localhost:8000/docs
+- **Agent API**: http://localhost:8080
 
 ---
 
@@ -118,6 +136,16 @@ docker compose up -d
 | `DEFAULT_BATCH_SIZE` | Default batch size | `512` |
 | `SERVER_INACTIVITY_TIMEOUT` | Auto-shutdown timeout (seconds) | `300` |
 | `MAX_SERVER_INSTANCES` | Max concurrent servers | `5` |
+
+#### Agent Configuration
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `AGENT_ID` | Unique agent identifier | *(required for Agent)* |
+| `AGENT_NAME` | Human-readable agent name | `inference-agent` |
+| `FRONTEND_URL` | Frontend Service URL | *(required for Agent)* |
+| `FRONTEND_API_KEY` | Optional API key for auth | `None` |
+| `GPU_BACKEND` | GPU backend: auto, cuda, metal, vulkan | `auto` |
 
 #### Audio Processing
 
@@ -255,6 +283,47 @@ volumes:
   postgres_data:
 ```
 
+### Multi-Agent Setup
+
+Deploy multiple Agents across different GPU-equipped machines:
+
+```yaml
+# On GPU Machine 1
+services:
+  agent:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - AGENT_ID=agent-1
+      - AGENT_NAME=GPU-Machine-1
+      - FRONTEND_URL=http://frontend-host:8000
+      - DEFAULT_GPU_LAYERS=35
+    volumes:
+      - ./models:/models
+      - ./cache:/cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+# On GPU Machine 2 (different AGENT_ID)
+services:
+  agent:
+    environment:
+      - AGENT_ID=agent-2
+      - AGENT_NAME=GPU-Machine-2
+      - FRONTEND_URL=http://frontend-host:8000
+```
+
+**Note:** Each Agent must have a unique `AGENT_ID` and be able to reach the Frontend Service over the network.
+
 ---
 
 ## GPU Configuration
@@ -276,7 +345,7 @@ sudo systemctl restart docker
 2. Update `compose.yml`:
 ```yaml
 services:
-  backend:
+  agent:
     deploy:
       resources:
         reservations:
@@ -297,7 +366,7 @@ DEFAULT_GPU_LAYERS=35  # Adjust based on VRAM
 2. Update `compose.yml`:
 ```yaml
 services:
-  backend:
+  agent:
     devices:
       - /dev/kfd:/dev/kfd
       - /dev/dri:/dev/dri

@@ -440,6 +440,11 @@ class PromptCache(SQLModel, table=True):
         foreign_key="conversations.id",
         ondelete="SET NULL",
     )
+    agent_id: uuid.UUID | None = Field(
+        default=None,
+        foreign_key="agents.id",
+        ondelete="SET NULL",
+    )
     cache_path: str
 
     model: "Model" = Relationship(

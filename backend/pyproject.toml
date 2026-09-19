@@ -28,6 +28,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest<10.0.0,>=7.4.3",
+    "pytest-asyncio<1.0.0,>=0.21.0",
     "mypy<3.0.0,>=1.8.0",
     "ty>=0.0.25",
     "ruff<1.0.0,>=0.2.2",
@@ -82,6 +83,9 @@ sort = "-Cover"
 
 [tool.coverage.html]
 show_contexts = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
 
 [tool.ty.terminal]
 error-on-warning = true

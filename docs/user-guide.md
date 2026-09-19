@@ -1,14 +1,15 @@
 # User Guide
 
-Welcome to Inference Matrix! This guide covers using the WebUI and API for model management and inference.
+Welcome to Inference Matrix! This guide covers using the WebUI and API for model management and inference, including multi-agent deployments.
 
 ## Table of Contents
 
 1. [Getting Started](#getting-started)
 2. [Model Management](#model-management)
 3. [Using the API](#using-the-api)
-4. [Monitoring & Settings](#monitoring--settings)
-5. [Troubleshooting](#troubleshooting)
+4. [Multi-Agent Workflows](#multi-agent-workflows)
+5. [Monitoring & Settings](#monitoring--settings)
+6. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -281,6 +282,144 @@ The **Monitoring** dashboard shows:
 5. Confirm restore
 
 **Note**: Models themselves (GGUF files) are not included in backups. Re-download or restore from separate model backup.
+
+---
+
+## Multi-Agent Workflows
+
+Inference Matrix supports distributed inference across multiple GPU-equipped machines using the Agent architecture.
+
+### Agent Status Dashboard
+
+The **Agents** page shows:
+
+- **Agent List**: All registered agents with status
+- **Health Indicators**: Online/offline/unreachable
+- **GPU Info**: GPU model, VRAM total/used
+- **WebSocket Status**: Real-time connection health
+- **Server Count**: Running llama.cpp servers per agent
+- **Last Seen**: Most recent heartbeat timestamp
+
+### Starting Servers on Agents
+
+**Automatic Agent Selection:**
+
+1. Go to **Models** page
+2. Click **Load** on a model
+3. System automatically selects an agent with:
+   - The model available
+   - Sufficient VRAM
+   - Online status
+   - Lowest current load
+
+**Manual Agent Selection:**
+
+1. Go to **Models** page
+2. Click **Load** dropdown arrow
+3. Select specific agent from list
+4. Server starts on chosen agent
+
+### Multi-Agent Inference
+
+When making API requests, you can specify which agent to use:
+
+```bash
+# Let system choose best agent
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama-3.2-3b-instruct",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+
+# Specify specific agent
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama-3.2-3b-instruct",
+    "agent_id": "agent-2",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
+
+### Load Distribution
+
+The Frontend Service distributes requests based on:
+
+1. **Model Availability** - Agent must have the model downloaded
+2. **Agent Status** - Only online agents receive requests
+3. **Server Availability** - Prefers agents with existing servers
+4. **Load Balancing** - Future: distribute based on current load
+
+### Model Synchronization
+
+Models are not automatically synced across agents. To use a model on multiple agents:
+
+**Option 1: Download to each agent separately**
+1. Go to **Models** page
+2. Click **Download** dropdown
+3. Select target agent
+4. Repeat for each agent
+
+**Option 2: Manual file copy**
+1. Download model to shared storage
+2. Mount shared storage on all agents
+3. Register model via API on each agent
+
+### Agent Failover
+
+If an agent goes offline:
+
+1. Agent status changes to `offline` or `unreachable`
+2. Existing servers on that agent become unavailable
+3. New requests automatically route to other agents
+4. Manual intervention required to restart servers
+
+**Best Practice:** Keep models downloaded on multiple agents for redundancy.
+
+### Monitoring Agents
+
+**Via WebUI:**
+
+- **Agents Page**: Real-time status overview
+- **Dashboard**: Agent count, online/offline breakdown
+- **Server List**: Shows which agent hosts each server
+
+**Via API:**
+
+```bash
+# List all agents
+curl http://localhost:8000/api/agents
+
+# Get specific agent
+curl http://localhost:8000/api/agents/agent-1
+
+# Get agent GPU info
+curl http://localhost:8000/api/agents/agent-1/gpu
+```
+
+### Troubleshooting Agents
+
+**Agent shows offline:**
+
+1. Check agent machine network connectivity
+2. Verify agent service is running
+3. Check FRONTEND_URL configuration on agent
+4. Review agent logs for errors
+
+**Server won't start on agent:**
+
+1. Check agent has sufficient VRAM
+2. Verify model file exists on agent machine
+3. Check agent logs for llama.cpp errors
+4. Try starting server on different agent
+
+**High latency on specific agent:**
+
+1. Check agent GPU utilization
+2. Monitor network latency between frontend and agent
+3. Consider load balancing to other agents
+4. Check agent machine resources (CPU, RAM)
 
 ---
 

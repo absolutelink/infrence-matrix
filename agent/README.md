@@ -1,92 +1,81 @@
-# Inference Matrix Agent Service
+# Inference Matrix Agent
 
-The Agent Service manages llama.cpp servers on inference hardware. It communicates with the Frontend Service to receive commands and report status.
+Agent service for distributed inference in the Inference Matrix architecture.
 
 ## Features
 
-- **llama.cpp Server Management** - Start/stop inference servers
-- **GPU Monitoring** - Real-time VRAM and utilization tracking
-- **Model Management** - Download, delete, and validate GGUF models
-- **HTTP Proxy** - Proxies llama.cpp API requests from Frontend
-- **WebSocket Events** - Real-time status updates to Frontend
-- **Auto-Registration** - Registers with Frontend on startup
+- Manages llama.cpp server processes
+- Handles model downloads from HuggingFace
+- Reports GPU information and usage
+- WebSocket event streaming to Frontend Service
+- HTTP proxy for llama.cpp API
 
-## Quick Start
+## Setup
 
-### 1. Configure Environment
+### Requirements
 
-Create `.env` file:
+- Python 3.14+
+- llama.cpp with GPU support (CUDA, Metal, or Vulkan)
 
-```bash
-AGENT_ID=agent-1
-AGENT_NAME=GPU-Agent-1
-FRONTEND_URL=http://frontend:8000
-LLAMA_SERVER_PATH=/usr/local/bin/llama-server
-DEFAULT_GPU_LAYERS=35
-MODELS_PATH=/models
-CACHE_PATH=/cache
-```
-
-### 2. Install Dependencies
+### Installation
 
 ```bash
-cd agent
 uv sync
 ```
 
-### 3. Run Agent
+### Configuration
+
+Set the following environment variables:
+
+- `AGENT_ID` - Unique agent identifier (required)
+- `AGENT_NAME` - Human-readable agent name (default: "inference-agent")
+- `FRONTEND_URL` - Frontend Service URL (required)
+- `FRONTEND_API_KEY` - Optional API key for authentication
+- `LLAMA_SERVER_PATH` - Path to llama-server binary (default: "/usr/local/bin/llama-server")
+- `MODELS_PATH` - Directory for model storage (default: "/models")
+- `CACHE_PATH` - Directory for prompt cache (default: "/cache")
+- `GPU_BACKEND` - GPU backend: auto, cuda, metal, vulkan (default: "auto")
+
+### Running
 
 ```bash
 uv run python -m app.main
 ```
 
-### 4. Verify Registration
+Or with uvicorn:
 
-Check Frontend logs or WebUI to confirm Agent is registered.
+```bash
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8080
+```
 
 ## API Endpoints
 
-- `POST /api/servers/start` - Start llama.cpp server
-- `POST /api/servers/{id}/stop` - Stop server
-- `GET /api/servers` - List running servers
-- `GET /api/gpu/info` - GPU information
-- `GET /api/models` - List model files
-- `POST /api/models/download` - Download model
-- `DELETE /api/models/{id}` - Delete model
-- `GET /api/health` - Health check
-- `WS /api/ws/status` - WebSocket event stream
+- `GET /health` - Health check
+- `GET /servers` - List running servers
+- `POST /servers/start` - Start a new server
+- `POST /servers/{id}/stop` - Stop a server
+- `GET /models` - List downloaded models
+- `POST /models/download` - Download a model
+- `DELETE /models/{filename}` - Delete a model
+- `GET /gpu` - Get GPU information
+- `GET /gpu/usage` - Get GPU usage
+- `WS /ws/status` - WebSocket event stream
 
-## Directory Structure
+## Docker
 
-```
-agent/
-├── app/
-│   ├── main.py              # FastAPI application
-│   ├── core/
-│   │   ├── config.py        # Settings
-│   │   └── logging.py       # Logging config
-│   ├── api/
-│   │   ├── routes/
-│   │   │   ├── servers.py   # Server management
-│   │   │   ├── models.py    # Model files
-│   │   │   ├── gpu.py       # GPU monitoring
-│   │   │   └── websocket.py # WebSocket events
-│   │   └── deps.py          # Dependencies
-│   ├── services/
-│   │   ├── llama_server.py  # llama.cpp management
-│   │   ├── model_manager.py # Model downloads
-│   │   ├── gpu_monitor.py   # GPU monitoring
-│   │   ├── proxy.py         # HTTP proxy
-│   │   └── frontend_client.py # Frontend connection
-│   └── utils/
-│       └── llama_cpp.py     # llama.cpp helpers
-└── tests/
-```
-
-## Docker Deployment
+Build the image:
 
 ```bash
-docker compose up agent
+docker build -t inference-matrix-agent .
 ```
 
-See `compose.yml` for full configuration.
+Run with GPU support:
+
+```bash
+docker run --gpus all \
+  -e AGENT_ID=agent-1 \
+  -e FRONTEND_URL=http://frontend:8000 \
+  -v ./models:/models \
+  -v ./cache:/cache \
+  inference-matrix-agent
+```
