@@ -1,7 +1,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import Index
+from sqlalchemy import BigInteger, Index
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlmodel import Column, Field, Relationship, SQLModel
 
@@ -208,10 +208,10 @@ class Model(SQLModel, table=True):
 
     name: str = Field(max_length=512, unique=True, index=True)
     path: str = Field(max_length=1024)
-    size_bytes: int
+    size_bytes: int = Field(sa_type=BigInteger)  # type: ignore[call-arg]
 
     architecture: str
-    parameter_count: int | None = None
+    parameter_count: int | None = Field(default=None, sa_type=BigInteger)  # type: ignore[call-arg]
     quantization: str
 
     supports_embeddings: bool = False
@@ -248,9 +248,9 @@ class ModelCreate(SQLModel):
     """Model creation model."""
     name: str = Field(max_length=512)
     path: str = Field(max_length=1024)
-    size_bytes: int
+    size_bytes: int = Field(sa_type=BigInteger)  # type: ignore[call-arg]
     architecture: str
-    parameter_count: int | None = None
+    parameter_count: int | None = Field(default=None, sa_type=BigInteger)  # type: ignore[call-arg]
     quantization: str
     supports_embeddings: bool = False
     supports_vision: bool = False
@@ -268,9 +268,9 @@ class ModelUpdate(SQLModel):
     """Model update model."""
     name: str | None = Field(default=None, max_length=512)
     path: str | None = Field(default=None, max_length=1024)
-    size_bytes: int | None = None
+    size_bytes: int | None = Field(default=None, sa_type=BigInteger)  # type: ignore[call-arg]
     architecture: str | None = None
-    parameter_count: int | None = None
+    parameter_count: int | None = Field(default=None, sa_type=BigInteger)  # type: ignore[call-arg]
     quantization: str | None = None
     supports_embeddings: bool | None = None
     supports_vision: bool | None = None
