@@ -56,7 +56,7 @@ export const AddModel = ({ isOpen, onClose }: AddModelProps) => {
   const queryClient = useQueryClient()
   const { showSuccessToast } = useCustomToast()
 
-  const form = useForm<FormData>({
+  const form = useForm({
     resolver: zodResolver(formSchema),
     mode: "onBlur",
     defaultValues: {
@@ -81,7 +81,7 @@ export const AddModel = ({ isOpen, onClose }: AddModelProps) => {
 
   const onSubmit = async (data: FormData) => {
     try {
-      await ModelsService.createModel({ body: data })
+      await ModelsService.createModel({ body: data as any })
       showSuccessToast("Model created successfully")
       onClose()
       form.reset()

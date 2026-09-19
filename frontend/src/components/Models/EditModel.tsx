@@ -59,7 +59,7 @@ export default function EditModel({ isOpen, onClose, model }: EditModelProps) {
   const queryClient = useQueryClient()
   const { showSuccessToast } = useCustomToast()
 
-  const form = useForm<FormData>({
+  const form = useForm({
     resolver: zodResolver(formSchema),
     mode: "onBlur",
     defaultValues: {
@@ -109,7 +109,7 @@ export default function EditModel({ isOpen, onClose, model }: EditModelProps) {
     try {
       await ModelsService.updateModel({
         id: model.id,
-        body: data,
+        body: data as any,
       })
       showSuccessToast("Model updated successfully")
       onClose()
