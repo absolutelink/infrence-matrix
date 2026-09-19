@@ -39,20 +39,71 @@ interface GGUFFile {
   size: number
 }
 
+interface GGUFFileGroup {
+  id: string
+  name: string
+  files: GGUFFile[]
+  totalSize: number
+  fileCount: number
+  isSplit: boolean
+}
+
+// Detect if files are part of a split model (e.g., model-00001-of-00003.gguf)
+const groupSplitFiles = (files: GGUFFile[]): GGUFFileGroup[] => {
+  const splitPattern = /^(.+?)-(\d+)-of-(\d+)\.gguf$/
+  const groups = new Map<string, GGUFFileGroup>()
+  const singleFiles: GGUFFileGroup[] = []
+
+  files.forEach(file => {
+    const filename = file.path.split('/').pop() || file.path
+    const match = filename.match(splitPattern)
+    
+    if (match) {
+      const [, baseName, , totalParts] = match
+      const groupId = `${baseName}-${totalParts}`
+      
+      if (!groups.has(groupId)) {
+        groups.set(groupId, {
+          id: groupId,
+          name: `${baseName} (${totalParts} parts)`,
+          files: [],
+          totalSize: 0,
+          fileCount: parseInt(totalParts),
+          isSplit: true,
+        })
+      }
+      
+      const group = groups.get(groupId)!
+      group.files.push(file)
+      group.totalSize += file.size
+    } else {
+      singleFiles.push({
+        id: file.path,
+        name: filename,
+        files: [file],
+        totalSize: file.size,
+        fileCount: 1,
+        isSplit: false,
+      })
+    }
+  })
+
+  return [...Array.from(groups.values()), ...singleFiles]
+}
+
 export function AddModelFromHF({ model, onClose }: AddModelFromHFProps) {
   const queryClient = useQueryClient()
   const { showSuccessToast, showErrorToast } = useCustomToast()
-  const [files, setFiles] = useState<GGUFFile[]>([])
-  const [selectedFile, setSelectedFile] = useState<string>("")
+  const [fileGroups, setFileGroups] = useState<GGUFFileGroup[]>([])
+  const [selectedGroup, setSelectedGroup] = useState<string>("")
   const [isLoadingFiles, setIsLoadingFiles] = useState(false)
 
-  // Fetch GGUF files for this model
+  // Fetch GGUF files for this model and group split files
   useEffect(() => {
     const fetchFiles = async () => {
       setIsLoadingFiles(true)
       try {
         const token = localStorage.getItem("access_token")
-        // Use runtime config or current origin for API base URL
         const baseUrl = (window as any).APP_CONFIG?.API_URL || 
                         import.meta.env.VITE_API_URL || 
                         window.location.origin
@@ -65,10 +116,11 @@ export function AddModelFromHF({ model, onClose }: AddModelFromHFProps) {
           }
         )
         if (response.ok) {
-          const data = await response.json()
-          setFiles(data)
-          if (data.length > 0) {
-            setSelectedFile(data[0].path)
+          const data: GGUFFile[] = await response.json()
+          const groups = groupSplitFiles(data)
+          setFileGroups(groups)
+          if (groups.length > 0) {
+            setSelectedGroup(groups[0].id)
           }
         }
       } catch (error) {
@@ -96,20 +148,26 @@ export function AddModelFromHF({ model, onClose }: AddModelFromHFProps) {
   })
 
   const handleAddModel = () => {
-    if (!selectedFile) {
+    if (!selectedGroup) {
       showErrorToast("Please select a GGUF file")
       return
     }
 
-    const file = files.find(f => f.path === selectedFile)
+    const group = fileGroups.find(g => g.id === selectedGroup)
+    if (!group) return
+
+    // For split models, use the first file's name pattern
+    const primaryFile = group.files[0]
+    const baseName = group.isSplit ? group.name.split(' (')[0] : primaryFile.path.split('/').pop()
+    
     const modelData: any = {
-      name: `${model.modelId}/${selectedFile.split('/').pop()}`,
-      path: `/models/${model.modelId}/${selectedFile.split('/').pop()}`,
-      size_bytes: file?.size || 0,
+      name: `${model.modelId}/${baseName}${group.isSplit ? ' (split)' : ''}`,
+      path: `/models/${model.modelId}/${baseName}`,
+      size_bytes: group.totalSize,
       architecture: "llama",
-      quantization: selectedFile.includes("Q4_K_M") ? "Q4_K_M" : 
-                   selectedFile.includes("Q5_K_M") ? "Q5_K_M" : 
-                   selectedFile.includes("Q8_0") ? "Q8_0" : "unknown",
+      quantization: baseName?.includes("Q4_K_M") ? "Q4_K_M" : 
+                   baseName?.includes("Q5_K_M") ? "Q5_K_M" : 
+                   baseName?.includes("Q8_0") ? "Q8_0" : "unknown",
       supports_embeddings: false,
       supports_vision: false,
       context_length: 4096,
@@ -117,11 +175,10 @@ export function AddModelFromHF({ model, onClose }: AddModelFromHFProps) {
       source: "huggingface",
       source_repo_id: model.modelId,
       source_url: `https://huggingface.co/${model.modelId}`,
-      source_file: selectedFile,
+      source_file: group.isSplit ? JSON.stringify(group.files.map(f => f.path)) : primaryFile.path,
     }
     
-    // Only include optional fields if they have values
-    if (file?.size) modelData.size_bytes = file.size
+    if (group.totalSize) modelData.size_bytes = group.totalSize
     if (model.modelId.includes("7B") || model.modelId.includes("7b")) modelData.parameter_count = 7000000000
     else if (model.modelId.includes("13B") || model.modelId.includes("13b")) modelData.parameter_count = 13000000000
     else if (model.modelId.includes("70B") || model.modelId.includes("70b")) modelData.parameter_count = 70000000000
@@ -148,20 +205,20 @@ export function AddModelFromHF({ model, onClose }: AddModelFromHFProps) {
           </div>
 
           <div>
-            <Label>GGUF File</Label>
+            <Label>GGUF Files</Label>
             {isLoadingFiles ? (
               <div className="text-sm text-muted-foreground">
                 Loading available files...
               </div>
-            ) : files.length > 0 ? (
-              <Select value={selectedFile} onValueChange={setSelectedFile}>
+            ) : fileGroups.length > 0 ? (
+              <Select value={selectedGroup} onValueChange={setSelectedGroup}>
                 <SelectTrigger className="mt-1">
-                  <SelectValue placeholder="Select a file" />
+                  <SelectValue placeholder="Select files to download" />
                 </SelectTrigger>
                 <SelectContent>
-                  {files.map((file) => (
-                    <SelectItem key={file.path} value={file.path}>
-                      {file.path.split('/').pop()} ({(file.size / 1024 / 1024 / 1024).toFixed(2)} GB)
+                  {fileGroups.map((group) => (
+                    <SelectItem key={group.id} value={group.id}>
+                      {group.name} ({(group.totalSize / 1024 / 1024 / 1024).toFixed(2)} GB{group.isSplit ? `, ${group.fileCount} files` : ''})
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -179,10 +236,10 @@ export function AddModelFromHF({ model, onClose }: AddModelFromHFProps) {
             </Button>
             <LoadingButton
               onClick={handleAddModel}
-              loading={createModelMutation.isPending || !selectedFile}
-              disabled={!selectedFile}
+              loading={createModelMutation.isPending || !selectedGroup}
+              disabled={!selectedGroup}
             >
-              Add Model
+              Add Model{selectedGroup && fileGroups.find(g => g.id === selectedGroup)?.isSplit ? " (Multiple Files)" : ""}
             </LoadingButton>
           </div>
         </div>
