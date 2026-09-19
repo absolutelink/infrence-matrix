@@ -40,7 +40,10 @@ interface SearchHuggingFaceProps {
 
 const searchModels = async (query: string): Promise<HuggingFaceModel[]> => {
   const token = localStorage.getItem("access_token")
-  const baseUrl = import.meta.env.VITE_API_URL || "http://localhost:8000"
+  // Use runtime config or current origin for API base URL
+  const baseUrl = (window as any).APP_CONFIG?.API_URL || 
+                  import.meta.env.VITE_API_URL || 
+                  window.location.origin
   const response = await fetch(
     `${baseUrl}/api/v1/huggingface/search?search=${encodeURIComponent(query)}&limit=20`,
     {

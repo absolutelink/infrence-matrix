@@ -52,7 +52,10 @@ export function AddModelFromHF({ model, onClose }: AddModelFromHFProps) {
       setIsLoadingFiles(true)
       try {
         const token = localStorage.getItem("access_token")
-        const baseUrl = import.meta.env.VITE_API_URL || "http://localhost:8000"
+        // Use runtime config or current origin for API base URL
+        const baseUrl = (window as any).APP_CONFIG?.API_URL || 
+                        import.meta.env.VITE_API_URL || 
+                        window.location.origin
         const response = await fetch(
           `${baseUrl}/api/v1/huggingface/models/files?repo_id=${encodeURIComponent(model.modelId)}`,
           {
