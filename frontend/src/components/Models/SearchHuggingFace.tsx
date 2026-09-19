@@ -58,7 +58,6 @@ const searchModels = async (query: string): Promise<HuggingFaceModel[]> => {
 export function SearchHuggingFace({ isOpen, onClose }: SearchHuggingFaceProps) {
   const [searchQuery, setSearchQuery] = useState("")
   const [selectedModel, setSelectedModel] = useState<HuggingFaceModel | null>(null)
-  const { showErrorToast } = useCustomToast()
 
   const { data: searchResults, isLoading } = useQuery({
     queryKey: ["hf-search", searchQuery],
