@@ -1,24 +1,27 @@
+# Base Inference Matrix Agent image (no llama.cpp included)
 FROM python:3.14-slim
+
+# Create non-root user
+RUN useradd -m -u 1000 appuser
 
 WORKDIR /app
 
+# Install basic dependencies (no llama.cpp)
 RUN apt-get update && apt-get install -y \
-    cmake \
-    build-essential \
-    git \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-RUN git clone https://github.com/ggerganov/llama.cpp.git \
-    && cd llama.cpp \
-    && cmake -B build \
-    && cmake --build build --config Release \
-    && cp build/bin/llama-server /usr/local/bin/
-
+# Install Python dependencies
 COPY pyproject.toml .
-
 RUN pip install uv && uv sync --frozen
 
+# Copy application code
 COPY app/ ./app/
+
+# Set ownership
+RUN chown -R appuser:appuser /app
+
+USER appuser
 
 EXPOSE 8080
 
