@@ -4,7 +4,6 @@ import { z } from "zod"
 
 import {
   type Model,
-  type ModelUpdate,
   ModelsService,
 } from "@/client"
 import {
@@ -110,7 +109,7 @@ export default function EditModel({ isOpen, onClose, model }: EditModelProps) {
     try {
       await ModelsService.updateModel({
         id: model.id,
-        body: data as ModelUpdate,
+        body: data,
       })
       showSuccessToast("Model updated successfully")
       onClose()

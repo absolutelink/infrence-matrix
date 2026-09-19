@@ -22,6 +22,9 @@ export interface Model {
   updated_at: string | null
 }
 
+export type ModelCreate = ModelsServiceCreateModelData["body"]
+export type ModelUpdate = ModelsServiceUpdateModelData["body"]
+
 export interface ModelsServiceReadModelsData {
   query?: {
     skip?: number

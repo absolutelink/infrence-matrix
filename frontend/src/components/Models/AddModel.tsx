@@ -3,7 +3,6 @@ import { useForm } from "react-hook-form"
 import { z } from "zod"
 
 import {
-  type ModelCreate,
   ModelsService,
 } from "@/client"
 import {
@@ -82,7 +81,7 @@ export const AddModel = ({ isOpen, onClose }: AddModelProps) => {
 
   const onSubmit = async (data: FormData) => {
     try {
-      await ModelsService.createModel({ body: data as ModelCreate })
+      await ModelsService.createModel({ body: data })
       showSuccessToast("Model created successfully")
       onClose()
       form.reset()
