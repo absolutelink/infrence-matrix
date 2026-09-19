@@ -155,7 +155,7 @@ export const AddModel = ({ isOpen, onClose }: AddModelProps) => {
                   <FormItem>
                     <FormLabel>Size (bytes)</FormLabel>
                     <FormControl>
-                      <Input type="number" {...field} />
+                      <Input type="number" {...field} value={typeof field.value === 'number' ? field.value : ''} onChange={(e) => field.onChange(e.target.valueAsNumber)} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -169,7 +169,7 @@ export const AddModel = ({ isOpen, onClose }: AddModelProps) => {
                   <FormItem>
                     <FormLabel>Parameters</FormLabel>
                     <FormControl>
-                      <Input type="number" placeholder="7000000000" {...field} />
+                      <Input type="number" placeholder="7000000000" {...field} value={typeof field.value === 'number' ? field.value : ''} onChange={(e) => field.onChange(e.target.valueAsNumber)} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -183,7 +183,7 @@ export const AddModel = ({ isOpen, onClose }: AddModelProps) => {
                   <FormItem>
                     <FormLabel>Context Length</FormLabel>
                     <FormControl>
-                      <Input type="number" {...field} />
+                      <Input type="number" {...field} value={typeof field.value === 'number' ? field.value : ''} onChange={(e) => field.onChange(e.target.valueAsNumber)} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>

@@ -23,7 +23,6 @@ import {
 } from "@/components/ui/form"
 import { Input } from "@/components/ui/input"
 import { LoadingButton } from "@/components/ui/loading-button"
-import { Checkbox } from "@/components/ui/checkbox"
 import useCustomToast from "@/hooks/useCustomToast"
 import { useQueryClient } from "@tanstack/react-query"
 import { useEffect } from "react"
@@ -183,7 +182,7 @@ export default function EditModel({ isOpen, onClose, model }: EditModelProps) {
                   <FormItem>
                     <FormLabel>Size (bytes)</FormLabel>
                     <FormControl>
-                      <Input type="number" {...field} />
+                      <Input type="number" {...field} value={typeof field.value === 'number' ? field.value : ''} onChange={(e) => field.onChange(e.target.valueAsNumber)} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -197,7 +196,7 @@ export default function EditModel({ isOpen, onClose, model }: EditModelProps) {
                   <FormItem>
                     <FormLabel>Parameters</FormLabel>
                     <FormControl>
-                      <Input type="number" {...field} />
+                      <Input type="number" {...field} value={typeof field.value === 'number' ? field.value : ''} onChange={(e) => field.onChange(e.target.valueAsNumber)} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -211,7 +210,7 @@ export default function EditModel({ isOpen, onClose, model }: EditModelProps) {
                   <FormItem>
                     <FormLabel>Context Length</FormLabel>
                     <FormControl>
-                      <Input type="number" {...field} />
+                      <Input type="number" {...field} value={typeof field.value === 'number' ? field.value : ''} onChange={(e) => field.onChange(e.target.valueAsNumber)} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
