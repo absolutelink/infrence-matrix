@@ -57,9 +57,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 WORKDIR /app/backend/
 
-# Make prestart script executable
-RUN chmod +x scripts/prestart.sh
-
 # Install entrypoint script
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
@@ -71,5 +68,5 @@ RUN chmod +x /etc/entrypoint.d/*.sh
 # Set entrypoint
 ENTRYPOINT ["/entrypoint.sh"]
 
-# Run migrations and start server
+# Run FastAPI server
 CMD ["fastapi", "run", "app/main.py", "--workers", "4"]
