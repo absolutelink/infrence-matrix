@@ -94,9 +94,12 @@ const groupSplitFiles = (files: GGUFFile[]): GGUFFileGroup[] => {
 export function AddModelFromHF({ model, onClose }: AddModelFromHFProps) {
   const queryClient = useQueryClient()
   const { showSuccessToast, showErrorToast } = useCustomToast()
+  const [files, setFiles] = useState<GGUFFile[]>([])
   const [fileGroups, setFileGroups] = useState<GGUFFileGroup[]>([])
   const [selectedGroup, setSelectedGroup] = useState<string>("")
   const [isLoadingFiles, setIsLoadingFiles] = useState(false)
+  const [parameterCount, setParameterCount] = useState<number | undefined>(undefined)
+  const [isLoadingParams, setIsLoadingParams] = useState(false)
 
   // Fetch GGUF files for this model and group split files
   useEffect(() => {
@@ -130,7 +133,37 @@ export function AddModelFromHF({ model, onClose }: AddModelFromHFProps) {
       }
     }
 
+    // Fetch parameter count from HuggingFace config
+    const fetchParams = async () => {
+      setIsLoadingParams(true)
+      try {
+        const token = localStorage.getItem("access_token")
+        const baseUrl = (window as any).APP_CONFIG?.API_URL || 
+                        import.meta.env.VITE_API_URL || 
+                        window.location.origin
+        const response = await fetch(
+          `${baseUrl}/api/v1/huggingface/models/params?repo_id=${encodeURIComponent(model.modelId)}`,
+          {
+            headers: {
+              "Authorization": `Bearer ${token}`,
+            },
+          }
+        )
+        if (response.ok) {
+          const data = await response.json()
+          if (data.parameter_count) {
+            setParameterCount(data.parameter_count)
+          }
+        }
+      } catch (error) {
+        console.error("Failed to fetch parameter count:", error)
+      } finally {
+        setIsLoadingParams(false)
+      }
+    }
+
     fetchFiles()
+    fetchParams()
   }, [model.modelId])
 
   const createModelMutation = useMutation({
@@ -179,9 +212,16 @@ export function AddModelFromHF({ model, onClose }: AddModelFromHFProps) {
     }
     
     if (group.totalSize) modelData.size_bytes = group.totalSize
-    if (model.modelId.includes("7B") || model.modelId.includes("7b")) modelData.parameter_count = 7000000000
-    else if (model.modelId.includes("13B") || model.modelId.includes("13b")) modelData.parameter_count = 13000000000
-    else if (model.modelId.includes("70B") || model.modelId.includes("70b")) modelData.parameter_count = 70000000000
+    // Use actual parameter count from HuggingFace if available
+    if (parameterCount) {
+      modelData.parameter_count = parameterCount
+    } else if (model.modelId.includes("7B") || model.modelId.includes("7b")) {
+      modelData.parameter_count = 7000000000
+    } else if (model.modelId.includes("13B") || model.modelId.includes("13b")) {
+      modelData.parameter_count = 13000000000
+    } else if (model.modelId.includes("70B") || model.modelId.includes("70b")) {
+      modelData.parameter_count = 70000000000
+    }
 
     createModelMutation.mutate(modelData)
   }

@@ -143,3 +143,83 @@ def get_model_info(
             status_code=503,
             detail=f"Failed to fetch model info: {str(e)}"
         )
+
+
+@router.get("/models/params")
+def get_parameter_count(
+    current_user: CurrentUser,
+    repo_id: str = Query(..., description="HuggingFace repository ID"),
+) -> dict[str, Any]:
+    """
+    Get the actual parameter count from a model's config.json.
+    Fetches from HuggingFace's raw file API.
+    """
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            # Try to fetch config.json from the repo
+            response = client.get(
+                f"https://huggingface.co/{repo_id}/raw/main/config.json",
+                follow_redirects=True,
+            )
+            
+            if response.status_code == 404:
+                # Try master branch if main doesn't exist
+                response = client.get(
+                    f"https://huggingface.co/{repo_id}/raw/master/config.json",
+                    follow_redirects=True,
+                )
+            
+            response.raise_for_status()
+            config = response.json()
+            
+            # Extract parameter count from various possible fields
+            param_count = None
+            
+            # Check common fields for parameter count
+            if "num_params" in config:
+                param_count = config["num_params"]
+            elif "total_params" in config:
+                param_count = config["total_params"]
+            elif "architectures" in config and "num_hidden_layers" in config:
+                # Estimate from architecture
+                hidden_layers = config.get("num_hidden_layers", 0)
+                hidden_size = config.get("hidden_size", 0)
+                vocab_size = config.get("vocab_size", 0)
+                # Rough estimate: layers * hidden^2 + vocab * hidden
+                if hidden_layers and hidden_size:
+                    param_count = hidden_layers * (hidden_size ** 2) + (vocab_size * hidden_size)
+            
+            # Also check gguf specific fields
+            if "gguf" in config:
+                gguf = config["gguf"]
+                if "params" in gguf:
+                    param_count = gguf["params"]
+                elif "parameter_count" in gguf:
+                    param_count = gguf["parameter_count"]
+            
+            return {
+                "repo_id": repo_id,
+                "parameter_count": param_count,
+                "config": config,
+            }
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return {
+                "repo_id": repo_id,
+                "parameter_count": None,
+                "error": "config.json not found",
+            }
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to fetch config: {str(e)}"
+        )
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to fetch parameter count: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to parse config: {str(e)}"
+        )
