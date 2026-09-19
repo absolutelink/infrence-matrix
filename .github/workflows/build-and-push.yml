@@ -9,11 +9,11 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  FRONTEND_IMAGE: ${{ github.repository_owner }}/frontend
+  MATRIX_APP_IMAGE: ${{ github.repository_owner }}/matrix-app
   AGENT_IMAGE: ${{ github.repository_owner }}/agent
 
 jobs:
-  build-frontend:
+  build-matrix-app:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -37,7 +37,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}
+          images: ${{ env.REGISTRY }}/${{ env.MATRIX_APP_IMAGE }}
           tags: |
             type=ref,event=branch
             type=ref,event=pr
@@ -45,7 +45,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=
 
-      - name: Build and push Frontend image
+      - name: Build and push Matrix App image
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -107,7 +107,7 @@ jobs:
 
   test-deployment:
     runs-on: ubuntu-latest
-    needs: [build-frontend, build-agent]
+    needs: [build-matrix-app, build-agent]
     if: github.event_name != 'pull_request'
 
     steps:
