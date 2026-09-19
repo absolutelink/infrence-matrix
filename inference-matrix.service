@@ -1,0 +1,37 @@
+[Unit]
+Description=Inference Matrix AI Application Server
+Requires=docker.service docker-main-network.service
+After=docker.service docker-main-network.service
+BindsTo=docker.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=5
+TimeoutStartSec=0
+ExecStartPre=-/usr/bin/docker pull ghcr.io/absolutelink/matrix-app:main
+ExecStart=/usr/bin/docker run --rm \
+  --name inference-matrix \
+  --network=main \
+  -v /opt/inference-matrix/alembic:/app/backend/alembic \
+  -e POSTGRES_USER=inference-matrix \
+  -e POSTGRES_PASSWORD='2WOk1ogSa5N0p9' \
+  -e POSTGRES_DB=inference-matrix \
+  -e POSTGRES_HOST=postgres \
+  -e SECRET_KEY='aK9#mP2$vL5@xR8!nQ4&wB7^jH3*cF6%tY1' \
+  -e ADMIN_JWT_SECRET='zX4@dN8#pW2$qM6!vB9&rT5^kL1*fJ7%hC3' \
+  -e API_KEY_AUTH_ENABLED=false \
+  -e AGENT_DISCOVERY_ENABLED=true \
+  -e FRONTEND_HOST=https://matrix.thelink.family \
+  -l traefik.enable=true \
+  -l traefik.http.routers.inference-matrix.rule="Host(`matrix.thelink.family`)" \
+  -l traefik.http.routers.inference-matrix.entrypoints="websecure" \
+  -l traefik.http.routers.inference-matrix.tls=true \
+  -l traefik.http.routers.inference-matrix.tls.certresolver="letsencrypt-cloudflare" \
+  -l traefik.http.services.inference-matrix.loadbalancer.server.port="8000" \
+  ghcr.io/absolutelink/matrix-app:main
+
+ExecStop=/usr/bin/docker stop inference-matrix
+
+[Install]
+WantedBy=multi-user.target
