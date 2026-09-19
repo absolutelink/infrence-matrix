@@ -1,5 +1,11 @@
 #!/bin/sh
 # Entrypoint script - runs all scripts in /etc/entrypoint.d/ in order
+# 
+# Naming convention:
+# - 0XX = delivered with the application (010, 020, 030, etc.)
+# - 1XX+ = user-added custom scripts (100, 110, 120, etc.)
+#
+# Scripts execute in alphabetical order
 
 set -e
 
@@ -11,6 +17,8 @@ if [ -d "/etc/entrypoint.d" ]; then
         echo ">>> Running: $(basename $script)"
         . "$script"
     done
+else
+    echo "No entrypoint scripts found in /etc/entrypoint.d"
 fi
 
 echo "Entrypoint scripts complete."
