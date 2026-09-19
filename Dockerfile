@@ -60,5 +60,12 @@ WORKDIR /app/backend/
 # Make prestart script executable
 RUN chmod +x scripts/prestart.sh
 
+# Create script to generate runtime config
+RUN echo '#!/bin/sh' > /app/backend/generate-config.sh && \
+    echo 'if [ -n "$API_URL" ]; then' >> /app/backend/generate-config.sh && \
+    echo '  echo "window.APP_CONFIG = { API_URL: '\''$API_URL'\'' }" > /app/backend/app/frontend/config.js' >> /app/backend/generate-config.sh && \
+    echo 'fi' >> /app/backend/generate-config.sh && \
+    chmod +x /app/backend/generate-config.sh
+
 # Run migrations and start server
-CMD ["sh", "-c", "scripts/prestart.sh && fastapi run app/main.py --workers 4"]
+CMD ["sh", "-c", "/app/backend/generate-config.sh && scripts/prestart.sh && fastapi run app/main.py --workers 4"]
