@@ -107,7 +107,7 @@ export default function EditModel({ isOpen, onClose, model }: EditModelProps) {
   const onSubmit = async (data: FormData) => {
     try {
       await ModelsService.updateModel({
-        id: model.id,
+        path: { id: model.id! },
         body: data as any,
       })
       showSuccessToast("Model updated successfully")

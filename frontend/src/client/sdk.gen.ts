@@ -2,7 +2,7 @@
 
 import { type Client, formDataBodySerializer, type Options as Options2, type TDataShape, urlSearchParamsBodySerializer } from './client';
 import { client } from './client.gen';
-import type { agentsGetAgentData, agentsGetAgentErrors, agentsGetAgentResponses, agentsListAgentsData, agentsListAgentsResponses, agentsRegisterAgentData, agentsRegisterAgentErrors, agentsRegisterAgentResponses, agentsSendCommandData, agentsSendCommandErrors, agentsSendCommandResponses, huggingfaceGetModelInfoData, huggingfaceGetModelInfoErrors, huggingfaceGetModelInfoResponses, huggingfaceGetParameterCountData, huggingfaceGetParameterCountErrors, huggingfaceGetParameterCountResponses, huggingfaceListModelFilesData, huggingfaceListModelFilesErrors, huggingfaceListModelFilesResponses, huggingfaceSearchModelsData, huggingfaceSearchModelsErrors, huggingfaceSearchModelsResponses, itemsCreateItemData, itemsCreateItemErrors, itemsCreateItemResponses, itemsDeleteItemData, itemsDeleteItemErrors, itemsDeleteItemResponses, itemsReadItemData, itemsReadItemErrors, itemsReadItemResponses, itemsReadItemsData, itemsReadItemsErrors, itemsReadItemsResponses, itemsUpdateItemData, itemsUpdateItemErrors, itemsUpdateItemResponses, loginLoginAccessTokenData, loginLoginAccessTokenErrors, loginLoginAccessTokenResponses, loginRecoverPasswordData, loginRecoverPasswordErrors, loginRecoverPasswordHtmlContentData, loginRecoverPasswordHtmlContentErrors, loginRecoverPasswordHtmlContentResponses, loginRecoverPasswordResponses, loginResetPasswordData, loginResetPasswordErrors, loginResetPasswordResponses, loginTestTokenData, loginTestTokenResponses, metricsMetricsData, metricsMetricsResponses, modelsCreateModelData, modelsCreateModelErrors, modelsCreateModelResponses, modelsDeleteModelData, modelsDeleteModelErrors, modelsDeleteModelResponses, modelsReadModelData, modelsReadModelErrors, modelsReadModelResponses, modelsReadModelsData, modelsReadModelsErrors, modelsReadModelsResponses, modelsUpdateModelData, modelsUpdateModelErrors, modelsUpdateModelResponses, privateCreateUserData, privateCreateUserErrors, privateCreateUserResponses, usersCreateUserData, usersCreateUserErrors, usersCreateUserResponses, usersDeleteUserData, usersDeleteUserErrors, usersDeleteUserMeData, usersDeleteUserMeResponses, usersDeleteUserResponses, usersReadUserByIdData, usersReadUserByIdErrors, usersReadUserByIdResponses, usersReadUserMeData, usersReadUserMeResponses, usersReadUsersData, usersReadUsersErrors, usersReadUsersResponses, usersRegisterUserData, usersRegisterUserErrors, usersRegisterUserResponses, usersUpdatePasswordMeData, usersUpdatePasswordMeErrors, usersUpdatePasswordMeResponses, usersUpdateUserData, usersUpdateUserErrors, usersUpdateUserMeData, usersUpdateUserMeErrors, usersUpdateUserMeResponses, usersUpdateUserResponses, utilsHealthCheckData, utilsHealthCheckResponses, utilsTestEmailData, utilsTestEmailErrors, utilsTestEmailResponses, v1AudioCreateSpeechData, v1AudioCreateSpeechErrors, v1AudioCreateSpeechResponses, v1AudioCreateTranscriptionData, v1AudioCreateTranscriptionErrors, v1AudioCreateTranscriptionResponses, v1AudioCreateTranslationData, v1AudioCreateTranslationErrors, v1AudioCreateTranslationResponses, v1BatchesCancelBatchData, v1BatchesCancelBatchErrors, v1BatchesCancelBatchResponses, v1BatchesCreateBatchData, v1BatchesCreateBatchErrors, v1BatchesCreateBatchResponses, v1BatchesListBatchesData, v1BatchesListBatchesErrors, v1BatchesListBatchesResponses, v1BatchesRetrieveBatchData, v1BatchesRetrieveBatchErrors, v1BatchesRetrieveBatchResponses, v1ChatCreateChatCompletionData, v1ChatCreateChatCompletionErrors, v1ChatCreateChatCompletionResponses, v1CompletionsCreateCompletionData, v1CompletionsCreateCompletionErrors, v1CompletionsCreateCompletionResponses, v1EmbeddingsCreateEmbeddingData, v1EmbeddingsCreateEmbeddingErrors, v1EmbeddingsCreateEmbeddingResponses, v1FilesDeleteFileData, v1FilesDeleteFileErrors, v1FilesDeleteFileResponses, v1FilesListFilesData, v1FilesListFilesErrors, v1FilesListFilesResponses, v1FilesRetrieveFileContentData, v1FilesRetrieveFileContentErrors, v1FilesRetrieveFileContentResponses, v1FilesRetrieveFileData, v1FilesRetrieveFileErrors, v1FilesRetrieveFileResponses, v1FilesUploadFileData, v1FilesUploadFileErrors, v1FilesUploadFileResponses, v1ModelsListModelsData, v1ModelsListModelsResponses, v1ModelsRetrieveModelData, v1ModelsRetrieveModelErrors, v1ModelsRetrieveModelResponses, v1ResponsesCreateResponseData, v1ResponsesCreateResponseErrors, v1ResponsesCreateResponseResponses, v1ResponsesRetrieveResponseData, v1ResponsesRetrieveResponseErrors, v1ResponsesRetrieveResponseResponses } from './types.gen';
+import type { agentsGetAgentData, agentsGetAgentErrors, agentsGetAgentResponses, agentsListAgentsData, agentsListAgentsResponses, agentsRegisterAgentData, agentsRegisterAgentErrors, agentsRegisterAgentResponses, agentsSendCommandData, agentsSendCommandErrors, agentsSendCommandResponses, huggingfaceGetModelInfoData, huggingfaceGetModelInfoErrors, huggingfaceGetModelInfoResponses, huggingfaceGetParameterCountData, huggingfaceGetParameterCountErrors, huggingfaceGetParameterCountResponses, huggingfaceListModelFilesData, huggingfaceListModelFilesErrors, huggingfaceListModelFilesResponses, huggingfaceSearchModelsData, huggingfaceSearchModelsErrors, huggingfaceSearchModelsResponses, loginLoginAccessTokenData, loginLoginAccessTokenErrors, loginLoginAccessTokenResponses, loginRecoverPasswordData, loginRecoverPasswordErrors, loginRecoverPasswordHtmlContentData, loginRecoverPasswordHtmlContentErrors, loginRecoverPasswordHtmlContentResponses, loginRecoverPasswordResponses, loginResetPasswordData, loginResetPasswordErrors, loginResetPasswordResponses, loginTestTokenData, loginTestTokenResponses, metricsMetricsData, metricsMetricsResponses, modelsCreateModelData, modelsCreateModelErrors, modelsCreateModelResponses, modelsDeleteModelData, modelsDeleteModelErrors, modelsDeleteModelResponses, modelsReadModelData, modelsReadModelErrors, modelsReadModelResponses, modelsReadModelsData, modelsReadModelsErrors, modelsReadModelsResponses, modelsUpdateModelData, modelsUpdateModelErrors, modelsUpdateModelResponses, privateCreateUserData, privateCreateUserErrors, privateCreateUserResponses, usersCreateUserData, usersCreateUserErrors, usersCreateUserResponses, usersDeleteUserData, usersDeleteUserErrors, usersDeleteUserMeData, usersDeleteUserMeResponses, usersDeleteUserResponses, usersReadUserByIdData, usersReadUserByIdErrors, usersReadUserByIdResponses, usersReadUserMeData, usersReadUserMeResponses, usersReadUsersData, usersReadUsersErrors, usersReadUsersResponses, usersRegisterUserData, usersRegisterUserErrors, usersRegisterUserResponses, usersUpdatePasswordMeData, usersUpdatePasswordMeErrors, usersUpdatePasswordMeResponses, usersUpdateUserData, usersUpdateUserErrors, usersUpdateUserMeData, usersUpdateUserMeErrors, usersUpdateUserMeResponses, usersUpdateUserResponses, utilsHealthCheckData, utilsHealthCheckResponses, utilsTestEmailData, utilsTestEmailErrors, utilsTestEmailResponses, v1AudioCreateSpeechData, v1AudioCreateSpeechErrors, v1AudioCreateSpeechResponses, v1AudioCreateTranscriptionData, v1AudioCreateTranscriptionErrors, v1AudioCreateTranscriptionResponses, v1AudioCreateTranslationData, v1AudioCreateTranslationErrors, v1AudioCreateTranslationResponses, v1BatchesCancelBatchData, v1BatchesCancelBatchErrors, v1BatchesCancelBatchResponses, v1BatchesCreateBatchData, v1BatchesCreateBatchErrors, v1BatchesCreateBatchResponses, v1BatchesListBatchesData, v1BatchesListBatchesErrors, v1BatchesListBatchesResponses, v1BatchesRetrieveBatchData, v1BatchesRetrieveBatchErrors, v1BatchesRetrieveBatchResponses, v1ChatCreateChatCompletionData, v1ChatCreateChatCompletionErrors, v1ChatCreateChatCompletionResponses, v1CompletionsCreateCompletionData, v1CompletionsCreateCompletionErrors, v1CompletionsCreateCompletionResponses, v1EmbeddingsCreateEmbeddingData, v1EmbeddingsCreateEmbeddingErrors, v1EmbeddingsCreateEmbeddingResponses, v1FilesDeleteFileData, v1FilesDeleteFileErrors, v1FilesDeleteFileResponses, v1FilesListFilesData, v1FilesListFilesErrors, v1FilesListFilesResponses, v1FilesRetrieveFileContentData, v1FilesRetrieveFileContentErrors, v1FilesRetrieveFileContentResponses, v1FilesRetrieveFileData, v1FilesRetrieveFileErrors, v1FilesRetrieveFileResponses, v1FilesUploadFileData, v1FilesUploadFileErrors, v1FilesUploadFileResponses, v1ModelsListModelsData, v1ModelsListModelsResponses, v1ModelsRetrieveModelData, v1ModelsRetrieveModelErrors, v1ModelsRetrieveModelResponses, v1ResponsesCreateResponseData, v1ResponsesCreateResponseErrors, v1ResponsesCreateResponseResponses, v1ResponsesRetrieveResponseData, v1ResponsesRetrieveResponseErrors, v1ResponsesRetrieveResponseResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -280,86 +280,6 @@ export class UtilsService {
             responseType: 'json',
             url: '/api/v1/utils/health-check/',
             ...options
-        });
-    }
-}
-
-export class ItemsService {
-    /**
-     * Read Items
-     *
-     * Retrieve items.
-     */
-    public static readItems<ThrowOnError extends boolean = true>(options?: Options<itemsReadItemsData, ThrowOnError>) {
-        return (options?.client ?? client).get<itemsReadItemsResponses, itemsReadItemsErrors, ThrowOnError>({
-            responseType: 'json',
-            security: [{ scheme: 'bearer', type: 'http' }],
-            url: '/api/v1/items/',
-            ...options
-        });
-    }
-    
-    /**
-     * Create Item
-     *
-     * Create new item.
-     */
-    public static createItem<ThrowOnError extends boolean = true>(options: Options<itemsCreateItemData, ThrowOnError>) {
-        return (options.client ?? client).post<itemsCreateItemResponses, itemsCreateItemErrors, ThrowOnError>({
-            responseType: 'json',
-            security: [{ scheme: 'bearer', type: 'http' }],
-            url: '/api/v1/items/',
-            ...options,
-            headers: {
-                'Content-Type': 'application/json',
-                ...options.headers
-            }
-        });
-    }
-    
-    /**
-     * Delete Item
-     *
-     * Delete an item.
-     */
-    public static deleteItem<ThrowOnError extends boolean = true>(options: Options<itemsDeleteItemData, ThrowOnError>) {
-        return (options.client ?? client).delete<itemsDeleteItemResponses, itemsDeleteItemErrors, ThrowOnError>({
-            responseType: 'json',
-            security: [{ scheme: 'bearer', type: 'http' }],
-            url: '/api/v1/items/{id}',
-            ...options
-        });
-    }
-    
-    /**
-     * Read Item
-     *
-     * Get item by ID.
-     */
-    public static readItem<ThrowOnError extends boolean = true>(options: Options<itemsReadItemData, ThrowOnError>) {
-        return (options.client ?? client).get<itemsReadItemResponses, itemsReadItemErrors, ThrowOnError>({
-            responseType: 'json',
-            security: [{ scheme: 'bearer', type: 'http' }],
-            url: '/api/v1/items/{id}',
-            ...options
-        });
-    }
-    
-    /**
-     * Update Item
-     *
-     * Update an item.
-     */
-    public static updateItem<ThrowOnError extends boolean = true>(options: Options<itemsUpdateItemData, ThrowOnError>) {
-        return (options.client ?? client).put<itemsUpdateItemResponses, itemsUpdateItemErrors, ThrowOnError>({
-            responseType: 'json',
-            security: [{ scheme: 'bearer', type: 'http' }],
-            url: '/api/v1/items/{id}',
-            ...options,
-            headers: {
-                'Content-Type': 'application/json',
-                ...options.headers
-            }
         });
     }
 }

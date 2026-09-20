@@ -30,7 +30,7 @@ export default function DeleteModel({
   const deleteModel = async () => {
     setIsDeleting(true)
     try {
-      await ModelsService.deleteModel({ id: modelId })
+      await ModelsService.deleteModel({ path: { id: modelId } })
       showSuccessToast("Model deleted successfully")
       onClose()
       queryClient.invalidateQueries({ queryKey: ["models"] })

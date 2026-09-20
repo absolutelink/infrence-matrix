@@ -44,46 +44,6 @@ class User(UserBase, table=True):
     )
     hashed_password: str
     created_at: datetime = Field(default_factory=get_datetime_utc)
-    items: list["Item"] = Relationship(
-        back_populates="owner",
-        sa_relationship_kwargs={"lazy": "selectin"},
-    )
-
-
-class ItemBase(SQLModel):
-    """Base item model."""
-    title: str = Field(min_length=1, max_length=255)
-    description: str | None = None
-
-
-class ItemCreate(ItemBase):
-    """Item creation model."""
-    pass
-
-
-class ItemUpdate(SQLModel):
-    """Item update model."""
-    title: str | None = Field(default=None, min_length=1, max_length=255)
-    description: str | None = None
-
-
-class Item(ItemBase, table=True):
-    """Item database model."""
-    __tablename__ = "item"
-    id: uuid.UUID = Field(
-        default_factory=uuid.uuid4,
-        primary_key=True,
-        sa_type=UUID(as_uuid=True),  # type: ignore[call-arg,arg-type]
-    )
-    owner_id: uuid.UUID = Field(
-        foreign_key="user.id",
-        ondelete="CASCADE",
-    )
-    owner: "User" = Relationship(
-        back_populates="items",
-        sa_relationship_kwargs={"lazy": "selectin"},
-    )
-    created_at: datetime = Field(default_factory=get_datetime_utc)
 
 
 class TokenPayload(SQLModel):
@@ -98,21 +58,10 @@ class Message(SQLModel):
     message: str
 
 
-class ItemsPublic(SQLModel):
-    """List of items response."""
-    data: list[Item]
-    count: int
-
-
-class ItemPublic(ItemBase):
-    """Public item model."""
-    id: uuid.UUID
-    owner_id: uuid.UUID
-
-
 class UserPublic(UserBase):
     """Public user model."""
     id: uuid.UUID
+    created_at: datetime
 
 
 class UsersPublic(SQLModel):

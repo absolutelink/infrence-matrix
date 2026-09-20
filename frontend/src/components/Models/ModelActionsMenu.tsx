@@ -54,7 +54,7 @@ export default function ModelActionsMenu({ model }: ModelActionsMenuProps) {
       <DeleteModel
         isOpen={showDeleteDialog}
         onClose={() => setShowDeleteDialog(false)}
-        modelId={model.id}
+        modelId={model.id!}
       />
     </>
   )

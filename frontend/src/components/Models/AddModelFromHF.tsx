@@ -94,12 +94,10 @@ const groupSplitFiles = (files: GGUFFile[]): GGUFFileGroup[] => {
 export function AddModelFromHF({ model, onClose }: AddModelFromHFProps) {
   const queryClient = useQueryClient()
   const { showSuccessToast, showErrorToast } = useCustomToast()
-  const [files, setFiles] = useState<GGUFFile[]>([])
   const [fileGroups, setFileGroups] = useState<GGUFFileGroup[]>([])
   const [selectedGroup, setSelectedGroup] = useState<string>("")
   const [isLoadingFiles, setIsLoadingFiles] = useState(false)
   const [parameterCount, setParameterCount] = useState<number | undefined>(undefined)
-  const [isLoadingParams, setIsLoadingParams] = useState(false)
 
   // Fetch GGUF files for this model and group split files
   useEffect(() => {
@@ -135,7 +133,6 @@ export function AddModelFromHF({ model, onClose }: AddModelFromHFProps) {
 
     // Fetch parameter count from HuggingFace config
     const fetchParams = async () => {
-      setIsLoadingParams(true)
       try {
         const token = localStorage.getItem("access_token")
         const baseUrl = (window as any).APP_CONFIG?.API_URL || 
@@ -157,8 +154,6 @@ export function AddModelFromHF({ model, onClose }: AddModelFromHFProps) {
         }
       } catch (error) {
         console.error("Failed to fetch parameter count:", error)
-      } finally {
-        setIsLoadingParams(false)
       }
     }
 
