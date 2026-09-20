@@ -42,7 +42,7 @@ Edit `.env` with your configuration:
 PROJECT_NAME=Inference Matrix
 BACKEND_HOST=0.0.0.0
 BACKEND_PORT=8000
-FRONTEND_HOST=http://localhost:3000
+FRONTEND_HOST=http://localhost:5173  # Local development; change for production
 
 # Database
 POSTGRES_USER=inference
@@ -80,7 +80,7 @@ This starts the Frontend Service, Agent Service, and PostgreSQL database.
 
 ### 4. Access the Application
 
-- **WebUI**: http://localhost:3000
+- **WebUI**: http://localhost:5173 (local development) or your configured FRONTEND_HOST
 - **API**: http://localhost:8000
 - **API Docs**: http://localhost:8000/docs
 - **Agent API**: http://localhost:8080
@@ -98,7 +98,7 @@ This starts the Frontend Service, Agent Service, and PostgreSQL database.
 | `PROJECT_NAME` | Application name | `Inference Matrix` |
 | `BACKEND_HOST` | Backend bind address | `0.0.0.0` |
 | `BACKEND_PORT` | Backend port | `8000` |
-| `FRONTEND_HOST` | Frontend URL | `http://localhost:3000` |
+| `FRONTEND_HOST` | Frontend URL | `http://localhost:5173` (development) |
 
 #### Database
 

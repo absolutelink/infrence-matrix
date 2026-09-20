@@ -185,7 +185,7 @@ async def _update_conversation_completion(
     db.commit()
 
 
-@router.post("/v1/responses", response_model=ResponseData)
+@router.post("/responses", response_model=ResponseData)
 async def create_response(
     request: ResponseRequest,
     db: Session = Depends(get_db),
@@ -285,7 +285,7 @@ async def create_response(
         raise HTTPException(status_code=500, detail=f"Failed to create response: {e}")
 
 
-@router.get("/v1/responses/{response_id}")
+@router.get("/responses/{response_id}")
 async def retrieve_response(
     response_id: str,
     db: Session = Depends(get_db),

@@ -244,7 +244,7 @@ async def _get_or_create_server(model: Model, agent_id: str | None = None) -> Se
         return server
 
 
-@router.post("", response_model=None)
+@router.post("/chat/completions", response_model=None)
 async def create_chat_completion(
     request: ChatCompletionRequest,
     db: Session = Depends(get_db),

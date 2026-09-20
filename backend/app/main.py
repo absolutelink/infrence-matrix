@@ -6,6 +6,16 @@ from fastapi.routing import APIRoute
 from starlette.middleware.cors import CORSMiddleware
 
 from app.api.main import api_router
+from app.api.routes.v1 import (
+    audio_router,
+    batches_router,
+    chat_completions_router,
+    completions_router,
+    embeddings_router,
+    files_router,
+    models_router,
+    responses_router,
+)
 from app.core.config import settings
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
@@ -33,4 +43,15 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix=settings.API_V1_STR)
+
+# OpenAI-compatible endpoints - these need to be at /v1/... not /api/v1/v1/...
+app.include_router(models_router, prefix="/v1", tags=["v1/models"])
+app.include_router(chat_completions_router, prefix="/v1", tags=["v1/chat"])
+app.include_router(completions_router, prefix="/v1", tags=["v1/completions"])
+app.include_router(embeddings_router, prefix="/v1", tags=["v1/embeddings"])
+app.include_router(responses_router, prefix="/v1", tags=["v1/responses"])
+app.include_router(files_router, prefix="/v1", tags=["v1/files"])
+app.include_router(batches_router, prefix="/v1", tags=["v1/batches"])
+app.include_router(audio_router, prefix="/v1", tags=["v1/audio"])
+
 app.frontend("/", directory=FRONTEND_DIR)

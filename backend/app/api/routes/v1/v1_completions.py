@@ -271,7 +271,7 @@ async def _find_model_server(
     raise HTTPException(status_code=503, detail="Failed to start model server")
 
 
-@router.post("/v1/completions")
+@router.post("/completions")
 async def create_completion(
     request: CompletionRequest,
     db: Session = Depends(get_db),

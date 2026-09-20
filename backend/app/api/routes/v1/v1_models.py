@@ -28,7 +28,7 @@ class ModelsList(BaseModel):
     data: list[ModelData]
 
 
-@router.get("/v1/models", response_model=ModelsList)
+@router.get("/models", response_model=ModelsList)
 def list_models(
     db: Session = Depends(get_db),
 ) -> ModelsList:
@@ -51,7 +51,7 @@ def list_models(
     return ModelsList(data=model_data)
 
 
-@router.get("/v1/models/{model_id}")
+@router.get("/models/{model_id}")
 def retrieve_model(
     model_id: str,
     db: Session = Depends(get_db),

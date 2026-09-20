@@ -5,6 +5,164 @@ export type ClientOptions = {
 };
 
 /**
+ * AgentListResponse
+ */
+export type AgentListResponse = {
+    /**
+     * Agents
+     */
+    agents: Array<{
+        [key: string]: unknown;
+    }>;
+};
+
+/**
+ * AgentRegisterRequest
+ */
+export type AgentRegisterRequest = {
+    /**
+     * Agent Id
+     */
+    agent_id: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Host
+     */
+    host: string;
+    /**
+     * Port
+     */
+    port: number;
+    /**
+     * Gpu Info
+     */
+    gpu_info?: {
+        [key: string]: unknown;
+    } | null;
+};
+
+/**
+ * AgentRegisterResponse
+ */
+export type AgentRegisterResponse = {
+    /**
+     * Registered
+     */
+    registered: boolean;
+    /**
+     * Frontend Version
+     */
+    frontend_version: string;
+};
+
+/**
+ * BatchData
+ *
+ * Batch data for OpenAI API response.
+ */
+export type BatchData = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Object
+     */
+    object?: string;
+    /**
+     * Created At
+     */
+    created_at: number;
+    /**
+     * Endpoint
+     */
+    endpoint: string;
+    /**
+     * Input File Id
+     */
+    input_file_id: string;
+    /**
+     * Output File Id
+     */
+    output_file_id?: string | null;
+    /**
+     * Results File Id
+     */
+    results_file_id?: string | null;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Completion Window
+     */
+    completion_window: string;
+    /**
+     * Total Requests
+     */
+    total_requests?: number;
+    /**
+     * Processed Requests
+     */
+    processed_requests?: number;
+    /**
+     * Successful Requests
+     */
+    successful_requests?: number;
+    /**
+     * Failed Requests
+     */
+    failed_requests?: number;
+    /**
+     * Expires At
+     */
+    expires_at?: number | null;
+    /**
+     * Error Message
+     */
+    error_message?: string | null;
+};
+
+/**
+ * BatchRequest
+ *
+ * Batch creation request.
+ */
+export type BatchRequest = {
+    /**
+     * Input File Id
+     */
+    input_file_id: string;
+    /**
+     * Endpoint
+     */
+    endpoint: string;
+    /**
+     * Completion Window
+     */
+    completion_window?: string;
+};
+
+/**
+ * BatchesList
+ *
+ * List of batches response.
+ */
+export type BatchesList = {
+    /**
+     * Object
+     */
+    object?: string;
+    /**
+     * Data
+     */
+    data: Array<BatchData>;
+};
+
+/**
  * Body_login-login_access_token
  */
 export type Body_login_login_access_token = {
@@ -35,6 +193,369 @@ export type Body_login_login_access_token = {
 };
 
 /**
+ * Body_v1/audio-create_transcription
+ */
+export type Body_v1_audio_create_transcription = {
+    /**
+     * File
+     */
+    file: Blob | File;
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Language
+     */
+    language?: string | null;
+    /**
+     * Prompt
+     */
+    prompt?: string | null;
+    /**
+     * Response Format
+     */
+    response_format?: 'json' | 'text' | 'srt' | 'verbose_json';
+    /**
+     * Temperature
+     */
+    temperature?: number;
+};
+
+/**
+ * Body_v1/audio-create_translation
+ */
+export type Body_v1_audio_create_translation = {
+    /**
+     * File
+     */
+    file: Blob | File;
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Prompt
+     */
+    prompt?: string | null;
+    /**
+     * Response Format
+     */
+    response_format?: 'json' | 'text' | 'srt' | 'verbose_json';
+    /**
+     * Temperature
+     */
+    temperature?: number;
+};
+
+/**
+ * Body_v1/files-upload_file
+ */
+export type Body_v1_files_upload_file = {
+    /**
+     * File
+     */
+    file: Blob | File;
+    /**
+     * Purpose
+     */
+    purpose: string;
+};
+
+/**
+ * ChatCompletionRequest
+ *
+ * Chat completion request.
+ */
+export type ChatCompletionRequest = {
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Agent Id
+     */
+    agent_id?: string | null;
+    /**
+     * Messages
+     */
+    messages: Array<ChatMessage>;
+    /**
+     * Stream
+     */
+    stream?: boolean;
+    /**
+     * Temperature
+     */
+    temperature?: number;
+    /**
+     * Max Tokens
+     */
+    max_tokens?: number | null;
+    /**
+     * Top P
+     */
+    top_p?: number | null;
+    /**
+     * Frequency Penalty
+     */
+    frequency_penalty?: number | null;
+    /**
+     * Presence Penalty
+     */
+    presence_penalty?: number | null;
+    /**
+     * Stop
+     */
+    stop?: string | Array<string> | null;
+    /**
+     * Tools
+     */
+    tools?: Array<{
+        [key: string]: string;
+    }> | null;
+    /**
+     * Tool Choice
+     */
+    tool_choice?: string | {
+        [key: string]: string;
+    } | null;
+    /**
+     * Prompt Cache Options
+     */
+    prompt_cache_options?: {
+        [key: string]: unknown;
+    } | null;
+};
+
+/**
+ * ChatMessage
+ *
+ * Chat message.
+ */
+export type ChatMessage = {
+    /**
+     * Role
+     */
+    role: 'system' | 'user' | 'assistant' | 'developer';
+    /**
+     * Content
+     */
+    content: string;
+};
+
+/**
+ * CompletionRequest
+ *
+ * Completion request for legacy /v1/completions endpoint.
+ */
+export type CompletionRequest = {
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Prompt
+     */
+    prompt: string | Array<string> | Array<number> | Array<Array<number>>;
+    /**
+     * Stream
+     */
+    stream?: boolean;
+    /**
+     * Temperature
+     */
+    temperature?: number;
+    /**
+     * Max Tokens
+     */
+    max_tokens?: number | null;
+    /**
+     * Top P
+     */
+    top_p?: number | null;
+    /**
+     * Frequency Penalty
+     */
+    frequency_penalty?: number | null;
+    /**
+     * Presence Penalty
+     */
+    presence_penalty?: number | null;
+    /**
+     * Stop
+     */
+    stop?: string | Array<string> | null;
+    /**
+     * Echo
+     */
+    echo?: boolean;
+    /**
+     * N
+     */
+    n?: number;
+    /**
+     * Logprobs
+     */
+    logprobs?: number | null;
+    /**
+     * Suffix
+     */
+    suffix?: string | null;
+};
+
+/**
+ * DeleteFileResponse
+ *
+ * Delete file response.
+ */
+export type DeleteFileResponse = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Object
+     */
+    object?: string;
+    /**
+     * Deleted
+     */
+    deleted: boolean;
+};
+
+/**
+ * EmbeddingData
+ *
+ * Embedding data.
+ */
+export type EmbeddingData = {
+    /**
+     * Object
+     */
+    object?: string;
+    /**
+     * Embedding
+     */
+    embedding: Array<number>;
+    /**
+     * Index
+     */
+    index: number;
+};
+
+/**
+ * EmbeddingRequest
+ *
+ * Embedding request.
+ */
+export type EmbeddingRequest = {
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Input
+     *
+     * Input text or list of texts
+     */
+    input: string | Array<string>;
+    /**
+     * Encoding Format
+     */
+    encoding_format?: 'float' | 'base64';
+};
+
+/**
+ * EmbeddingResponse
+ *
+ * Embedding response.
+ */
+export type EmbeddingResponse = {
+    /**
+     * Object
+     */
+    object?: string;
+    /**
+     * Data
+     */
+    data: Array<EmbeddingData>;
+    /**
+     * Model
+     */
+    model: string;
+    usage: EmbeddingUsage;
+};
+
+/**
+ * EmbeddingUsage
+ *
+ * Embedding usage.
+ */
+export type EmbeddingUsage = {
+    /**
+     * Prompt Tokens
+     */
+    prompt_tokens: number;
+    /**
+     * Total Tokens
+     */
+    total_tokens: number;
+};
+
+/**
+ * FileData
+ *
+ * File data for OpenAI API response.
+ */
+export type FileData = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Object
+     */
+    object?: string;
+    /**
+     * Bytes
+     */
+    bytes: number;
+    /**
+     * Created At
+     */
+    created_at: number;
+    /**
+     * Filename
+     */
+    filename: string;
+    /**
+     * Purpose
+     */
+    purpose: string;
+    /**
+     * Status
+     */
+    status: string;
+};
+
+/**
+ * FilesList
+ *
+ * List of files response.
+ */
+export type FilesList = {
+    /**
+     * Object
+     */
+    object?: string;
+    /**
+     * Data
+     */
+    data: Array<FileData>;
+};
+
+/**
  * HTTPValidationError
  */
 export type HTTPValidationError = {
@@ -45,7 +566,59 @@ export type HTTPValidationError = {
 };
 
 /**
+ * InputItem
+ *
+ * Input item for Responses API.
+ */
+export type InputItem = {
+    /**
+     * Type
+     */
+    type: 'message' | 'function_call' | 'function_call_output' | 'reasoning';
+    /**
+     * Role
+     */
+    role?: 'user' | 'assistant' | 'system' | 'developer' | null;
+    /**
+     * Content
+     */
+    content?: string | Array<{
+        [key: string]: string;
+    }> | null;
+};
+
+/**
+ * Item
+ *
+ * Item database model.
+ */
+export type Item = {
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Description
+     */
+    description?: string | null;
+    /**
+     * Id
+     */
+    id?: string;
+    /**
+     * Owner Id
+     */
+    owner_id: string;
+    /**
+     * Created At
+     */
+    created_at?: string;
+};
+
+/**
  * ItemCreate
+ *
+ * Item creation model.
  */
 export type ItemCreate = {
     /**
@@ -60,6 +633,8 @@ export type ItemCreate = {
 
 /**
  * ItemPublic
+ *
+ * Public item model.
  */
 export type ItemPublic = {
     /**
@@ -78,14 +653,12 @@ export type ItemPublic = {
      * Owner Id
      */
     owner_id: string;
-    /**
-     * Created At
-     */
-    created_at?: string | null;
 };
 
 /**
  * ItemUpdate
+ *
+ * Item update model.
  */
 export type ItemUpdate = {
     /**
@@ -100,12 +673,14 @@ export type ItemUpdate = {
 
 /**
  * ItemsPublic
+ *
+ * List of items response.
  */
 export type ItemsPublic = {
     /**
      * Data
      */
-    data: Array<ItemPublic>;
+    data: Array<Item>;
     /**
      * Count
      */
@@ -114,6 +689,8 @@ export type ItemsPublic = {
 
 /**
  * Message
+ *
+ * Generic message response.
  */
 export type Message = {
     /**
@@ -123,7 +700,275 @@ export type Message = {
 };
 
 /**
+ * Model
+ */
+export type Model = {
+    /**
+     * Id
+     */
+    id?: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Path
+     */
+    path: string;
+    /**
+     * Size Bytes
+     */
+    size_bytes: number;
+    /**
+     * Architecture
+     */
+    architecture: string;
+    /**
+     * Parameter Count
+     */
+    parameter_count?: number | null;
+    /**
+     * Quantization
+     */
+    quantization: string;
+    /**
+     * Supports Embeddings
+     */
+    supports_embeddings?: boolean;
+    /**
+     * Supports Vision
+     */
+    supports_vision?: boolean;
+    /**
+     * Context Length
+     */
+    context_length: number;
+    /**
+     * License
+     */
+    license?: string | null;
+    /**
+     * Tags
+     */
+    tags?: Array<string>;
+    /**
+     * Description
+     */
+    description?: string | null;
+    /**
+     * Source
+     */
+    source: string;
+    /**
+     * Source Repo Id
+     */
+    source_repo_id?: string | null;
+    /**
+     * Source Url
+     */
+    source_url?: string | null;
+    /**
+     * Source File
+     */
+    source_file?: string | null;
+    /**
+     * Downloaded At
+     */
+    downloaded_at?: string;
+    /**
+     * Updated At
+     */
+    updated_at?: string | null;
+};
+
+/**
+ * ModelCreate
+ *
+ * Model creation model.
+ */
+export type ModelCreate = {
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Path
+     */
+    path: string;
+    /**
+     * Size Bytes
+     */
+    size_bytes: number;
+    /**
+     * Architecture
+     */
+    architecture: string;
+    /**
+     * Parameter Count
+     */
+    parameter_count?: number | null;
+    /**
+     * Quantization
+     */
+    quantization: string;
+    /**
+     * Supports Embeddings
+     */
+    supports_embeddings?: boolean;
+    /**
+     * Supports Vision
+     */
+    supports_vision?: boolean;
+    /**
+     * Context Length
+     */
+    context_length: number;
+    /**
+     * License
+     */
+    license?: string | null;
+    /**
+     * Tags
+     */
+    tags?: Array<string>;
+    /**
+     * Description
+     */
+    description?: string | null;
+    /**
+     * Source
+     */
+    source: string;
+    /**
+     * Source Repo Id
+     */
+    source_repo_id?: string | null;
+    /**
+     * Source Url
+     */
+    source_url?: string | null;
+    /**
+     * Source File
+     */
+    source_file?: string | null;
+};
+
+/**
+ * ModelData
+ *
+ * Model data for OpenAI API response.
+ */
+export type ModelData = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Object
+     */
+    object?: string;
+    /**
+     * Created
+     */
+    created: number;
+    /**
+     * Owned By
+     */
+    owned_by?: string;
+};
+
+/**
+ * ModelUpdate
+ *
+ * Model update model.
+ */
+export type ModelUpdate = {
+    /**
+     * Name
+     */
+    name?: string | null;
+    /**
+     * Path
+     */
+    path?: string | null;
+    /**
+     * Size Bytes
+     */
+    size_bytes?: number | null;
+    /**
+     * Architecture
+     */
+    architecture?: string | null;
+    /**
+     * Parameter Count
+     */
+    parameter_count?: number | null;
+    /**
+     * Quantization
+     */
+    quantization?: string | null;
+    /**
+     * Supports Embeddings
+     */
+    supports_embeddings?: boolean | null;
+    /**
+     * Supports Vision
+     */
+    supports_vision?: boolean | null;
+    /**
+     * Context Length
+     */
+    context_length?: number | null;
+    /**
+     * License
+     */
+    license?: string | null;
+    /**
+     * Tags
+     */
+    tags?: Array<string> | null;
+    /**
+     * Description
+     */
+    description?: string | null;
+    /**
+     * Source
+     */
+    source?: string | null;
+    /**
+     * Source Repo Id
+     */
+    source_repo_id?: string | null;
+    /**
+     * Source Url
+     */
+    source_url?: string | null;
+    /**
+     * Source File
+     */
+    source_file?: string | null;
+};
+
+/**
+ * ModelsList
+ *
+ * List of models response.
+ */
+export type ModelsList = {
+    /**
+     * Object
+     */
+    object?: string;
+    /**
+     * Data
+     */
+    data: Array<ModelData>;
+};
+
+/**
  * NewPassword
+ *
+ * New password request.
  */
 export type NewPassword = {
     /**
@@ -134,6 +979,46 @@ export type NewPassword = {
      * New Password
      */
     new_password: string;
+};
+
+/**
+ * OutputContent
+ *
+ * Output content.
+ */
+export type OutputContent = {
+    /**
+     * Type
+     */
+    type?: string;
+    /**
+     * Text
+     */
+    text: string;
+};
+
+/**
+ * OutputItem
+ *
+ * Output item.
+ */
+export type OutputItem = {
+    /**
+     * Type
+     */
+    type: 'message' | 'function_call' | 'reasoning';
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Role
+     */
+    role: 'assistant';
+    /**
+     * Content
+     */
+    content: Array<OutputContent>;
 };
 
 /**
@@ -159,7 +1044,175 @@ export type PrivateUserCreate = {
 };
 
 /**
+ * ReasoningConfig
+ *
+ * Reasoning configuration.
+ */
+export type ReasoningConfig = {
+    /**
+     * Effort
+     */
+    effort?: 'none' | 'low' | 'medium' | 'high' | 'xhigh';
+    /**
+     * Summary
+     */
+    summary?: 'concise' | 'detailed' | 'auto';
+};
+
+/**
+ * ResponseData
+ *
+ * Response data.
+ */
+export type ResponseData = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Object
+     */
+    object?: string;
+    /**
+     * Created At
+     */
+    created_at: number;
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Input
+     */
+    input: Array<{
+        [key: string]: string;
+    }>;
+    /**
+     * Output
+     */
+    output: Array<OutputItem>;
+    /**
+     * Status
+     */
+    status: 'in_progress' | 'completed' | 'failed';
+    usage?: ResponseUsage | null;
+};
+
+/**
+ * ResponseRequest
+ *
+ * Response request.
+ */
+export type ResponseRequest = {
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Input
+     */
+    input: string | Array<InputItem>;
+    /**
+     * Previous Response Id
+     */
+    previous_response_id?: string | null;
+    /**
+     * Stream
+     */
+    stream?: boolean;
+    /**
+     * Temperature
+     */
+    temperature?: number;
+    /**
+     * Max Output Tokens
+     */
+    max_output_tokens?: number | null;
+    /**
+     * Tools
+     */
+    tools?: Array<{
+        [key: string]: string;
+    }>;
+    /**
+     * Tool Choice
+     */
+    tool_choice?: string | {
+        [key: string]: string;
+    };
+    /**
+     * Metadata
+     */
+    metadata?: {
+        [key: string]: string;
+    };
+    reasoning?: ReasoningConfig | null;
+    /**
+     * Include
+     */
+    include?: Array<string>;
+    /**
+     * Store
+     */
+    store?: boolean;
+    /**
+     * Truncation
+     */
+    truncation?: 'auto' | 'disabled';
+};
+
+/**
+ * ResponseUsage
+ *
+ * Response usage.
+ */
+export type ResponseUsage = {
+    /**
+     * Input Tokens
+     */
+    input_tokens: number;
+    /**
+     * Output Tokens
+     */
+    output_tokens: number;
+    /**
+     * Total Tokens
+     */
+    total_tokens: number;
+};
+
+/**
+ * SpeechRequest
+ *
+ * Speech generation request.
+ */
+export type SpeechRequest = {
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Input
+     */
+    input: string;
+    /**
+     * Voice
+     */
+    voice?: string;
+    /**
+     * Response Format
+     */
+    response_format?: 'mp3' | 'wav' | 'flac' | 'opus' | 'aac';
+    /**
+     * Speed
+     */
+    speed?: number;
+};
+
+/**
  * Token
+ *
+ * JWT token response.
  */
 export type Token = {
     /**
@@ -173,7 +1226,33 @@ export type Token = {
 };
 
 /**
+ * TranscriptionResponse
+ *
+ * Transcription response.
+ */
+export type TranscriptionResponse = {
+    /**
+     * Text
+     */
+    text: string;
+};
+
+/**
+ * TranslationResponse
+ *
+ * Translation response.
+ */
+export type TranslationResponse = {
+    /**
+     * Text
+     */
+    text: string;
+};
+
+/**
  * UpdatePassword
+ *
+ * Update password model.
  */
 export type UpdatePassword = {
     /**
@@ -188,6 +1267,8 @@ export type UpdatePassword = {
 
 /**
  * UserCreate
+ *
+ * User creation model.
  */
 export type UserCreate = {
     /**
@@ -214,6 +1295,8 @@ export type UserCreate = {
 
 /**
  * UserPublic
+ *
+ * Public user model.
  */
 export type UserPublic = {
     /**
@@ -236,14 +1319,12 @@ export type UserPublic = {
      * Id
      */
     id: string;
-    /**
-     * Created At
-     */
-    created_at?: string | null;
 };
 
 /**
  * UserRegister
+ *
+ * User registration model.
  */
 export type UserRegister = {
     /**
@@ -258,10 +1339,16 @@ export type UserRegister = {
      * Full Name
      */
     full_name?: string | null;
+    /**
+     * Is Active
+     */
+    is_active?: boolean;
 };
 
 /**
  * UserUpdate
+ *
+ * User update model.
  */
 export type UserUpdate = {
     /**
@@ -269,25 +1356,23 @@ export type UserUpdate = {
      */
     email?: string | null;
     /**
-     * Is Active
+     * Password
      */
-    is_active?: boolean | null;
-    /**
-     * Is Superuser
-     */
-    is_superuser?: boolean | null;
+    password?: string | null;
     /**
      * Full Name
      */
     full_name?: string | null;
     /**
-     * Password
+     * Is Active
      */
-    password?: string | null;
+    is_active?: boolean | null;
 };
 
 /**
  * UserUpdateMe
+ *
+ * User update me model.
  */
 export type UserUpdateMe = {
     /**
@@ -298,10 +1383,16 @@ export type UserUpdateMe = {
      * Email
      */
     email?: string | null;
+    /**
+     * Password
+     */
+    password?: string | null;
 };
 
 /**
  * UsersPublic
+ *
+ * List of users response.
  */
 export type UsersPublic = {
     /**
@@ -921,6 +2012,441 @@ export type itemsUpdateItemResponses = {
 
 export type itemsUpdateItemResponse = itemsUpdateItemResponses[keyof itemsUpdateItemResponses];
 
+export type modelsReadModelsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Skip
+         */
+        skip?: number;
+        /**
+         * Limit
+         */
+        limit?: number;
+    };
+    url: '/api/v1/models/';
+};
+
+export type modelsReadModelsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type modelsReadModelsError = modelsReadModelsErrors[keyof modelsReadModelsErrors];
+
+export type modelsReadModelsResponses = {
+    /**
+     * Response Models-Read Models
+     *
+     * Successful Response
+     */
+    200: Array<Model>;
+};
+
+export type modelsReadModelsResponse = modelsReadModelsResponses[keyof modelsReadModelsResponses];
+
+export type modelsCreateModelData = {
+    body: ModelCreate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/models/';
+};
+
+export type modelsCreateModelErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type modelsCreateModelError = modelsCreateModelErrors[keyof modelsCreateModelErrors];
+
+export type modelsCreateModelResponses = {
+    /**
+     * Successful Response
+     */
+    200: Model;
+};
+
+export type modelsCreateModelResponse = modelsCreateModelResponses[keyof modelsCreateModelResponses];
+
+export type modelsDeleteModelData = {
+    body?: never;
+    path: {
+        /**
+         * Id
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/api/v1/models/{id}';
+};
+
+export type modelsDeleteModelErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type modelsDeleteModelError = modelsDeleteModelErrors[keyof modelsDeleteModelErrors];
+
+export type modelsDeleteModelResponses = {
+    /**
+     * Successful Response
+     */
+    200: Message;
+};
+
+export type modelsDeleteModelResponse = modelsDeleteModelResponses[keyof modelsDeleteModelResponses];
+
+export type modelsReadModelData = {
+    body?: never;
+    path: {
+        /**
+         * Id
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/api/v1/models/{id}';
+};
+
+export type modelsReadModelErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type modelsReadModelError = modelsReadModelErrors[keyof modelsReadModelErrors];
+
+export type modelsReadModelResponses = {
+    /**
+     * Successful Response
+     */
+    200: Model;
+};
+
+export type modelsReadModelResponse = modelsReadModelResponses[keyof modelsReadModelResponses];
+
+export type modelsUpdateModelData = {
+    body: ModelUpdate;
+    path: {
+        /**
+         * Id
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/api/v1/models/{id}';
+};
+
+export type modelsUpdateModelErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type modelsUpdateModelError = modelsUpdateModelErrors[keyof modelsUpdateModelErrors];
+
+export type modelsUpdateModelResponses = {
+    /**
+     * Successful Response
+     */
+    200: Model;
+};
+
+export type modelsUpdateModelResponse = modelsUpdateModelResponses[keyof modelsUpdateModelResponses];
+
+export type huggingfaceSearchModelsData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Search
+         *
+         * Search query
+         */
+        search: string;
+        /**
+         * Limit
+         *
+         * Max results
+         */
+        limit?: number;
+        /**
+         * Full
+         *
+         * Include full model info
+         */
+        full?: boolean;
+    };
+    url: '/api/v1/huggingface/search';
+};
+
+export type huggingfaceSearchModelsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type huggingfaceSearchModelsError = huggingfaceSearchModelsErrors[keyof huggingfaceSearchModelsErrors];
+
+export type huggingfaceSearchModelsResponses = {
+    /**
+     * Response Huggingface-Search Models
+     *
+     * Successful Response
+     */
+    200: Array<{
+        [key: string]: unknown;
+    }>;
+};
+
+export type huggingfaceSearchModelsResponse = huggingfaceSearchModelsResponses[keyof huggingfaceSearchModelsResponses];
+
+export type huggingfaceListModelFilesData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Repo Id
+         *
+         * HuggingFace repository ID (e.g., 'unsloth/Qwen3.8-27B-GGUF')
+         */
+        repo_id: string;
+    };
+    url: '/api/v1/huggingface/models/files';
+};
+
+export type huggingfaceListModelFilesErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type huggingfaceListModelFilesError = huggingfaceListModelFilesErrors[keyof huggingfaceListModelFilesErrors];
+
+export type huggingfaceListModelFilesResponses = {
+    /**
+     * Response Huggingface-List Model Files
+     *
+     * Successful Response
+     */
+    200: Array<{
+        [key: string]: unknown;
+    }>;
+};
+
+export type huggingfaceListModelFilesResponse = huggingfaceListModelFilesResponses[keyof huggingfaceListModelFilesResponses];
+
+export type huggingfaceGetModelInfoData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Repo Id
+         *
+         * HuggingFace repository ID
+         */
+        repo_id: string;
+    };
+    url: '/api/v1/huggingface/models/info';
+};
+
+export type huggingfaceGetModelInfoErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type huggingfaceGetModelInfoError = huggingfaceGetModelInfoErrors[keyof huggingfaceGetModelInfoErrors];
+
+export type huggingfaceGetModelInfoResponses = {
+    /**
+     * Response Huggingface-Get Model Info
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type huggingfaceGetModelInfoResponse = huggingfaceGetModelInfoResponses[keyof huggingfaceGetModelInfoResponses];
+
+export type huggingfaceGetParameterCountData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Repo Id
+         *
+         * HuggingFace repository ID
+         */
+        repo_id: string;
+    };
+    url: '/api/v1/huggingface/models/params';
+};
+
+export type huggingfaceGetParameterCountErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type huggingfaceGetParameterCountError = huggingfaceGetParameterCountErrors[keyof huggingfaceGetParameterCountErrors];
+
+export type huggingfaceGetParameterCountResponses = {
+    /**
+     * Response Huggingface-Get Parameter Count
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type huggingfaceGetParameterCountResponse = huggingfaceGetParameterCountResponses[keyof huggingfaceGetParameterCountResponses];
+
+export type agentsRegisterAgentData = {
+    body: AgentRegisterRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/agents/register';
+};
+
+export type agentsRegisterAgentErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type agentsRegisterAgentError = agentsRegisterAgentErrors[keyof agentsRegisterAgentErrors];
+
+export type agentsRegisterAgentResponses = {
+    /**
+     * Successful Response
+     */
+    200: AgentRegisterResponse;
+};
+
+export type agentsRegisterAgentResponse = agentsRegisterAgentResponses[keyof agentsRegisterAgentResponses];
+
+export type agentsListAgentsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/agents';
+};
+
+export type agentsListAgentsResponses = {
+    /**
+     * Successful Response
+     */
+    200: AgentListResponse;
+};
+
+export type agentsListAgentsResponse = agentsListAgentsResponses[keyof agentsListAgentsResponses];
+
+export type agentsGetAgentData = {
+    body?: never;
+    path: {
+        /**
+         * Agent Id
+         */
+        agent_id: string;
+    };
+    query?: never;
+    url: '/api/v1/agents/{agent_id}';
+};
+
+export type agentsGetAgentErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type agentsGetAgentError = agentsGetAgentErrors[keyof agentsGetAgentErrors];
+
+export type agentsGetAgentResponses = {
+    /**
+     * Response Agents-Get Agent
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type agentsGetAgentResponse = agentsGetAgentResponses[keyof agentsGetAgentResponses];
+
+export type agentsSendCommandData = {
+    /**
+     * Command
+     */
+    body: {
+        [key: string]: unknown;
+    };
+    path: {
+        /**
+         * Agent Id
+         */
+        agent_id: string;
+    };
+    query?: never;
+    url: '/api/v1/agents/{agent_id}/command';
+};
+
+export type agentsSendCommandErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type agentsSendCommandError = agentsSendCommandErrors[keyof agentsSendCommandErrors];
+
+export type agentsSendCommandResponses = {
+    /**
+     * Response Agents-Send Command
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type agentsSendCommandResponse = agentsSendCommandResponses[keyof agentsSendCommandResponses];
+
+export type metricsMetricsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/metrics';
+};
+
+export type metricsMetricsResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
 export type privateCreateUserData = {
     body: PrivateUserCreate;
     path?: never;
@@ -945,3 +2471,506 @@ export type privateCreateUserResponses = {
 };
 
 export type privateCreateUserResponse = privateCreateUserResponses[keyof privateCreateUserResponses];
+
+export type v1ModelsListModelsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/models';
+};
+
+export type v1ModelsListModelsResponses = {
+    /**
+     * Successful Response
+     */
+    200: ModelsList;
+};
+
+export type v1ModelsListModelsResponse = v1ModelsListModelsResponses[keyof v1ModelsListModelsResponses];
+
+export type v1ModelsRetrieveModelData = {
+    body?: never;
+    path: {
+        /**
+         * Model Id
+         */
+        model_id: string;
+    };
+    query?: never;
+    url: '/v1/models/{model_id}';
+};
+
+export type v1ModelsRetrieveModelErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type v1ModelsRetrieveModelError = v1ModelsRetrieveModelErrors[keyof v1ModelsRetrieveModelErrors];
+
+export type v1ModelsRetrieveModelResponses = {
+    /**
+     * Successful Response
+     */
+    200: ModelData;
+};
+
+export type v1ModelsRetrieveModelResponse = v1ModelsRetrieveModelResponses[keyof v1ModelsRetrieveModelResponses];
+
+export type v1ChatCreateChatCompletionData = {
+    body: ChatCompletionRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/chat/completions';
+};
+
+export type v1ChatCreateChatCompletionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type v1ChatCreateChatCompletionError = v1ChatCreateChatCompletionErrors[keyof v1ChatCreateChatCompletionErrors];
+
+export type v1ChatCreateChatCompletionResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type v1CompletionsCreateCompletionData = {
+    body: CompletionRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/completions';
+};
+
+export type v1CompletionsCreateCompletionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type v1CompletionsCreateCompletionError = v1CompletionsCreateCompletionErrors[keyof v1CompletionsCreateCompletionErrors];
+
+export type v1CompletionsCreateCompletionResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type v1EmbeddingsCreateEmbeddingData = {
+    body: EmbeddingRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/embeddings';
+};
+
+export type v1EmbeddingsCreateEmbeddingErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type v1EmbeddingsCreateEmbeddingError = v1EmbeddingsCreateEmbeddingErrors[keyof v1EmbeddingsCreateEmbeddingErrors];
+
+export type v1EmbeddingsCreateEmbeddingResponses = {
+    /**
+     * Successful Response
+     */
+    200: EmbeddingResponse;
+};
+
+export type v1EmbeddingsCreateEmbeddingResponse = v1EmbeddingsCreateEmbeddingResponses[keyof v1EmbeddingsCreateEmbeddingResponses];
+
+export type v1ResponsesCreateResponseData = {
+    body: ResponseRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/responses';
+};
+
+export type v1ResponsesCreateResponseErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type v1ResponsesCreateResponseError = v1ResponsesCreateResponseErrors[keyof v1ResponsesCreateResponseErrors];
+
+export type v1ResponsesCreateResponseResponses = {
+    /**
+     * Successful Response
+     */
+    200: ResponseData;
+};
+
+export type v1ResponsesCreateResponseResponse = v1ResponsesCreateResponseResponses[keyof v1ResponsesCreateResponseResponses];
+
+export type v1ResponsesRetrieveResponseData = {
+    body?: never;
+    path: {
+        /**
+         * Response Id
+         */
+        response_id: string;
+    };
+    query?: never;
+    url: '/v1/responses/{response_id}';
+};
+
+export type v1ResponsesRetrieveResponseErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type v1ResponsesRetrieveResponseError = v1ResponsesRetrieveResponseErrors[keyof v1ResponsesRetrieveResponseErrors];
+
+export type v1ResponsesRetrieveResponseResponses = {
+    /**
+     * Successful Response
+     */
+    200: ResponseData;
+};
+
+export type v1ResponsesRetrieveResponseResponse = v1ResponsesRetrieveResponseResponses[keyof v1ResponsesRetrieveResponseResponses];
+
+export type v1FilesListFilesData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Purpose
+         */
+        purpose?: string | null;
+    };
+    url: '/v1/files';
+};
+
+export type v1FilesListFilesErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type v1FilesListFilesError = v1FilesListFilesErrors[keyof v1FilesListFilesErrors];
+
+export type v1FilesListFilesResponses = {
+    /**
+     * Successful Response
+     */
+    200: FilesList;
+};
+
+export type v1FilesListFilesResponse = v1FilesListFilesResponses[keyof v1FilesListFilesResponses];
+
+export type v1FilesUploadFileData = {
+    body: Body_v1_files_upload_file;
+    path?: never;
+    query?: never;
+    url: '/v1/files';
+};
+
+export type v1FilesUploadFileErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type v1FilesUploadFileError = v1FilesUploadFileErrors[keyof v1FilesUploadFileErrors];
+
+export type v1FilesUploadFileResponses = {
+    /**
+     * Successful Response
+     */
+    200: FileData;
+};
+
+export type v1FilesUploadFileResponse = v1FilesUploadFileResponses[keyof v1FilesUploadFileResponses];
+
+export type v1FilesDeleteFileData = {
+    body?: never;
+    path: {
+        /**
+         * File Id
+         */
+        file_id: string;
+    };
+    query?: never;
+    url: '/v1/files/{file_id}';
+};
+
+export type v1FilesDeleteFileErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type v1FilesDeleteFileError = v1FilesDeleteFileErrors[keyof v1FilesDeleteFileErrors];
+
+export type v1FilesDeleteFileResponses = {
+    /**
+     * Successful Response
+     */
+    200: DeleteFileResponse;
+};
+
+export type v1FilesDeleteFileResponse = v1FilesDeleteFileResponses[keyof v1FilesDeleteFileResponses];
+
+export type v1FilesRetrieveFileData = {
+    body?: never;
+    path: {
+        /**
+         * File Id
+         */
+        file_id: string;
+    };
+    query?: never;
+    url: '/v1/files/{file_id}';
+};
+
+export type v1FilesRetrieveFileErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type v1FilesRetrieveFileError = v1FilesRetrieveFileErrors[keyof v1FilesRetrieveFileErrors];
+
+export type v1FilesRetrieveFileResponses = {
+    /**
+     * Successful Response
+     */
+    200: FileData;
+};
+
+export type v1FilesRetrieveFileResponse = v1FilesRetrieveFileResponses[keyof v1FilesRetrieveFileResponses];
+
+export type v1FilesRetrieveFileContentData = {
+    body?: never;
+    path: {
+        /**
+         * File Id
+         */
+        file_id: string;
+    };
+    query?: never;
+    url: '/v1/files/{file_id}/content';
+};
+
+export type v1FilesRetrieveFileContentErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type v1FilesRetrieveFileContentError = v1FilesRetrieveFileContentErrors[keyof v1FilesRetrieveFileContentErrors];
+
+export type v1FilesRetrieveFileContentResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type v1BatchesListBatchesData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Status
+         */
+        status?: string | null;
+    };
+    url: '/v1/batches';
+};
+
+export type v1BatchesListBatchesErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type v1BatchesListBatchesError = v1BatchesListBatchesErrors[keyof v1BatchesListBatchesErrors];
+
+export type v1BatchesListBatchesResponses = {
+    /**
+     * Successful Response
+     */
+    200: BatchesList;
+};
+
+export type v1BatchesListBatchesResponse = v1BatchesListBatchesResponses[keyof v1BatchesListBatchesResponses];
+
+export type v1BatchesCreateBatchData = {
+    body: BatchRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/batches';
+};
+
+export type v1BatchesCreateBatchErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type v1BatchesCreateBatchError = v1BatchesCreateBatchErrors[keyof v1BatchesCreateBatchErrors];
+
+export type v1BatchesCreateBatchResponses = {
+    /**
+     * Successful Response
+     */
+    200: BatchData;
+};
+
+export type v1BatchesCreateBatchResponse = v1BatchesCreateBatchResponses[keyof v1BatchesCreateBatchResponses];
+
+export type v1BatchesRetrieveBatchData = {
+    body?: never;
+    path: {
+        /**
+         * Batch Id
+         */
+        batch_id: string;
+    };
+    query?: never;
+    url: '/v1/batches/{batch_id}';
+};
+
+export type v1BatchesRetrieveBatchErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type v1BatchesRetrieveBatchError = v1BatchesRetrieveBatchErrors[keyof v1BatchesRetrieveBatchErrors];
+
+export type v1BatchesRetrieveBatchResponses = {
+    /**
+     * Successful Response
+     */
+    200: BatchData;
+};
+
+export type v1BatchesRetrieveBatchResponse = v1BatchesRetrieveBatchResponses[keyof v1BatchesRetrieveBatchResponses];
+
+export type v1BatchesCancelBatchData = {
+    body?: never;
+    path: {
+        /**
+         * Batch Id
+         */
+        batch_id: string;
+    };
+    query?: never;
+    url: '/v1/batches/{batch_id}/cancel';
+};
+
+export type v1BatchesCancelBatchErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type v1BatchesCancelBatchError = v1BatchesCancelBatchErrors[keyof v1BatchesCancelBatchErrors];
+
+export type v1BatchesCancelBatchResponses = {
+    /**
+     * Successful Response
+     */
+    200: BatchData;
+};
+
+export type v1BatchesCancelBatchResponse = v1BatchesCancelBatchResponses[keyof v1BatchesCancelBatchResponses];
+
+export type v1AudioCreateTranscriptionData = {
+    body: Body_v1_audio_create_transcription;
+    path?: never;
+    query?: never;
+    url: '/v1/audio/transcriptions';
+};
+
+export type v1AudioCreateTranscriptionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type v1AudioCreateTranscriptionError = v1AudioCreateTranscriptionErrors[keyof v1AudioCreateTranscriptionErrors];
+
+export type v1AudioCreateTranscriptionResponses = {
+    /**
+     * Successful Response
+     */
+    200: TranscriptionResponse;
+};
+
+export type v1AudioCreateTranscriptionResponse = v1AudioCreateTranscriptionResponses[keyof v1AudioCreateTranscriptionResponses];
+
+export type v1AudioCreateTranslationData = {
+    body: Body_v1_audio_create_translation;
+    path?: never;
+    query?: never;
+    url: '/v1/audio/translations';
+};
+
+export type v1AudioCreateTranslationErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type v1AudioCreateTranslationError = v1AudioCreateTranslationErrors[keyof v1AudioCreateTranslationErrors];
+
+export type v1AudioCreateTranslationResponses = {
+    /**
+     * Successful Response
+     */
+    200: TranslationResponse;
+};
+
+export type v1AudioCreateTranslationResponse = v1AudioCreateTranslationResponses[keyof v1AudioCreateTranslationResponses];
+
+export type v1AudioCreateSpeechData = {
+    body: SpeechRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/audio/speech';
+};
+
+export type v1AudioCreateSpeechErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type v1AudioCreateSpeechError = v1AudioCreateSpeechErrors[keyof v1AudioCreateSpeechErrors];
+
+export type v1AudioCreateSpeechResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};

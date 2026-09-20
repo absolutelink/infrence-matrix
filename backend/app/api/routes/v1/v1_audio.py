@@ -68,7 +68,7 @@ def _validate_audio_file(file: UploadFile) -> None:
         )
 
 
-@router.post("/v1/audio/transcriptions", response_model=TranscriptionResponse)
+@router.post("/audio/transcriptions", response_model=TranscriptionResponse)
 async def create_transcription(
     file: UploadFile = File(...),
     model: str = Form(...),
@@ -166,7 +166,7 @@ async def create_transcription(
         raise HTTPException(status_code=500, detail=f"Failed to transcribe audio: {e}")
 
 
-@router.post("/v1/audio/translations", response_model=TranslationResponse)
+@router.post("/audio/translations", response_model=TranslationResponse)
 async def create_translation(
     file: UploadFile = File(...),
     model: str = Form(...),
@@ -261,7 +261,7 @@ async def create_translation(
         raise HTTPException(status_code=500, detail=f"Failed to translate audio: {e}")
 
 
-@router.post("/v1/audio/speech")
+@router.post("/audio/speech")
 async def create_speech(
     request: SpeechRequest,
     db: Session = Depends(get_db),

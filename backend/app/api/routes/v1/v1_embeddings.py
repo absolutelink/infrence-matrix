@@ -94,7 +94,7 @@ async def _find_embedding_server(
     raise HTTPException(status_code=503, detail="Failed to start embedding server")
 
 
-@router.post("/v1/embeddings", response_model=EmbeddingResponse)
+@router.post("/embeddings", response_model=EmbeddingResponse)
 async def create_embedding(
     request: EmbeddingRequest,
     db: Session = Depends(get_db),

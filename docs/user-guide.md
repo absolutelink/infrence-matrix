@@ -17,8 +17,10 @@ Welcome to Inference Matrix! This guide covers using the WebUI and API for model
 
 ### First Login
 
-1. Open your browser to http://localhost:3000
+1. Open your browser to http://localhost:5173 (local development) or your configured FRONTEND_HOST
 2. If authentication is enabled, log in with your credentials
+   - Default admin email: `admin@example.com`
+   - Default admin password: `changethis` (change this in production!)
 3. You'll see the dashboard with model status and quick actions
 
 ### Dashboard Overview

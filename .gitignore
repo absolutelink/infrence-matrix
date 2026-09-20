@@ -7,3 +7,4 @@ backend/app/frontend/
 /blob-report/
 /playwright/.cache/
 .env
+.devcontainer/.envbuilder.tmp

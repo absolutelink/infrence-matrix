@@ -62,7 +62,7 @@ def _parse_completion_window(completion_window: str) -> int:
             return 24
 
 
-@router.post("/v1/batches", response_model=BatchData)
+@router.post("/batches", response_model=BatchData)
 def create_batch(
     request: BatchRequest,
     db: Session = Depends(get_db),
@@ -126,7 +126,7 @@ def create_batch(
     )
 
 
-@router.get("/v1/batches", response_model=BatchesList)
+@router.get("/batches", response_model=BatchesList)
 def list_batches(
     status: str | None = None,
     db: Session = Depends(get_db),
@@ -165,7 +165,7 @@ def list_batches(
     return BatchesList(data=batch_data)
 
 
-@router.get("/v1/batches/{batch_id}", response_model=BatchData)
+@router.get("/batches/{batch_id}", response_model=BatchData)
 def retrieve_batch(
     batch_id: str,
     db: Session = Depends(get_db),
@@ -205,7 +205,7 @@ def retrieve_batch(
     )
 
 
-@router.post("/v1/batches/{batch_id}/cancel", response_model=BatchData)
+@router.post("/batches/{batch_id}/cancel", response_model=BatchData)
 def cancel_batch(
     batch_id: str,
     db: Session = Depends(get_db),

@@ -58,7 +58,7 @@ def _get_mime_type(filename: str) -> str:
     return mime_type or "application/octet-stream"
 
 
-@router.get("/v1/files", response_model=FilesList)
+@router.get("/files", response_model=FilesList)
 def list_files(
     purpose: str | None = None,
     db: Session = Depends(get_db),
@@ -89,7 +89,7 @@ def list_files(
     return FilesList(data=file_data)
 
 
-@router.post("/v1/files", response_model=FileData)
+@router.post("/files", response_model=FileData)
 async def upload_file(
     file: UploadFile = File(...),
     purpose: str = Form(...),
@@ -153,7 +153,7 @@ async def upload_file(
         raise HTTPException(status_code=500, detail=f"Failed to upload file: {e}")
 
 
-@router.get("/v1/files/{file_id}", response_model=FileData)
+@router.get("/files/{file_id}", response_model=FileData)
 def retrieve_file(
     file_id: str,
     db: Session = Depends(get_db),
@@ -185,7 +185,7 @@ def retrieve_file(
     )
 
 
-@router.delete("/v1/files/{file_id}", response_model=DeleteFileResponse)
+@router.delete("/files/{file_id}", response_model=DeleteFileResponse)
 def delete_file(
     file_id: str,
     db: Session = Depends(get_db),
@@ -223,7 +223,7 @@ def delete_file(
     )
 
 
-@router.get("/v1/files/{file_id}/content")
+@router.get("/files/{file_id}/content")
 def retrieve_file_content(
     file_id: str,
     db: Session = Depends(get_db),

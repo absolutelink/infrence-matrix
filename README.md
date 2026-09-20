@@ -87,13 +87,15 @@ docker compose up -d
 
 ### 3. Access the application
 
-- **WebUI**: http://localhost:3000
+- **WebUI**: http://localhost:5173 (frontend dev server)
 - **API**: http://localhost:8000
 - **API Docs**: http://localhost:8000/docs
 
+> **Note**: During local development, the frontend runs on port 5173 with hot reload enabled. In production deployments, the frontend is served by the backend on port 8000.
+
 ### 4. Download your first model
 
-1. Open WebUI at http://localhost:3000
+1. Open WebUI at http://localhost:5173
 2. Navigate to **Models**
 3. Click **Download Model**
 4. Enter HuggingFace repo: `TheBloke/Llama-2-7B-Chat-GGUF`
