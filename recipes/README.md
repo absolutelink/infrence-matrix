@@ -16,10 +16,13 @@ docker build -t inference-matrix-agent:base -f agent/Dockerfile .
 
 ### 2. llama.cpp Vulkan (`recipes/llama-cpp-vulkan/`)
 
-Agent with llama.cpp compiled with Vulkan support for AMD/Intel/NVIDIA GPUs.
+Agent layered on the official llama.cpp Vulkan image (`ghcr.io/ggml-org/llama.cpp:full-vulkan`), with the agent application copied from the built agent image.
 
 ```bash
-docker build -t inference-matrix-agent:vulkan -f recipes/llama-cpp-vulkan/Dockerfile .
+docker build \
+  --build-arg AGENT_IMAGE=ghcr.io/absolutelink/agent:main \
+  -t inference-matrix-agent:vulkan \
+  -f recipes/llama-cpp-vulkan/Dockerfile .
 ```
 
 **GPU Support:**
@@ -54,8 +57,11 @@ docker build -t inference-matrix-agent:vulkan -f recipes/llama-cpp-vulkan/Docker
 # Build base
 docker build -t inference-matrix-agent:base -f agent/Dockerfile .
 
-# Build Vulkan
-docker build -t inference-matrix-agent:vulkan -f recipes/llama-cpp-vulkan/Dockerfile .
+# Build Vulkan (requires the agent image as base)
+docker build \
+  --build-arg AGENT_IMAGE=inference-matrix-agent:base \
+  -t inference-matrix-agent:vulkan \
+  -f recipes/llama-cpp-vulkan/Dockerfile .
 ```
 
 ### Using Pre-built Images
@@ -75,13 +81,15 @@ docker pull ghcr.io/your-org/inference-matrix-agent:vulkan
 To create a new recipe:
 
 1. Create folder: `recipes/your-backend/`
-2. Add `Dockerfile` starting from base image:
+2. Add `Dockerfile` starting from an official llama.cpp image (e.g. `ghcr.io/ggml-org/llama.cpp:full-cuda`) and copy the agent app from the `AGENT_IMAGE` build-arg:
    ```dockerfile
-   FROM inference-matrix-agent:base
-   # Add your llama.cpp build steps
+   ARG AGENT_IMAGE
+   FROM ${AGENT_IMAGE} AS agent
+   FROM ghcr.io/ggml-org/llama.cpp:full-cuda
+   # Copy agent app and install deps
    ```
 3. Add `README.md` with usage instructions
-4. Update `.github/workflows/build-agents.yml` to build your recipe
+4. Update `.github/workflows/build-and-push.yml` to build your recipe
 
 ## Recipe Structure
 
@@ -105,7 +113,7 @@ GitHub Actions automatically builds all recipes on:
 - New version tags
 - Pull requests (no push)
 
-See `.github/workflows/build-agents.yml` for configuration.
+See `.github/workflows/build-and-push.yml` for configuration. The `build-recipes` job runs after `build-agent` and passes the freshly built agent image via the `AGENT_IMAGE` build-arg.
 
 ## Choosing a Backend
 

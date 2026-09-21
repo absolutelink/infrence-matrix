@@ -28,5 +28,11 @@ USER appuser
 
 EXPOSE 8080
 
+RUN mkdir -p /etc/entrypoint.d
+
+COPY docker/entrypoint.sh /usr/local/bin/
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
 # Use uvicorn to run the FastAPI app directly
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--log-level", "info"]
