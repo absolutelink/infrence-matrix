@@ -55,7 +55,7 @@ function Chat() {
 
     try {
       // Create the streaming request
-      const response = await V1ChatService.v1.createChatCompletion({
+      await V1ChatService.v1.createChatCompletion({
         body: {
           model: selectedModel,
           messages: [...messages, userMessage].map(m => ({
