@@ -14,12 +14,12 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-COPY pyproject.toml .
-COPY uv.lock .
+COPY agent/pyproject.toml .
+COPY agent/uv.lock .
 RUN pip install uv && uv sync
 
 # Copy application code
-COPY app/ ./app/
+COPY agent/app/ ./app/
 
 # Set ownership
 RUN chown -R appuser:appuser /app
