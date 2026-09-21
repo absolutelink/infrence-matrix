@@ -1,5 +1,5 @@
 import type { ColumnDef } from "@tanstack/react-table"
-import { Activity, MoreHorizontal, Terminal, Trash2 } from "lucide-react"
+import { Activity, Edit, MoreHorizontal, Terminal, Trash2 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -152,6 +152,10 @@ export const columns: ColumnDef<Agent>[] = [
               View Metrics
             </DropdownMenuItem>
             <DropdownMenuSeparator />
+            <DropdownMenuItem>
+              <Edit className="mr-2 h-4 w-4" />
+              Edit Agent
+            </DropdownMenuItem>
             <DropdownMenuItem className="text-destructive">
               <Trash2 className="mr-2 h-4 w-4" />
               Delete Agent

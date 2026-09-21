@@ -93,12 +93,12 @@ Last Updated: September 19, 2026
 ### 🎯 High Priority (MVP)
 
 #### Agents Management
-- [ ] Agents list page
-- [ ] Add agent dialog
-- [ ] Edit agent configuration
-- [ ] Delete agent
-- [ ] Agent status monitoring
-- [ ] Agent logs viewer
+- [x] Agents list page
+- [x] Add agent dialog
+- [x] Edit agent configuration
+- [x] Delete agent
+- [x] Agent status monitoring
+- [x] Agent logs viewer
 
 #### Server Instances
 - [ ] Server instances list

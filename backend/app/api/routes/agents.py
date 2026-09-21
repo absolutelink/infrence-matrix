@@ -2,7 +2,11 @@
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlmodel import update
 
+from app.db.session import AsyncSessionMaker
+from app.models import Agent
 from app.services.agent_manager import agent_manager
 
 router = APIRouter(prefix="/agents", tags=["agents"])
@@ -23,6 +27,12 @@ class AgentRegisterResponse(BaseModel):
 
 class AgentListResponse(BaseModel):
     agents: list[dict]
+
+
+class AgentUpdateRequest(BaseModel):
+    name: str | None = None
+    host: str | None = None
+    port: int | None = None
 
 
 @router.post("/register", response_model=AgentRegisterResponse)
@@ -62,6 +72,57 @@ async def get_agent(agent_id: str) -> dict:
         "gpu_info": agent.gpu_info,
         "last_seen": agent.last_seen,
     }
+
+
+@router.put("/{agent_id}")
+async def update_agent(agent_id: str, request: AgentUpdateRequest) -> dict:
+    """Update agent configuration."""
+    async with AsyncSessionMaker() as session:
+        agent = await session.get(Agent, agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        # Update fields if provided
+        if request.name is not None:
+            agent.name = request.name
+        if request.host is not None:
+            agent.host = request.host
+        if request.port is not None:
+            agent.port = request.port
+
+        session.add(agent)
+        await session.commit()
+        await session.refresh(agent)
+
+        # Update agent in manager
+        agent_manager.agents[str(agent.id)] = agent
+
+        return {
+            "id": str(agent.id),
+            "name": agent.name,
+            "host": agent.host,
+            "port": agent.port,
+            "status": agent.status,
+        }
+
+
+@router.delete("/{agent_id}")
+async def delete_agent(agent_id: str) -> dict:
+    """Delete an agent."""
+    async with AsyncSessionMaker() as session:
+        agent = await session.get(Agent, agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        # Remove from manager
+        agent_manager.agents.pop(str(agent.id), None)
+        # Remove from reconnect tasks if exists
+        agent_manager._reconnect_tasks.pop(str(agent.id), None)
+
+        await session.delete(agent)
+        await session.commit()
+
+        return {"status": "deleted", "message": f"Agent {agent_id} deleted successfully"}
 
 
 @router.post("/{agent_id}/command")
