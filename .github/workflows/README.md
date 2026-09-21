@@ -1,102 +1,22 @@
-# GitHub Actions Workflows
+# GitHub Workflows
+
+This directory contains GitHub Actions workflows for building and deploying Inference Matrix components.
 
 ## Workflows
 
-### 1. Build and Push (`build-and-push.yml`)
+- `build-and-push.yml` - Builds and pushes the main application and agent images
+- `build-vulkan-recipe.yml` - Builds the Vulkan llama.cpp recipe image
+- `build-base-agent.yml` - Builds the base agent image used by recipes
 
-**Triggers:**
-- Push to `main` or `develop` branches
-- Tag pushes (semver)
-- Pull requests (build only, no push)
+## Building Recipes
 
-**Jobs:**
-1. **build-matrix-app** - Builds and pushes Matrix App Docker image
-2. **build-agent** - Builds and pushes Agent Service Docker image
+The Vulkan llama.cpp recipe is built as a separate Docker image to provide optimized GPU acceleration for AMD and Intel GPUs.
 
-**Output:**
-- Images pushed to `ghcr.io/inference-matrix/frontend`
-- Images pushed to `ghcr.io/inference-matrix/agent`
-- Tags: branch name, PR number, semver (for tags), SHA
+To build the recipe, the workflow:
+1. Uses the base agent image as a foundation
+2. Installs Vulkan dependencies
+3. Compiles llama.cpp with Vulkan support
+4. Builds the necessary binaries
+5. Packages everything into a Docker image
 
-**Example tags:**
-- `main` - Latest from main branch
-- `develop` - Latest from develop branch
-- `v1.2.3` - Release version
-- `v1.2` - Major.minor release
-- `abc123def` - Commit SHA
-
-### 2. Test and Lint (`test.yml`)
-
-**Triggers:**
-- Push to `main` or `develop`
-- All pull requests
-
-**Jobs:**
-1. **test-backend** - Backend tests with PostgreSQL
-   - Runs linter (ruff)
-   - Runs type checker (mypy)
-   - Runs pytest tests
-   
-2. **test-agent** - Agent service tests
-   - Runs linter (ruff)
-   - Runs type checker (mypy)
-   - Runs pytest tests
-   
-3. **check-docker** - Docker build validation
-   - Validates Frontend Dockerfile builds
-   - Validates Agent Dockerfile builds
-
-## Required Secrets
-
-No secrets required for PR builds.
-
-For production builds (main/develop/tags):
-- `GITHUB_TOKEN` - Automatically provided by GitHub Actions
-
-## Container Registry
-
-Images are published to GitHub Container Registry:
-- Frontend: `ghcr.io/inference-matrix/frontend`
-- Agent: `ghcr.io/inference-matrix/agent`
-
-## Usage in compose.yml
-
-```yaml
-services:
-  frontend:
-    image: ghcr.io/inference-matrix/frontend:main
-    # ... rest of config
-  
-  agent:
-    image: ghcr.io/inference-matrix/agent:main
-    # ... rest of config
-```
-
-## Manual Trigger
-
-To manually trigger a build:
-
-```bash
-# Push to main
-git push origin main
-
-# Create a tag
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-## Debugging Failed Builds
-
-1. Check GitHub Actions logs
-2. Download failed build artifacts
-3. Reproduce locally:
-   ```bash
-   docker build -t test-image ./backend
-   docker run --rm test-image
-   ```
-
-## Cache Strategy
-
-- Uses GitHub Actions cache for faster builds
-- Docker layer caching via BuildKit
-- Python package caching via uv
+The resulting image can be used with the agent service for GPU-accelerated inference.

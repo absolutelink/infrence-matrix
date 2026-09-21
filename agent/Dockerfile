@@ -1,5 +1,7 @@
 # Base Inference Matrix Agent image (no llama.cpp included)
-FROM python:3.14-slim
+ARG BASE_IMAGE=python:3.14-slim
+
+FROM $BASE_IMAGE
 
 # Create non-root user
 RUN useradd -m -u 1000 appuser

@@ -1,18 +1,23 @@
-# Inference Matrix Agent with llama.cpp Vulkan Support
+# Vulkan llama.cpp Recipe
 
-This recipe builds an Agent image with llama.cpp compiled with Vulkan GPU acceleration.
+This recipe builds an Inference Matrix Agent image with llama.cpp compiled with Vulkan GPU acceleration support.
 
-## Features
+## Overview
 
-- Vulkan GPU support for AMD and Intel GPUs
-- Also works with NVIDIA GPUs via Vulkan
-- Cross-platform compatibility (Linux, Windows, macOS)
+The Vulkan recipe provides GPU acceleration for AMD and Intel GPUs through Vulkan API support, while also being compatible with NVIDIA GPUs via Vulkan drivers.
 
 ## Building
 
 ```bash
 docker build -t inference-matrix-agent:llama-cpp-vulkan -f recipes/llama-cpp-vulkan/Dockerfile .
 ```
+
+## Requirements
+
+To build this recipe, you need:
+- Docker with buildx support
+- Access to the base agent image (`inference-matrix-agent:base`)
+- Vulkan development libraries (automatically installed during build)
 
 ## Usage
 
@@ -26,47 +31,6 @@ docker run --gpus all \
   inference-matrix-agent:llama-cpp-vulkan
 ```
 
-## GPU Requirements
-
-- **AMD**: RDNA2 or newer (RX 6000 series+)
-- **Intel**: Arc or newer
-- **NVIDIA**: GTX 1000 series or newer (Vulkan 1.2+)
-
-## Vulkan Installation
-
-### Ubuntu/Debian
-
-```bash
-sudo apt-get update
-sudo apt-get install -y \
-  vulkan-tools \
-  libvulkan1 \
-  libvulkan-dev \
-  mesa-vulkan-drivers
-```
-
-### AMD GPU
-
-```bash
-# Install AMDGPU-PRO drivers
-sudo apt-get install -y amdgpu-dkms rocm-opencl-runtime
-```
-
-### Intel GPU
-
-```bash
-# Intel Vulkan drivers are typically included
-sudo apt-get install -y intel-media-va-driver
-```
-
-## Verification
-
-Check Vulkan installation:
-
-```bash
-vulkaninfo | head -20
-```
-
 ## Environment Variables
 
 | Variable | Description | Default |
@@ -77,24 +41,12 @@ vulkaninfo | head -20
 | `DEFAULT_GPU_LAYERS` | Default GPU layers | `35` |
 | `GPU_BACKEND` | Set to `vulkan` | `vulkan` |
 
-## Performance Tips
+## GPU Support
 
-1. **GPU Layers**: Start with 35, adjust based on VRAM
-2. **Context Size**: Reduce if out of memory
-3. **Batch Size**: 512 is good default
+- **AMD**: RDNA2 or newer (RX 6000 series+)
+- **Intel**: Arc or newer
+- **NVIDIA**: GTX 1000 series or newer (Vulkan 1.2+)
 
-## Troubleshooting
+## Development
 
-**Vulkan not detected:**
-```bash
-# Check Vulkan installation
-vulkaninfo
-
-# Check GPU visibility
-lspci | grep -i vga
-```
-
-**Out of memory:**
-- Reduce `DEFAULT_GPU_LAYERS`
-- Reduce `DEFAULT_CONTEXT_SIZE`
-- Use smaller quantization (Q4_K_M instead of Q8_0)
+This recipe is built automatically by the GitHub Actions workflow `build-vulkan-recipe.yml` when changes are made to this directory.

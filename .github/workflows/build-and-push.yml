@@ -104,3 +104,4 @@ jobs:
           platforms: linux/amd64
           build-args: |
             BUILDKIT_INLINE_CACHE=1
+            BASE_IMAGE=python:3.14-slim
