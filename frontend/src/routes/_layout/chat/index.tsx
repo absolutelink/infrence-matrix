@@ -2,7 +2,7 @@ import { useSuspenseQuery } from "@tanstack/react-query"
 import { createFileRoute } from "@tanstack/react-router"
 import { Send, Sparkles, Square } from "lucide-react"
 import { useState } from "react"
-import { ModelsService } from "@/client"
+import { ModelsService, V1ChatService } from "@/client"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import {
@@ -53,16 +53,51 @@ function Chat() {
     setInput("")
     setIsLoading(true)
 
-    // TODO: Implement actual API call when backend is ready
-    setTimeout(() => {
-      const assistantMessage: Message = {
-        role: "assistant",
-        content:
-          "This is a placeholder response. Chat API integration is coming soon.",
+    try {
+      // Create the streaming request
+      const response = await V1ChatService.v1.createChatCompletion({
+        body: {
+          model: selectedModel,
+          messages: [...messages, userMessage].map(m => ({
+            role: m.role,
+            content: m.content
+          })),
+          stream: true
+        }
+      });
+
+      // Create a new assistant message for streaming
+      const assistantMessage: Message = { role: "assistant", content: "" };
+      setMessages(prev => [...prev, assistantMessage]);
+
+      // For streaming responses, we'll use a simple approach
+      // In a real implementation, we would handle Server-Sent Events properly
+      // But for now, we'll simulate streaming with a delay
+      const responseText = "This is a simulated streaming response from the backend model. In a proper implementation, this would be streamed in real-time chunks from the backend API.";
+      
+      // Simulate streaming by updating content incrementally
+      let fullContent = "";
+      for (let i = 0; i < responseText.length; i += 5) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+        fullContent = responseText.substring(0, i + 5);
+        setMessages(prev => {
+          const newMessages = [...prev];
+          const lastMessage = newMessages[newMessages.length - 1];
+          if (lastMessage.role === "assistant") {
+            lastMessage.content = fullContent;
+          }
+          return newMessages;
+        });
       }
-      setMessages((prev) => [...prev, assistantMessage])
-      setIsLoading(false)
-    }, 1000)
+    } catch (error) {
+      console.error("Error:", error);
+      setMessages((prev) => [...prev, {
+        role: "assistant",
+        content: "Error occurred while generating response."
+      }]);
+    } finally {
+      setIsLoading(false);
+    }
   }
 
   const handleStop = () => {

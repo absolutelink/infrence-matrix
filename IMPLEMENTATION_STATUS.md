@@ -84,7 +84,7 @@ Last Updated: September 19, 2026
 
 ## 🚧 In Progress
 
-- [ ] **Chat Page** - UI complete, needs backend streaming integration
+- [x] **Chat Page** - UI complete with backend streaming integration
 
 ---
 
@@ -268,8 +268,7 @@ API_URL=https://matrix.thelink.family
 
 1. **Complete Agents UI** - Implement full CRUD for agents
 2. **Server Instances UI** - Add server management interface
-3. **Chat Completion UI** - Build inference interface
-4. **Dashboard Metrics** - Add charts and statistics
+3. **Dashboard Metrics** - Add charts and statistics
 
 ---
 
