@@ -10,9 +10,8 @@
 - Pull requests (build only, no push)
 
 **Jobs:**
-1. **build-frontend** - Builds and pushes Frontend Service Docker image
-2. **build-agent** - Builds and pushes Agent Service Docker image  
-3. **test-deployment** - Deploys both services and verifies health
+1. **build-matrix-app** - Builds and pushes Matrix App Docker image
+2. **build-agent** - Builds and pushes Agent Service Docker image
 
 **Output:**
 - Images pushed to `ghcr.io/inference-matrix/frontend`
