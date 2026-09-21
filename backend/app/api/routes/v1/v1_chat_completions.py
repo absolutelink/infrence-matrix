@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app.api.deps import get_db
-from app.models import Model, ServerInstance, Agent
+from app.models import Model, ServerInstance
 from app.services.agent_manager import agent_manager
 
 logger = logging.getLogger(__name__)
@@ -98,50 +98,50 @@ async def _stream_completion_via_agent(
 ) -> AsyncGenerator[str]:
     """Stream completion via Agent proxy."""
     messages = _convert_messages_to_llama_format(request.messages)
-    
+
     payload = {
         "messages": messages,
         "temperature": request.temperature,
         "max_tokens": request.max_tokens,
         "stream": True,
     }
-    
+
     # Add optional parameters
     for key in ["top_p", "frequency_penalty", "presence_penalty", "stop"]:
         value = getattr(request, key)
         if value is not None:
             payload[key] = value
-    
+
     created = int(time.time())
-    
+
     try:
         # Get agent
         agent = await agent_manager.get_agent(agent_id)
         if not agent:
             raise ValueError(f"Agent {agent_id} not found")
-        
+
         # Stream through agent proxy
         async with httpx.AsyncClient(timeout=300.0) as client:
             proxy_url = f"http://{agent.host}:{agent.port}/proxy/{server.id}/v1/chat/completions"
-            
+
             async with client.stream(
                 "POST",
                 proxy_url,
                 json=payload,
             ) as response:
                 response.raise_for_status()
-                
+
                 async for line in response.aiter_lines():
                     if line.startswith("data: "):
                         data = line[6:]
                         if data.strip() == "[DONE]":
                             yield "data: [DONE]\n\n"
                             break
-                        
+
                         try:
                             chunk_data = json.loads(data)
                             delta = {"content": chunk_data.get("content", "")}
-                            
+
                             stream_chunk = ChatCompletionChunk(
                                 id=request_id,
                                 created=created,
@@ -152,13 +152,13 @@ async def _stream_completion_via_agent(
                                     finish_reason=chunk_data.get("finish_reason"),
                                 )],
                             )
-                            
+
                             yield f"data: {stream_chunk.model_dump_json()}\n\n"
-                            
+
                         except json.JSONDecodeError:
                             logger.warning(f"Invalid JSON in stream: {data}")
                             continue
-                            
+
     except Exception as e:
         logger.error(f"Streaming error: {e}")
         error_chunk = {
@@ -184,17 +184,17 @@ async def _get_or_create_server(model: Model, agent_id: str | None = None) -> Se
                 ServerInstance.model_id == model.id,
                 ServerInstance.status == "running",
             )
-        
+
         result = session.exec(stmt)
         server = result.first()
-        
+
         if server:
             logger.info(f"Using existing server {server.id}")
             return server
-        
+
         # Need to start a new server
         logger.info("No existing server found, starting new one")
-        
+
         # Find an agent
         if agent_id:
             agent = await agent_manager.get_agent(agent_id)
@@ -206,10 +206,10 @@ async def _get_or_create_server(model: Model, agent_id: str | None = None) -> Se
             if not agents:
                 raise HTTPException(503, "No agents available")
             agent = await agent_manager.get_agent(agents[0]["id"])
-        
+
         if not agent or agent.status != "online":
             raise HTTPException(503, "No online agents available")
-        
+
         # Start server via agent
         start_response = await agent_manager.send_to_agent(
             agent.id,
@@ -226,7 +226,7 @@ async def _get_or_create_server(model: Model, agent_id: str | None = None) -> Se
                 }
             }
         )
-        
+
         # Create ServerInstance record
         server = ServerInstance(
             model_id=model.id,
@@ -239,7 +239,7 @@ async def _get_or_create_server(model: Model, agent_id: str | None = None) -> Se
         session.add(server)
         session.commit()
         session.refresh(server)
-        
+
         logger.info(f"Started new server {server.id} on agent {agent.id}")
         return server
 
@@ -252,12 +252,12 @@ async def create_chat_completion(
     """Create chat completion via Agent proxy."""
     request_id = f"chatcmpl-{uuid.uuid4()}"
     created = int(time.time())
-    
+
     # Get model
     model = db.exec(select(Model).where(Model.name == request.model)).first()
     if not model:
         raise HTTPException(404, f"Model {request.model} not found")
-    
+
     # Get or create server
     try:
         server = await _get_or_create_server(model, request.agent_id)
@@ -266,7 +266,7 @@ async def create_chat_completion(
     except Exception as e:
         logger.error(f"Server creation failed: {e}")
         raise HTTPException(503, f"Failed to start server: {e}")
-    
+
     if request.stream:
         # Stream response
         return StreamingResponse(
@@ -278,13 +278,13 @@ async def create_chat_completion(
             ),
             media_type="text/event-stream",
         )
-    
+
     # Non-streaming response
     try:
         agent = await agent_manager.get_agent(str(server.agent_id))
         if not agent:
             raise ValueError("Agent not found")
-        
+
         response = await agent_manager.send_to_agent(
             str(server.agent_id),
             "POST",
@@ -297,7 +297,7 @@ async def create_chat_completion(
             },
             timeout=300.0,
         )
-        
+
         return ChatCompletionResponse(
             id=request_id,
             created=created,
@@ -316,7 +316,7 @@ async def create_chat_completion(
                 total_tokens=response.get("usage", {}).get("total_tokens", 0),
             ) if response.get("usage") else None,
         )
-        
+
     except Exception as e:
         logger.error(f"Completion error: {e}")
         raise HTTPException(500, f"Inference failed: {e}")

@@ -12,6 +12,3 @@ export SQLALCHEMY_URL="postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWO
 
 # Run migrations with correct database URL
 alembic upgrade head
-
-# Create initial data in DB
-python app/initial_data.py

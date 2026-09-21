@@ -56,7 +56,7 @@
 **UI Features:**
 - [ ] Server instances table
 - [ ] Health status badges
-- [ ] Add server form (URL, API key, config)
+- [ ] Add server form (URL, config)
 - [ ] Connection test button
 - [ ] Edit server configuration
 - [ ] Delete with confirmation
@@ -72,17 +72,10 @@
 - `frontend/src/components/Settings/`
 
 **Sections to Implement:**
-- [ ] **Profile Settings**
-  - Change name/email
-  - Change password
 - [ ] **Preferences**
   - Theme (dark/light/system)
   - Language
   - Default model
-- [ ] **API Configuration**
-  - API key management
-  - Generate new keys
-  - Revoke keys
 - [ ] **Notifications**
   - Email notifications
   - Browser notifications
@@ -254,25 +247,7 @@
 
 ---
 
-### 3.2 Admin Panel ✋ TODO
-**Priority**: Medium | **Estimated**: 2 days
-
-**Files to Update:**
-- `frontend/src/routes/_layout/admin.tsx`
-- `frontend/src/components/Admin/`
-
-**Features to Add:**
-- [ ] Users management table
-- [ ] Create/edit/delete users
-- [ ] User roles/permissions
-- [ ] System settings
-- [ ] Audit logs
-- [ ] Backup/restore
-- [ ] System health overview
-
----
-
-### 3.3 Items Page (Template) ✋ TODO
+### 3.2 Items Page (Template) ✋ TODO
 **Priority**: Low | **Estimated**: 1 day
 
 **Files to Update:**

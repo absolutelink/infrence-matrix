@@ -1,11 +1,9 @@
 """Tests for V1 Models API endpoint."""
 
-import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
 from app.models import Model
-from datetime import UTC, datetime
 
 
 class TestListModels:

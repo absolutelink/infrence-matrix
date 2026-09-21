@@ -31,16 +31,6 @@ Last Updated: September 19, 2026
   - Domain: `matrix.thelink.family`
   - PostgreSQL database connection
 
-### 🔐 Authentication & Users
-
-- [x] Login page
-- [x] Signup page
-- [x] Password recovery
-- [x] Password reset
-- [x] JWT token management
-- [x] User session handling
-- [x] Protected routes
-
 ### 📊 Models Management
 
 - [x] **Models CRUD**
@@ -82,8 +72,6 @@ Last Updated: September 19, 2026
 - [x] `/api/v1/huggingface/search` - Search HF models
 - [x] `/api/v1/huggingface/models/files` - List GGUF files
 - [x] `/api/v1/huggingface/models/params` - Get parameter count
-- [x] `/api/v1/users/me` - Current user info
-- [x] `/api/v1/items/` - Basic CRUD (template)
 - [x] `/api/health` - Health check
 
 ### 🌐 Frontend Configuration
@@ -97,9 +85,7 @@ Last Updated: September 19, 2026
 
 ## 🚧 In Progress
 
-- [ ] **Items Page** - Basic structure exists, needs full implementation
-- [ ] **Settings Page** - Basic structure exists, needs user preferences
-- [ ] **Admin Page** - Basic structure exists, needs admin features
+- [ ] **Chat Page** - UI complete, needs backend streaming integration
 
 ---
 
@@ -139,19 +125,6 @@ Last Updated: September 19, 2026
 
 ### 🔧 Medium Priority
 
-#### User Management (Admin)
-- [ ] Users list (admin only)
-- [ ] Create user
-- [ ] Edit user roles
-- [ ] Delete/deactivate user
-- [ ] User activity logs
-
-#### API Keys
-- [ ] API keys management
-- [ ] Create API key
-- [ ] Revoke API key
-- [ ] API key usage stats
-
 #### Prompts Library
 - [ ] Saved prompts
 - [ ] Prompt templates
@@ -182,8 +155,6 @@ Last Updated: September 19, 2026
 - [ ] Cost tracking
 
 #### Integrations
-- [ ] OAuth providers
-- [ ] SSO support
 - [ ] Webhook configurations
 - [ ] API webhooks
 - [ ] Third-party integrations
@@ -209,29 +180,24 @@ frontend/src/
 │   └── ui/ (Shadcn components) ✅
 ├── routes/
 │   ├── _layout/
-│   │   ├── admin.tsx 🚧
 │   │   ├── index.tsx ✅ (Dashboard)
-│   │   ├── items.tsx 🚧
 │   │   ├── models.tsx ✅
-│   │   └── settings.tsx 🚧
-│   ├── login.tsx ✅
-│   ├── signup.tsx ✅
-│   ├── recover-password.tsx ✅
-│   └── reset-password.tsx ✅
-└── client/ (Auto-generated API client) ✅
+│   │   ├── agents.tsx ✅
+│   │   ├── server-instances.tsx ✅
+│   │   └── chat/ ✅
+│   └── client/ (Auto-generated API client) ✅
 
 backend/app/
 ├── api/
 │   ├── routes/
 │   │   ├── models.py ✅
 │   │   ├── huggingface.py ✅
-│   │   ├── users.py ✅
-│   │   ├── items.py ✅
-│   │   ├── agents.py 🚧
+│   │   ├── server_instances.py ✅
+│   │   ├── agents.py ✅
 │   │   └── v1/ (OpenAI-compatible endpoints) ✅
-│   └── deps.py ✅
+│   └── deps.py ✅ (get_db/SessionDep)
 ├── models.py ✅
-└── core/ (Config, security, DB) ✅
+└── core/ (Config, DB) ✅
 ```
 
 ---
@@ -268,9 +234,6 @@ POSTGRES_HOST=postgres
 POSTGRES_PORT=5432
 
 # Application
-SECRET_KEY=<secret>
-ADMIN_JWT_SECRET=<secret>
-API_KEY_AUTH_ENABLED=false
 AGENT_DISCOVERY_ENABLED=true
 FRONTEND_HOST=https://matrix.thelink.family
 
@@ -281,6 +244,13 @@ API_URL=https://matrix.thelink.family
 ---
 
 ## 📝 Recent Changes
+
+### September 21, 2026
+- ✅ Removed users, authentication, and API keys (not needed for this project)
+- ✅ Dropped `user`, `item`, and `api_keys` database tables via migration
+- ✅ Regenerated API client without auth endpoints
+- ✅ Simplified vite proxy to `/api/v1` and `/v1` (fixed 404s on `/api-keys` page path)
+- ✅ Forced `client_encoding=utf8` for SQL_ASCII postgres compatibility
 
 ### September 19, 2026
 - ✅ Fixed frontend API calls to use runtime config instead of localhost
@@ -301,16 +271,15 @@ API_URL=https://matrix.thelink.family
 2. **Server Instances UI** - Add server management interface
 3. **Chat Completion UI** - Build inference interface
 4. **Dashboard Metrics** - Add charts and statistics
-5. **Admin Panel** - Complete user management features
 
 ---
 
 ## 📊 Statistics
 
-- **Frontend Routes**: 11 (8 complete, 3 in progress)
+- **Frontend Routes**: 6 (dashboard, models, agents, server-instances, chat, 404)
 - **API Endpoints**: 20+ implemented
 - **UI Components**: 50+ Shadcn components
-- **Database Models**: 10+ SQLModel classes
+- **Database Models**: 8 SQLModel classes
 - **Docker Layers**: 2-stage build
 - **Entrypoint Scripts**: 3 modular scripts
 

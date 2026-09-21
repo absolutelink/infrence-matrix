@@ -163,36 +163,6 @@ export type BatchesList = {
 };
 
 /**
- * Body_login-login_access_token
- */
-export type Body_login_login_access_token = {
-    /**
-     * Grant Type
-     */
-    grant_type?: string | null;
-    /**
-     * Username
-     */
-    username: string;
-    /**
-     * Password
-     */
-    password: string;
-    /**
-     * Scope
-     */
-    scope?: string;
-    /**
-     * Client Id
-     */
-    client_id?: string | null;
-    /**
-     * Client Secret
-     */
-    client_secret?: string | null;
-};
-
-/**
  * Body_v1/audio-create_transcription
  */
 export type Body_v1_audio_create_transcription = {
@@ -866,22 +836,6 @@ export type ModelsList = {
 };
 
 /**
- * NewPassword
- *
- * New password request.
- */
-export type NewPassword = {
-    /**
-     * Token
-     */
-    token: string;
-    /**
-     * New Password
-     */
-    new_password: string;
-};
-
-/**
  * OutputContent
  *
  * Output content.
@@ -919,28 +873,6 @@ export type OutputItem = {
      * Content
      */
     content: Array<OutputContent>;
-};
-
-/**
- * PrivateUserCreate
- */
-export type PrivateUserCreate = {
-    /**
-     * Email
-     */
-    email: string;
-    /**
-     * Password
-     */
-    password: string;
-    /**
-     * Full Name
-     */
-    full_name: string;
-    /**
-     * Is Verified
-     */
-    is_verified?: boolean;
 };
 
 /**
@@ -1082,6 +1014,86 @@ export type ResponseUsage = {
 };
 
 /**
+ * ServerInstanceListResponse
+ */
+export type ServerInstanceListResponse = {
+    /**
+     * Server Instances
+     */
+    server_instances: Array<ServerInstanceResponse>;
+};
+
+/**
+ * ServerInstanceResponse
+ */
+export type ServerInstanceResponse = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Model Id
+     */
+    model_id: string;
+    /**
+     * Model Name
+     */
+    model_name?: string | null;
+    /**
+     * Port
+     */
+    port: number;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Health Status
+     */
+    health_status: string;
+    /**
+     * Agent Id
+     */
+    agent_id: string;
+    /**
+     * Agent Name
+     */
+    agent_name?: string | null;
+    /**
+     * Agent Host
+     */
+    agent_host?: string | null;
+    /**
+     * Agent Port
+     */
+    agent_port?: number | null;
+    /**
+     * Proxy Url
+     */
+    proxy_url?: string | null;
+    /**
+     * Started At
+     */
+    started_at?: string | null;
+    /**
+     * Total Requests
+     */
+    total_requests: number;
+    /**
+     * Cpu Usage Percent
+     */
+    cpu_usage_percent?: number | null;
+    /**
+     * Ram Usage Bytes
+     */
+    ram_usage_bytes?: number | null;
+    /**
+     * Vram Usage Bytes
+     */
+    vram_usage_bytes?: number | null;
+};
+
+/**
  * SpeechRequest
  *
  * Speech generation request.
@@ -1110,19 +1122,25 @@ export type SpeechRequest = {
 };
 
 /**
- * Token
- *
- * JWT token response.
+ * StartServerRequest
  */
-export type Token = {
+export type StartServerRequest = {
     /**
-     * Access Token
+     * Model Id
      */
-    access_token: string;
+    model_id: string;
     /**
-     * Token Type
+     * Agent Id
      */
-    token_type?: string;
+    agent_id?: string | null;
+    /**
+     * Gpu Layers
+     */
+    gpu_layers?: number;
+    /**
+     * Context Size
+     */
+    context_size?: number;
 };
 
 /**
@@ -1147,166 +1165,6 @@ export type TranslationResponse = {
      * Text
      */
     text: string;
-};
-
-/**
- * UpdatePassword
- *
- * Update password model.
- */
-export type UpdatePassword = {
-    /**
-     * Current Password
-     */
-    current_password: string;
-    /**
-     * New Password
-     */
-    new_password: string;
-};
-
-/**
- * UserCreate
- *
- * User creation model.
- */
-export type UserCreate = {
-    /**
-     * Email
-     */
-    email: string;
-    /**
-     * Is Active
-     */
-    is_active?: boolean;
-    /**
-     * Is Superuser
-     */
-    is_superuser?: boolean;
-    /**
-     * Full Name
-     */
-    full_name?: string | null;
-    /**
-     * Password
-     */
-    password: string;
-};
-
-/**
- * UserPublic
- *
- * Public user model.
- */
-export type UserPublic = {
-    /**
-     * Email
-     */
-    email: string;
-    /**
-     * Is Active
-     */
-    is_active?: boolean;
-    /**
-     * Is Superuser
-     */
-    is_superuser?: boolean;
-    /**
-     * Full Name
-     */
-    full_name?: string | null;
-    /**
-     * Id
-     */
-    id: string;
-    /**
-     * Created At
-     */
-    created_at: string;
-};
-
-/**
- * UserRegister
- *
- * User registration model.
- */
-export type UserRegister = {
-    /**
-     * Email
-     */
-    email: string;
-    /**
-     * Password
-     */
-    password: string;
-    /**
-     * Full Name
-     */
-    full_name?: string | null;
-    /**
-     * Is Active
-     */
-    is_active?: boolean;
-};
-
-/**
- * UserUpdate
- *
- * User update model.
- */
-export type UserUpdate = {
-    /**
-     * Email
-     */
-    email?: string | null;
-    /**
-     * Password
-     */
-    password?: string | null;
-    /**
-     * Full Name
-     */
-    full_name?: string | null;
-    /**
-     * Is Active
-     */
-    is_active?: boolean | null;
-};
-
-/**
- * UserUpdateMe
- *
- * User update me model.
- */
-export type UserUpdateMe = {
-    /**
-     * Full Name
-     */
-    full_name?: string | null;
-    /**
-     * Email
-     */
-    email?: string | null;
-    /**
-     * Password
-     */
-    password?: string | null;
-};
-
-/**
- * UsersPublic
- *
- * List of users response.
- */
-export type UsersPublic = {
-    /**
-     * Data
-     */
-    data: Array<UserPublic>;
-    /**
-     * Count
-     */
-    count: number;
 };
 
 /**
@@ -1337,435 +1195,242 @@ export type ValidationError = {
     };
 };
 
-export type loginLoginAccessTokenData = {
-    body: Body_login_login_access_token;
+export type agentsRegisterAgentData = {
+    body: AgentRegisterRequest;
     path?: never;
     query?: never;
-    url: '/api/v1/login/access-token';
+    url: '/api/v1/agents/register';
 };
 
-export type loginLoginAccessTokenErrors = {
+export type agentsRegisterAgentErrors = {
     /**
      * Validation Error
      */
     422: HTTPValidationError;
 };
 
-export type loginLoginAccessTokenError = loginLoginAccessTokenErrors[keyof loginLoginAccessTokenErrors];
+export type agentsRegisterAgentError = agentsRegisterAgentErrors[keyof agentsRegisterAgentErrors];
 
-export type loginLoginAccessTokenResponses = {
+export type agentsRegisterAgentResponses = {
     /**
      * Successful Response
      */
-    200: Token;
+    200: AgentRegisterResponse;
 };
 
-export type loginLoginAccessTokenResponse = loginLoginAccessTokenResponses[keyof loginLoginAccessTokenResponses];
+export type agentsRegisterAgentResponse = agentsRegisterAgentResponses[keyof agentsRegisterAgentResponses];
 
-export type loginTestTokenData = {
+export type agentsListAgentsData = {
     body?: never;
     path?: never;
     query?: never;
-    url: '/api/v1/login/test-token';
+    url: '/api/v1/agents';
 };
 
-export type loginTestTokenResponses = {
+export type agentsListAgentsResponses = {
     /**
      * Successful Response
      */
-    200: UserPublic;
+    200: AgentListResponse;
 };
 
-export type loginTestTokenResponse = loginTestTokenResponses[keyof loginTestTokenResponses];
+export type agentsListAgentsResponse = agentsListAgentsResponses[keyof agentsListAgentsResponses];
 
-export type loginRecoverPasswordData = {
-    body?: never;
-    path: {
-        /**
-         * Email
-         */
-        email: string;
-    };
-    query?: never;
-    url: '/api/v1/password-recovery/{email}';
-};
-
-export type loginRecoverPasswordErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type loginRecoverPasswordError = loginRecoverPasswordErrors[keyof loginRecoverPasswordErrors];
-
-export type loginRecoverPasswordResponses = {
-    /**
-     * Successful Response
-     */
-    200: Message;
-};
-
-export type loginRecoverPasswordResponse = loginRecoverPasswordResponses[keyof loginRecoverPasswordResponses];
-
-export type loginResetPasswordData = {
-    body: NewPassword;
-    path?: never;
-    query?: never;
-    url: '/api/v1/reset-password/';
-};
-
-export type loginResetPasswordErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type loginResetPasswordError = loginResetPasswordErrors[keyof loginResetPasswordErrors];
-
-export type loginResetPasswordResponses = {
-    /**
-     * Successful Response
-     */
-    200: Message;
-};
-
-export type loginResetPasswordResponse = loginResetPasswordResponses[keyof loginResetPasswordResponses];
-
-export type loginRecoverPasswordHtmlContentData = {
+export type agentsGetAgentData = {
     body?: never;
     path: {
         /**
-         * Email
+         * Agent Id
          */
-        email: string;
+        agent_id: string;
     };
     query?: never;
-    url: '/api/v1/password-recovery-html-content/{email}';
+    url: '/api/v1/agents/{agent_id}';
 };
 
-export type loginRecoverPasswordHtmlContentErrors = {
+export type agentsGetAgentErrors = {
     /**
      * Validation Error
      */
     422: HTTPValidationError;
 };
 
-export type loginRecoverPasswordHtmlContentError = loginRecoverPasswordHtmlContentErrors[keyof loginRecoverPasswordHtmlContentErrors];
+export type agentsGetAgentError = agentsGetAgentErrors[keyof agentsGetAgentErrors];
 
-export type loginRecoverPasswordHtmlContentResponses = {
+export type agentsGetAgentResponses = {
     /**
-     * Successful Response
-     */
-    200: string;
-};
-
-export type loginRecoverPasswordHtmlContentResponse = loginRecoverPasswordHtmlContentResponses[keyof loginRecoverPasswordHtmlContentResponses];
-
-export type usersReadUsersData = {
-    body?: never;
-    path?: never;
-    query?: {
-        /**
-         * Skip
-         */
-        skip?: number;
-        /**
-         * Limit
-         */
-        limit?: number;
-    };
-    url: '/api/v1/users/';
-};
-
-export type usersReadUsersErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type usersReadUsersError = usersReadUsersErrors[keyof usersReadUsersErrors];
-
-export type usersReadUsersResponses = {
-    /**
-     * Successful Response
-     */
-    200: UsersPublic;
-};
-
-export type usersReadUsersResponse = usersReadUsersResponses[keyof usersReadUsersResponses];
-
-export type usersCreateUserData = {
-    body: UserCreate;
-    path?: never;
-    query?: never;
-    url: '/api/v1/users/';
-};
-
-export type usersCreateUserErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type usersCreateUserError = usersCreateUserErrors[keyof usersCreateUserErrors];
-
-export type usersCreateUserResponses = {
-    /**
-     * Successful Response
-     */
-    200: UserPublic;
-};
-
-export type usersCreateUserResponse = usersCreateUserResponses[keyof usersCreateUserResponses];
-
-export type usersDeleteUserMeData = {
-    body?: never;
-    path?: never;
-    query?: never;
-    url: '/api/v1/users/me';
-};
-
-export type usersDeleteUserMeResponses = {
-    /**
-     * Successful Response
-     */
-    200: Message;
-};
-
-export type usersDeleteUserMeResponse = usersDeleteUserMeResponses[keyof usersDeleteUserMeResponses];
-
-export type usersReadUserMeData = {
-    body?: never;
-    path?: never;
-    query?: never;
-    url: '/api/v1/users/me';
-};
-
-export type usersReadUserMeResponses = {
-    /**
-     * Successful Response
-     */
-    200: UserPublic;
-};
-
-export type usersReadUserMeResponse = usersReadUserMeResponses[keyof usersReadUserMeResponses];
-
-export type usersUpdateUserMeData = {
-    body: UserUpdateMe;
-    path?: never;
-    query?: never;
-    url: '/api/v1/users/me';
-};
-
-export type usersUpdateUserMeErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type usersUpdateUserMeError = usersUpdateUserMeErrors[keyof usersUpdateUserMeErrors];
-
-export type usersUpdateUserMeResponses = {
-    /**
-     * Successful Response
-     */
-    200: UserPublic;
-};
-
-export type usersUpdateUserMeResponse = usersUpdateUserMeResponses[keyof usersUpdateUserMeResponses];
-
-export type usersUpdatePasswordMeData = {
-    body: UpdatePassword;
-    path?: never;
-    query?: never;
-    url: '/api/v1/users/me/password';
-};
-
-export type usersUpdatePasswordMeErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type usersUpdatePasswordMeError = usersUpdatePasswordMeErrors[keyof usersUpdatePasswordMeErrors];
-
-export type usersUpdatePasswordMeResponses = {
-    /**
-     * Successful Response
-     */
-    200: Message;
-};
-
-export type usersUpdatePasswordMeResponse = usersUpdatePasswordMeResponses[keyof usersUpdatePasswordMeResponses];
-
-export type usersRegisterUserData = {
-    body: UserRegister;
-    path?: never;
-    query?: never;
-    url: '/api/v1/users/signup';
-};
-
-export type usersRegisterUserErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type usersRegisterUserError = usersRegisterUserErrors[keyof usersRegisterUserErrors];
-
-export type usersRegisterUserResponses = {
-    /**
-     * Successful Response
-     */
-    200: UserPublic;
-};
-
-export type usersRegisterUserResponse = usersRegisterUserResponses[keyof usersRegisterUserResponses];
-
-export type usersDeleteUserData = {
-    body?: never;
-    path: {
-        /**
-         * User Id
-         */
-        user_id: string;
-    };
-    query?: never;
-    url: '/api/v1/users/{user_id}';
-};
-
-export type usersDeleteUserErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type usersDeleteUserError = usersDeleteUserErrors[keyof usersDeleteUserErrors];
-
-export type usersDeleteUserResponses = {
-    /**
-     * Successful Response
-     */
-    200: Message;
-};
-
-export type usersDeleteUserResponse = usersDeleteUserResponses[keyof usersDeleteUserResponses];
-
-export type usersReadUserByIdData = {
-    body?: never;
-    path: {
-        /**
-         * User Id
-         */
-        user_id: string;
-    };
-    query?: never;
-    url: '/api/v1/users/{user_id}';
-};
-
-export type usersReadUserByIdErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type usersReadUserByIdError = usersReadUserByIdErrors[keyof usersReadUserByIdErrors];
-
-export type usersReadUserByIdResponses = {
-    /**
-     * Successful Response
-     */
-    200: UserPublic;
-};
-
-export type usersReadUserByIdResponse = usersReadUserByIdResponses[keyof usersReadUserByIdResponses];
-
-export type usersUpdateUserData = {
-    body: UserUpdate;
-    path: {
-        /**
-         * User Id
-         */
-        user_id: string;
-    };
-    query?: never;
-    url: '/api/v1/users/{user_id}';
-};
-
-export type usersUpdateUserErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type usersUpdateUserError = usersUpdateUserErrors[keyof usersUpdateUserErrors];
-
-export type usersUpdateUserResponses = {
-    /**
-     * Successful Response
-     */
-    200: UserPublic;
-};
-
-export type usersUpdateUserResponse = usersUpdateUserResponses[keyof usersUpdateUserResponses];
-
-export type utilsTestEmailData = {
-    body?: never;
-    path?: never;
-    query: {
-        /**
-         * Email To
-         */
-        email_to: string;
-    };
-    url: '/api/v1/utils/test-email/';
-};
-
-export type utilsTestEmailErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type utilsTestEmailError = utilsTestEmailErrors[keyof utilsTestEmailErrors];
-
-export type utilsTestEmailResponses = {
-    /**
-     * Successful Response
-     */
-    201: Message;
-};
-
-export type utilsTestEmailResponse = utilsTestEmailResponses[keyof utilsTestEmailResponses];
-
-export type utilsHealthCheckData = {
-    body?: never;
-    path?: never;
-    query?: never;
-    url: '/api/v1/utils/health-check/';
-};
-
-export type utilsHealthCheckResponses = {
-    /**
-     * Response Utils-Health Check
+     * Response Agents-Get Agent
      *
      * Successful Response
      */
-    200: boolean;
+    200: {
+        [key: string]: unknown;
+    };
 };
 
-export type utilsHealthCheckResponse = utilsHealthCheckResponses[keyof utilsHealthCheckResponses];
+export type agentsGetAgentResponse = agentsGetAgentResponses[keyof agentsGetAgentResponses];
+
+export type agentsSendCommandData = {
+    /**
+     * Command
+     */
+    body: {
+        [key: string]: unknown;
+    };
+    path: {
+        /**
+         * Agent Id
+         */
+        agent_id: string;
+    };
+    query?: never;
+    url: '/api/v1/agents/{agent_id}/command';
+};
+
+export type agentsSendCommandErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type agentsSendCommandError = agentsSendCommandErrors[keyof agentsSendCommandErrors];
+
+export type agentsSendCommandResponses = {
+    /**
+     * Response Agents-Send Command
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type agentsSendCommandResponse = agentsSendCommandResponses[keyof agentsSendCommandResponses];
+
+export type metricsMetricsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/metrics';
+};
+
+export type metricsMetricsResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type serverInstancesListServerInstancesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/server-instances';
+};
+
+export type serverInstancesListServerInstancesResponses = {
+    /**
+     * Successful Response
+     */
+    200: ServerInstanceListResponse;
+};
+
+export type serverInstancesListServerInstancesResponse = serverInstancesListServerInstancesResponses[keyof serverInstancesListServerInstancesResponses];
+
+export type serverInstancesGetServerInstanceData = {
+    body?: never;
+    path: {
+        /**
+         * Server Id
+         */
+        server_id: string;
+    };
+    query?: never;
+    url: '/api/v1/server-instances/{server_id}';
+};
+
+export type serverInstancesGetServerInstanceErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type serverInstancesGetServerInstanceError = serverInstancesGetServerInstanceErrors[keyof serverInstancesGetServerInstanceErrors];
+
+export type serverInstancesGetServerInstanceResponses = {
+    /**
+     * Successful Response
+     */
+    200: ServerInstanceResponse;
+};
+
+export type serverInstancesGetServerInstanceResponse = serverInstancesGetServerInstanceResponses[keyof serverInstancesGetServerInstanceResponses];
+
+export type serverInstancesStartServerData = {
+    body: StartServerRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/server-instances/start';
+};
+
+export type serverInstancesStartServerErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type serverInstancesStartServerError = serverInstancesStartServerErrors[keyof serverInstancesStartServerErrors];
+
+export type serverInstancesStartServerResponses = {
+    /**
+     * Response Server-Instances-Start Server
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type serverInstancesStartServerResponse = serverInstancesStartServerResponses[keyof serverInstancesStartServerResponses];
+
+export type serverInstancesStopServerData = {
+    body?: never;
+    path: {
+        /**
+         * Server Id
+         */
+        server_id: string;
+    };
+    query?: never;
+    url: '/api/v1/server-instances/{server_id}/stop';
+};
+
+export type serverInstancesStopServerErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type serverInstancesStopServerError = serverInstancesStopServerErrors[keyof serverInstancesStopServerErrors];
+
+export type serverInstancesStopServerResponses = {
+    /**
+     * Response Server-Instances-Stop Server
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: string;
+    };
+};
+
+export type serverInstancesStopServerResponse = serverInstancesStopServerResponses[keyof serverInstancesStopServerResponses];
 
 export type modelsReadModelsData = {
     body?: never;
@@ -2074,158 +1739,23 @@ export type huggingfaceGetParameterCountResponses = {
 
 export type huggingfaceGetParameterCountResponse = huggingfaceGetParameterCountResponses[keyof huggingfaceGetParameterCountResponses];
 
-export type agentsRegisterAgentData = {
-    body: AgentRegisterRequest;
-    path?: never;
-    query?: never;
-    url: '/api/v1/agents/register';
-};
-
-export type agentsRegisterAgentErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type agentsRegisterAgentError = agentsRegisterAgentErrors[keyof agentsRegisterAgentErrors];
-
-export type agentsRegisterAgentResponses = {
-    /**
-     * Successful Response
-     */
-    200: AgentRegisterResponse;
-};
-
-export type agentsRegisterAgentResponse = agentsRegisterAgentResponses[keyof agentsRegisterAgentResponses];
-
-export type agentsListAgentsData = {
+export type utilsHealthCheckData = {
     body?: never;
     path?: never;
     query?: never;
-    url: '/api/v1/agents';
+    url: '/api/v1/utils/health-check/';
 };
 
-export type agentsListAgentsResponses = {
+export type utilsHealthCheckResponses = {
     /**
-     * Successful Response
-     */
-    200: AgentListResponse;
-};
-
-export type agentsListAgentsResponse = agentsListAgentsResponses[keyof agentsListAgentsResponses];
-
-export type agentsGetAgentData = {
-    body?: never;
-    path: {
-        /**
-         * Agent Id
-         */
-        agent_id: string;
-    };
-    query?: never;
-    url: '/api/v1/agents/{agent_id}';
-};
-
-export type agentsGetAgentErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type agentsGetAgentError = agentsGetAgentErrors[keyof agentsGetAgentErrors];
-
-export type agentsGetAgentResponses = {
-    /**
-     * Response Agents-Get Agent
+     * Response Utils-Health Check
      *
      * Successful Response
      */
-    200: {
-        [key: string]: unknown;
-    };
+    200: boolean;
 };
 
-export type agentsGetAgentResponse = agentsGetAgentResponses[keyof agentsGetAgentResponses];
-
-export type agentsSendCommandData = {
-    /**
-     * Command
-     */
-    body: {
-        [key: string]: unknown;
-    };
-    path: {
-        /**
-         * Agent Id
-         */
-        agent_id: string;
-    };
-    query?: never;
-    url: '/api/v1/agents/{agent_id}/command';
-};
-
-export type agentsSendCommandErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type agentsSendCommandError = agentsSendCommandErrors[keyof agentsSendCommandErrors];
-
-export type agentsSendCommandResponses = {
-    /**
-     * Response Agents-Send Command
-     *
-     * Successful Response
-     */
-    200: {
-        [key: string]: unknown;
-    };
-};
-
-export type agentsSendCommandResponse = agentsSendCommandResponses[keyof agentsSendCommandResponses];
-
-export type metricsMetricsData = {
-    body?: never;
-    path?: never;
-    query?: never;
-    url: '/api/v1/metrics';
-};
-
-export type metricsMetricsResponses = {
-    /**
-     * Successful Response
-     */
-    200: unknown;
-};
-
-export type privateCreateUserData = {
-    body: PrivateUserCreate;
-    path?: never;
-    query?: never;
-    url: '/api/v1/private/users/';
-};
-
-export type privateCreateUserErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type privateCreateUserError = privateCreateUserErrors[keyof privateCreateUserErrors];
-
-export type privateCreateUserResponses = {
-    /**
-     * Successful Response
-     */
-    200: UserPublic;
-};
-
-export type privateCreateUserResponse = privateCreateUserResponses[keyof privateCreateUserResponses];
+export type utilsHealthCheckResponse = utilsHealthCheckResponses[keyof utilsHealthCheckResponses];
 
 export type v1ModelsListModelsData = {
     body?: never;

@@ -1,16 +1,14 @@
 import { useSuspenseQuery } from "@tanstack/react-query"
 import { createFileRoute } from "@tanstack/react-router"
-import { Search, CloudDownload } from "lucide-react"
+import { CloudDownload, Plus, Search } from "lucide-react"
 import { Suspense, useState } from "react"
-
 import { ModelsService } from "@/client"
 import { DataTable } from "@/components/Common/DataTable"
-import { columns } from "@/components/Models/columns"
-import PendingModels from "@/components/Pending/PendingModels"
 import { AddModel } from "@/components/Models/AddModel"
+import { columns } from "@/components/Models/columns"
 import { SearchHuggingFace } from "@/components/Models/SearchHuggingFace"
+import PendingModels from "@/components/Pending/PendingModels"
 import { Button } from "@/components/ui/button"
-import { Plus } from "lucide-react"
 
 function getModelsQueryOptions() {
   return {

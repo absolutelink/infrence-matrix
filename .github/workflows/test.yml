@@ -55,7 +55,6 @@ jobs:
         working-directory: ./backend
         env:
           DATABASE_URL: postgresql+psycopg://inference:testpassword@localhost:5432/inference_matrix_test
-          SECRET_KEY: testsecretkeyfortesting12345678901234567890
         run: |
           uv run pytest tests/ -v --tb=short
 

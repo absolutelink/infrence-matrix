@@ -3,7 +3,6 @@ from pathlib import Path
 from typing import Literal, Self
 
 from pydantic import (
-    EmailStr,
     Field,
     HttpUrl,
     PostgresDsn,
@@ -62,13 +61,6 @@ class Settings(BaseSettings):
             path=self.POSTGRES_DB,
         )
 
-    # Authentication
-    API_KEY_AUTH_ENABLED: bool = False
-    ADMIN_JWT_SECRET: str = Field(default="changethis", min_length=1)
-    API_KEY_HEADER: str = "Authorization"
-    SECRET_KEY: str = Field(default="changethis", min_length=32)
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 8
-
     # Storage Paths
     MODELS_PATH: str = "/models"
     FILES_PATH: str = "/files"
@@ -92,33 +84,6 @@ class Settings(BaseSettings):
     AUDIO_MAX_FILE_SIZE: int = 25
     AUDIO_MAX_DURATION: int = 60
 
-    # Email (for password resets, etc.)
-    SMTP_TLS: bool = True
-    SMTP_SSL: bool = False
-    SMTP_PORT: int = 587
-    SMTP_HOST: str | None = None
-    SMTP_USER: str | None = None
-    SMTP_PASSWORD: str | None = None
-    EMAILS_FROM_EMAIL: EmailStr | None = None
-    EMAILS_FROM_NAME: str | None = None
-
-    @model_validator(mode="after")
-    def _set_default_emails_from(self) -> Self:
-        if not self.EMAILS_FROM_NAME:
-            self.EMAILS_FROM_NAME = self.PROJECT_NAME
-        return self
-
-    EMAIL_RESET_TOKEN_EXPIRE_HOURS: int = 48
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def emails_enabled(self) -> bool:
-        return bool(self.SMTP_HOST and self.EMAILS_FROM_EMAIL)
-
-    EMAIL_TEST_USER: EmailStr = "test@example.com"
-    FIRST_SUPERUSER: EmailStr = Field(default="admin@example.com")
-    FIRST_SUPERUSER_PASSWORD: str = Field(default="changethis", min_length=8)
-
     # Sentry
     SENTRY_DSN: HttpUrl | None = None
 
@@ -136,15 +101,8 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _enforce_non_default_secrets(self) -> Self:
         if self.FASTAPI_ENV == "production":
-            self._check_default_secret("SECRET_KEY", self.SECRET_KEY)
             self._check_default_secret(
                 "POSTGRES_PASSWORD", self.POSTGRES_PASSWORD
-            )
-            self._check_default_secret(
-                "ADMIN_JWT_SECRET", self.ADMIN_JWT_SECRET
-            )
-            self._check_default_secret(
-                "FIRST_SUPERUSER_PASSWORD", self.FIRST_SUPERUSER_PASSWORD
             )
         return self
 

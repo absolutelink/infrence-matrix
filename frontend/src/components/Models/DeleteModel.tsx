@@ -1,6 +1,7 @@
-import { useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
+import { useState } from "react"
 import { ModelsService } from "@/client"
+import { Button } from "@/components/ui/button"
 import {
   Dialog,
   DialogContent,
@@ -9,7 +10,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { Button } from "@/components/ui/button"
 import useCustomToast from "@/hooks/useCustomToast"
 
 interface DeleteModelProps {

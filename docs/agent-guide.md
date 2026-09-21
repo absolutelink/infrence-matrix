@@ -85,7 +85,6 @@ docker run --gpus all \
 | `AGENT_ID` | Unique agent identifier | Yes | - |
 | `AGENT_NAME` | Human-readable name | No | `inference-agent` |
 | `FRONTEND_URL` | Frontend Service URL | Yes | - |
-| `FRONTEND_API_KEY` | API key for authentication | No | `None` |
 | `LLAMA_SERVER_PATH` | Path to llama-server binary | No | `/usr/local/bin/llama-server` |
 | `DEFAULT_GPU_LAYERS` | Default GPU layers for models | No | `35` |
 | `DEFAULT_CONTEXT_SIZE` | Default context size | No | `4096` |
@@ -503,14 +502,6 @@ journalctl -u inference-matrix-agent -f
 ```
 
 ## Security
-
-### API Key Authentication
-
-Enable authentication with Frontend:
-
-```bash
-export FRONTEND_API_KEY=your_secret_key
-```
 
 ### Network Isolation
 

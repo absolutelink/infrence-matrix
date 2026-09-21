@@ -149,7 +149,6 @@ class Settings(BaseSettings):
     
     # Frontend connection
     FRONTEND_URL: str
-    FRONTEND_API_KEY: str | None = None  # Optional auth
     
     # llama.cpp
     LLAMA_SERVER_PATH: str = "/usr/local/bin/llama-server"

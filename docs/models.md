@@ -10,8 +10,6 @@ This document describes all PostgreSQL database models used by Inference Matrix.
 ├─────────────────────┤
 │    Conversation     │  Tree-structured conversation history
 ├─────────────────────┤
-│      APIKey         │  API authentication keys
-├─────────────────────┤
 │   PromptCache       │  Prompt cache metadata
 ├─────────────────────┤
 │   DownloadJob       │  Model download tracking
@@ -148,59 +146,6 @@ Conversation 1 (root)
 └── Conversation 3 (child of 1)
 ```
 
----
-
-## APIKey
-
-API authentication keys for OpenAI-compatible authentication.
-
-```python
-class APIKey(SQLModel, table=True):
-    __tablename__ = "api_keys"
-    
-    # Primary Key
-    id: UUID = Field(default_factory=uuid4, primary_key=True)
-    
-    # Key Info
-    name: str = Field(max_length=255)  # User-friendly name
-    key_hash: str = Field(max_length=512, index=True)  # Hashed key
-    key_prefix: str = Field(max_length=10)  # First 10 chars for identification
-    
-    # Permissions
-    permissions: list[str] = Field(
-        default_factory=lambda: ["chat", "embeddings", "files"],
-        sa_column=Column(JSON)
-    )
-    # Allowed: "chat", "completions", "embeddings", "files", "batches", "audio"
-    
-    # Limits
-    rate_limit_requests: Optional[int]  # Requests per minute
-    rate_limit_tokens: Optional[int]  # Tokens per minute
-    
-    # Status
-    is_active: bool = True
-    last_used_at: Optional[datetime]
-    expires_at: Optional[datetime]
-    
-    # Timestamps
-    created_at: datetime
-    created_by: UUID  # User ID (for multi-user future)
-    
-    # Usage Tracking
-    total_requests: int = 0
-    total_tokens: int = 0
-```
-
-**Indexes:**
-- `idx_api_keys_key_hash` - Fast key lookup
-- `idx_api_keys_is_active` - Filter active keys
-
-**Security:**
-- Keys are hashed using argon2
-- Only key prefix stored in plaintext
-- Full key shown only once on creation
-
----
 
 ## PromptCache
 
@@ -573,12 +518,8 @@ class File(SQLModel, table=True):
                └──────────────┘
 
 ┌──────────────┐       ┌──────────────┐
-│    APIKey    │       │     File     │
+│     File     │       │   AudioJob   │
 └──────────────┘       └──────────────┘
-                              │
-                              ├──────►┌──────────────┐
-                              │       │   AudioJob   │
-                              │       └──────────────┘
                               │
                               └──────►┌──────────────┐
                                       │   BatchJob   │

@@ -1,5 +1,5 @@
-import { ColumnDef } from "@tanstack/react-table"
-import { type Model } from "@/client"
+import type { ColumnDef } from "@tanstack/react-table"
+import type { Model } from "@/client"
 import { formatBytes } from "@/utils"
 import ModelActionsMenu from "./ModelActionsMenu"
 

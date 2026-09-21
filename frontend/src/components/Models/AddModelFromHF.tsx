@@ -1,6 +1,7 @@
-import { useState, useEffect } from "react"
 import { useMutation, useQueryClient } from "@tanstack/react-query"
-
+import { useEffect, useState } from "react"
+import { ModelsService } from "@/client"
+import { Button } from "@/components/ui/button"
 import {
   Dialog,
   DialogContent,
@@ -8,7 +9,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { LoadingButton } from "@/components/ui/loading-button"
 import {
@@ -18,7 +18,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { ModelsService } from "@/client"
 import useCustomToast from "@/hooks/useCustomToast"
 
 interface HuggingFaceModel {
@@ -54,25 +53,25 @@ const groupSplitFiles = (files: GGUFFile[]): GGUFFileGroup[] => {
   const groups = new Map<string, GGUFFileGroup>()
   const singleFiles: GGUFFileGroup[] = []
 
-  files.forEach(file => {
-    const filename = file.path.split('/').pop() || file.path
+  files.forEach((file) => {
+    const filename = file.path.split("/").pop() || file.path
     const match = filename.match(splitPattern)
-    
+
     if (match) {
       const [, baseName, , totalParts] = match
       const groupId = `${baseName}-${totalParts}`
-      
+
       if (!groups.has(groupId)) {
         groups.set(groupId, {
           id: groupId,
           name: `${baseName} (${totalParts} parts)`,
           files: [],
           totalSize: 0,
-          fileCount: parseInt(totalParts),
+          fileCount: parseInt(totalParts, 10),
           isSplit: true,
         })
       }
-      
+
       const group = groups.get(groupId)!
       group.files.push(file)
       group.totalSize += file.size
@@ -97,24 +96,21 @@ export function AddModelFromHF({ model, onClose }: AddModelFromHFProps) {
   const [fileGroups, setFileGroups] = useState<GGUFFileGroup[]>([])
   const [selectedGroup, setSelectedGroup] = useState<string>("")
   const [isLoadingFiles, setIsLoadingFiles] = useState(false)
-  const [parameterCount, setParameterCount] = useState<number | undefined>(undefined)
+  const [parameterCount, setParameterCount] = useState<number | undefined>(
+    undefined,
+  )
 
   // Fetch GGUF files for this model and group split files
   useEffect(() => {
     const fetchFiles = async () => {
       setIsLoadingFiles(true)
       try {
-        const token = localStorage.getItem("access_token")
-        const baseUrl = (window as any).APP_CONFIG?.API_URL || 
-                        import.meta.env.VITE_API_URL || 
-                        window.location.origin
+        const baseUrl =
+          (window as any).APP_CONFIG?.API_URL ||
+          import.meta.env.VITE_API_URL ||
+          window.location.origin
         const response = await fetch(
           `${baseUrl}/api/v1/huggingface/models/files?repo_id=${encodeURIComponent(model.modelId)}`,
-          {
-            headers: {
-              "Authorization": `Bearer ${token}`,
-            },
-          }
         )
         if (response.ok) {
           const data: GGUFFile[] = await response.json()
@@ -134,17 +130,12 @@ export function AddModelFromHF({ model, onClose }: AddModelFromHFProps) {
     // Fetch parameter count from HuggingFace config
     const fetchParams = async () => {
       try {
-        const token = localStorage.getItem("access_token")
-        const baseUrl = (window as any).APP_CONFIG?.API_URL || 
-                        import.meta.env.VITE_API_URL || 
-                        window.location.origin
+        const baseUrl =
+          (window as any).APP_CONFIG?.API_URL ||
+          import.meta.env.VITE_API_URL ||
+          window.location.origin
         const response = await fetch(
           `${baseUrl}/api/v1/huggingface/models/params?repo_id=${encodeURIComponent(model.modelId)}`,
-          {
-            headers: {
-              "Authorization": `Bearer ${token}`,
-            },
-          }
         )
         if (response.ok) {
           const data = await response.json()
@@ -181,31 +172,39 @@ export function AddModelFromHF({ model, onClose }: AddModelFromHFProps) {
       return
     }
 
-    const group = fileGroups.find(g => g.id === selectedGroup)
+    const group = fileGroups.find((g) => g.id === selectedGroup)
     if (!group) return
 
     // For split models, use the first file's name pattern
     const primaryFile = group.files[0]
-    const baseName = group.isSplit ? group.name.split(' (')[0] : primaryFile.path.split('/').pop()
-    
+    const baseName = group.isSplit
+      ? group.name.split(" (")[0]
+      : primaryFile.path.split("/").pop()
+
     const modelData: any = {
-      name: `${model.modelId}/${baseName}${group.isSplit ? ' (split)' : ''}`,
+      name: `${model.modelId}/${baseName}${group.isSplit ? " (split)" : ""}`,
       path: `/models/${model.modelId}/${baseName}`,
       size_bytes: group.totalSize,
       architecture: "llama",
-      quantization: baseName?.includes("Q4_K_M") ? "Q4_K_M" : 
-                   baseName?.includes("Q5_K_M") ? "Q5_K_M" : 
-                   baseName?.includes("Q8_0") ? "Q8_0" : "unknown",
+      quantization: baseName?.includes("Q4_K_M")
+        ? "Q4_K_M"
+        : baseName?.includes("Q5_K_M")
+          ? "Q5_K_M"
+          : baseName?.includes("Q8_0")
+            ? "Q8_0"
+            : "unknown",
       supports_embeddings: false,
       supports_vision: false,
       context_length: 4096,
-      tags: ["huggingface", model.modelId.split('/')[0]],
+      tags: ["huggingface", model.modelId.split("/")[0]],
       source: "huggingface",
       source_repo_id: model.modelId,
       source_url: `https://huggingface.co/${model.modelId}`,
-      source_file: group.isSplit ? JSON.stringify(group.files.map(f => f.path)) : primaryFile.path,
+      source_file: group.isSplit
+        ? JSON.stringify(group.files.map((f) => f.path))
+        : primaryFile.path,
     }
-    
+
     if (group.totalSize) modelData.size_bytes = group.totalSize
     // Use actual parameter count from HuggingFace if available
     if (parameterCount) {
@@ -253,7 +252,9 @@ export function AddModelFromHF({ model, onClose }: AddModelFromHFProps) {
                 <SelectContent>
                   {fileGroups.map((group) => (
                     <SelectItem key={group.id} value={group.id}>
-                      {group.name} ({(group.totalSize / 1024 / 1024 / 1024).toFixed(2)} GB{group.isSplit ? `, ${group.fileCount} files` : ''})
+                      {group.name} (
+                      {(group.totalSize / 1024 / 1024 / 1024).toFixed(2)} GB
+                      {group.isSplit ? `, ${group.fileCount} files` : ""})
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -274,7 +275,11 @@ export function AddModelFromHF({ model, onClose }: AddModelFromHFProps) {
               loading={createModelMutation.isPending || !selectedGroup}
               disabled={!selectedGroup}
             >
-              Add Model{selectedGroup && fileGroups.find(g => g.id === selectedGroup)?.isSplit ? " (Multiple Files)" : ""}
+              Add Model
+              {selectedGroup &&
+              fileGroups.find((g) => g.id === selectedGroup)?.isSplit
+                ? " (Multiple Files)"
+                : ""}
             </LoadingButton>
           </div>
         </div>

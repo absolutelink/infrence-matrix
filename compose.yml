@@ -25,8 +25,6 @@ services:
       - "8000:8000"  # Both WebUI and API
     environment:
       - DATABASE_URL=postgresql+psycopg://inference:${POSTGRES_PASSWORD:-changethis}@postgres/inference_matrix
-      - SECRET_KEY=${SECRET_KEY:-changethisverylongsecretkey}
-      - API_KEY_AUTH_ENABLED=${API_KEY_AUTH_ENABLED:-false}
       - AGENT_DISCOVERY_ENABLED=true
     volumes:
       - ./models:/models:ro

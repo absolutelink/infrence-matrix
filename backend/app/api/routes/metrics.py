@@ -1,7 +1,13 @@
 """Prometheus metrics endpoint."""
 
 from fastapi import APIRouter, Response
-from prometheus_client import generate_latest, CONTENT_TYPE_LATEST, Gauge, Counter, Histogram
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
+)
 
 router = APIRouter(tags=["metrics"])
 
@@ -66,7 +72,7 @@ def update_agent_metrics(agents: list) -> None:
     for agent in agents:
         status = agent.get("status", "unknown")
         status_counts[status] = status_counts.get(status, 0) + 1
-    
+
     for status, count in status_counts.items():
         AGENT_COUNT.labels(status=status).set(count)
 
@@ -93,12 +99,12 @@ def record_inference_request(
         agent_id=agent_id,
         status=status
     ).inc()
-    
+
     INFERENCE_LATENCY.labels(
         model=model,
         agent_id=agent_id
     ).observe(latency)
-    
+
     if tokens > 0:
         TOKENS_GENERATED.labels(
             model=model,

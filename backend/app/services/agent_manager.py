@@ -1,26 +1,25 @@
 """Manages Agent registration, discovery, and WebSocket connections."""
 
 import asyncio
-from typing import Dict, Optional
 from datetime import datetime
 
 import httpx
-from websockets.client import connect, WebSocketClientProtocol
+from websockets.client import WebSocketClientProtocol, connect
 
 from app.core.config import settings
-from app.models import Agent
 from app.core.logging import logger
 from app.db.session import AsyncSessionMaker
+from app.models import Agent
 
 
 class AgentManager:
     """Manages Agent lifecycle and WebSocket connections."""
 
     def __init__(self) -> None:
-        self.agents: Dict[str, Agent] = {}  # agent_id -> Agent
-        self.ws_connections: Dict[str, WebSocketClientProtocol] = {}
-        self._reconnect_tasks: Dict[str, asyncio.Task] = {}
-        self._event_buffers: Dict[str, list] = {}
+        self.agents: dict[str, Agent] = {}  # agent_id -> Agent
+        self.ws_connections: dict[str, WebSocketClientProtocol] = {}
+        self._reconnect_tasks: dict[str, asyncio.Task] = {}
+        self._event_buffers: dict[str, list] = {}
 
     async def register_agent(self, agent_data: dict) -> Agent:
         """Register an Agent with the Frontend."""
@@ -168,8 +167,9 @@ class AgentManager:
         """Handle server.started event."""
         # Update ServerInstance in database
         async with AsyncSessionMaker() as session:
-            from app.models import ServerInstance
             from sqlalchemy import select
+
+            from app.models import ServerInstance
 
             server_id = data.get("server_id")
             if server_id:
@@ -189,8 +189,9 @@ class AgentManager:
     async def _handle_server_stopped(self, agent_id: str, data: dict) -> None:
         """Handle server.stopped event."""
         async with AsyncSessionMaker() as session:
-            from app.models import ServerInstance
             from sqlalchemy import select
+
+            from app.models import ServerInstance
 
             server_id = data.get("server_id")
             if server_id:
@@ -221,8 +222,9 @@ class AgentManager:
         """Handle download.progress event."""
         # Update DownloadJob in database
         async with AsyncSessionMaker() as session:
-            from app.models import DownloadJob
             from sqlalchemy import select
+
+            from app.models import DownloadJob
 
             job_id = data.get("job_id")
             if job_id:
@@ -243,7 +245,7 @@ class AgentManager:
         agent_id: str,
         method: str,
         path: str,
-        json: Optional[dict] = None,
+        json: dict | None = None,
         timeout: float = 30.0,
     ) -> dict:
         """Send HTTP request to Agent."""
@@ -272,7 +274,7 @@ class AgentManager:
                 logger.error(f"Error sending to agent {agent_id}: {e}")
                 raise
 
-    async def get_agent(self, agent_id: str) -> Optional[Agent]:
+    async def get_agent(self, agent_id: str) -> Agent | None:
         """Get agent by ID."""
         return self.agents.get(agent_id)
 
@@ -295,7 +297,7 @@ class AgentManager:
     async def cleanup_offline_agents(self) -> None:
         """Mark agents as offline if not seen recently."""
         async with AsyncSessionMaker() as session:
-            from sqlalchemy import select, update
+            from sqlalchemy import update
 
             # Find agents not seen in last 5 minutes
             cutoff = datetime.utcnow()

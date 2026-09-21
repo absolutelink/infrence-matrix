@@ -11,96 +11,11 @@ def get_datetime_utc() -> datetime:
 
 
 # ============================================================================
-# Legacy Models - For backward compatibility with existing test infrastructure
+# Message - Generic message response
 # ============================================================================
-class UserBase(SQLModel):
-    """Base user model."""
-    email: str = Field(unique=True, index=True, max_length=255)
-    is_active: bool = True
-    is_superuser: bool = False
-    full_name: str | None = None
-
-
-class UserCreate(UserBase):
-    """User creation model."""
-    password: str = Field(min_length=8, max_length=40)
-
-
-class UserUpdate(SQLModel):
-    """User update model."""
-    email: str | None = None
-    password: str | None = Field(default=None, min_length=8, max_length=40)
-    full_name: str | None = None
-    is_active: bool | None = None
-
-
-class User(UserBase, table=True):
-    """User database model."""
-    __tablename__ = "user"
-    id: uuid.UUID = Field(
-        default_factory=uuid.uuid4,
-        primary_key=True,
-        sa_type=UUID(as_uuid=True),  # type: ignore[call-arg,arg-type]
-    )
-    hashed_password: str
-    created_at: datetime = Field(default_factory=get_datetime_utc)
-
-
-class TokenPayload(SQLModel):
-    """JWT token payload."""
-    sub: str | None = None
-    exp: int | None = None
-    type: str | None = None
-
-
 class Message(SQLModel):
     """Generic message response."""
     message: str
-
-
-class UserPublic(UserBase):
-    """Public user model."""
-    id: uuid.UUID
-    created_at: datetime
-
-
-class UsersPublic(SQLModel):
-    """List of users response."""
-    data: list[UserPublic]
-    count: int
-
-
-class Token(SQLModel):
-    """JWT token response."""
-    access_token: str
-    token_type: str = "bearer"
-
-
-class NewPassword(SQLModel):
-    """New password request."""
-    token: str
-    new_password: str = Field(min_length=8, max_length=40)
-
-
-class UserRegister(SQLModel):
-    """User registration model."""
-    email: str = Field(unique=True, index=True, max_length=255)
-    password: str = Field(min_length=8, max_length=40)
-    full_name: str | None = None
-    is_active: bool = True
-
-
-class UserUpdateMe(SQLModel):
-    """User update me model."""
-    full_name: str | None = None
-    email: str | None = None
-    password: str | None = Field(default=None, min_length=8, max_length=40)
-
-
-class UpdatePassword(SQLModel):
-    """Update password model."""
-    current_password: str = Field(min_length=8, max_length=40)
-    new_password: str = Field(min_length=8, max_length=40)
 
 
 # ============================================================================
@@ -132,7 +47,7 @@ class Agent(SQLModel, table=True):
     created_at: datetime = Field(default_factory=get_datetime_utc)
 
     # Relationships
-    servers: list["ServerInstance"] = Relationship(
+    servers: list[ServerInstance] = Relationship(
         back_populates="agent",
         sa_relationship_kwargs={"lazy": "selectin"},
     )
@@ -179,15 +94,15 @@ class Model(SQLModel, table=True):
     downloaded_at: datetime = Field(default_factory=get_datetime_utc)
     updated_at: datetime | None = None
 
-    conversations: list["Conversation"] = Relationship(
+    conversations: list[Conversation] = Relationship(
         back_populates="model",
         sa_relationship_kwargs={"lazy": "selectin"},
     )
-    server_instances: list["ServerInstance"] = Relationship(
+    server_instances: list[ServerInstance] = Relationship(
         back_populates="model",
         sa_relationship_kwargs={"lazy": "selectin"},
     )
-    cache_entries: list["PromptCache"] = Relationship(
+    cache_entries: list[PromptCache] = Relationship(
         back_populates="model",
         sa_relationship_kwargs={"lazy": "selectin"},
     )
@@ -290,60 +205,21 @@ class Conversation(SQLModel, table=True):
     created_at: datetime = Field(default_factory=get_datetime_utc)
     completed_at: datetime | None = None
 
-    model: "Model" = Relationship(
+    model: Model = Relationship(
         back_populates="conversations",
         sa_relationship_kwargs={"lazy": "selectin"},
     )
-    children: list["Conversation"] = Relationship(
+    children: list[Conversation] = Relationship(
         back_populates="parent",
         sa_relationship_kwargs={
             "lazy": "selectin",
             "remote_side": "Conversation.id",
         },
     )
-    parent: "Conversation" = Relationship(
+    parent: Conversation = Relationship(
         back_populates="children",
         sa_relationship_kwargs={"lazy": "selectin"},
     )
-
-
-# ============================================================================
-# APIKey - API authentication keys
-# ============================================================================
-class APIKey(SQLModel, table=True):
-    __tablename__ = "api_keys"
-    __table_args__ = (
-        Index("idx_api_keys_key_hash", "key_hash"),
-        Index("idx_api_keys_is_active", "is_active"),
-    )
-
-    id: uuid.UUID = Field(
-        default_factory=uuid.uuid4,
-        primary_key=True,
-        sa_type=UUID(as_uuid=True),  # type: ignore[call-arg,arg-type]
-    )
-
-    name: str = Field(max_length=255)
-    key_hash: str = Field(max_length=512, index=True)
-    key_prefix: str = Field(max_length=10)
-
-    permissions: list[str] = Field(
-        default_factory=lambda: ["chat", "embeddings", "files"],
-        sa_column=Column(JSON),
-    )
-
-    rate_limit_requests: int | None = None
-    rate_limit_tokens: int | None = None
-
-    is_active: bool = True
-    last_used_at: datetime | None = None
-    expires_at: datetime | None = None
-
-    created_at: datetime = Field(default_factory=get_datetime_utc)
-    created_by: uuid.UUID
-
-    total_requests: int = 0
-    total_tokens: int = 0
 
 
 # ============================================================================
@@ -396,7 +272,7 @@ class PromptCache(SQLModel, table=True):
     )
     cache_path: str
 
-    model: "Model" = Relationship(
+    model: Model = Relationship(
         back_populates="cache_entries",
         sa_relationship_kwargs={"lazy": "selectin"},
     )
@@ -511,11 +387,11 @@ class ServerInstance(SQLModel, table=True):
     )
     proxy_url: str | None = None
 
-    agent: "Agent" = Relationship(
+    agent: Agent = Relationship(
         back_populates="servers",
         sa_relationship_kwargs={"lazy": "selectin"},
     )
-    model: "Model" = Relationship(
+    model: Model = Relationship(
         back_populates="server_instances",
         sa_relationship_kwargs={"lazy": "selectin"},
     )
@@ -572,21 +448,21 @@ class AudioJob(SQLModel, table=True):
 
     processing_time_ms: int | None = None
 
-    input_file: "File" = Relationship(
+    input_file: File = Relationship(
         back_populates="audio_jobs",
         sa_relationship_kwargs={
             "lazy": "selectin",
             "foreign_keys": "[AudioJob.input_file_id]",
         },
     )
-    output_file: "File" = Relationship(
+    output_file: File = Relationship(
         back_populates="audio_output_jobs",
         sa_relationship_kwargs={
             "lazy": "selectin",
             "foreign_keys": "[AudioJob.output_file_id]",
         },
     )
-    model: "Model" = Relationship(
+    model: Model = Relationship(
         sa_relationship_kwargs={"lazy": "selectin"},
     )
 
@@ -640,21 +516,21 @@ class BatchJob(SQLModel, table=True):
 
     error_message: str | None = None
 
-    input_file: "File" = Relationship(
+    input_file: File = Relationship(
         back_populates="batch_jobs",
         sa_relationship_kwargs={
             "lazy": "selectin",
             "foreign_keys": "[BatchJob.input_file_id]",
         },
     )
-    output_file: "File" = Relationship(
+    output_file: File = Relationship(
         back_populates="batch_output_jobs",
         sa_relationship_kwargs={
             "lazy": "selectin",
             "foreign_keys": "[BatchJob.output_file_id]",
         },
     )
-    results_file: "File" = Relationship(
+    results_file: File = Relationship(
         back_populates="batch_results_jobs",
         sa_relationship_kwargs={
             "lazy": "selectin",
@@ -699,35 +575,35 @@ class File(SQLModel, table=True):
     created_at: datetime = Field(default_factory=get_datetime_utc)
     expires_at: datetime | None = None
 
-    audio_jobs: list["AudioJob"] = Relationship(
+    audio_jobs: list[AudioJob] = Relationship(
         back_populates="input_file",
         sa_relationship_kwargs={
             "lazy": "selectin",
             "foreign_keys": "AudioJob.input_file_id",
         },
     )
-    audio_output_jobs: list["AudioJob"] = Relationship(
+    audio_output_jobs: list[AudioJob] = Relationship(
         back_populates="output_file",
         sa_relationship_kwargs={
             "lazy": "selectin",
             "foreign_keys": "AudioJob.output_file_id",
         },
     )
-    batch_jobs: list["BatchJob"] = Relationship(
+    batch_jobs: list[BatchJob] = Relationship(
         back_populates="input_file",
         sa_relationship_kwargs={
             "lazy": "selectin",
             "foreign_keys": "BatchJob.input_file_id",
         },
     )
-    batch_output_jobs: list["BatchJob"] = Relationship(
+    batch_output_jobs: list[BatchJob] = Relationship(
         back_populates="output_file",
         sa_relationship_kwargs={
             "lazy": "selectin",
             "foreign_keys": "BatchJob.output_file_id",
         },
     )
-    batch_results_jobs: list["BatchJob"] = Relationship(
+    batch_results_jobs: list[BatchJob] = Relationship(
         back_populates="results_file",
         sa_relationship_kwargs={
             "lazy": "selectin",

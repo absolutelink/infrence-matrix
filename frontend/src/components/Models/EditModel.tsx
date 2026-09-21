@@ -1,11 +1,9 @@
 import { zodResolver } from "@hookform/resolvers/zod"
+import { useQueryClient } from "@tanstack/react-query"
+import { useEffect } from "react"
 import { useForm } from "react-hook-form"
 import { z } from "zod"
-
-import {
-  type Model,
-  ModelsService,
-} from "@/client"
+import { type Model, ModelsService } from "@/client"
 import {
   Dialog,
   DialogContent,
@@ -24,8 +22,6 @@ import {
 import { Input } from "@/components/ui/input"
 import { LoadingButton } from "@/components/ui/loading-button"
 import useCustomToast from "@/hooks/useCustomToast"
-import { useQueryClient } from "@tanstack/react-query"
-import { useEffect } from "react"
 
 const formSchema = z.object({
   name: z.string().min(1, { message: "Name is required" }),
@@ -36,7 +32,9 @@ const formSchema = z.object({
   quantization: z.string().min(1, { message: "Quantization is required" }),
   supports_embeddings: z.boolean().default(false),
   supports_vision: z.boolean().default(false),
-  context_length: z.coerce.number().min(1, { message: "Context length is required" }),
+  context_length: z.coerce
+    .number()
+    .min(1, { message: "Context length is required" }),
   license: z.string().optional(),
   tags: z.array(z.string()).default([]),
   description: z.string().optional(),
@@ -123,9 +121,7 @@ export default function EditModel({ isOpen, onClose, model }: EditModelProps) {
       <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Edit Model</DialogTitle>
-          <DialogDescription>
-            Update model information
-          </DialogDescription>
+          <DialogDescription>Update model information</DialogDescription>
         </DialogHeader>
 
         <Form {...form}>
@@ -182,7 +178,14 @@ export default function EditModel({ isOpen, onClose, model }: EditModelProps) {
                   <FormItem>
                     <FormLabel>Size (bytes)</FormLabel>
                     <FormControl>
-                      <Input type="number" {...field} value={typeof field.value === 'number' ? field.value : ''} onChange={(e) => field.onChange(e.target.valueAsNumber)} />
+                      <Input
+                        type="number"
+                        {...field}
+                        value={
+                          typeof field.value === "number" ? field.value : ""
+                        }
+                        onChange={(e) => field.onChange(e.target.valueAsNumber)}
+                      />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -196,7 +199,14 @@ export default function EditModel({ isOpen, onClose, model }: EditModelProps) {
                   <FormItem>
                     <FormLabel>Parameters</FormLabel>
                     <FormControl>
-                      <Input type="number" {...field} value={typeof field.value === 'number' ? field.value : ''} onChange={(e) => field.onChange(e.target.valueAsNumber)} />
+                      <Input
+                        type="number"
+                        {...field}
+                        value={
+                          typeof field.value === "number" ? field.value : ""
+                        }
+                        onChange={(e) => field.onChange(e.target.valueAsNumber)}
+                      />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -210,7 +220,14 @@ export default function EditModel({ isOpen, onClose, model }: EditModelProps) {
                   <FormItem>
                     <FormLabel>Context Length</FormLabel>
                     <FormControl>
-                      <Input type="number" {...field} value={typeof field.value === 'number' ? field.value : ''} onChange={(e) => field.onChange(e.target.valueAsNumber)} />
+                      <Input
+                        type="number"
+                        {...field}
+                        value={
+                          typeof field.value === "number" ? field.value : ""
+                        }
+                        onChange={(e) => field.onChange(e.target.valueAsNumber)}
+                      />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -236,9 +253,7 @@ export default function EditModel({ isOpen, onClose, model }: EditModelProps) {
               <LoadingButton type="button" variant="outline" onClick={onClose}>
                 Cancel
               </LoadingButton>
-              <LoadingButton type="submit">
-                Update Model
-              </LoadingButton>
+              <LoadingButton type="submit">Update Model</LoadingButton>
             </div>
           </form>
         </Form>

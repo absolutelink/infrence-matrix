@@ -178,7 +178,6 @@ All 5 phases of the Inference Matrix distributed architecture implementation are
 ### Configuration
 - [ ] Copy `.env.example` to `.env`
 - [ ] Set `POSTGRES_PASSWORD`
-- [ ] Set `SECRET_KEY`
 - [ ] Configure `AGENT_ID` (unique per agent)
 - [ ] Set `DEFAULT_GPU_LAYERS` based on VRAM
 

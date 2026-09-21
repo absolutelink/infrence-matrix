@@ -1,10 +1,9 @@
 """Agent management endpoints."""
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.services.agent_manager import agent_manager
-from app.models import Agent
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -30,7 +29,7 @@ class AgentListResponse(BaseModel):
 async def register_agent(request: AgentRegisterRequest) -> AgentRegisterResponse:
     """Register an agent with the frontend."""
     try:
-        agent = await agent_manager.register_agent(request.model_dump())
+        await agent_manager.register_agent(request.model_dump())
         return AgentRegisterResponse(
             registered=True,
             frontend_version="0.1.0",
@@ -66,7 +65,7 @@ async def get_agent(agent_id: str) -> dict:
 
 
 @router.post("/{agent_id}/command")
-async def send_command(agent_id: str, command: dict) -> dict:
+async def send_command(agent_id: str, command: dict) -> dict:  # noqa: ARG001
     """Send a command to an agent."""
     try:
         # TODO: Implement command sending via WebSocket

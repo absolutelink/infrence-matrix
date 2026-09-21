@@ -14,16 +14,6 @@ http://localhost:8000/v1
 http://agent-hostname:8080/api
 ```
 
-## Authentication
-
-API keys are passed via the `Authorization` header to the Frontend Service:
-
-```bash
-Authorization: Bearer YOUR_API_KEY
-```
-
-Authentication is optional and can be enabled/disabled via configuration.
-
 **Agent Service has no authentication** (trusted internal network).
 
 ---
@@ -785,7 +775,6 @@ All endpoints return errors in the following format:
 
 **HTTP Status Codes:**
 - `400` - Bad Request (invalid parameters)
-- `401` - Unauthorized (invalid/missing API key)
 - `404` - Not Found (model/resource not found)
 - `429` - Rate Limit Exceeded
 - `500` - Internal Server Error

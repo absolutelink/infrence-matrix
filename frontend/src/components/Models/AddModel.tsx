@@ -1,10 +1,9 @@
 import { zodResolver } from "@hookform/resolvers/zod"
+import { useQueryClient } from "@tanstack/react-query"
 import { useForm } from "react-hook-form"
 import { z } from "zod"
-
-import {
-  ModelsService,
-} from "@/client"
+import { ModelsService } from "@/client"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   Dialog,
   DialogContent,
@@ -22,9 +21,7 @@ import {
 } from "@/components/ui/form"
 import { Input } from "@/components/ui/input"
 import { LoadingButton } from "@/components/ui/loading-button"
-import { Checkbox } from "@/components/ui/checkbox"
 import useCustomToast from "@/hooks/useCustomToast"
-import { useQueryClient } from "@tanstack/react-query"
 
 const formSchema = z.object({
   name: z.string().min(1, { message: "Name is required" }),
@@ -35,7 +32,9 @@ const formSchema = z.object({
   quantization: z.string().min(1, { message: "Quantization is required" }),
   supports_embeddings: z.boolean().default(false),
   supports_vision: z.boolean().default(false),
-  context_length: z.coerce.number().min(1, { message: "Context length is required" }),
+  context_length: z.coerce
+    .number()
+    .min(1, { message: "Context length is required" }),
   license: z.string().optional(),
   tags: z.array(z.string()).default([]),
   description: z.string().optional(),
@@ -111,7 +110,10 @@ export const AddModel = ({ isOpen, onClose }: AddModelProps) => {
                   <FormItem>
                     <FormLabel>Model Name</FormLabel>
                     <FormControl>
-                      <Input placeholder="llama-2-7b-chat.Q4_K_M.gguf" {...field} />
+                      <Input
+                        placeholder="llama-2-7b-chat.Q4_K_M.gguf"
+                        {...field}
+                      />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -140,7 +142,10 @@ export const AddModel = ({ isOpen, onClose }: AddModelProps) => {
                 <FormItem>
                   <FormLabel>File Path</FormLabel>
                   <FormControl>
-                    <Input placeholder="/models/llama-2-7b-chat.Q4_K_M.gguf" {...field} />
+                    <Input
+                      placeholder="/models/llama-2-7b-chat.Q4_K_M.gguf"
+                      {...field}
+                    />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -155,7 +160,14 @@ export const AddModel = ({ isOpen, onClose }: AddModelProps) => {
                   <FormItem>
                     <FormLabel>Size (bytes)</FormLabel>
                     <FormControl>
-                      <Input type="number" {...field} value={typeof field.value === 'number' ? field.value : ''} onChange={(e) => field.onChange(e.target.valueAsNumber)} />
+                      <Input
+                        type="number"
+                        {...field}
+                        value={
+                          typeof field.value === "number" ? field.value : ""
+                        }
+                        onChange={(e) => field.onChange(e.target.valueAsNumber)}
+                      />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -169,7 +181,15 @@ export const AddModel = ({ isOpen, onClose }: AddModelProps) => {
                   <FormItem>
                     <FormLabel>Parameters</FormLabel>
                     <FormControl>
-                      <Input type="number" placeholder="7000000000" {...field} value={typeof field.value === 'number' ? field.value : ''} onChange={(e) => field.onChange(e.target.valueAsNumber)} />
+                      <Input
+                        type="number"
+                        placeholder="7000000000"
+                        {...field}
+                        value={
+                          typeof field.value === "number" ? field.value : ""
+                        }
+                        onChange={(e) => field.onChange(e.target.valueAsNumber)}
+                      />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -183,7 +203,14 @@ export const AddModel = ({ isOpen, onClose }: AddModelProps) => {
                   <FormItem>
                     <FormLabel>Context Length</FormLabel>
                     <FormControl>
-                      <Input type="number" {...field} value={typeof field.value === 'number' ? field.value : ''} onChange={(e) => field.onChange(e.target.valueAsNumber)} />
+                      <Input
+                        type="number"
+                        {...field}
+                        value={
+                          typeof field.value === "number" ? field.value : ""
+                        }
+                        onChange={(e) => field.onChange(e.target.valueAsNumber)}
+                      />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -263,7 +290,7 @@ export const AddModel = ({ isOpen, onClose }: AddModelProps) => {
 
             <div className="border-t pt-4">
               <h4 className="text-sm font-medium mb-3">Source Information</h4>
-              
+
               <FormField
                 control={form.control}
                 name="source"
@@ -286,7 +313,10 @@ export const AddModel = ({ isOpen, onClose }: AddModelProps) => {
                     <FormItem>
                       <FormLabel>Repository ID</FormLabel>
                       <FormControl>
-                        <Input placeholder="TheBloke/Llama-2-7B-Chat-GGUF" {...field} />
+                        <Input
+                          placeholder="TheBloke/Llama-2-7B-Chat-GGUF"
+                          {...field}
+                        />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -300,7 +330,10 @@ export const AddModel = ({ isOpen, onClose }: AddModelProps) => {
                     <FormItem>
                       <FormLabel>Source File</FormLabel>
                       <FormControl>
-                        <Input placeholder="llama-2-7b-chat.Q4_K_M.gguf" {...field} />
+                        <Input
+                          placeholder="llama-2-7b-chat.Q4_K_M.gguf"
+                          {...field}
+                        />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -331,9 +364,7 @@ export const AddModel = ({ isOpen, onClose }: AddModelProps) => {
               <LoadingButton type="button" variant="outline" onClick={onClose}>
                 Cancel
               </LoadingButton>
-              <LoadingButton type="submit">
-                Create Model
-              </LoadingButton>
+              <LoadingButton type="submit">Create Model</LoadingButton>
             </div>
           </form>
         </Form>

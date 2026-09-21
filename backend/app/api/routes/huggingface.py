@@ -1,7 +1,7 @@
-import httpx
 from typing import Any
-from fastapi import APIRouter, Depends, HTTPException, Query
-from app.api.deps import CurrentUser
+
+import httpx
+from fastapi import APIRouter, HTTPException, Query
 
 router = APIRouter(prefix="/huggingface", tags=["huggingface"])
 
@@ -10,7 +10,6 @@ HUGGINGFACE_API_BASE = "https://huggingface.co/api"
 
 @router.get("/search")
 def search_models(
-    current_user: CurrentUser,
     search: str = Query(..., min_length=1, description="Search query"),
     limit: int = Query(20, ge=1, le=100, description="Max results"),
     full: bool = Query(False, description="Include full model info"),
@@ -40,7 +39,6 @@ def search_models(
 
 @router.get("/models/files")
 def list_model_files(
-    current_user: CurrentUser,
     repo_id: str = Query(..., description="HuggingFace repository ID (e.g., 'unsloth/Qwen3.8-27B-GGUF')"),
 ) -> list[dict[str, Any]]:
     """
@@ -55,16 +53,16 @@ def list_model_files(
             )
             response.raise_for_status()
             model_data = response.json()
-            
+
             # Get the siblings (files) from the response
             siblings = model_data.get("siblings", [])
-            
+
             # Filter for GGUF files only
             gguf_files = [
                 file for file in siblings
                 if file.get("rfilename", "").endswith(".gguf")
             ]
-            
+
             # If sizes are not included, fetch them from the tree endpoint
             if gguf_files and not gguf_files[0].get("size"):
                 # Fetch file tree with sizes
@@ -94,7 +92,7 @@ def list_model_files(
                     {"path": file.get("rfilename"), "size": file.get("size", 0)}
                     for file in gguf_files
                 ]
-            
+
             return gguf_files
     except httpx.HTTPError as e:
         raise HTTPException(
@@ -105,7 +103,6 @@ def list_model_files(
 
 @router.get("/models/info")
 def get_model_info(
-    current_user: CurrentUser,
     repo_id: str = Query(..., description="HuggingFace repository ID"),
 ) -> dict[str, Any]:
     """
@@ -119,12 +116,12 @@ def get_model_info(
             )
             response.raise_for_status()
             model_info = response.json()
-            
+
             # Extract GGUF specific info if available
             gguf_info = {}
             if "gguf" in model_info.get("cardData", {}):
                 gguf_info = model_info["cardData"]["gguf"]
-            
+
             return {
                 "id": model_info.get("id"),
                 "modelId": model_info.get("modelId"),
@@ -147,7 +144,6 @@ def get_model_info(
 
 @router.get("/models/params")
 def get_parameter_count(
-    current_user: CurrentUser,
     repo_id: str = Query(..., description="HuggingFace repository ID"),
 ) -> dict[str, Any]:
     """
@@ -161,20 +157,20 @@ def get_parameter_count(
                 f"https://huggingface.co/{repo_id}/raw/main/config.json",
                 follow_redirects=True,
             )
-            
+
             if response.status_code == 404:
                 # Try master branch if main doesn't exist
                 response = client.get(
                     f"https://huggingface.co/{repo_id}/raw/master/config.json",
                     follow_redirects=True,
                 )
-            
+
             response.raise_for_status()
             config = response.json()
-            
+
             # Extract parameter count from various possible fields
             param_count = None
-            
+
             # Check common fields for parameter count
             if "num_params" in config:
                 param_count = config["num_params"]
@@ -188,7 +184,7 @@ def get_parameter_count(
                 # Rough estimate: layers * hidden^2 + vocab * hidden
                 if hidden_layers and hidden_size:
                     param_count = hidden_layers * (hidden_size ** 2) + (vocab_size * hidden_size)
-            
+
             # Also check gguf specific fields
             if "gguf" in config:
                 gguf = config["gguf"]
@@ -196,7 +192,7 @@ def get_parameter_count(
                     param_count = gguf["params"]
                 elif "parameter_count" in gguf:
                     param_count = gguf["parameter_count"]
-            
+
             return {
                 "repo_id": repo_id,
                 "parameter_count": param_count,

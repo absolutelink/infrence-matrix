@@ -1,13 +1,10 @@
 """Tests for V1 Chat Completions API endpoint."""
 
-import json
-from datetime import UTC, datetime
 
-import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
-from app.models import Model, ServerInstance
+from app.models import Model
 
 
 class TestCreateChatCompletion:
@@ -42,9 +39,9 @@ class TestCreateChatCompletion:
         }
 
         response = client.post("/v1/chat/completions", json=payload)
-        
+
         assert response.status_code in [200, 503]
-        
+
         if response.status_code == 200:
             data = response.json()
             assert "id" in data
@@ -81,26 +78,26 @@ class TestCreateChatCompletion:
         }
 
         response = client.post("/v1/chat/completions", json=payload)
-        
+
         assert response.status_code in [200, 503]
-        
+
         if response.status_code == 200:
             assert response.headers["content-type"] == "text/event-stream; charset=utf-8"
-            
+
             content = response.text
             lines = content.strip().split("\n\n")
-            
+
             assert len(lines) > 0
-            
+
             first_line = lines[0]
             assert first_line.startswith("data: ")
-            
+
             has_done = False
             for line in lines:
                 if "[DONE]" in line:
                     has_done = True
                     break
-            
+
             assert has_done, "Streaming response should end with [DONE]"
 
     def test_chat_completion_model_not_found(self, client: TestClient, db: Session) -> None:
@@ -149,7 +146,7 @@ class TestCreateChatCompletion:
         }
 
         response = client.post("/v1/chat/completions", json=payload)
-        
+
         assert response.status_code in [200, 503]
 
     def test_chat_completion_multiple_messages(self, client: TestClient, db: Session) -> None:
@@ -181,5 +178,5 @@ class TestCreateChatCompletion:
         }
 
         response = client.post("/v1/chat/completions", json=payload)
-        
+
         assert response.status_code in [200, 503]

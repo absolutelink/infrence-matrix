@@ -1,9 +1,8 @@
-import { useState } from "react"
-import { Search, Download } from "lucide-react"
 import { useQuery } from "@tanstack/react-query"
-
+import { Download, Search } from "lucide-react"
+import { useState } from "react"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
 import {
   Dialog,
   DialogContent,
@@ -11,6 +10,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
+import { Skeleton } from "@/components/ui/skeleton"
 import {
   Table,
   TableBody,
@@ -19,8 +20,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { Badge } from "@/components/ui/badge"
-import { Skeleton } from "@/components/ui/skeleton"
 import { AddModelFromHF } from "./AddModelFromHF"
 
 interface HuggingFaceModel {
@@ -39,18 +38,13 @@ interface SearchHuggingFaceProps {
 }
 
 const searchModels = async (query: string): Promise<HuggingFaceModel[]> => {
-  const token = localStorage.getItem("access_token")
   // Use runtime config or current origin for API base URL
-  const baseUrl = (window as any).APP_CONFIG?.API_URL || 
-                  import.meta.env.VITE_API_URL || 
-                  window.location.origin
+  const baseUrl =
+    (window as any).APP_CONFIG?.API_URL ||
+    import.meta.env.VITE_API_URL ||
+    window.location.origin
   const response = await fetch(
     `${baseUrl}/api/v1/huggingface/search?search=${encodeURIComponent(query)}&limit=20`,
-    {
-      headers: {
-        "Authorization": `Bearer ${token}`,
-      },
-    }
   )
   if (!response.ok) {
     throw new Error("Failed to search HuggingFace")
@@ -60,7 +54,9 @@ const searchModels = async (query: string): Promise<HuggingFaceModel[]> => {
 
 export function SearchHuggingFace({ isOpen, onClose }: SearchHuggingFaceProps) {
   const [searchQuery, setSearchQuery] = useState("")
-  const [selectedModel, setSelectedModel] = useState<HuggingFaceModel | null>(null)
+  const [selectedModel, setSelectedModel] = useState<HuggingFaceModel | null>(
+    null,
+  )
 
   const { data: searchResults, isLoading } = useQuery({
     queryKey: ["hf-search", searchQuery],
@@ -75,17 +71,21 @@ export function SearchHuggingFace({ isOpen, onClose }: SearchHuggingFaceProps) {
 
   return (
     <>
-      <Dialog open={isOpen} onOpenChange={(open) => {
-        if (!open) {
-          onClose()
-          setSearchQuery("")
-        }
-      }}>
+      <Dialog
+        open={isOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            onClose()
+            setSearchQuery("")
+          }
+        }}
+      >
         <DialogContent className="max-w-4xl max-h-[80vh] flex flex-col">
           <DialogHeader>
             <DialogTitle>Search HuggingFace Models</DialogTitle>
             <DialogDescription>
-              Search for GGUF models on HuggingFace and add them to your inference matrix
+              Search for GGUF models on HuggingFace and add them to your
+              inference matrix
             </DialogDescription>
           </DialogHeader>
 
@@ -123,13 +123,15 @@ export function SearchHuggingFace({ isOpen, onClose }: SearchHuggingFaceProps) {
                 </TableHeader>
                 <TableBody>
                   {searchResults.map((model) => (
-                    <TableRow 
+                    <TableRow
                       key={model.id}
                       className="cursor-pointer hover:bg-muted/50"
                       onClick={() => handleSelectModel(model)}
                     >
                       <TableCell>
-                        <div className="font-medium">{model.modelId || model.id}</div>
+                        <div className="font-medium">
+                          {model.modelId || model.id}
+                        </div>
                         <div className="text-sm text-muted-foreground">
                           by {model.author}
                         </div>
@@ -143,7 +145,11 @@ export function SearchHuggingFace({ isOpen, onClose }: SearchHuggingFaceProps) {
                       <TableCell>
                         <div className="flex flex-wrap gap-1">
                           {model.tags?.slice(0, 3).map((tag: string) => (
-                            <Badge key={tag} variant="secondary" className="text-xs">
+                            <Badge
+                              key={tag}
+                              variant="secondary"
+                              className="text-xs"
+                            >
                               {tag}
                             </Badge>
                           ))}

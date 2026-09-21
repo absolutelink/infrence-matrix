@@ -64,15 +64,6 @@ services:
       - ./backend/htmlcov:/app/backend/htmlcov
     environment:
       FASTAPI_ENV: "development"
-      SMTP_HOST: "mailpit"
-      SMTP_PORT: "1025"
-      SMTP_TLS: "false"
-
-  mailpit:
-    image: axllent/mailpit
-    ports:
-      - "8025:8025"
-      - "1025:1025"
 
   playwright:
     build:
@@ -83,13 +74,9 @@ services:
     ipc: host
     depends_on:
       - backend
-      - mailpit
     environment:
-      - FIRST_SUPERUSER=${FIRST_SUPERUSER:?Variable not set}
-      - FIRST_SUPERUSER_PASSWORD=${FIRST_SUPERUSER_PASSWORD:?Variable not set}
       - PLAYWRIGHT_BASE_URL=http://backend:8000
       - VITE_API_URL=http://backend:8000
-      - MAILPIT_HOST=http://mailpit:8025
       # For the reports when run locally
       - PLAYWRIGHT_HTML_HOST=0.0.0.0
       - CI=${CI:-}

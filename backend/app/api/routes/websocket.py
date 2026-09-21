@@ -2,8 +2,8 @@
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.services.agent_manager import agent_manager
 from app.core.logging import logger
+from app.services.agent_manager import agent_manager
 
 router = APIRouter(tags=["websocket"])
 

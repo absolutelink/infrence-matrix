@@ -45,15 +45,7 @@ Drop-in replacement for OpenAI API with full compatibility:
 - **Real-time monitoring** - VRAM usage, tokens/sec, queue depth
 - **GPU configuration** - Per-model GPU layer settings
 - **Conversation history** - Tree-structured for /v1/responses
-- **API key management** - Create/revoke keys
 - **Backup/restore** - Database and configurations
-
-### 🔒 Optional Authentication
-
-- **API keys** (OpenAI-style) for API endpoints
-- **JWT authentication** for admin WebUI
-- **Configurable enforcement** per endpoint
-- **Rate limiting** support
 
 ### 💾 Data Persistence
 
@@ -119,7 +111,7 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="http://localhost:8000/v1",
-    api_key="not-needed"  # Optional if auth disabled
+    api_key="not-needed"
 )
 
 response = client.chat.completions.create(
@@ -224,10 +216,6 @@ SERVER_INACTIVITY_TIMEOUT=300
 MODELS_PATH=/models
 FILES_PATH=/files
 CACHE_PATH=/cache
-
-# Authentication (optional)
-API_KEY_AUTH_ENABLED=false
-ADMIN_JWT_SECRET=your_secret
 ```
 
 ### llama.cpp Server

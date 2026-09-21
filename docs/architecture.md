@@ -102,7 +102,7 @@ Designed for single-user home server deployments with support for multiple infer
 - Python 3.14+ with FastAPI
 - React + TypeScript + shadcn/ui
 - PostgreSQL with SQLModel ORM
-- JWT + API Key authentication (optional)
+
 
 **Responsibilities:**
 - Serve React WebUI
@@ -119,7 +119,6 @@ Designed for single-user home server deployments with support for multiple infer
 - Multi-agent support (manual selection)
 - Agent health monitoring via WebSocket
 - Centralized database for all metadata
-- Optional authentication
 
 ### Agent Service
 
@@ -467,7 +466,6 @@ DELETE /proxy/{server_id}/cache/{cache_id}
 - Agent forwards request to llama.cpp subprocess
 - Streams SSE responses back to Frontend in real-time
 - Handles connection pooling and retries
-- Adds authentication headers if needed
 - Logs all proxied requests for debugging
 
 ## Deployment Architecture
@@ -596,12 +594,11 @@ services:
 - Firewall rules should restrict access
 
 **External Access:**
-- Frontend exposes API to external clients (with optional auth)
+- Frontend exposes API to external clients
 - Agent should NEVER be exposed externally
 - All external traffic goes through Frontend
 
 **Data Protection:**
-- API keys hashed in database (argon2)
 - No secrets in logs
 - HTTPS at Frontend level (Traefik)
 

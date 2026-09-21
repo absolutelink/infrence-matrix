@@ -122,7 +122,6 @@ jobs:
         run: |
           cp .env.example .env
           echo "POSTGRES_PASSWORD=testpassword123" >> .env
-          echo "SECRET_KEY=testsecretkeyfordeploymentverification123456" >> .env
 
       - name: Start services
         run: |

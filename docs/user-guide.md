@@ -15,13 +15,10 @@ Welcome to Inference Matrix! This guide covers using the WebUI and API for model
 
 ## Getting Started
 
-### First Login
+### Opening the WebUI
 
 1. Open your browser to http://localhost:5173 (local development) or your configured FRONTEND_HOST
-2. If authentication is enabled, log in with your credentials
-   - Default admin email: `admin@example.com`
-   - Default admin password: `changethis` (change this in production!)
-3. You'll see the dashboard with model status and quick actions
+2. You'll see the dashboard with model status and quick actions
 
 ### Dashboard Overview
 
@@ -144,7 +141,7 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="http://localhost:8000/v1",
-    api_key="not-needed"  # Optional if auth disabled
+    api_key="not-needed"
 )
 
 # Chat completion
@@ -231,22 +228,6 @@ The **Cache** page shows:
 **Cache Strategies:**
 - **Chat Completions**: Automatic conversation caching
 - **Responses API**: Hierarchical system prompt caching
-
-### API Keys
-
-If authentication is enabled:
-
-**Create API Key:**
-1. Go to **Settings > API Keys**
-2. Click **Create Key**
-3. Enter name and permissions
-4. Copy the key (shown once only)
-5. Use in API requests: `Authorization: Bearer sk-...`
-
-**Manage Keys:**
-- View key list with last used timestamp
-- Revoke keys
-- Set expiration dates
 
 ### System Monitoring
 
@@ -574,7 +555,6 @@ Batch status:
 
 ### Security
 
-1. **Enable authentication**: If exposed to network
-2. **Use API keys**: Don't share keys publicly
-3. **Regular backups**: Protect conversation history
-4. **Update regularly**: Keep up with security patches
+1. **Network isolation**: Expose the API only to trusted networks
+2. **Regular backups**: Protect conversation history
+3. **Update regularly**: Keep up with security patches

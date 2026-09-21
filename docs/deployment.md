@@ -49,10 +49,6 @@ POSTGRES_USER=inference
 POSTGRES_PASSWORD=your_secure_password_here
 POSTGRES_DB=inference_matrix
 
-# Authentication (optional)
-API_KEY_AUTH_ENABLED=false
-ADMIN_JWT_SECRET=your_jwt_secret_here
-
 # Storage
 MODELS_PATH=/models
 FILES_PATH=/files
@@ -110,14 +106,6 @@ This starts the Frontend Service, Agent Service, and PostgreSQL database.
 | `POSTGRES_HOST` | Database host | `postgres` |
 | `POSTGRES_PORT` | Database port | `5432` |
 
-#### Authentication
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `API_KEY_AUTH_ENABLED` | Enable API key auth | `false` |
-| `ADMIN_JWT_SECRET` | JWT secret for admin UI | *(required if auth enabled)* |
-| `API_KEY_HEADER` | Custom auth header | `Authorization` |
-
 #### Storage
 
 | Variable | Description | Default |
@@ -144,7 +132,6 @@ This starts the Frontend Service, Agent Service, and PostgreSQL database.
 | `AGENT_ID` | Unique agent identifier | *(required for Agent)* |
 | `AGENT_NAME` | Human-readable agent name | `inference-agent` |
 | `FRONTEND_URL` | Frontend Service URL | *(required for Agent)* |
-| `FRONTEND_API_KEY` | Optional API key for auth | `None` |
 | `GPU_BACKEND` | GPU backend: auto, cuda, metal, vulkan | `auto` |
 
 #### Audio Processing
@@ -425,7 +412,7 @@ curl http://localhost:8000/v1/models
 docker compose exec postgres pg_dump -U inference inference_matrix > backup.sql
 
 # Backup models list
-curl http://localhost:8000/admin/models/export > models.json
+curl http://localhost:8000/api/v1/models/ > models.json
 
 # Backup configuration
 cp .env backup.env
@@ -455,7 +442,7 @@ curl http://localhost:8000/health
 docker compose exec postgres pg_isready -U inference
 
 # llama-server instances
-curl http://localhost:8000/admin/servers
+curl http://localhost:8000/api/v1/server-instances
 ```
 
 ### Logs
@@ -539,13 +526,7 @@ docker compose up -d
 
 ## Production Hardening
 
-1. **Enable authentication:**
-```bash
-API_KEY_AUTH_ENABLED=true
-ADMIN_JWT_SECRET=$(openssl rand -hex 32)
-```
-
-2. **Configure HTTPS with Traefik:**
+1. **Configure HTTPS with Traefik:**
 ```yaml
 labels:
   - "traefik.http.routers.backend.rule=Host(`inference.example.com`)"

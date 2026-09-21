@@ -1,6 +1,6 @@
 import { MoreHorizontal, Pencil, Trash2 } from "lucide-react"
-import { type Model } from "@/client"
-
+import { useState } from "react"
+import type { Model } from "@/client"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -10,7 +10,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import DeleteModel from "./DeleteModel"
-import { useState } from "react"
 import EditModel from "./EditModel"
 
 interface ModelActionsMenuProps {
