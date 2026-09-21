@@ -13,10 +13,9 @@ Last Updated: September 19, 2026
   - Image name: `ghcr.io/absolutelink/matrix-app:main`
 
 - [x] **Modular Entrypoint System**
-  - `/etc/entrypoint.d/` with numbered scripts (010, 020, 030...)
+  - `/etc/entrypoint.d/` with numbered scripts (010, 020...)
   - 010-generate-config.sh: Runtime API URL configuration
   - 020-run-migrations.sh: Database migrations
-  - 030-create-initial-data.sh: Initial data seeding
   - Support for `/opt/rootfs` overlay for custom files
   - CMD override via `/tmp/docker_cmd_override`
 
