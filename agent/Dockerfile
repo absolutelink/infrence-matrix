@@ -25,4 +25,5 @@ USER appuser
 
 EXPOSE 8080
 
-CMD ["uv", "run", "python", "-m", "app.main"]
+# Use uvicorn to run the FastAPI app directly
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--log-level", "info"]

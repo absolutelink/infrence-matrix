@@ -6,20 +6,15 @@ import sys
 import os
 
 # Add the app directory to the Python path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "app"))
+sys.path.insert(0, os.path.dirname(__file__))
 
 from app.core.logging import logger
 from app.services.frontend_client import frontend_client
-from app.services.llama_server import llama_server_manager
-from app.services.model_manager import model_manager
 
 
 async def main():
     """Initialize and run agent services."""
     logger.info("Starting Inference Matrix Agent...")
-    
-    # Initialize managers
-    logger.info("Initializing service managers...")
     
     # Try to register with frontend
     logger.info("Registering with frontend...")
