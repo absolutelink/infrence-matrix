@@ -24,13 +24,15 @@ COPY agent/app/ ./app/
 # Set ownership
 RUN chown -R appuser:appuser /app
 
-USER appuser
 
-EXPOSE 8080
 
 RUN mkdir -p /etc/entrypoint.d
 
 COPY docker/entrypoint.sh /usr/local/bin/
+
+# USER appuser
+
+EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
