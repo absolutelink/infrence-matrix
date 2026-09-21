@@ -1,5 +1,5 @@
 # Build Inference Matrix Agent with llama.cpp Vulkan support
-FROM inference-matrix-agent:base AS builder
+FROM ghcr.io/absolutelink/agent:main
 
 USER root
 
