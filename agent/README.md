@@ -1,81 +1,53 @@
 # Inference Matrix Agent
 
-Agent service for distributed inference in the Inference Matrix architecture.
+This is the agent service for Inference Matrix, responsible for managing local inference servers and communicating with the main frontend service.
 
 ## Features
 
-- Manages llama.cpp server processes
-- Handles model downloads from HuggingFace
-- Reports GPU information and usage
-- WebSocket event streaming to Frontend Service
-- HTTP proxy for llama.cpp API
+- Registers with the main Inference Matrix frontend
+- Manages llama.cpp server instances
+- Handles WebSocket communication for command execution
+- Downloads and manages GGUF model files
+- Reports GPU usage and system information
 
-## Setup
+## Environment Variables
 
-### Requirements
-
-- Python 3.14+
-- llama.cpp with GPU support (CUDA, Metal, or Vulkan)
-
-### Installation
-
-```bash
-uv sync
-```
-
-### Configuration
-
-Set the following environment variables:
-
-- `AGENT_ID` - Unique agent identifier (required)
-- `AGENT_NAME` - Human-readable agent name (default: "inference-agent")
-- `FRONTEND_URL` - Frontend Service URL (required)
-- `FRONTEND_API_KEY` - Optional API key for authentication
+- `AGENT_ID` - Unique identifier for this agent
+- `AGENT_NAME` - Human-readable name for the agent (default: "inference-agent")
+- `FRONTEND_URL` - URL of the main Inference Matrix frontend
 - `LLAMA_SERVER_PATH` - Path to llama-server binary (default: "/usr/local/bin/llama-server")
-- `MODELS_PATH` - Directory for model storage (default: "/models")
-- `CACHE_PATH` - Directory for prompt cache (default: "/cache")
-- `GPU_BACKEND` - GPU backend: auto, cuda, metal, vulkan (default: "auto")
-
-### Running
-
-```bash
-uv run python -m app.main
-```
-
-Or with uvicorn:
-
-```bash
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8080
-```
+- `MODELS_PATH` - Path to download and store models (default: "/models")
+- `CACHE_PATH` - Path for prompt cache files (default: "/cache")
 
 ## API Endpoints
 
-- `GET /health` - Health check
-- `GET /servers` - List running servers
-- `POST /servers/start` - Start a new server
-- `POST /servers/{id}/stop` - Stop a server
-- `GET /models` - List downloaded models
-- `POST /models/download` - Download a model
-- `DELETE /models/{filename}` - Delete a model
-- `GET /gpu` - Get GPU information
-- `GET /gpu/usage` - Get GPU usage
-- `WS /ws/status` - WebSocket event stream
+### Server Management
+- `POST /servers/start` - Start a llama.cpp server
+- `POST /servers/stop` - Stop a llama.cpp server
+- `GET /servers/list` - List all running servers
+- `GET /servers/status/{server_id}` - Get status of a specific server
 
-## Docker
+### Model Management
+- `POST /models/download` - Download a model from HuggingFace
+- `GET /models/list` - List all downloaded models
 
-Build the image:
+### GPU Monitoring
+- `GET /gpu/info` - Get GPU information
+- `GET /gpu/usage` - Get GPU usage statistics
+
+## WebSocket Events
+
+The agent connects to the frontend over WebSocket to receive commands:
+- `start_server` - Start a new server instance
+- `stop_server` - Stop a running server instance
+- `update_model` - Update a model file
+
+## Usage
 
 ```bash
-docker build -t inference-matrix-agent .
-```
+# Run the agent
+uv run python -m app.main
 
-Run with GPU support:
-
-```bash
-docker run --gpus all \
-  -e AGENT_ID=agent-1 \
-  -e FRONTEND_URL=http://frontend:8000 \
-  -v ./models:/models \
-  -v ./cache:/cache \
-  inference-matrix-agent
+# With environment variables
+AGENT_ID=agent-123 FRONTEND_URL=http://localhost:8000 uv run python -m app.main
 ```

@@ -1,10 +1,13 @@
 """FastAPI application factory."""
 
+import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import servers, models, gpu, websocket, proxy
 from app.core.config import settings
+from app.core.logging import logger
+from app.services.frontend_client import frontend_client
 
 
 def create_app() -> FastAPI:
@@ -32,6 +35,25 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def health_check() -> dict:
         return {"status": "healthy"}
+
+    @app.on_event("startup")
+    async def startup_event():
+        """Startup event to initialize services."""
+        logger.info("Starting Inference Matrix Agent services...")
+        
+        # Start background tasks for frontend connection
+        try:
+            await frontend_client.start_background_tasks()
+            logger.info("Started frontend client background tasks")
+        except Exception as e:
+            logger.error(f"Failed to start background tasks: {e}")
+
+    @app.on_event("shutdown")
+    async def shutdown_event():
+        """Shutdown event to cleanup services."""
+        logger.info("Shutting down Inference Matrix Agent services...")
+        await frontend_client.close()
+        logger.info("Agent shutdown complete")
 
     return app
 

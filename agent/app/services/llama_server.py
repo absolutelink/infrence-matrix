@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import httpx
 
 from app.core.config import settings
+from app.core.logging import logger
 
 
 @dataclass
@@ -55,19 +56,26 @@ class LlamaServerManager:
         if config.flash_attn:
             cmd.append("--flash-attn")
 
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
+        logger.info(f"Starting llama.cpp server {server_id} with command: {' '.join(cmd)}")
 
-        self.servers[server_id] = proc
-        self.configs[server_id] = config
-        self.start_times[server_id] = time.time()
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
 
-        await self._wait_for_server(server_id, config.port)
+            self.servers[server_id] = proc
+            self.configs[server_id] = config
+            self.start_times[server_id] = time.time()
 
-        return True
+            await self._wait_for_server(server_id, config.port)
+
+            return True
+        except Exception as e:
+            logger.error(f"Failed to start server {server_id}: {e}")
+            return False
 
     async def stop_server(self, server_id: str, force: bool = False) -> bool:
         """Stop a llama.cpp server."""
@@ -103,15 +111,16 @@ class LlamaServerManager:
         start = time.time()
 
         while time.time() - start < timeout:
-            async with httpx.AsyncClient() as client:
-                try:
+            try:
+                async with httpx.AsyncClient() as client:
                     response = await client.get(
                         f"http://localhost:{port}/health"
                     )
                     if response.status_code == 200:
+                        logger.info(f"Server {server_id} is now healthy")
                         return
-                except Exception:
-                    pass
+            except Exception:
+                pass
 
             await asyncio.sleep(1)
 
@@ -139,3 +148,20 @@ class LlamaServerManager:
             })
 
         return servers
+
+    async def get_server_status(self, server_id: str) -> dict:
+        """Get detailed status of a specific server."""
+        if server_id not in self.servers:
+            return {"status": "stopped"}
+            
+        return {
+            "status": "running",
+            "server_id": server_id,
+            "model_path": self.configs[server_id].model_path,
+            "port": self.configs[server_id].port,
+            "uptime_seconds": self.get_server_uptime(server_id),
+        }
+
+
+# Global instance
+llama_server_manager = LlamaServerManager()

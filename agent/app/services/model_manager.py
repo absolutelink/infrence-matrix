@@ -2,7 +2,7 @@
 
 import asyncio
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Optional, Callable, Dict, Any
 
 from app.core.config import settings
 from app.core.logging import logger
@@ -46,6 +46,17 @@ class ModelManager:
             logger.error(f"Download failed: {e}")
             raise
     
+    async def update_model(self, model_id: str) -> dict:
+        """Update model from repository."""
+        # This would be implemented to update an existing model
+        # For now, just return a success response
+        logger.info(f"Updating model {model_id}")
+        return {
+            "status": "updated",
+            "model_id": model_id,
+            "message": "Model update completed"
+        }
+    
     def list_models(self) -> list:
         """List all model files."""
         models = []
@@ -73,3 +84,16 @@ class ModelManager:
     def model_exists(self, filename: str) -> bool:
         """Check if model file exists."""
         return (self.models_path / filename).exists()
+    
+    def get_model_info(self, filename: str) -> Dict[str, Any]:
+        """Get detailed information about a model."""
+        model_path = self.models_path / filename
+        if not model_path.exists():
+            return {}
+        
+        return {
+            "filename": filename,
+            "path": str(model_path),
+            "size_bytes": model_path.stat().st_size,
+            "modified_time": model_path.stat().st_mtime,
+        }

@@ -1,63 +1,88 @@
-"""Server management endpoints."""
+"""Server management API endpoints."""
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-import uuid
+from typing import Optional, Dict, Any
 
-from app.services.llama_server import LlamaServerManager, ServerConfig
+from app.services.llama_server import llama_server_manager
+from app.services.model_manager import model_manager
 
 router = APIRouter(prefix="/servers", tags=["servers"])
-server_manager = LlamaServerManager()
 
 
-class StartServerRequest(BaseModel):
-    model_id: str
+class ServerConfig(BaseModel):
+    id: str
     model_path: str
-    config: dict
+    port: int
+    gpu_layers: int = 35
+    context_size: int = 4096
+    batch_size: int = 512
+    cache_prompt: bool = True
+    flash_attn: bool = True
 
 
-class StartServerResponse(BaseModel):
+class ServerStartRequest(BaseModel):
+    config: ServerConfig
+
+
+class ServerStopRequest(BaseModel):
     server_id: str
-    status: str
-    proxy_url: str
 
 
-@router.post("/start", response_model=StartServerResponse)
-async def start_server(request: StartServerRequest) -> StartServerResponse:
+@router.post("/start")
+async def start_server(request: ServerStartRequest) -> dict:
     """Start a llama.cpp server."""
-    server_id = str(uuid.uuid4())
+    try:
+        # Validate model exists
+        if not model_manager.model_exists(request.config.model_path):
+            raise HTTPException(status_code=404, detail="Model not found")
 
-    config = ServerConfig(
-        model_path=request.model_path,
-        port=8081,
-        **request.config
-    )
+        # Start the server
+        config = llama_server_manager.ServerConfig(
+            model_path=request.config.model_path,
+            port=request.config.port,
+            gpu_layers=request.config.gpu_layers,
+            context_size=request.config.context_size,
+            batch_size=request.config.batch_size,
+            cache_prompt=request.config.cache_prompt,
+            flash_attn=request.config.flash_attn
+        )
+        
+        success = await llama_server_manager.start_server(request.config.id, config)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to start server")
 
-    success = await server_manager.start_server(server_id, config)
-
-    if not success:
-        raise HTTPException(400, "Server already running")
-
-    return StartServerResponse(
-        server_id=server_id,
-        status="running",
-        proxy_url=f"http://localhost:{config.port}"
-    )
+        return {"status": "started", "server_id": request.config.id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/{server_id}/stop")
-async def stop_server(server_id: str, force: bool = False) -> dict:
+@router.post("/stop")
+async def stop_server(request: ServerStopRequest) -> dict:
     """Stop a llama.cpp server."""
-    success = await server_manager.stop_server(server_id, force)
+    try:
+        success = await llama_server_manager.stop_server(request.server_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Server not found")
 
-    if not success:
-        raise HTTPException(404, "Server not found")
+        return {"status": "stopped", "server_id": request.server_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    return {"status": "stopped"}
 
-
-@router.get("")
+@router.get("/list")
 async def list_servers() -> dict:
     """List all running servers."""
-    servers = server_manager.list_servers()
+    servers = llama_server_manager.list_servers()
     return {"servers": servers}
+
+
+@router.get("/status/{server_id}")
+async def get_server_status(server_id: str) -> dict:
+    """Get status of a specific server."""
+    servers = llama_server_manager.list_servers()
+    for server in servers:
+        if server["server_id"] == server_id:
+            return {"status": "running", "server": server}
+    
+    return {"status": "stopped", "server_id": server_id}
