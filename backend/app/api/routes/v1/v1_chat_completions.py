@@ -5,7 +5,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator
-from typing import Literal
+from typing import Any, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app.api.deps import get_db
+from app.core.db import engine
 from app.models import Model, ServerInstance
 from app.services.agent_manager import agent_manager
 
@@ -176,80 +177,78 @@ async def _stream_completion_via_agent(
         yield f"data: {json.dumps(error_chunk)}\n\n"
 
 
+def _find_existing_server(
+    model_id: Any, agent_id: str | None = None
+) -> ServerInstance | None:
+    """Find a running server instance for the model (optionally on a specific agent)."""
+    with Session(engine) as session:
+        stmt = select(ServerInstance).where(
+            ServerInstance.model_id == model_id,
+            ServerInstance.status == "running",
+        )
+        if agent_id:
+            stmt = stmt.where(ServerInstance.agent_id == agent_id)
+        return session.exec(stmt).first()
+
+
 async def _get_or_create_server(
     model: Model, agent_id: str | None = None
 ) -> ServerInstance:
     """Get existing server or create new one via Agent."""
-    async with Session() as session:
-        # Try to find existing server
-        if agent_id:
-            # Look for server on specific agent
-            stmt = select(ServerInstance).where(
-                ServerInstance.model_id == model.id,
-                ServerInstance.agent_id == agent_id,
-                ServerInstance.status == "running",
-            )
-        else:
-            # Find any running server for this model
-            stmt = select(ServerInstance).where(
-                ServerInstance.model_id == model.id,
-                ServerInstance.status == "running",
-            )
+    server = _find_existing_server(model.id, agent_id)
 
-        result = session.exec(stmt)
-        server = result.first()
+    if server:
+        logger.info(f"Using existing server {server.id}")
+        return server
 
-        if server:
-            logger.info(f"Using existing server {server.id}")
-            return server
+    # Need to start a new server
+    logger.info("No existing server found, starting new one")
 
-        # Need to start a new server
-        logger.info("No existing server found, starting new one")
+    # Find an agent
+    if agent_id:
+        agent = await agent_manager.get_agent(agent_id)
+        if not agent:
+            raise HTTPException(404, f"Agent {agent_id} not found")
+    else:
+        # Find first online agent
+        agents = await agent_manager.list_agents()
+        if not agents:
+            raise HTTPException(503, "No agents available")
+        agent = await agent_manager.get_agent(agents[0]["id"])
 
-        # Find an agent
-        if agent_id:
-            agent = await agent_manager.get_agent(agent_id)
-            if not agent:
-                raise HTTPException(404, f"Agent {agent_id} not found")
-        else:
-            # Find first online agent
-            agents = await agent_manager.list_agents()
-            if not agents:
-                raise HTTPException(503, "No agents available")
-            agent = await agent_manager.get_agent(agents[0]["id"])
+    if not agent or agent.status != "online":
+        raise HTTPException(503, "No online agents available")
 
-        if not agent or agent.status != "online":
-            raise HTTPException(503, "No online agents available")
-
-        # Start server via agent
-        start_response = await agent_manager.send_to_agent(
-            agent.id,
-            "POST",
-            "/servers/start",
-            {
-                "model_id": str(model.id),
-                "model_path": model.path,
-                "config": {
-                    "id": str(uuid.uuid4()),
-                    "port": 8091,
-                    "gpu_layers": 35,
-                    "context_size": model.context_length or 4096,
-                    "batch_size": 512,
-                    "cache_prompt": True,
-                },
-                # If the model file is not on the agent yet, it downloads it
-                # from the source repo before launching llama-server.
-                "source": {
-                    "source": model.source,
-                    "repo_id": model.source_repo_id,
-                    "filename": model.source_file or (model.path.rsplit("/", 1)[-1]),
-                }
-                if model.source_repo_id
-                else None,
+    # Start server via agent
+    start_response = await agent_manager.send_to_agent(
+        agent.id,
+        "POST",
+        "/servers/start",
+        {
+            "model_id": str(model.id),
+            "model_path": model.path,
+            "config": {
+                "id": str(uuid.uuid4()),
+                "port": 8091,
+                "gpu_layers": 35,
+                "context_size": model.context_length or 4096,
+                "batch_size": 512,
+                "cache_prompt": True,
             },
-        )
+            # If the model file is not on the agent yet, it downloads it
+            # from the source repo before launching llama-server.
+            "source": {
+                "source": model.source,
+                "repo_id": model.source_repo_id,
+                "filename": model.source_file or (model.path.rsplit("/", 1)[-1]),
+            }
+            if model.source_repo_id
+            else None,
+        },
+    )
 
-        # Create ServerInstance record
+    # Create ServerInstance record
+    with Session(engine) as session:
         server = ServerInstance(
             model_id=model.id,
             agent_id=agent.id,
@@ -262,8 +261,8 @@ async def _get_or_create_server(
         session.commit()
         session.refresh(server)
 
-        logger.info(f"Started new server {server.id} on agent {agent.id}")
-        return server
+    logger.info(f"Started new server {server.id} on agent {agent.id}")
+    return server
 
 
 @router.post("/chat/completions", response_model=None)
@@ -278,13 +277,16 @@ async def create_chat_completion(
     # Get model by name (OpenAI style) or id (UI legacy)
     model = db.exec(select(Model).where(Model.name == request.model)).first()
     if not model:
-        model = db.exec(select(Model).where(Model.id == request.model)).first()
+        try:
+            model = db.exec(select(Model).where(Model.id == request.model)).first()
+        except Exception:
+            model = None
     if not model:
         raise HTTPException(404, f"Model {request.model} not found")
 
     # Get or create server
     try:
-        server = await _get_or_create_server(model, request.agent_id)
+        server = _get_or_create_server(model, request.agent_id)
     except HTTPException:
         raise
     except Exception as e:

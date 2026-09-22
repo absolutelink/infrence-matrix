@@ -59,7 +59,10 @@ async def create_embedding(
     # Get model by name (OpenAI style) or id (UI legacy)
     model = db.exec(select(Model).where(Model.name == request.model)).first()
     if not model:
-        model = db.exec(select(Model).where(Model.id == request.model)).first()
+        try:
+            model = db.exec(select(Model).where(Model.id == request.model)).first()
+        except Exception:
+            model = None
     if not model:
         raise HTTPException(404, f"Model {request.model} not found")
 
@@ -67,7 +70,7 @@ async def create_embedding(
         raise HTTPException(400, f"Model '{request.model}' does not support embeddings")
 
     try:
-        server = await _get_or_create_server(model, request.agent_id)
+        server = _get_or_create_server(model, request.agent_id)
     except HTTPException:
         raise
     except Exception as e:
