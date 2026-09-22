@@ -2,10 +2,9 @@
 
 import asyncio
 import os
-import subprocess
 import signal
+import subprocess
 import time
-from typing import Dict, Optional
 from dataclasses import dataclass
 
 import httpx
@@ -23,16 +22,17 @@ class ServerConfig:
     context_size: int = 4096
     batch_size: int = 512
     cache_prompt: bool = True
-    flash_attn: bool = True
+    # None lets llama.cpp decide; True/False maps to --flash-attn on/off
+    flash_attn: bool | None = None
 
 
 class LlamaServerManager:
     """Manages llama.cpp subprocesses."""
 
     def __init__(self) -> None:
-        self.servers: Dict[str, subprocess.Popen] = {}
-        self.configs: Dict[str, ServerConfig] = {}
-        self.start_times: Dict[str, float] = {}
+        self.servers: dict[str, subprocess.Popen] = {}
+        self.configs: dict[str, ServerConfig] = {}
+        self.start_times: dict[str, float] = {}
 
     async def start_server(self, server_id: str, config: ServerConfig) -> bool:
         """Start a llama.cpp server subprocess."""
@@ -53,11 +53,8 @@ class LlamaServerManager:
             str(config.batch_size),
         ]
 
-        if config.cache_prompt:
-            cmd.extend(["--prompt-cache", f"{settings.CACHE_PATH}/{server_id}.cache"])
-
-        if config.flash_attn:
-            cmd.append("--flash-attn")
+        if config.flash_attn is not None:
+            cmd.extend(["--flash-attn", "on" if config.flash_attn else "off"])
 
         logger.info(
             f"Starting llama.cpp server {server_id} with command: {' '.join(cmd)}"
@@ -206,7 +203,7 @@ class LlamaServerManager:
         """List all running servers."""
         servers = []
 
-        for server_id in self.servers.keys():
+        for server_id in self.servers:
             config = self.configs[server_id]
             servers.append(
                 {

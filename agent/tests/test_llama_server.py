@@ -27,7 +27,7 @@ class TestServerConfig:
         assert config.context_size == 4096
         assert config.batch_size == 512
         assert config.cache_prompt is True
-        assert config.flash_attn is True
+        assert config.flash_attn is None
 
     def test_custom_values(self):
         """Test custom configuration values."""

@@ -22,7 +22,8 @@ class ServerSpec(BaseModel):
     context_size: int = 4096
     batch_size: int = 512
     cache_prompt: bool = True
-    flash_attn: bool = True
+    # None lets llama.cpp decide; True/False maps to --flash-attn on/off
+    flash_attn: bool | None = True
 
 
 class ServerStartRequest(BaseModel):
