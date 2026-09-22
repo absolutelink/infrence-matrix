@@ -18,10 +18,13 @@ class TestAgentManagerRegistration:
         """Test registering a new agent."""
         manager = AgentManager()
 
+        mock_result = Mock()
+        mock_result.scalar_one_or_none = Mock(return_value=None)
+
         mock_session = AsyncMock()
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.get = AsyncMock(return_value=None)
+        mock_session.execute = AsyncMock(return_value=mock_result)
         mock_session.add = Mock()
         mock_session.commit = AsyncMock()
         mock_session.refresh = AsyncMock()
@@ -50,17 +53,19 @@ class TestAgentManagerRegistration:
         manager = AgentManager()
 
         existing_agent = Agent(
-            id="test-agent-id",
             name="Test Agent",
             host="old-host",
             port=8080,
             status="offline",
         )
 
+        mock_result = Mock()
+        mock_result.scalar_one_or_none = Mock(return_value=existing_agent)
+
         mock_session = AsyncMock()
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.get = AsyncMock(return_value=existing_agent)
+        mock_session.execute = AsyncMock(return_value=mock_result)
         mock_session.add = Mock()
         mock_session.commit = AsyncMock()
         mock_session.refresh = AsyncMock()

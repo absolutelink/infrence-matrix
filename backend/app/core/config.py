@@ -79,6 +79,10 @@ class Settings(BaseSettings):
     SERVER_INACTIVITY_TIMEOUT: int = 300
     MAX_SERVER_INSTANCES: int = 5
 
+    # Agent WebSocket
+    WS_RECONNECT_INTERVAL: int = 5
+    AGENT_MAX_RECONNECT_ATTEMPTS: int = 10
+
     # Audio Processing
     WHISPER_MODEL_PATH: str = "/models/whisper"
     AUDIO_MAX_FILE_SIZE: int = 25
