@@ -94,7 +94,17 @@ class TestAgentManagerList:
         """Test listing agents when none registered."""
         manager = AgentManager()
 
-        agents = await manager.list_agents()
+        mock_result = Mock()
+        mock_scalars = Mock()
+        mock_scalars.all = Mock(return_value=[])
+        mock_result.scalars = Mock(return_value=mock_scalars)
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        with patch("app.services.agent_manager.AsyncSessionMaker", return_value=mock_session):
+            agents = await manager.list_agents()
 
         assert agents == []
 
@@ -104,7 +114,6 @@ class TestAgentManagerList:
         manager = AgentManager()
 
         agent = Agent(
-            id="test-agent-id",
             name="Test Agent",
             host="localhost",
             port=8080,
@@ -114,12 +123,20 @@ class TestAgentManagerList:
             last_seen=datetime.utcnow(),
         )
 
-        manager.agents["test-agent-id"] = agent
+        mock_scalars = Mock()
+        mock_scalars.all = Mock(return_value=[agent])
+        mock_result = Mock()
+        mock_result.scalars = Mock(return_value=mock_scalars)
 
-        agents = await manager.list_agents()
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        with patch("app.services.agent_manager.AsyncSessionMaker", return_value=mock_session):
+            agents = await manager.list_agents()
 
         assert len(agents) == 1
-        assert agents[0]["id"] == "test-agent-id"
         assert agents[0]["name"] == "Test Agent"
         assert agents[0]["status"] == "online"
 
@@ -199,16 +216,19 @@ class TestAgentManagerGet:
         manager = AgentManager()
 
         agent = Agent(
-            id="test-agent-id",
             name="Test Agent",
             host="localhost",
             port=8080,
             status="online",
         )
 
-        manager.agents["test-agent-id"] = agent
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        mock_session.get = AsyncMock(return_value=agent)
 
-        result = await manager.get_agent("test-agent-id")
+        with patch("app.services.agent_manager.AsyncSessionMaker", return_value=mock_session):
+            result = await manager.get_agent(str(agent.id))
 
         assert result == agent
 
@@ -217,6 +237,12 @@ class TestAgentManagerGet:
         """Test getting a non-existent agent."""
         manager = AgentManager()
 
-        result = await manager.get_agent("nonexistent")
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        mock_session.get = AsyncMock(return_value=None)
+
+        with patch("app.services.agent_manager.AsyncSessionMaker", return_value=mock_session):
+            result = await manager.get_agent("b8d06e5c-1c4d-47d5-ba47-c8a55fc67592")
 
         assert result is None

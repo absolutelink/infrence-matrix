@@ -279,23 +279,37 @@ class AgentManager:
 
     async def get_agent(self, agent_id: str) -> Agent | None:
         """Get agent by ID."""
-        return self.agents.get(agent_id)
+        async with AsyncSessionMaker() as session:
+            import uuid as uuid_module
+
+            try:
+                agent_uuid = uuid_module.UUID(agent_id)
+            except ValueError:
+                return None
+
+            return await session.get(Agent, agent_uuid)
 
     async def list_agents(self) -> list:
         """List all registered agents."""
-        return [
-            {
-                "id": str(agent.id),
-                "name": agent.name,
-                "host": agent.host,
-                "port": agent.port,
-                "status": agent.status,
-                "websocket_connected": agent.websocket_connected,
-                "gpu_info": agent.gpu_info,
-                "last_seen": agent.last_seen,
-            }
-            for agent in self.agents.values()
-        ]
+        async with AsyncSessionMaker() as session:
+            from sqlalchemy import select
+
+            result = await session.execute(select(Agent).order_by(Agent.name))
+            agents = result.scalars().all()
+
+            return [
+                {
+                    "id": str(agent.id),
+                    "name": agent.name,
+                    "host": agent.host,
+                    "port": agent.port,
+                    "status": agent.status,
+                    "websocket_connected": agent.websocket_connected,
+                    "gpu_info": agent.gpu_info or {},
+                    "last_seen": agent.last_seen,
+                }
+                for agent in agents
+            ]
 
     async def cleanup_offline_agents(self) -> None:
         """Mark agents as offline if not seen recently."""
