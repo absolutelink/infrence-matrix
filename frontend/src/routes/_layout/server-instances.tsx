@@ -1,24 +1,23 @@
 import { useSuspenseQuery } from "@tanstack/react-query"
 import { createFileRoute } from "@tanstack/react-router"
 import { Plus, Server } from "lucide-react"
-import { Suspense } from "react"
+import { Suspense, useState } from "react"
 
-// TODO: Import from client when backend is running
-const ServerInstancesService = {
-  listServerInstances: async () => ({ data: { server_instances: [] } }),
-}
-
+import { ServerInstancesService } from "@/client"
 import { DataTable } from "@/components/Common/DataTable"
 import { columns } from "@/components/ServerInstances/columns"
+import { StartServerDialog } from "@/components/ServerInstances/StartServerDialog"
 import { Button } from "@/components/ui/button"
 
 function getServerInstancesQueryOptions() {
   return {
     queryFn: async () => {
-      const response = await ServerInstancesService.listServerInstances()
+      const response =
+        await ServerInstancesService.instancesListServerInstances()
       return response.data.server_instances || []
     },
     queryKey: ["server-instances"],
+    refetchInterval: 5000,
   }
 }
 
@@ -50,7 +49,7 @@ function ServerInstancesTableContent() {
     )
   }
 
-  return <DataTable columns={columns} data={instances} />
+  return <DataTable columns={columns as any} data={instances as any} />
 }
 
 function ServerInstancesTable() {
@@ -68,6 +67,8 @@ function ServerInstancesTable() {
 }
 
 function ServerInstances() {
+  const [startOpen, setStartOpen] = useState(false)
+
   return (
     <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between">
@@ -79,12 +80,16 @@ function ServerInstances() {
             Manage running llama.cpp server instances
           </p>
         </div>
-        <Button>
+        <Button onClick={() => setStartOpen(true)}>
           <Plus className="mr-2 h-4 w-4" />
           Start Server
         </Button>
       </div>
       <ServerInstancesTable />
+      <StartServerDialog
+        isOpen={startOpen}
+        onClose={() => setStartOpen(false)}
+      />
     </div>
   )
 }

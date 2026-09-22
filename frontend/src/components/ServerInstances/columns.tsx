@@ -1,3 +1,4 @@
+import { useMutation, useQueryClient } from "@tanstack/react-query"
 import type { ColumnDef } from "@tanstack/react-table"
 import {
   Activity,
@@ -7,8 +8,12 @@ import {
   MoreHorizontal,
   Power,
   Terminal,
-  Trash2,
 } from "lucide-react"
+import { useState } from "react"
+import { toast } from "sonner"
+
+import { AgentsService, ServerInstancesService } from "@/client"
+import { ServerLogsSheet } from "@/components/ServerInstances/ServerLogsSheet"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -206,45 +211,76 @@ export const columns: ColumnDef<ServerInstance>[] = [
     cell: ({ row }) => {
       const instance = row.original
 
-      return (
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" className="h-8 w-8 p-0">
-              <span className="sr-only">Open menu</span>
-              <MoreHorizontal className="h-4 w-4" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuLabel>Actions</DropdownMenuLabel>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem>
-              <Terminal className="mr-2 h-4 w-4" />
-              View Logs
-            </DropdownMenuItem>
-            <DropdownMenuItem>
-              <Activity className="mr-2 h-4 w-4" />
-              View Metrics
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            {instance.status === "running" ? (
-              <DropdownMenuItem className="text-destructive">
-                <Power className="mr-2 h-4 w-4" />
-                Stop Server
-              </DropdownMenuItem>
-            ) : (
-              <DropdownMenuItem>
-                <Power className="mr-2 h-4 w-4" />
-                Start Server
-              </DropdownMenuItem>
-            )}
-            <DropdownMenuSeparator />
-            <DropdownMenuItem className="text-destructive">
-              <Trash2 className="mr-2 h-4 w-4" />
-              Delete
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      )
+      return <InstanceActions instance={instance} />
     },
   },
 ]
+
+function InstanceActions({ instance }: { instance: ServerInstance }) {
+  const queryClient = useQueryClient()
+  const [logsOpen, setLogsOpen] = useState(false)
+
+  const stopMutation = useMutation({
+    mutationFn: async () => {
+      // Stop the llama-server on the agent via the command proxy.
+      if (instance.agent_id && instance.agent_host && instance.agent_port) {
+        await AgentsService.sendCommand({
+          path: { agent_id: instance.agent_id },
+          body: {
+            method: "POST",
+            path: "/servers/stop",
+            body: { server_id: instance.id },
+          },
+        })
+      }
+      return ServerInstancesService.instancesStopServer({
+        path: { server_id: instance.id },
+      })
+    },
+    onSuccess: () => {
+      toast.success("Server stopped")
+      queryClient.invalidateQueries({ queryKey: ["server-instances"] })
+    },
+    onError: () => {
+      toast.error("Failed to stop server")
+    },
+  })
+
+  return (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" className="h-8 w-8 p-0">
+            <span className="sr-only">Open menu</span>
+            <MoreHorizontal className="h-4 w-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuLabel>Actions</DropdownMenuLabel>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onClick={() => setLogsOpen(true)}>
+            <Terminal className="mr-2 h-4 w-4" />
+            View Logs
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          {instance.status === "running" ? (
+            <DropdownMenuItem
+              className="text-destructive"
+              onClick={() => stopMutation.mutate()}
+              disabled={stopMutation.isPending}
+            >
+              <Power className="mr-2 h-4 w-4" />
+              Stop Server
+            </DropdownMenuItem>
+          ) : null}
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      <ServerLogsSheet
+        isOpen={logsOpen}
+        onClose={() => setLogsOpen(false)}
+        instance={instance}
+      />
+    </>
+  )
+}

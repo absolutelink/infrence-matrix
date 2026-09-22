@@ -1,6 +1,7 @@
 import type { ColumnDef } from "@tanstack/react-table"
-import { Activity, MoreHorizontal, Terminal, Trash2 } from "lucide-react"
+import { Activity, MoreHorizontal, Radio, Terminal, Trash2 } from "lucide-react"
 import { useState } from "react"
+import { AgentEventsSheet } from "@/components/Agents/AgentEventsSheet"
 import { AgentLogsSheet } from "@/components/Agents/AgentLogsSheet"
 import { AgentMetricsSheet } from "@/components/Agents/AgentMetricsSheet"
 import { Badge } from "@/components/ui/badge"
@@ -138,6 +139,7 @@ export const columns: ColumnDef<Agent>[] = [
 function AgentActions({ agent }: { agent: Agent }) {
   const [logsOpen, setLogsOpen] = useState(false)
   const [metricsOpen, setMetricsOpen] = useState(false)
+  const [eventsOpen, setEventsOpen] = useState(false)
 
   return (
     <>
@@ -156,6 +158,10 @@ function AgentActions({ agent }: { agent: Agent }) {
           >
             Copy Agent ID
           </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => setEventsOpen(true)}>
+            <Radio className="mr-2 h-4 w-4" />
+            View Events
+          </DropdownMenuItem>
           <DropdownMenuItem onClick={() => setLogsOpen(true)}>
             <Terminal className="mr-2 h-4 w-4" />
             View Logs
@@ -171,6 +177,13 @@ function AgentActions({ agent }: { agent: Agent }) {
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+
+      <AgentEventsSheet
+        isOpen={eventsOpen}
+        onClose={() => setEventsOpen(false)}
+        agentId={agent.id}
+        agentName={agent.name}
+      />
 
       <AgentLogsSheet
         isOpen={logsOpen}
