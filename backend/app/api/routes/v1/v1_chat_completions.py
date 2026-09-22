@@ -223,8 +223,17 @@ async def _get_or_create_server(model: Model, agent_id: str | None = None) -> Se
                     "context_size": model.context_length or 4096,
                     "batch_size": 512,
                     "cache_prompt": True,
+                },
+                # If the model file is not on the agent yet, it downloads it
+                # from the source repo before launching llama-server.
+                "source": {
+                    "source": model.source,
+                    "repo_id": model.source_repo_id,
+                    "filename": model.source_file or (model.path.rsplit("/", 1)[-1]),
                 }
-            }
+                if model.source_repo_id
+                else None,
+            },
         )
 
         # Create ServerInstance record

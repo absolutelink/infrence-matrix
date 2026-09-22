@@ -2,9 +2,9 @@
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
 
-from app.services.llama_server import llama_server_manager
+from app.core.logging import logger
+from app.services.llama_server import ServerConfig, llama_server_manager
 from app.services.model_manager import model_manager
 
 router = APIRouter(prefix="/servers", tags=["servers"])
@@ -12,7 +12,7 @@ router = APIRouter(prefix="/servers", tags=["servers"])
 server_manager = llama_server_manager
 
 
-class ServerConfig(BaseModel):
+class ServerSpec(BaseModel):
     id: str
     model_path: str
     port: int
@@ -24,24 +24,61 @@ class ServerConfig(BaseModel):
 
 
 class ServerStartRequest(BaseModel):
-    config: ServerConfig
+    config: ServerSpec
+    # If provided and the model file is missing locally, the agent downloads
+    # the file from the source repo before starting the server.
+    source: dict[str, str] | None = None
 
 
 class ServerStopRequest(BaseModel):
     server_id: str
 
 
+def _resolve_model_path(model_path: str) -> str:
+    """Accept absolute paths or bare filenames under MODELS_PATH."""
+    if model_path.startswith("/"):
+        return model_path
+    return str(model_manager.models_path / model_path)
+
+
+async def _ensure_model(
+    model_path: str,
+    source: dict[str, str] | None,
+) -> str:
+    """Ensure the model file exists locally, downloading it if needed.
+
+    Returns the absolute path to the model file.
+    """
+    path = _resolve_model_path(model_path)
+    filename = path.rsplit("/", 1)[-1]
+
+    if model_manager.model_exists(filename):
+        return path
+
+    if not source or not source.get("repo_id") or not source.get("filename"):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Model file {filename} not found on agent and no download source provided",
+        )
+
+    logger.info(f"Model {filename} missing; downloading from {source['repo_id']}")
+    downloaded = await model_manager.download_model(
+        repo_id=source["repo_id"],
+        filename=source["filename"],
+        source=source.get("source", "huggingface"),
+        job_id=source.get("job_id"),
+    )
+    return downloaded
+
+
 @router.post("/start")
 async def start_server(request: ServerStartRequest) -> dict:
-    """Start a llama.cpp server."""
+    """Start a llama.cpp server, auto-downloading the model if needed."""
     try:
-        # Validate model exists
-        if not model_manager.model_exists(request.config.model_path):
-            raise HTTPException(status_code=404, detail="Model not found")
+        model_path = await _ensure_model(request.config.model_path, request.source)
 
-        # Start the server
-        config = llama_server_manager.ServerConfig(
-            model_path=request.config.model_path,
+        config = ServerConfig(
+            model_path=model_path,
             port=request.config.port,
             gpu_layers=request.config.gpu_layers,
             context_size=request.config.context_size,
@@ -54,9 +91,15 @@ async def start_server(request: ServerStartRequest) -> dict:
         if not success:
             raise HTTPException(status_code=500, detail="Failed to start server")
 
-        return {"status": "started", "server_id": request.config.id}
+        return {
+            "status": "started",
+            "server_id": request.config.id,
+            "model_path": model_path,
+        }
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/stop")
@@ -69,7 +112,7 @@ async def stop_server(request: ServerStopRequest) -> dict:
 
         return {"status": "stopped", "server_id": request.server_id}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/list")
