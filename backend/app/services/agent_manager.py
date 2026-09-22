@@ -4,6 +4,8 @@ import asyncio
 from datetime import UTC, datetime
 
 import httpx
+from sqlalchemy import update
+from sqlmodel import col
 from websockets.client import WebSocketClientProtocol, connect
 
 from app.core.config import settings
@@ -44,6 +46,8 @@ class AgentManager:
         async with AsyncSessionMaker() as session:
             from sqlalchemy import select
 
+            from app.models import ServerInstance
+
             name = agent_data["name"]
 
             # Agents have a UUID PK; the agent-declared agent_id is not
@@ -73,6 +77,23 @@ class AgentManager:
                 )
                 session.add(agent)
                 logger.info(f"Registered new agent {name}")
+
+            # The agent restarts with no running llama-server processes, so
+            # anything still marked starting/running for it is stale.
+            stale = await session.execute(
+                update(ServerInstance)
+                .where(
+                    col(ServerInstance.agent_id) == agent.id,
+                    col(ServerInstance.status).in_(["starting", "running"]),
+                )
+                .values(status="stopped", health_status="unknown")
+            )
+            stale_count = getattr(stale, "rowcount", 0)
+            if stale_count:
+                logger.info(
+                    f"Marked {stale_count} server instance(s) as stopped "
+                    f"for restarted agent {name}"
+                )
 
             await session.commit()
             await session.refresh(agent)
