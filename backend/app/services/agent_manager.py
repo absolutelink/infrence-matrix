@@ -1,6 +1,7 @@
 """Manages Agent registration, discovery, and WebSocket connections."""
 
 import asyncio
+import json
 from datetime import UTC, datetime
 
 import httpx
@@ -21,7 +22,8 @@ class AgentManager:
         self.agents: dict[str, Agent] = {}  # agent_id -> Agent
         self.ws_connections: dict[str, WebSocketClientProtocol] = {}
         self._reconnect_tasks: dict[str, asyncio.Task[None]] = {}
-        self._event_buffers: dict[str, list[dict[str, object]]] = {}
+        self._event_buffers: dict[str, list[dict]] = {}
+        self._connect_tasks: dict[str, asyncio.Task[None]] = {}
         # UI subscribers per agent: agent_id -> list of asyncio.Queue
         self._event_subscribers: dict[str, list[asyncio.Queue[dict[str, object]]]] = {}
 
@@ -99,15 +101,35 @@ class AgentManager:
             await session.refresh(agent)
 
             self.agents[str(agent.id)] = agent
-            self._event_buffers[str(agent.id)] = []
+            if str(agent.id) not in self._event_buffers:
+                self._event_buffers[str(agent.id)] = []
 
-            # Start WebSocket connection
+            # Start WebSocket connection (skip if one is already live)
             asyncio.create_task(self.connect_websocket(agent))
 
             return agent
 
     async def connect_websocket(self, agent: Agent) -> None:
-        """Establish WebSocket connection to Agent."""
+        """Establish and hold the WebSocket connection to an Agent.
+
+        Exits early if a connection is already being established, so
+        repeated registrations don't pile up parallel connections.
+        """
+        agent_id = str(agent.id)
+
+        existing_task = self._connect_tasks.get(agent_id)
+        if existing_task is not None and not existing_task.done():
+            return
+
+        task = asyncio.create_task(self._run_agent_websocket(agent))
+        self._connect_tasks[agent_id] = task
+        try:
+            await task
+        finally:
+            self._connect_tasks.pop(agent_id, None)
+
+    async def _run_agent_websocket(self, agent: Agent) -> None:
+        """Run the agent event WebSocket loop until it fails."""
         ws_url = f"ws://{agent.host}:{agent.port}/ws/status"
         agent_id = str(agent.id)
 
@@ -122,7 +144,15 @@ class AgentManager:
 
                     # Listen for events
                     async for message in websocket:
-                        await self._handle_agent_event(agent_id, message)
+                        try:
+                            event = json.loads(message)
+                        except TypeError, ValueError:
+                            logger.warning(
+                                f"Unparseable message from agent {agent_id}: "
+                                f"{str(message)[:120]}"
+                            )
+                            continue
+                        await self._handle_agent_event(agent_id, event)
 
             except Exception as e:
                 agent.websocket_connected = False
@@ -149,20 +179,10 @@ class AgentManager:
             try:
                 await asyncio.sleep(settings.WS_RECONNECT_INTERVAL)
 
-                # Try to reconnect
-                ws_url = f"ws://{agent.host}:{agent.port}/ws/status"
-                async with connect(
-                    ws_url, extra_headers={"X-Agent-ID": agent_id}
-                ) as websocket:
-                    self.ws_connections[agent_id] = websocket
-                    agent.websocket_connected = True
-                    agent.status = "online"
-                    logger.info(f"Reconnected to agent {agent_id}")
-
-                    # Exit reconnect loop
-                    self._reconnect_tasks.pop(agent_id, None)
-                    asyncio.create_task(self._listen_websocket(agent_id, websocket))
-                    return
+                # Try to reconnect via the normal connection runner (it
+                # holds the connection and parses messages).
+                await self._run_agent_websocket(agent)
+                return
 
             except Exception as e:
                 attempts += 1
@@ -175,23 +195,7 @@ class AgentManager:
         self._reconnect_tasks.pop(agent_id, None)
         logger.error(f"Max reconnect attempts reached for agent {agent_id}")
 
-    async def _listen_websocket(
-        self, agent_id: str, websocket: WebSocketClientProtocol
-    ) -> None:
-        """Listen for WebSocket events."""
-        try:
-            async for message in websocket:
-                await self._handle_agent_event(agent_id, message)
-        except Exception as e:
-            logger.error(f"WebSocket listen error for agent {agent_id}: {e}")
-            agent = self.agents.get(agent_id)
-            if agent:
-                agent.websocket_connected = False
-                self._schedule_reconnect(agent)
-
-    async def _handle_agent_event(
-        self, agent_id: str, event: dict[str, object]
-    ) -> None:
+    async def _handle_agent_event(self, agent_id: str, event: dict) -> None:
         """Process event from Agent."""
         # Buffer event
         if agent_id in self._event_buffers:
@@ -208,8 +212,10 @@ class AgentManager:
                 logger.warning(f"UI event queue full for agent {agent_id}")
 
         # Update database based on event type
-        event_type = event.get("event")
-        event_data = event.get("data", {})
+        event_type = str(event.get("event"))
+        event_data: dict = (
+            event.get("data") if isinstance(event.get("data"), dict) else {}
+        )
 
         logger.debug(f"Received event from agent {agent_id}: {event_type}")
 
@@ -224,9 +230,7 @@ class AgentManager:
         elif event_type == "download.progress":
             await self._handle_download_progress(agent_id, event_data)
 
-    async def _handle_server_error(
-        self, agent_id: str, data: dict[str, object]
-    ) -> None:
+    async def _handle_server_error(self, agent_id: str, data: dict) -> None:
         """Handle server.error event."""
         async with AsyncSessionMaker() as session:
             from sqlalchemy import select
@@ -249,9 +253,7 @@ class AgentManager:
                 await session.commit()
                 logger.warning(f"Server {server_id} error: {data.get('error')}")
 
-    async def _handle_server_started(
-        self, agent_id: str, data: dict[str, object]
-    ) -> None:
+    async def _handle_server_started(self, agent_id: str, data: dict) -> None:
         """Handle server.started event."""
         # Update ServerInstance in database
         async with AsyncSessionMaker() as session:
@@ -276,9 +278,7 @@ class AgentManager:
                     await session.commit()
                     logger.info(f"Server {server_id} marked as running")
 
-    async def _handle_server_stopped(
-        self, agent_id: str, data: dict[str, object]
-    ) -> None:
+    async def _handle_server_stopped(self, agent_id: str, data: dict) -> None:
         """Handle server.stopped event."""
         async with AsyncSessionMaker() as session:
             from sqlalchemy import select
@@ -298,7 +298,7 @@ class AgentManager:
                     await session.commit()
                     logger.info(f"Server {server_id} marked as stopped")
 
-    async def _handle_gpu_usage(self, agent_id: str, data: dict[str, object]) -> None:
+    async def _handle_gpu_usage(self, agent_id: str, data: dict) -> None:
         """Handle gpu.usage event."""
         # Update agent GPU info
         agent = self.agents.get(agent_id)
@@ -310,9 +310,7 @@ class AgentManager:
             agent.gpu_info = gpu_info
             agent.last_seen = datetime.now(UTC)
 
-    async def _handle_download_progress(
-        self, agent_id: str, data: dict[str, object]
-    ) -> None:
+    async def _handle_download_progress(self, agent_id: str, data: dict) -> None:
         """Handle download.progress event."""
         # Update DownloadJob in database
         async with AsyncSessionMaker() as session:
