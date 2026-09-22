@@ -30,10 +30,50 @@ class ServerConfig:
 class LlamaServerManager:
     """Manages llama.cpp subprocesses."""
 
+    # Number of raw log chunks (per stream) kept in memory per server
+    LOG_BUFFER_CHUNKS: int = 64
+
     def __init__(self) -> None:
         self.servers: dict[str, subprocess.Popen] = {}
         self.configs: dict[str, ServerConfig] = {}
         self.start_times: dict[str, float] = {}
+        # server_id -> list of (stream_key, raw_chunk) in order
+        self._log_buffers: dict[str, list[tuple[str, str]]] = {}
+        self._log_task: asyncio.Task | None = None
+
+    def start_log_forwarding(self) -> None:
+        """Start the background loop emitting log.lines events."""
+        if self._log_task is None or self._log_task.done():
+            self._log_task = asyncio.create_task(self._log_forward_loop())
+
+    async def _log_forward_loop(self) -> None:
+        """Periodically drain server output and emit log.lines events."""
+        positions: dict[str, tuple[int, int]] = {}
+        while True:
+            await asyncio.sleep(settings.LOG_FORWARD_INTERVAL)
+            for server_id in list(self.servers.keys()):
+                from_stdout, from_stderr = positions.get(server_id, (0, 0))
+                (
+                    stdout_lines,
+                    stderr_lines,
+                    total_stdout,
+                    total_stderr,
+                ) = self._collect_logs(server_id, from_stdout, from_stderr)
+
+                lines = [
+                    {"stream": "stdout", "line": line} for line in stdout_lines
+                ] + [{"stream": "stderr", "line": line} for line in stderr_lines]
+
+                if lines:
+                    publish_event(
+                        "log.lines",
+                        {
+                            "server_id": server_id,
+                            "lines": lines,
+                        },
+                    )
+
+                positions[server_id] = (total_stdout, total_stderr)
 
     async def start_server(self, server_id: str, config: ServerConfig) -> bool:
         """Start a llama.cpp server subprocess."""
@@ -123,6 +163,7 @@ class LlamaServerManager:
         self.servers.pop(server_id, None)
         self.configs.pop(server_id, None)
         self.start_times.pop(server_id, None)
+        self._log_buffers.pop(server_id, None)
 
         publish_event(
             "server.stopped",
@@ -161,6 +202,71 @@ class LlamaServerManager:
             return 0.0
         return time.time() - start_time
 
+    def _drain_pipes(self, server_id: str) -> None:
+        """Read any pending output into the per-server ring buffer."""
+        proc = self.servers.get(server_id)
+        if proc is None:
+            return
+
+        import fcntl
+
+        for stream, key in ((proc.stdout, "stdout"), (proc.stderr, "stderr")):
+            if not stream:
+                continue
+            try:
+                fd = stream.fileno()
+                orig = fcntl.fcntl(fd, fcntl.F_GETFL)
+                fcntl.fcntl(fd, fcntl.F_SETFL, orig | os.O_NONBLOCK)
+                try:
+                    raw = stream.read()
+                finally:
+                    fcntl.fcntl(fd, fcntl.F_SETFL, orig)
+                if raw:
+                    self._log_buffers[server_id].append((key, raw))
+                    if len(self._log_buffers[server_id]) > self.LOG_BUFFER_CHUNKS:
+                        self._log_buffers[server_id].pop(0)
+            except Exception:
+                pass
+
+    def _collect_logs(
+        self,
+        server_id: str,
+        from_stdout: int = 0,
+        from_stderr: int = 0,
+    ) -> tuple[list[str], list[str], int, int]:
+        """Drain pipes and return (stdout_lines, stderr_lines, new_stdout_pos, new_stderr_pos)."""
+        self._drain_pipes(server_id)
+
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+
+        for stream_key, from_pos, collected in (
+            ("stdout", from_stdout, stdout_lines),
+            ("stderr", from_stderr, stderr_lines),
+        ):
+            pos = 0
+            for chunk_key, chunk in self._log_buffers.get(server_id, []):
+                if chunk_key != stream_key:
+                    continue
+                lines = chunk.splitlines()
+                chunk_end = pos + len(lines)
+                if chunk_end > from_pos:
+                    collected.extend(lines[max(from_pos - pos, 0) :])
+                pos = chunk_end
+
+        total_stdout = sum(
+            len(c.splitlines())
+            for k, c in self._log_buffers.get(server_id, [])
+            if k == "stdout"
+        )
+        total_stderr = sum(
+            len(c.splitlines())
+            for k, c in self._log_buffers.get(server_id, [])
+            if k == "stderr"
+        )
+
+        return stdout_lines, stderr_lines, total_stdout, total_stderr
+
     def get_server_logs(self, server_id: str, lines: int = 100) -> dict:
         """Get recent stdout/stderr output from a llama.cpp server."""
         if server_id not in self.servers:
@@ -171,42 +277,14 @@ class LlamaServerManager:
                 "stderr": [],
             }
 
-        proc = self.servers[server_id]
-        logs = {"server_id": server_id, "status": "running", "stdout": [], "stderr": []}
+        stdout_lines, stderr_lines, _, _ = self._collect_logs(server_id)
 
-        if proc.stdout:
-            try:
-                import fcntl
-
-                fd = proc.stdout.fileno()
-                orig = fcntl.fcntl(fd, fcntl.F_GETFL)
-                fcntl.fcntl(fd, fcntl.F_SETFL, orig | os.O_NONBLOCK)
-                try:
-                    raw = proc.stdout.read()
-                finally:
-                    fcntl.fcntl(fd, fcntl.F_SETFL, orig)
-                if raw:
-                    logs["stdout"] = raw.strip().splitlines()[-lines:]
-            except Exception:
-                pass
-
-        if proc.stderr:
-            try:
-                import fcntl
-
-                fd = proc.stderr.fileno()
-                orig = fcntl.fcntl(fd, fcntl.F_GETFL)
-                fcntl.fcntl(fd, fcntl.F_SETFL, orig | os.O_NONBLOCK)
-                try:
-                    raw = proc.stderr.read()
-                finally:
-                    fcntl.fcntl(fd, fcntl.F_SETFL, orig)
-                if raw:
-                    logs["stderr"] = raw.strip().splitlines()[-lines:]
-            except Exception:
-                pass
-
-        return logs
+        return {
+            "server_id": server_id,
+            "status": "running",
+            "stdout": stdout_lines[-lines:],
+            "stderr": stderr_lines[-lines:],
+        }
 
     def list_servers(self) -> list[dict]:
         """List all running servers."""

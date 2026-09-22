@@ -4,6 +4,7 @@ import asyncio
 import logging
 import socket
 import uuid as uuid_module
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -256,6 +257,17 @@ async def _dispatch_start(
             payload,
             timeout=900.0,
         )
+        # The agent returned success (llama-server healthy). Mark running in
+        # case the server.started event was lost (e.g. backend restart).
+        async with AsyncSessionMaker() as session:
+            server = await session.get(ServerInstance, uuid_module.UUID(server_id))
+            if server and server.status != "running":
+                server.status = "running"
+                server.health_status = "healthy"
+                server.started_at = server.started_at or datetime.now(UTC)
+                session.add(server)
+                await session.commit()
+                logger.info(f"Server {server_id} marked as running (dispatch ack)")
     except Exception as e:
         logger.error(f"Failed to start server {server_id} on agent {agent_id}: {e}")
         async with AsyncSessionMaker() as session:

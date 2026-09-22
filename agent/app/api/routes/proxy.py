@@ -1,8 +1,7 @@
 """Proxy endpoints for llama.cpp API."""
 
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-import httpx
 
 from app.api.routes.servers import server_manager
 from app.services.proxy import LlamaCppProxy

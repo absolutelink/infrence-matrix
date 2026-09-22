@@ -15,6 +15,11 @@ from app.services.event_bus import publish_event
 class FrontendClient:
     """Handles Frontend registration and WebSocket connection."""
 
+    # Re-register periodically: if the backend restarts it loses its
+    # in-memory agent cache and needs a fresh register call to re-open
+    # the event WebSocket.
+    REREGISTER_INTERVAL: int = 60
+
     def __init__(self) -> None:
         self.registered = False
         self.ws_connected = False
@@ -81,13 +86,29 @@ class FrontendClient:
         self._ws_task = asyncio.create_task(self._connection_loop())
 
     async def _connection_loop(self) -> None:
-        """Register with the frontend (retrying until success), then connect."""
+        """Register with the frontend, then keep the WebSocket alive.
+
+        Re-registers periodically so a backend restart re-opens the
+        backend->agent event WebSocket (registration is what triggers
+        the backend to connect).
+        """
         while not self.registered:
             if await self.register():
                 break
             await asyncio.sleep(settings.WS_RECONNECT_INTERVAL)
 
-        await self.connect_websocket()
+        reregister_task = asyncio.create_task(self._reregister_loop())
+
+        try:
+            await self.connect_websocket()
+        finally:
+            reregister_task.cancel()
+
+    async def _reregister_loop(self) -> None:
+        """Re-register with the frontend on an interval."""
+        while True:
+            await asyncio.sleep(self.REREGISTER_INTERVAL)
+            await self.register()
 
     def _build_ws_url(self, frontend_url: str) -> str:
         """Convert the frontend HTTP(S) URL to a WebSocket URL."""

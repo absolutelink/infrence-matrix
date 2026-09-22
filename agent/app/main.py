@@ -7,6 +7,7 @@ from app.api.routes import gpu, models, proxy, servers, websocket
 from app.core.logging import logger
 from app.services.frontend_client import frontend_client
 from app.services.gpu_monitor import start_gpu_monitoring
+from app.services.llama_server import llama_server_manager
 
 
 def create_app() -> FastAPI:
@@ -53,6 +54,13 @@ def create_app() -> FastAPI:
             logger.info("Started GPU usage monitoring")
         except Exception as e:  # noqa: BLE001 - startup must not crash on optional services
             logger.error(f"Failed to start GPU monitoring: {e}")
+
+        # Start live log forwarding for llama.cpp servers
+        try:
+            llama_server_manager.start_log_forwarding()
+            logger.info("Started log forwarding")
+        except Exception as e:  # noqa: BLE001 - startup must not crash on optional services
+            logger.error(f"Failed to start log forwarding: {e}")
 
     @app.on_event("shutdown")
     async def shutdown_event():

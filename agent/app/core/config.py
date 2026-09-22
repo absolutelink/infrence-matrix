@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     # Events
     DOWNLOAD_PROGRESS_INTERVAL: float = 1.0
     GPU_USAGE_INTERVAL: int = 10
+    LOG_FORWARD_INTERVAL: float = 1.0
 
 
 settings = Settings()

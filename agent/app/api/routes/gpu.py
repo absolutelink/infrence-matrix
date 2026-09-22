@@ -1,7 +1,6 @@
 """GPU info endpoints."""
 
 from fastapi import APIRouter
-import psutil
 
 router = APIRouter(prefix="/gpu", tags=["gpu"])
 

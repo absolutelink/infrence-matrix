@@ -1,6 +1,7 @@
 """Proxies requests to llama.cpp servers."""
 
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
+
 import httpx
 
 from app.services.llama_server import LlamaServerManager
