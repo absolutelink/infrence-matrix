@@ -14,7 +14,10 @@ import { Route as LayoutIndexRouteImport } from './routes/_layout/index'
 import { Route as LayoutAgentsRouteImport } from './routes/_layout/agents'
 import { Route as LayoutModelsRouteImport } from './routes/_layout/models'
 import { Route as LayoutServerInstancesRouteImport } from './routes/_layout/server-instances'
+import { Route as LayoutAudioIndexRouteImport } from './routes/_layout/audio/index'
 import { Route as LayoutChatIndexRouteImport } from './routes/_layout/chat/index'
+import { Route as LayoutCompletionsIndexRouteImport } from './routes/_layout/completions/index'
+import { Route as LayoutEmbeddingsIndexRouteImport } from './routes/_layout/embeddings/index'
 
 const LayoutRoute = LayoutRouteImport.update({
   id: '/_layout',
@@ -40,9 +43,24 @@ const LayoutServerInstancesRoute = LayoutServerInstancesRouteImport.update({
   path: '/server-instances',
   getParentRoute: () => LayoutRoute,
 } as any)
+const LayoutAudioIndexRoute = LayoutAudioIndexRouteImport.update({
+  id: '/audio/',
+  path: '/audio/',
+  getParentRoute: () => LayoutRoute,
+} as any)
 const LayoutChatIndexRoute = LayoutChatIndexRouteImport.update({
   id: '/chat/',
   path: '/chat/',
+  getParentRoute: () => LayoutRoute,
+} as any)
+const LayoutCompletionsIndexRoute = LayoutCompletionsIndexRouteImport.update({
+  id: '/completions/',
+  path: '/completions/',
+  getParentRoute: () => LayoutRoute,
+} as any)
+const LayoutEmbeddingsIndexRoute = LayoutEmbeddingsIndexRouteImport.update({
+  id: '/embeddings/',
+  path: '/embeddings/',
   getParentRoute: () => LayoutRoute,
 } as any)
 
@@ -51,14 +69,20 @@ export interface FileRoutesByFullPath {
   '/agents': typeof LayoutAgentsRoute
   '/models': typeof LayoutModelsRoute
   '/server-instances': typeof LayoutServerInstancesRoute
+  '/audio/': typeof LayoutAudioIndexRoute
   '/chat/': typeof LayoutChatIndexRoute
+  '/completions/': typeof LayoutCompletionsIndexRoute
+  '/embeddings/': typeof LayoutEmbeddingsIndexRoute
 }
 export interface FileRoutesByTo {
   '/agents': typeof LayoutAgentsRoute
   '/models': typeof LayoutModelsRoute
   '/server-instances': typeof LayoutServerInstancesRoute
   '/': typeof LayoutIndexRoute
+  '/audio': typeof LayoutAudioIndexRoute
   '/chat': typeof LayoutChatIndexRoute
+  '/completions': typeof LayoutCompletionsIndexRoute
+  '/embeddings': typeof LayoutEmbeddingsIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -67,13 +91,32 @@ export interface FileRoutesById {
   '/_layout/models': typeof LayoutModelsRoute
   '/_layout/server-instances': typeof LayoutServerInstancesRoute
   '/_layout/': typeof LayoutIndexRoute
+  '/_layout/audio/': typeof LayoutAudioIndexRoute
   '/_layout/chat/': typeof LayoutChatIndexRoute
+  '/_layout/completions/': typeof LayoutCompletionsIndexRoute
+  '/_layout/embeddings/': typeof LayoutEmbeddingsIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/agents' | '/models' | '/server-instances' | '/chat/'
+  fullPaths:
+    | '/'
+    | '/agents'
+    | '/models'
+    | '/server-instances'
+    | '/audio/'
+    | '/chat/'
+    | '/completions/'
+    | '/embeddings/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/agents' | '/models' | '/server-instances' | '/' | '/chat'
+  to:
+    | '/agents'
+    | '/models'
+    | '/server-instances'
+    | '/'
+    | '/audio'
+    | '/chat'
+    | '/completions'
+    | '/embeddings'
   id:
     | '__root__'
     | '/_layout'
@@ -81,7 +124,10 @@ export interface FileRouteTypes {
     | '/_layout/models'
     | '/_layout/server-instances'
     | '/_layout/'
+    | '/_layout/audio/'
     | '/_layout/chat/'
+    | '/_layout/completions/'
+    | '/_layout/embeddings/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -125,11 +171,32 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LayoutServerInstancesRouteImport
       parentRoute: typeof LayoutRoute
     }
+    '/_layout/audio/': {
+      id: '/_layout/audio/'
+      path: '/audio'
+      fullPath: '/audio/'
+      preLoaderRoute: typeof LayoutAudioIndexRouteImport
+      parentRoute: typeof LayoutRoute
+    }
     '/_layout/chat/': {
       id: '/_layout/chat/'
       path: '/chat'
       fullPath: '/chat/'
       preLoaderRoute: typeof LayoutChatIndexRouteImport
+      parentRoute: typeof LayoutRoute
+    }
+    '/_layout/completions/': {
+      id: '/_layout/completions/'
+      path: '/completions'
+      fullPath: '/completions/'
+      preLoaderRoute: typeof LayoutCompletionsIndexRouteImport
+      parentRoute: typeof LayoutRoute
+    }
+    '/_layout/embeddings/': {
+      id: '/_layout/embeddings/'
+      path: '/embeddings'
+      fullPath: '/embeddings/'
+      preLoaderRoute: typeof LayoutEmbeddingsIndexRouteImport
       parentRoute: typeof LayoutRoute
     }
   }
@@ -140,7 +207,10 @@ interface LayoutRouteChildren {
   LayoutModelsRoute: typeof LayoutModelsRoute
   LayoutServerInstancesRoute: typeof LayoutServerInstancesRoute
   LayoutIndexRoute: typeof LayoutIndexRoute
+  LayoutAudioIndexRoute: typeof LayoutAudioIndexRoute
   LayoutChatIndexRoute: typeof LayoutChatIndexRoute
+  LayoutCompletionsIndexRoute: typeof LayoutCompletionsIndexRoute
+  LayoutEmbeddingsIndexRoute: typeof LayoutEmbeddingsIndexRoute
 }
 
 const LayoutRouteChildren: LayoutRouteChildren = {
@@ -148,7 +218,10 @@ const LayoutRouteChildren: LayoutRouteChildren = {
   LayoutModelsRoute: LayoutModelsRoute,
   LayoutServerInstancesRoute: LayoutServerInstancesRoute,
   LayoutIndexRoute: LayoutIndexRoute,
+  LayoutAudioIndexRoute: LayoutAudioIndexRoute,
   LayoutChatIndexRoute: LayoutChatIndexRoute,
+  LayoutCompletionsIndexRoute: LayoutCompletionsIndexRoute,
+  LayoutEmbeddingsIndexRoute: LayoutEmbeddingsIndexRoute,
 }
 
 const LayoutRouteWithChildren =

@@ -42,6 +42,10 @@ export type AgentRegisterRequest = {
     gpu_info?: {
         [key: string]: unknown;
     } | null;
+    /**
+     * Running Server Ids
+     */
+    running_server_ids?: Array<string> | null;
 };
 
 /**
@@ -343,6 +347,10 @@ export type CompletionRequest = {
      */
     model: string;
     /**
+     * Agent Id
+     */
+    agent_id?: string | null;
+    /**
      * Prompt
      */
     prompt: string | Array<string> | Array<number> | Array<Array<number>>;
@@ -442,6 +450,10 @@ export type EmbeddingRequest = {
      * Model
      */
     model: string;
+    /**
+     * Agent Id
+     */
+    agent_id?: string | null;
     /**
      * Input
      *

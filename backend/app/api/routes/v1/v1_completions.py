@@ -1,4 +1,4 @@
-"""V1 Completions endpoint - OpenAI-compatible legacy completions API."""
+"""V1 Completions endpoint - OpenAI-compatible legacy completions API via Agent proxy."""
 
 import json
 import logging
@@ -8,11 +8,14 @@ from collections.abc import AsyncGenerator
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app.api.deps import get_db
-from app.models import Model, ServerInstance
+from app.api.routes.v1.v1_chat_completions import _get_or_create_server
+from app.models import Model
+from app.services.agent_manager import agent_manager
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +24,9 @@ router = APIRouter()
 
 class CompletionRequest(BaseModel):
     """Completion request for legacy /v1/completions endpoint."""
+
     model: str
+    agent_id: str | None = None  # Optional: specify which agent to use
     prompt: str | list[str] | list[int] | list[list[int]]
     stream: bool = False
     temperature: float = Field(default=0.7, ge=0, le=2)
@@ -38,6 +43,7 @@ class CompletionRequest(BaseModel):
 
 class CompletionChoice(BaseModel):
     """Completion choice."""
+
     text: str
     index: int
     logprobs: dict[str, str] | None = None
@@ -46,6 +52,7 @@ class CompletionChoice(BaseModel):
 
 class UsageInfo(BaseModel):
     """Usage information."""
+
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
@@ -53,6 +60,7 @@ class UsageInfo(BaseModel):
 
 class CompletionResponse(BaseModel):
     """Completion response."""
+
     id: str
     object: str = "text_completion"
     created: int
@@ -63,6 +71,7 @@ class CompletionResponse(BaseModel):
 
 class StreamChoice(BaseModel):
     """Streaming choice."""
+
     text: str
     index: int
     logprobs: dict[str, str] | None = None
@@ -71,6 +80,7 @@ class StreamChoice(BaseModel):
 
 class CompletionChunk(BaseModel):
     """Completion chunk for streaming."""
+
     id: str
     object: str = "text_completion.chunk"
     created: int
@@ -78,7 +88,9 @@ class CompletionChunk(BaseModel):
     choices: list[StreamChoice]
 
 
-def _convert_prompt_to_llama_format(prompt: str | list[str] | list[int] | list[list[int]]) -> str:
+def _convert_prompt_to_llama_format(
+    prompt: str | list[str] | list[int] | list[list[int]],
+) -> str:
     """Convert prompt to llama.cpp format."""
     if isinstance(prompt, str):
         return prompt
@@ -94,37 +106,53 @@ def _convert_prompt_to_llama_format(prompt: str | list[str] | list[int] | list[l
     return str(prompt)
 
 
-async def _stream_completion(
-    server_port: int,
+def _build_payload(request: CompletionRequest, stream: bool) -> dict:
+    """Build llama.cpp /v1/completions payload."""
+    payload: dict = {
+        "prompt": _convert_prompt_to_llama_format(request.prompt),
+        "temperature": request.temperature,
+        "max_tokens": request.max_tokens,
+        "stream": stream,
+    }
+
+    for key in ["top_p", "frequency_penalty", "presence_penalty", "stop"]:
+        value = getattr(request, key)
+        if value is not None:
+            payload[key] = value
+
+    if request.echo:
+        payload["echo"] = True
+    if request.n != 1:
+        payload["n"] = request.n
+    if request.suffix is not None:
+        payload["suffix"] = request.suffix
+
+    return payload
+
+
+async def _stream_completion_via_agent(
+    agent_id: str,
+    server_id: str,
     request: CompletionRequest,
     request_id: str,
 ) -> AsyncGenerator[str]:
-    """Stream completion from llama-server."""
-    prompt = _convert_prompt_to_llama_format(request.prompt)
-
-    payload = {
-        "prompt": prompt,
-        "temperature": request.temperature,
-        "max_tokens": request.max_tokens,
-        "stream": True,
-    }
-
-    if request.top_p is not None:
-        payload["top_p"] = request.top_p
-    if request.frequency_penalty is not None:
-        payload["frequency_penalty"] = request.frequency_penalty
-    if request.presence_penalty is not None:
-        payload["presence_penalty"] = request.presence_penalty
-    if request.stop is not None:
-        payload["stop"] = request.stop
-
+    """Stream completion via Agent proxy."""
+    payload = _build_payload(request, stream=True)
     created = int(time.time())
 
     try:
+        agent = await agent_manager.get_agent(agent_id)
+        if not agent:
+            raise ValueError(f"Agent {agent_id} not found")
+
         async with httpx.AsyncClient(timeout=300.0) as client:
+            proxy_url = (
+                f"http://{agent.host}:{agent.port}/proxy/{server_id}/v1/completions"
+            )
+
             async with client.stream(
                 "POST",
-                f"http://localhost:{server_port}/completion",
+                proxy_url,
                 json=payload,
             ) as response:
                 response.raise_for_status()
@@ -138,172 +166,126 @@ async def _stream_completion(
 
                         try:
                             chunk_data = json.loads(data)
-                            content = chunk_data.get("content", "")
+                            text = _extract_chunk_text(chunk_data)
 
                             stream_chunk = CompletionChunk(
                                 id=request_id,
                                 created=created,
                                 model=request.model,
-                                choices=[StreamChoice(
-                                    text=content,
-                                    index=0,
-                                    finish_reason=chunk_data.get("finish_reason"),
-                                )],
+                                choices=[
+                                    StreamChoice(
+                                        text=text,
+                                        index=0,
+                                        finish_reason=chunk_data.get("finish_reason"),
+                                    )
+                                ],
                             )
 
                             yield f"data: {stream_chunk.model_dump_json()}\n\n"
 
                         except json.JSONDecodeError:
+                            logger.warning(f"Invalid JSON in stream: {data}")
                             continue
 
-    except httpx.HTTPError as e:
+    except Exception as e:
         logger.error(f"Streaming error: {e}")
-        error_chunk = {
-            "error": {
-                "message": str(e),
-                "type": "server_error",
-            }
-        }
+        error_chunk = {"error": {"message": str(e), "type": "server_error"}}
         yield f"data: {json.dumps(error_chunk)}\n\n"
 
 
-async def _get_completion(
-    server_port: int,
-    request: CompletionRequest,
-    request_id: str,
-) -> CompletionResponse:
-    """Get non-streaming completion from llama-server."""
-    prompt = _convert_prompt_to_llama_format(request.prompt)
-
-    payload = {
-        "prompt": prompt,
-        "temperature": request.temperature,
-        "max_tokens": request.max_tokens,
-        "stream": False,
-    }
-
-    if request.top_p is not None:
-        payload["top_p"] = request.top_p
-    if request.frequency_penalty is not None:
-        payload["frequency_penalty"] = request.frequency_penalty
-    if request.presence_penalty is not None:
-        payload["presence_penalty"] = request.presence_penalty
-    if request.stop is not None:
-        payload["stop"] = request.stop
-
-    try:
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            response = await client.post(
-                f"http://localhost:{server_port}/completion",
-                json=payload,
-            )
-            response.raise_for_status()
-            result = response.json()
-
-            created = int(time.time())
-            content = result.get("content", "")
-
-            prompt_tokens = result.get("prompt_tokens", 0)
-            completion_tokens = result.get("completion_tokens", 0)
-
-            return CompletionResponse(
-                id=request_id,
-                created=created,
-                model=request.model,
-                choices=[CompletionChoice(
-                    text=content,
-                    index=0,
-                    finish_reason=result.get("finish_reason", "stop"),
-                )],
-                usage=UsageInfo(
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    total_tokens=prompt_tokens + completion_tokens,
-                ),
-            )
-
-    except httpx.HTTPError as e:
-        logger.error(f"Completion error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get completion: {e}")
+def _extract_chunk_text(chunk_data: dict) -> str:
+    """Extract text from a streaming chunk (OpenAI or llama.cpp native format)."""
+    choices = chunk_data.get("choices")
+    if choices and isinstance(choices, list):
+        choice = choices[0]
+        if "text" in choice:
+            return choice.get("text", "")
+        if "delta" in choice:
+            return choice["delta"].get("content", "") or choice["delta"].get("text", "")
+        if "content" in choice:
+            return choice.get("content", "")
+    return chunk_data.get("content", "")
 
 
-async def _find_model_server(
-    db: Session,
-    model_name: str,
-) -> int:
-    """Find or start a server for the model."""
-    statement = select(Model).where(Model.name == model_name)
-    model = db.exec(statement).first()
-
-    if not model:
-        raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found")
-
-    from app.services.llama_server import ServerConfig, llama_server_manager
-
-    statement = select(ServerInstance).where(
-        ServerInstance.model_id == model.id,
-        ServerInstance.status == "running",
-    )
-    instance = db.exec(statement).first()
-
-    if instance:
-        health = await llama_server_manager.check_health(instance.port)
-        if health == "healthy":
-            return instance.port
-
-    config = ServerConfig(
-        model_path=model.path,
-        port=8080,
-    )
-
-    new_instance = ServerInstance(
-        model_id=model.id,
-        port=config.port,
-        status="starting",
-        inactivity_timeout_seconds=300,
-    )
-
-    if await llama_server_manager.start_server(config, new_instance):
-        db.add(new_instance)
-        db.commit()
-        return config.port
-
-    raise HTTPException(status_code=503, detail="Failed to start model server")
-
-
-@router.post("/completions")
+@router.post("/completions", response_model=None)
 async def create_completion(
     request: CompletionRequest,
     db: Session = Depends(get_db),
-):
-    """
-    Create a completion (legacy GPT-3 style endpoint).
+) -> CompletionResponse | StreamingResponse:
+    """Create a completion (legacy GPT-3 style endpoint) via Agent proxy."""
+    request_id = f"cmpl-{uuid.uuid4()}"
+    created = int(time.time())
 
-    Supports both streaming (SSE) and non-streaming responses.
-    """
-    request_id = f"cmpl-{uuid.uuid4().hex[:12]}"
+    model = db.exec(select(Model).where(Model.name == request.model)).first()
+    if not model:
+        raise HTTPException(404, f"Model {request.model} not found")
 
     try:
-        server_port = await _find_model_server(db, request.model)
+        server = await _get_or_create_server(model, request.agent_id)
     except HTTPException:
         raise
+    except Exception as e:
+        logger.error(f"Server creation failed: {e}")
+        raise HTTPException(503, f"Failed to start server: {e}")
 
     if request.stream:
-        from fastapi.responses import StreamingResponse
-
-        async def generate() -> AsyncGenerator[str]:
-            async for chunk in _stream_completion(server_port, request, request_id):
-                yield chunk
-
         return StreamingResponse(
-            generate(),
+            _stream_completion_via_agent(
+                str(server.agent_id),
+                str(server.id),
+                request,
+                request_id,
+            ),
             media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Request-ID": request_id,
-            },
         )
-    else:
-        response = await _get_completion(server_port, request, request_id)
-        return response
+
+    try:
+        response = await agent_manager.send_to_agent(
+            str(server.agent_id),
+            "POST",
+            f"/proxy/{server.id}/v1/completions",
+            _build_payload(request, stream=False),
+            timeout=300.0,
+        )
+
+        text = ""
+        finish_reason = None
+        prompt_tokens = 0
+        completion_tokens = 0
+
+        choices = response.get("choices")
+        if choices and isinstance(choices, list):
+            choice = choices[0]
+            text = choice.get("text", "")
+            finish_reason = choice.get("finish_reason", "stop")
+            usage = response.get("usage", {})
+            prompt_tokens = usage.get("prompt_tokens", 0)
+            completion_tokens = usage.get("completion_tokens", 0)
+        else:
+            # llama.cpp native /completion response
+            text = response.get("content", "")
+            finish_reason = response.get("finish_reason", "stop")
+            prompt_tokens = response.get("tokens_evaluated", 0)
+            completion_tokens = response.get("tokens_predicted", 0)
+
+        return CompletionResponse(
+            id=request_id,
+            created=created,
+            model=request.model,
+            choices=[
+                CompletionChoice(
+                    text=text,
+                    index=0,
+                    finish_reason=finish_reason,
+                )
+            ],
+            usage=UsageInfo(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+            ),
+        )
+
+    except Exception as e:
+        logger.error(f"Completion error: {e}")
+        raise HTTPException(500, f"Inference failed: {e}")

@@ -712,9 +712,7 @@ export class V13 {
     /**
      * Create Completion
      *
-     * Create a completion (legacy GPT-3 style endpoint).
-     *
-     * Supports both streaming (SSE) and non-streaming responses.
+     * Create a completion (legacy GPT-3 style endpoint) via Agent proxy.
      */
     public static createCompletion<ThrowOnError extends boolean = true>(options: Options<v1CompletionsCreateCompletionData, ThrowOnError>) {
         return (options.client ?? client).post<v1CompletionsCreateCompletionResponses, v1CompletionsCreateCompletionErrors, ThrowOnError>({
@@ -737,10 +735,7 @@ export class V14 {
     /**
      * Create Embedding
      *
-     * Create embeddings for the given input text.
-     *
-     * Args:
-     * request: Embedding request with model and input text
+     * Create embeddings for the given input text via Agent proxy.
      */
     public static createEmbedding<ThrowOnError extends boolean = true>(options: Options<v1EmbeddingsCreateEmbeddingData, ThrowOnError>) {
         return (options.client ?? client).post<v1EmbeddingsCreateEmbeddingResponses, v1EmbeddingsCreateEmbeddingErrors, ThrowOnError>({

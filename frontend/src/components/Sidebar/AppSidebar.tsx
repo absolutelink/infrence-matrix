@@ -1,4 +1,13 @@
-import { Box, Cpu, Home, MessageSquare, Server } from "lucide-react"
+import {
+  AudioLines,
+  Box,
+  Braces,
+  Cpu,
+  Home,
+  MessageSquare,
+  Server,
+  Type,
+} from "lucide-react"
 
 import { SidebarAppearance } from "@/components/Common/Appearance"
 import { Logo } from "@/components/Common/Logo"
@@ -16,6 +25,9 @@ const baseItems: Item[] = [
   { icon: Cpu, title: "Agents", path: "/agents" },
   { icon: Box, title: "Server Instances", path: "/server-instances" },
   { icon: MessageSquare, title: "Chat", path: "/chat" },
+  { icon: Type, title: "Text Completion", path: "/completions" },
+  { icon: Braces, title: "Embeddings", path: "/embeddings" },
+  { icon: AudioLines, title: "Transcriptions", path: "/audio" },
 ]
 
 export function AppSidebar() {
