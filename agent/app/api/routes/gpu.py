@@ -18,11 +18,16 @@ async def get_gpu_info() -> dict:
 
     try:
         import subprocess
+
         result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name,memory.total,memory.used", "--format=csv,noheader,nounits"],
+            [
+                "nvidia-smi",
+                "--query-gpu=name,memory.total,memory.used",
+                "--format=csv,noheader,nounits",
+            ],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=5,
         )
 
         if result.returncode == 0:
@@ -41,7 +46,7 @@ async def get_gpu_info() -> dict:
             ["system_profiler", "SPDisplaysDataType"],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=5,
         )
 
         if result.returncode == 0 and "Metal" in result.stdout:
@@ -63,11 +68,16 @@ async def get_gpu_usage() -> dict:
 
     try:
         import subprocess
+
         result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=utilization.gpu,utilization.memory,temperature.gpu", "--format=csv,noheader,nounits"],
+            [
+                "nvidia-smi",
+                "--query-gpu=utilization.gpu,utilization.memory,temperature.gpu",
+                "--format=csv,noheader,nounits",
+            ],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=5,
         )
 
         if result.returncode == 0:

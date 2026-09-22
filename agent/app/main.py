@@ -3,10 +3,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import servers, models, gpu, websocket, proxy
-from app.core.config import settings
+from app.api.routes import gpu, models, proxy, servers, websocket
 from app.core.logging import logger
 from app.services.frontend_client import frontend_client
+from app.services.gpu_monitor import start_gpu_monitoring
 
 
 def create_app() -> FastAPI:
@@ -39,13 +39,20 @@ def create_app() -> FastAPI:
     async def startup_event():
         """Startup event to initialize services."""
         logger.info("Starting Inference Matrix Agent services...")
-        
+
         # Start background tasks for frontend connection
         try:
             await frontend_client.start_background_tasks()
             logger.info("Started frontend client background tasks")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - startup must not crash on optional services
             logger.error(f"Failed to start background tasks: {e}")
+
+        # Start periodic GPU usage event emission
+        try:
+            start_gpu_monitoring()
+            logger.info("Started GPU usage monitoring")
+        except Exception as e:  # noqa: BLE001 - startup must not crash on optional services
+            logger.error(f"Failed to start GPU monitoring: {e}")
 
     @app.on_event("shutdown")
     async def shutdown_event():

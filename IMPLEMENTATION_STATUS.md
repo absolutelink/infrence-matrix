@@ -1,6 +1,6 @@
 # Inference Matrix - Implementation Status
 
-Last Updated: September 19, 2026
+Last Updated: September 22, 2026
 
 ## ✅ Completed Features
 
@@ -98,7 +98,15 @@ Last Updated: September 19, 2026
 - [x] Edit agent configuration
 - [x] Delete agent
 - [x] Agent status monitoring
-- [x] Agent logs viewer
+- [x] Agent logs viewer (llama-server stdout/stderr, 5s auto-refresh)
+- [x] Agent metrics viewer (GPU, VRAM, running servers)
+- [x] Agent auto-registration from agent service (retry until success)
+- [x] Configurable advertised address (AGENT_HOST / AGENT_PORT)
+
+#### Recipes (Agent Backend Images)
+- [x] Vulkan recipe: agent app layered on `ghcr.io/ggml-org/llama.cpp:full-vulkan`
+- [x] CI `build-recipes` job chained after `build-agent` (AGENT_IMAGE build-arg)
+- [x] Quadlet `.container` deployment file for systemd/podman
 
 #### Server Instances
 - [ ] Server instances list
@@ -244,6 +252,18 @@ API_URL=https://matrix.thelink.family
 
 ## 📝 Recent Changes
 
+### September 22, 2026
+- ✅ Vulkan recipe rebuilt: layers agent app on official `ghcr.io/ggml-org/llama.cpp:full-vulkan` (no llama.cpp compilation), CI chained after agent build
+- ✅ Fixed agent registration 500 (UUID PK upsert on name), wired registration loop on agent startup
+- ✅ Fixed WebSocket URLs: agent→frontend scheme mapping (https→wss), backend→agent `/ws/status` (no /api prefix)
+- ✅ Mounted agent WS endpoint at `/api/ws/agents/{agent_id}` on backend
+- ✅ Implemented `send_command` HTTP proxy to agent (was TODO stub); agent routes at root (no `/api` prefix)
+- ✅ Agent list/get now read from database (survives backend restarts)
+- ✅ Added View Logs (llama-server stdout/stderr) and View Metrics (GPU/servers) sheets in UI
+- ✅ Added `AGENT_HOST`/`AGENT_PORT` settings for advertised agent address
+- ✅ Fixed agent startup import errors (model_manager singleton, server_manager alias, response_model)
+- ✅ Added missing backend settings (WS_RECONNECT_INTERVAL, AGENT_MAX_RECONNECT_ATTEMPTS)
+
 ### September 21, 2026
 - ✅ Removed users, authentication, and API keys (not needed for this project)
 - ✅ Dropped `user`, `item`, and `api_keys` database tables via migration
@@ -266,9 +286,10 @@ API_URL=https://matrix.thelink.family
 
 ## 🎯 Next Steps
 
-1. **Complete Agents UI** - Implement full CRUD for agents
-2. **Server Instances UI** - Add server management interface
-3. **Dashboard Metrics** - Add charts and statistics
+1. **Emit agent events** - server.started/stopped, gpu.usage, download.progress over /ws/status
+2. **Server instance lifecycle** - await agent confirmation on start; stop via command proxy
+3. **Schedule cleanup loop** - run cleanup_offline_agents periodically on startup
+4. **Dashboard Metrics** - Add charts and statistics
 
 ---
 

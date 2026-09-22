@@ -40,5 +40,9 @@ class Settings(BaseSettings):
     WS_RECONNECT_INTERVAL: int = 5
     WS_MAX_BUFFER_EVENTS: int = 1000
 
+    # Events
+    DOWNLOAD_PROGRESS_INTERVAL: float = 1.0
+    GPU_USAGE_INTERVAL: int = 10
+
 
 settings = Settings()

@@ -47,9 +47,9 @@ async def start_server(request: ServerStartRequest) -> dict:
             context_size=request.config.context_size,
             batch_size=request.config.batch_size,
             cache_prompt=request.config.cache_prompt,
-            flash_attn=request.config.flash_attn
+            flash_attn=request.config.flash_attn,
         )
-        
+
         success = await llama_server_manager.start_server(request.config.id, config)
         if not success:
             raise HTTPException(status_code=500, detail="Failed to start server")

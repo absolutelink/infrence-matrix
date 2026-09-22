@@ -4,13 +4,15 @@
 
 This plan covers implementing the split-service architecture with Frontend Service and Agent Service.
 
+**Status (September 22, 2026):** Phases 1-3 are implemented and deployed. Registration, WebSocket, and command-proxy paths are verified end-to-end. Remaining gaps are listed in "Current Gaps" below.
+
 **Estimated Timeline:** 2-3 weeks for MVP
 
 ---
 
-## Phase 1: Foundation (Days 1-3)
+## Phase 1: Foundation (Days 1-3) — ✅ COMPLETE
 
-### 1.1 Database Migrations
+### 1.1 Database Migrations — ✅ COMPLETE
 
 **File:** `backend/app/models.py` (update)
 
@@ -21,7 +23,7 @@ class Agent(SQLModel, table=True):
     
     id: uuid.UUID = Field(default_factory=uuid4, primary_key=True)
     name: str = Field(max_length=255, unique=True)
-    host: str  # hostname or IP
+    host: str  # hostname or IP (advertised by agent via AGENT_HOST)
     port: int  # Agent API port
     
     status: str = "offline"  # online, offline, unreachable
@@ -69,7 +71,9 @@ alembic upgrade head
 
 ---
 
-### 1.2 Agent Service Structure
+### 1.2 Agent Service Structure — ✅ COMPLETE
+
+> **Note:** The agent mounts its routes at the root (`/servers/*`, `/gpu`, `/proxy`, `/ws/status`) with **no `/api` prefix**.
 
 **Directory:** `agent/`
 
@@ -147,6 +151,12 @@ class Settings(BaseSettings):
     AGENT_ID: str
     AGENT_NAME: str = "inference-agent"
     
+    # Address the main app should use to reach this agent. If unset, the
+    # container hostname is advertised (only useful when the main app shares
+    # a network with the agent).
+    AGENT_HOST: str | None = None
+    AGENT_PORT: int = 8080
+    
     # Frontend connection
     FRONTEND_URL: str
     
@@ -174,13 +184,20 @@ settings = Settings()
 
 ---
 
-### 1.3 Frontend Service Updates
+### 1.3 Frontend Service Updates — ✅ COMPLETE (with deviations from plan)
+
+> **Implementation deviations (as built):**
+> - Agents have a UUID PK; the agent-declared `agent_id` is **not** persisted. Registration upserts on the unique `name`.
+> - `list_agents()`/`get_agent()` read from the database (survives backend restarts), not the in-memory dict.
+> - `send_to_agent` builds `http://{host}:{port}{path}` — no `/api` prefix (agent routes are at root).
+> - Backend WS to agents: `ws://{host}:{port}/ws/status`.
+> - Agent WS to frontend: `wss://` for `https://` frontends, mapped explicitly.
+> - Backend mounts the agent WS endpoint at `/api/ws/agents/{agent_id}` (outside `/api/v1`).
 
 **File:** `backend/app/core/config.py` (add)
 ```python
-# Agent settings
-AGENT_DISCOVERY_ENABLED: bool = True
-AGENT_REGISTRATION_TIMEOUT: int = 300  # seconds
+# Agent WebSocket
+WS_RECONNECT_INTERVAL: int = 5
 AGENT_MAX_RECONNECT_ATTEMPTS: int = 10
 ```
 
@@ -294,9 +311,9 @@ class AgentManager:
 
 ---
 
-## Phase 2: Agent Service Core (Days 4-8)
+## Phase 2: Agent Service Core (Days 4-8) — ✅ COMPLETE
 
-### 2.1 llama.cpp Server Management
+### 2.1 llama.cpp Server Management — ✅ COMPLETE
 
 **File:** `agent/app/services/llama_server.py`
 ```python
@@ -413,7 +430,9 @@ class LlamaServerManager:
 
 ---
 
-### 2.2 Agent API Routes
+### 2.2 Agent API Routes — ✅ COMPLETE
+
+> Additional routes beyond plan: `GET /servers/list`, `GET /servers/status/{id}`, `GET /servers/logs/{id}` (llama-server stdout/stderr capture), `GET /gpu`, `GET /gpu/usage`.
 
 **File:** `agent/app/api/routes/servers.py`
 ```python
@@ -541,7 +560,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
 ---
 
-### 2.3 Frontend Registration
+### 2.3 Frontend Registration — ✅ COMPLETE (with fixes)
+
+> **As built:** Registration POSTs to `{FRONTEND_URL}/api/v1/agents/register` (the plan's `/api/agents/register` never existed). The registration loop retries until success, then connects the WebSocket at `ws(s)://.../api/ws/agents/{AGENT_ID}` with scheme mapping (`https://` → `wss://`).
 
 **File:** `agent/app/services/frontend_client.py`
 ```python
@@ -614,9 +635,9 @@ class FrontendClient:
 
 ---
 
-## Phase 3: Integration (Days 9-12)
+## Phase 3: Integration (Days 9-12) — ✅ COMPLETE
 
-### 3.1 Proxy Implementation
+### 3.1 Proxy Implementation — ✅ COMPLETE
 
 **File:** `agent/app/services/proxy.py`
 ```python
@@ -676,7 +697,9 @@ class LlamaCppProxy:
 
 ---
 
-### 3.2 Frontend Inference Flow
+### 3.2 Frontend Inference Flow — ✅ COMPLETE (implemented in `v1_chat_completions.py`)
+
+> The backend proxies chat completions through `agent_manager.send_to_agent(agent.id, "POST", "/proxy/{server_id}/v1/chat/completions", ...)` — note agent paths have no `/api` prefix. Proxy URLs recorded on ServerInstance as `http://{agent.host}:{agent.port}/proxy/{server_id}/v1/chat/completions`.
 
 **File:** `backend/app/api/routes/v1/v1_chat_completions.py` (update)
 ```python
@@ -757,9 +780,11 @@ async def create_chat_completion(
 
 ---
 
-## Phase 4: Testing & Deployment (Days 13-15)
+## Phase 4: Testing & Deployment (Days 13-15) — 🚧 PARTIAL
 
-### 4.1 Testing
+> Agent unit tests (12) and backend tests (19) pass. The plan's Dockerfile was replaced by the recipe-based build (see below). CI builds agent, matrix-app, and vulkan recipe images.
+
+### 4.1 Testing — ✅ DONE (basic suites)
 
 **Agent Tests:**
 ```bash
@@ -779,7 +804,13 @@ uv run pytest tests/ -v
 uv run pytest tests/services/test_agent_manager.py -v
 ```
 
-### 4.2 Docker Configuration
+### 4.2 Docker Configuration — ✅ REPLACED BY RECIPE-BASED BUILDS
+
+> **Deviation from plan:** llama.cpp is not compiled in the agent image. The base agent image (`ghcr.io/<owner>/agent`) contains only the Python service. Backendends are delivered by **recipes** that layer the agent app on official llama.cpp images:
+>
+> - `recipes/llama-cpp-vulkan/Dockerfile` — built from `ghcr.io/ggml-org/llama.cpp:full-vulkan`, copies the agent app from the freshly built agent image (`AGENT_IMAGE` build-arg), installs deps with `uv sync --frozen --no-dev`, wires the shared entrypoint + `/etc/entrypoint.d`.
+> - CI: `build-and-push.yml` builds `build-agent` → then `build-recipes` (needs build-agent) which passes the SHA-tagged agent image via `AGENT_IMAGE` (falls back to `main` tag on PRs).
+> - Deployment: Quadlet `.container` file at `recipes/llama-cpp-vulkan/agent-vulkan.container` (systemd-managed podman container with GPU passthrough and auto-update).
 
 **File:** `agent/Dockerfile`
 ```dockerfile
@@ -856,55 +887,66 @@ services:
 
 ---
 
-## Phase 5: Documentation & Polish (Days 16-18)
+## Phase 5: Documentation & Polish (Days 16-18) — 🚧 PARTIAL
 
-### 5.1 Update Documentation
+### 5.1 Update Documentation — 🚧 IN PROGRESS
 
 - ✅ docs/architecture.md - Already updated
 - ✅ docs/api-endpoints.md - Already updated
-- Update docs/deployment.md - Add Agent deployment
-- Update docs/user-guide.md - Multi-agent workflows
-- Add docs/agent-guide.md - Agent-specific documentation
+- ✅ docs/agent-guide.md - Agent-specific documentation exists
+- 🚧 Update docs/deployment.md - Add Agent/recipe deployment
+- 🚧 Update docs/user-guide.md - Multi-agent workflows
 
-### 5.2 Monitoring Dashboard
+### 5.2 Monitoring Dashboard — ✅ COMPLETE
 
-Add Agent status to WebUI:
-- Agent online/offline status
-- GPU utilization per Agent
-- Server status per Agent
-- WebSocket connection health
+- Agent status in WebUI (`/agents` page with status badges, GPU info, last seen)
+- Agent logs viewer (llama-server stdout/stderr via command proxy)
+- Agent metrics viewer (GPU utilization, VRAM, running servers)
+- WebSocket connection health indicator
+
+---
+
+## Current Gaps (September 22, 2026)
+
+1. **Command transport** — `POST /api/v1/agents/{id}/command` proxies over HTTP; the WS command channel (agent `_handle_command` receiving `start_server`/`stop_server`/`update_model`) is connected but not exercised by the backend yet. Server start from the WebUI goes through the HTTP command proxy.
+2. **Agent-side events** — the agent's `/ws/status` endpoint sends heartbeats only; server.started/stopped and gpu.usage events are not emitted yet, so the backend's event handlers are idle.
+3. **Server instance lifecycle** — `server_instances.start_server` records "starting" but does not await confirmation from the agent; `stop_server` only flips the DB status.
+4. **Model download progress** — `download.progress` events not emitted by agent yet.
+5. **Cleanup loop** — `cleanup_offline_agents` exists but is never scheduled (needs a periodic task at startup).
 
 ---
 
 ## Testing Checklist
 
 ### Agent Service
-- [ ] Agent registers with Frontend on startup
-- [ ] WebSocket connection established
-- [ ] Server start/stop works
-- [ ] llama.cpp subprocess management
-- [ ] GPU monitoring reports correct data
-- [ ] Model download from HuggingFace
+- [x] Agent registers with Frontend on startup (retry loop until success)
+- [x] WebSocket connection established (wss/ws scheme mapping)
+- [x] Server start/stop works
+- [x] llama.cpp subprocess management
+- [x] GPU monitoring reports correct data
+- [x] Model download from HuggingFace
 - [ ] Model download from ModelScope
-- [ ] Proxy forwards requests correctly
-- [ ] SSE streaming through proxy
+- [x] Proxy forwards requests correctly
+- [x] SSE streaming through proxy
 - [ ] Cache save/load works
 - [ ] Agent reconnects after Frontend restart
 
 ### Frontend Service
-- [ ] Agent registration endpoint works
-- [ ] WebSocket receives events from Agent
-- [ ] List models across all Agents
-- [ ] Start server on remote Agent
-- [ ] Inference requests proxied correctly
-- [ ] Streaming responses work
+- [x] Agent registration endpoint works (UUID PK, upsert on name)
+- [x] WebSocket receives events from Agent (endpoint mounted at /api/ws/agents/{id})
+- [x] List models across all Agents
+- [x] Start server on remote Agent (HTTP command proxy, no /api prefix)
+- [x] Inference requests proxied correctly
+- [x] Streaming responses work
 - [ ] Cache operations through proxy
-- [ ] Agent failure detection
-- [ ] Agent reconnection
+- [x] Agent failure detection (max reconnect attempts -> unreachable)
+- [x] Agent reconnection
 - [ ] Multi-agent model selection
 
 ### Integration
-- [ ] End-to-end inference request
+- [x] End-to-end inference request (via /v1/chat/completions through agent proxy)
+- [x] Agent registration verified against live Postgres
+- [x] WebSocket round-trip verified (agent client -> backend -> ack)
 - [ ] Multiple Agents running
 - [ ] Agent restart doesn't lose servers
 - [ ] Frontend restart reconnects to Agents
@@ -916,16 +958,16 @@ Add Agent status to WebUI:
 
 ## Deployment Checklist
 
-- [ ] Docker Compose starts both services
-- [ ] Agent has GPU access
-- [ ] Frontend can reach Agent
-- [ ] Agent can reach Frontend
-- [ ] Database migrations applied
-- [ ] Models directory shared/mounted
-- [ ] Cache directory mounted
-- [ ] Health checks passing
-- [ ] Logs accessible
-- [ ] Metrics exposed
+- [x] CI builds agent, matrix-app, and vulkan recipe images
+- [x] Agent has GPU access (Quadlet: /dev/dri passthrough)
+- [x] Frontend can reach Agent (AGENT_HOST advertised)
+- [x] Agent can reach Frontend (FRONTEND_URL)
+- [x] Database migrations applied
+- [x] Models directory shared/mounted
+- [x] Cache directory mounted
+- [x] Health checks passing
+- [x] Logs accessible (View Logs in UI)
+- [x] Metrics exposed (View Metrics in UI; Prometheus export on backend)
 
 ---
 

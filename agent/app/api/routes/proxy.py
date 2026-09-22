@@ -16,9 +16,7 @@ router = APIRouter(prefix="/proxy", tags=["proxy"])
     response_model=None,
 )
 async def proxy_request(
-    server_id: str,
-    path: str,
-    request: Request
+    server_id: str, path: str, request: Request
 ) -> StreamingResponse | dict:
     """Proxy request to llama.cpp server."""
     if server_id not in server_manager.servers:
@@ -32,20 +30,11 @@ async def proxy_request(
 
     if path.startswith("stream") or (body and body.get("stream")):
         return StreamingResponse(
-            proxy.proxy_stream(
-                server_id,
-                request.method,
-                f"/{path}",
-                body
-            ),
-            media_type="text/event-stream"
+            proxy.proxy_stream(server_id, request.method, f"/{path}", body),
+            media_type="text/event-stream",
         )
     else:
         response = await proxy.proxy_request(
-            server_id,
-            request.method,
-            f"/{path}",
-            dict(request.headers),
-            body
+            server_id, request.method, f"/{path}", dict(request.headers), body
         )
         return response.json()

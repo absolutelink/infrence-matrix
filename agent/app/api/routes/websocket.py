@@ -1,31 +1,26 @@
 """WebSocket event streaming."""
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import asyncio
-import json
+
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.config import settings
+from app.core.logging import logger
+from app.services.event_bus import event_buffer, subscribe, unsubscribe
 
 router = APIRouter(tags=["websocket"])
 
 
-class EventBuffer:
-    """Buffer events for replay on reconnect."""
-
-    def __init__(self, max_events: int = 1000) -> None:
-        self.events: list[dict] = []
-        self.max_events = max_events
-
-    def add(self, event: dict) -> None:
-        self.events.append(event)
-        if len(self.events) > self.max_events:
-            self.events.pop(0)
-
-    def get_all(self) -> list[dict]:
-        return self.events.copy()
-
-
-event_buffer = EventBuffer(settings.WS_MAX_BUFFER_EVENTS)
+async def _heartbeat(websocket: WebSocket) -> None:
+    """Send periodic heartbeats until cancelled."""
+    while True:
+        await websocket.send_json(
+            {
+                "event": "heartbeat",
+                "data": {"timestamp": asyncio.get_event_loop().time()},
+            }
+        )
+        await asyncio.sleep(settings.WS_HEARTBEAT_INTERVAL)
 
 
 @router.websocket("/ws/status")
@@ -33,18 +28,31 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     """WebSocket connection for real-time events."""
     await websocket.accept()
 
-    agent_id = websocket.headers.get("X-Agent-ID")
+    queue = subscribe()
+    heartbeat_task = asyncio.create_task(_heartbeat(websocket))
+    sender_task = asyncio.create_task(_send_events(websocket, queue))
 
     try:
-        for event in event_buffer.get_all():
-            await websocket.send_json(event)
-
+        # Keep the connection open until the client disconnects. Any send
+        # failure in the background tasks surfaces here as an exception.
         while True:
-            await websocket.send_json({
-                "event": "heartbeat",
-                "data": {"timestamp": asyncio.get_event_loop().time()}
-            })
-            await asyncio.sleep(settings.WS_HEARTBEAT_INTERVAL)
-
-    except WebSocketDisconnect:
+            await asyncio.sleep(3600)
+    except (WebSocketDisconnect, asyncio.CancelledError):
         pass
+    except Exception as e:  # noqa: BLE001 - keep connection errors from crashing the endpoint
+        logger.warning(f"WebSocket error: {e}")
+    finally:
+        heartbeat_task.cancel()
+        sender_task.cancel()
+        unsubscribe(queue)
+
+
+async def _send_events(websocket: WebSocket, queue: asyncio.Queue) -> None:
+    """Forward queued events to the WebSocket client."""
+    # Replay buffered events on (re)connect
+    for event in event_buffer.get_all():
+        await websocket.send_json(event)
+
+    while True:
+        event = await queue.get()
+        await websocket.send_json(event)

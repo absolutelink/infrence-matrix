@@ -15,7 +15,7 @@ from app.services.frontend_client import frontend_client
 async def main():
     """Initialize and run agent services."""
     logger.info("Starting Inference Matrix Agent...")
-    
+
     # Try to register with frontend
     logger.info("Registering with frontend...")
     try:
@@ -26,14 +26,14 @@ async def main():
             logger.warning("Failed to register with frontend")
     except Exception as e:
         logger.error(f"Registration error: {e}")
-    
+
     # Start background tasks
     try:
         await frontend_client.start_background_tasks()
         logger.info("Started frontend client background tasks")
     except Exception as e:
         logger.error(f"Failed to start background tasks: {e}")
-    
+
     # Keep the agent running
     try:
         while True:

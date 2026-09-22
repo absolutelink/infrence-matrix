@@ -26,36 +26,25 @@ class LlamaCppProxy:
         method: str,
         path: str,
         headers: dict,
-        json: dict | None = None
+        json: dict | None = None,
     ) -> httpx.Response:
         """Proxy HTTP request to llama.cpp."""
         port = self._get_server_port(server_id)
         url = f"http://localhost:{port}{path}"
 
         response = await self.client.request(
-            method=method,
-            url=url,
-            headers=headers,
-            json=json
+            method=method, url=url, headers=headers, json=json
         )
 
         return response
 
     async def proxy_stream(
-        self,
-        server_id: str,
-        method: str,
-        path: str,
-        json: dict | None = None
+        self, server_id: str, method: str, path: str, json: dict | None = None
     ) -> AsyncGenerator[bytes, None]:
         """Proxy streaming request (SSE) to llama.cpp."""
         port = self._get_server_port(server_id)
         url = f"http://localhost:{port}{path}"
 
-        async with self.client.stream(
-            method=method,
-            url=url,
-            json=json
-        ) as response:
+        async with self.client.stream(method=method, url=url, json=json) as response:
             async for chunk in response.aiter_bytes():
                 yield chunk

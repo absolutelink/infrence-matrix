@@ -3,13 +3,13 @@
 import asyncio
 import json
 import socket
-from datetime import datetime
 
 import httpx
 from websockets.client import connect
 
 from app.core.config import settings
 from app.core.logging import logger
+from app.services.event_bus import publish_event
 
 
 class FrontendClient:
@@ -54,8 +54,13 @@ class FrontendClient:
 
         try:
             import subprocess
+
             result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+                [
+                    "nvidia-smi",
+                    "--query-gpu=name,memory.total",
+                    "--format=csv,noheader,nounits",
+                ],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -142,16 +147,22 @@ class FrontendClient:
         try:
             config = llama_server_manager.ServerConfig(**server_config)
             await llama_server_manager.start_server(server_config.get("id"), config)
-            await self._send_status_update("server.started", {
-                "server_id": server_config.get("id"),
-                "status": "running",
-            })
+            await self._send_status_update(
+                "server.started",
+                {
+                    "server_id": server_config.get("id"),
+                    "status": "running",
+                },
+            )
         except Exception as e:
             logger.error(f"Failed to start server: {e}")
-            await self._send_status_update("server.error", {
-                "server_id": server_config.get("id"),
-                "error": str(e),
-            })
+            await self._send_status_update(
+                "server.error",
+                {
+                    "server_id": server_config.get("id"),
+                    "error": str(e),
+                },
+            )
 
     async def _handle_stop_server(self, command: dict) -> None:
         """Handle stop server command."""
@@ -160,16 +171,22 @@ class FrontendClient:
         server_id = command.get("server_id")
         try:
             await llama_server_manager.stop_server(server_id)
-            await self._send_status_update("server.stopped", {
-                "server_id": server_id,
-                "status": "stopped",
-            })
+            await self._send_status_update(
+                "server.stopped",
+                {
+                    "server_id": server_id,
+                    "status": "stopped",
+                },
+            )
         except Exception as e:
             logger.error(f"Failed to stop server: {e}")
-            await self._send_status_update("server.error", {
-                "server_id": server_id,
-                "error": str(e),
-            })
+            await self._send_status_update(
+                "server.error",
+                {
+                    "server_id": server_id,
+                    "error": str(e),
+                },
+            )
 
     async def _handle_update_model(self, command: dict) -> None:
         """Handle update model command."""
@@ -178,31 +195,26 @@ class FrontendClient:
         model_id = command.get("model_id")
         try:
             await model_manager.update_model(model_id)
-            await self._send_status_update("model.updated", {
-                "model_id": model_id,
-                "status": "updated",
-            })
+            await self._send_status_update(
+                "model.updated",
+                {
+                    "model_id": model_id,
+                    "status": "updated",
+                },
+            )
         except Exception as e:
             logger.error(f"Failed to update model: {e}")
-            await self._send_status_update("model.error", {
-                "model_id": model_id,
-                "error": str(e),
-            })
+            await self._send_status_update(
+                "model.error",
+                {
+                    "model_id": model_id,
+                    "error": str(e),
+                },
+            )
 
     async def _send_status_update(self, event_type: str, data: dict) -> None:
-        """Send status update to Frontend."""
-        if not self.ws_connected or not self._ws_connection:
-            return
-
-        try:
-            message = {
-                "event": event_type,
-                "data": data,
-                "timestamp": datetime.utcnow().isoformat(),
-            }
-            await self._ws_connection.send(json.dumps(message))
-        except Exception as e:
-            logger.error(f"Failed to send status update: {e}")
+        """Publish a status update on the shared event bus."""
+        publish_event(event_type, data)
 
     async def close(self) -> None:
         """Close connections."""
