@@ -6,6 +6,7 @@ import {
   Cpu,
   MemoryStick,
   MoreHorizontal,
+  Play,
   Power,
   Terminal,
 } from "lucide-react"
@@ -246,6 +247,23 @@ function InstanceActions({ instance }: { instance: ServerInstance }) {
     },
   })
 
+  const startMutation = useMutation({
+    mutationFn: async () =>
+      ServerInstancesService.instancesRestartServer({
+        path: { server_id: instance.id },
+      }),
+    onSuccess: () => {
+      toast.success("Server start request sent")
+      queryClient.invalidateQueries({ queryKey: ["server-instances"] })
+    },
+    onError: () => {
+      toast.error("Failed to start server")
+    },
+  })
+
+  const canStart =
+    instance.status !== "running" && instance.status !== "starting"
+
   return (
     <>
       <DropdownMenu>
@@ -271,6 +289,15 @@ function InstanceActions({ instance }: { instance: ServerInstance }) {
             >
               <Power className="mr-2 h-4 w-4" />
               Stop Server
+            </DropdownMenuItem>
+          ) : null}
+          {canStart ? (
+            <DropdownMenuItem
+              onClick={() => startMutation.mutate()}
+              disabled={startMutation.isPending}
+            >
+              <Play className="mr-2 h-4 w-4" />
+              Start Server
             </DropdownMenuItem>
           ) : null}
         </DropdownMenuContent>

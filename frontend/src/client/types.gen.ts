@@ -59,6 +59,24 @@ export type AgentRegisterResponse = {
 };
 
 /**
+ * AgentUpdateRequest
+ */
+export type AgentUpdateRequest = {
+    /**
+     * Name
+     */
+    name?: string | null;
+    /**
+     * Host
+     */
+    host?: string | null;
+    /**
+     * Port
+     */
+    port?: number | null;
+};
+
+/**
  * BatchData
  *
  * Batch data for OpenAI API response.
@@ -1236,6 +1254,40 @@ export type agentsListAgentsResponses = {
 
 export type agentsListAgentsResponse = agentsListAgentsResponses[keyof agentsListAgentsResponses];
 
+export type agentsDeleteAgentData = {
+    body?: never;
+    path: {
+        /**
+         * Agent Id
+         */
+        agent_id: string;
+    };
+    query?: never;
+    url: '/api/v1/agents/{agent_id}';
+};
+
+export type agentsDeleteAgentErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type agentsDeleteAgentError = agentsDeleteAgentErrors[keyof agentsDeleteAgentErrors];
+
+export type agentsDeleteAgentResponses = {
+    /**
+     * Response Agents-Delete Agent
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type agentsDeleteAgentResponse = agentsDeleteAgentResponses[keyof agentsDeleteAgentResponses];
+
 export type agentsGetAgentData = {
     body?: never;
     path: {
@@ -1269,6 +1321,40 @@ export type agentsGetAgentResponses = {
 };
 
 export type agentsGetAgentResponse = agentsGetAgentResponses[keyof agentsGetAgentResponses];
+
+export type agentsUpdateAgentData = {
+    body: AgentUpdateRequest;
+    path: {
+        /**
+         * Agent Id
+         */
+        agent_id: string;
+    };
+    query?: never;
+    url: '/api/v1/agents/{agent_id}';
+};
+
+export type agentsUpdateAgentErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type agentsUpdateAgentError = agentsUpdateAgentErrors[keyof agentsUpdateAgentErrors];
+
+export type agentsUpdateAgentResponses = {
+    /**
+     * Response Agents-Update Agent
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type agentsUpdateAgentResponse = agentsUpdateAgentResponses[keyof agentsUpdateAgentResponses];
 
 export type agentsSendCommandData = {
     /**
@@ -1397,6 +1483,40 @@ export type serverInstancesStartServerResponses = {
 };
 
 export type serverInstancesStartServerResponse = serverInstancesStartServerResponses[keyof serverInstancesStartServerResponses];
+
+export type serverInstancesRestartServerData = {
+    body?: never;
+    path: {
+        /**
+         * Server Id
+         */
+        server_id: string;
+    };
+    query?: never;
+    url: '/api/v1/server-instances/{server_id}/start';
+};
+
+export type serverInstancesRestartServerErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type serverInstancesRestartServerError = serverInstancesRestartServerErrors[keyof serverInstancesRestartServerErrors];
+
+export type serverInstancesRestartServerResponses = {
+    /**
+     * Response Server-Instances-Restart Server
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type serverInstancesRestartServerResponse = serverInstancesRestartServerResponses[keyof serverInstancesRestartServerResponses];
 
 export type serverInstancesStopServerData = {
     body?: never;

@@ -2,7 +2,7 @@
 
 import { type Client, formDataBodySerializer, type Options as Options2, type TDataShape } from './client';
 import { client } from './client.gen';
-import type { agentsGetAgentData, agentsGetAgentErrors, agentsGetAgentResponses, agentsListAgentsData, agentsListAgentsResponses, agentsRegisterAgentData, agentsRegisterAgentErrors, agentsRegisterAgentResponses, agentsSendCommandData, agentsSendCommandErrors, agentsSendCommandResponses, huggingfaceGetModelInfoData, huggingfaceGetModelInfoErrors, huggingfaceGetModelInfoResponses, huggingfaceGetParameterCountData, huggingfaceGetParameterCountErrors, huggingfaceGetParameterCountResponses, huggingfaceListModelFilesData, huggingfaceListModelFilesErrors, huggingfaceListModelFilesResponses, huggingfaceSearchModelsData, huggingfaceSearchModelsErrors, huggingfaceSearchModelsResponses, metricsMetricsData, metricsMetricsResponses, modelsCreateModelData, modelsCreateModelErrors, modelsCreateModelResponses, modelsDeleteModelData, modelsDeleteModelErrors, modelsDeleteModelResponses, modelsReadModelData, modelsReadModelErrors, modelsReadModelResponses, modelsReadModelsData, modelsReadModelsErrors, modelsReadModelsResponses, modelsUpdateModelData, modelsUpdateModelErrors, modelsUpdateModelResponses, serverInstancesGetServerInstanceData, serverInstancesGetServerInstanceErrors, serverInstancesGetServerInstanceResponses, serverInstancesListServerInstancesData, serverInstancesListServerInstancesResponses, serverInstancesStartServerData, serverInstancesStartServerErrors, serverInstancesStartServerResponses, serverInstancesStopServerData, serverInstancesStopServerErrors, serverInstancesStopServerResponses, utilsHealthCheckData, utilsHealthCheckResponses, v1AudioCreateSpeechData, v1AudioCreateSpeechErrors, v1AudioCreateSpeechResponses, v1AudioCreateTranscriptionData, v1AudioCreateTranscriptionErrors, v1AudioCreateTranscriptionResponses, v1AudioCreateTranslationData, v1AudioCreateTranslationErrors, v1AudioCreateTranslationResponses, v1BatchesCancelBatchData, v1BatchesCancelBatchErrors, v1BatchesCancelBatchResponses, v1BatchesCreateBatchData, v1BatchesCreateBatchErrors, v1BatchesCreateBatchResponses, v1BatchesListBatchesData, v1BatchesListBatchesErrors, v1BatchesListBatchesResponses, v1BatchesRetrieveBatchData, v1BatchesRetrieveBatchErrors, v1BatchesRetrieveBatchResponses, v1ChatCreateChatCompletionData, v1ChatCreateChatCompletionErrors, v1ChatCreateChatCompletionResponses, v1CompletionsCreateCompletionData, v1CompletionsCreateCompletionErrors, v1CompletionsCreateCompletionResponses, v1EmbeddingsCreateEmbeddingData, v1EmbeddingsCreateEmbeddingErrors, v1EmbeddingsCreateEmbeddingResponses, v1FilesDeleteFileData, v1FilesDeleteFileErrors, v1FilesDeleteFileResponses, v1FilesListFilesData, v1FilesListFilesErrors, v1FilesListFilesResponses, v1FilesRetrieveFileContentData, v1FilesRetrieveFileContentErrors, v1FilesRetrieveFileContentResponses, v1FilesRetrieveFileData, v1FilesRetrieveFileErrors, v1FilesRetrieveFileResponses, v1FilesUploadFileData, v1FilesUploadFileErrors, v1FilesUploadFileResponses, v1ModelsListModelsData, v1ModelsListModelsResponses, v1ModelsRetrieveModelData, v1ModelsRetrieveModelErrors, v1ModelsRetrieveModelResponses, v1ResponsesCreateResponseData, v1ResponsesCreateResponseErrors, v1ResponsesCreateResponseResponses, v1ResponsesRetrieveResponseData, v1ResponsesRetrieveResponseErrors, v1ResponsesRetrieveResponseResponses } from './types.gen';
+import type { agentsDeleteAgentData, agentsDeleteAgentErrors, agentsDeleteAgentResponses, agentsGetAgentData, agentsGetAgentErrors, agentsGetAgentResponses, agentsListAgentsData, agentsListAgentsResponses, agentsRegisterAgentData, agentsRegisterAgentErrors, agentsRegisterAgentResponses, agentsSendCommandData, agentsSendCommandErrors, agentsSendCommandResponses, agentsUpdateAgentData, agentsUpdateAgentErrors, agentsUpdateAgentResponses, huggingfaceGetModelInfoData, huggingfaceGetModelInfoErrors, huggingfaceGetModelInfoResponses, huggingfaceGetParameterCountData, huggingfaceGetParameterCountErrors, huggingfaceGetParameterCountResponses, huggingfaceListModelFilesData, huggingfaceListModelFilesErrors, huggingfaceListModelFilesResponses, huggingfaceSearchModelsData, huggingfaceSearchModelsErrors, huggingfaceSearchModelsResponses, metricsMetricsData, metricsMetricsResponses, modelsCreateModelData, modelsCreateModelErrors, modelsCreateModelResponses, modelsDeleteModelData, modelsDeleteModelErrors, modelsDeleteModelResponses, modelsReadModelData, modelsReadModelErrors, modelsReadModelResponses, modelsReadModelsData, modelsReadModelsErrors, modelsReadModelsResponses, modelsUpdateModelData, modelsUpdateModelErrors, modelsUpdateModelResponses, serverInstancesGetServerInstanceData, serverInstancesGetServerInstanceErrors, serverInstancesGetServerInstanceResponses, serverInstancesListServerInstancesData, serverInstancesListServerInstancesResponses, serverInstancesRestartServerData, serverInstancesRestartServerErrors, serverInstancesRestartServerResponses, serverInstancesStartServerData, serverInstancesStartServerErrors, serverInstancesStartServerResponses, serverInstancesStopServerData, serverInstancesStopServerErrors, serverInstancesStopServerResponses, utilsHealthCheckData, utilsHealthCheckResponses, v1AudioCreateSpeechData, v1AudioCreateSpeechErrors, v1AudioCreateSpeechResponses, v1AudioCreateTranscriptionData, v1AudioCreateTranscriptionErrors, v1AudioCreateTranscriptionResponses, v1AudioCreateTranslationData, v1AudioCreateTranslationErrors, v1AudioCreateTranslationResponses, v1BatchesCancelBatchData, v1BatchesCancelBatchErrors, v1BatchesCancelBatchResponses, v1BatchesCreateBatchData, v1BatchesCreateBatchErrors, v1BatchesCreateBatchResponses, v1BatchesListBatchesData, v1BatchesListBatchesErrors, v1BatchesListBatchesResponses, v1BatchesRetrieveBatchData, v1BatchesRetrieveBatchErrors, v1BatchesRetrieveBatchResponses, v1ChatCreateChatCompletionData, v1ChatCreateChatCompletionErrors, v1ChatCreateChatCompletionResponses, v1CompletionsCreateCompletionData, v1CompletionsCreateCompletionErrors, v1CompletionsCreateCompletionResponses, v1EmbeddingsCreateEmbeddingData, v1EmbeddingsCreateEmbeddingErrors, v1EmbeddingsCreateEmbeddingResponses, v1FilesDeleteFileData, v1FilesDeleteFileErrors, v1FilesDeleteFileResponses, v1FilesListFilesData, v1FilesListFilesErrors, v1FilesListFilesResponses, v1FilesRetrieveFileContentData, v1FilesRetrieveFileContentErrors, v1FilesRetrieveFileContentResponses, v1FilesRetrieveFileData, v1FilesRetrieveFileErrors, v1FilesRetrieveFileResponses, v1FilesUploadFileData, v1FilesUploadFileErrors, v1FilesUploadFileResponses, v1ModelsListModelsData, v1ModelsListModelsResponses, v1ModelsRetrieveModelData, v1ModelsRetrieveModelErrors, v1ModelsRetrieveModelResponses, v1ResponsesCreateResponseData, v1ResponsesCreateResponseErrors, v1ResponsesCreateResponseResponses, v1ResponsesRetrieveResponseData, v1ResponsesRetrieveResponseErrors, v1ResponsesRetrieveResponseResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -80,6 +80,32 @@ export class AgentsService {
     }
     
     /**
+     * Delete Agent
+     *
+     * Delete an agent.
+     */
+    public static deleteAgent<ThrowOnError extends boolean = true>(options: Options<agentsDeleteAgentData, ThrowOnError>) {
+        return (options.client ?? client).delete<agentsDeleteAgentResponses, agentsDeleteAgentErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/agents/{agent_id}',
+            ...options
+        });
+    }
+    
+    /**
+     * Delete Agent
+     *
+     * Delete an agent.
+     */
+    public static deleteAgent2<ThrowOnError extends boolean = true>(options: Options<agentsDeleteAgentData, ThrowOnError>) {
+        return (options.client ?? client).delete<agentsDeleteAgentResponses, agentsDeleteAgentErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/agents/{agent_id}',
+            ...options
+        });
+    }
+    
+    /**
      * Get Agent
      *
      * Get agent details.
@@ -106,9 +132,43 @@ export class AgentsService {
     }
     
     /**
+     * Update Agent
+     *
+     * Update agent configuration.
+     */
+    public static updateAgent<ThrowOnError extends boolean = true>(options: Options<agentsUpdateAgentData, ThrowOnError>) {
+        return (options.client ?? client).put<agentsUpdateAgentResponses, agentsUpdateAgentErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/agents/{agent_id}',
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                ...options.headers
+            }
+        });
+    }
+    
+    /**
+     * Update Agent
+     *
+     * Update agent configuration.
+     */
+    public static updateAgent2<ThrowOnError extends boolean = true>(options: Options<agentsUpdateAgentData, ThrowOnError>) {
+        return (options.client ?? client).put<agentsUpdateAgentResponses, agentsUpdateAgentErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/agents/{agent_id}',
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                ...options.headers
+            }
+        });
+    }
+    
+    /**
      * Send Command
      *
-     * Send a command to an agent.
+     * Forward an HTTP request to the agent's API.
      */
     public static sendCommand<ThrowOnError extends boolean = true>(options: Options<agentsSendCommandData, ThrowOnError>) {
         return (options.client ?? client).post<agentsSendCommandResponses, agentsSendCommandErrors, ThrowOnError>({
@@ -125,7 +185,7 @@ export class AgentsService {
     /**
      * Send Command
      *
-     * Send a command to an agent.
+     * Forward an HTTP request to the agent's API.
      */
     public static sendCommand2<ThrowOnError extends boolean = true>(options: Options<agentsSendCommandData, ThrowOnError>) {
         return (options.client ?? client).post<agentsSendCommandResponses, agentsSendCommandErrors, ThrowOnError>({
@@ -252,6 +312,32 @@ export class ServerInstancesService {
                 'Content-Type': 'application/json',
                 ...options.headers
             }
+        });
+    }
+    
+    /**
+     * Restart Server
+     *
+     * Start an existing (stopped or errored) server instance.
+     */
+    public static instancesRestartServer<ThrowOnError extends boolean = true>(options: Options<serverInstancesRestartServerData, ThrowOnError>) {
+        return (options.client ?? client).post<serverInstancesRestartServerResponses, serverInstancesRestartServerErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/server-instances/{server_id}/start',
+            ...options
+        });
+    }
+    
+    /**
+     * Restart Server
+     *
+     * Start an existing (stopped or errored) server instance.
+     */
+    public static instancesRestartServer2<ThrowOnError extends boolean = true>(options: Options<serverInstancesRestartServerData, ThrowOnError>) {
+        return (options.client ?? client).post<serverInstancesRestartServerResponses, serverInstancesRestartServerErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/server-instances/{server_id}/start',
+            ...options
         });
     }
     

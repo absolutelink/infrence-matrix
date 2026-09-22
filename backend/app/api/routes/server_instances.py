@@ -267,6 +267,74 @@ async def _dispatch_start(
                 await session.commit()
 
 
+@router.post("/{server_id}/start")
+async def restart_server(server_id: str) -> dict[str, Any]:
+    """Start an existing (stopped or errored) server instance."""
+    async with AsyncSessionMaker() as session:
+        instance = await session.get(ServerInstance, uuid_module.UUID(server_id))
+        if not instance:
+            raise HTTPException(status_code=404, detail="Server instance not found")
+
+        if instance.status in ("starting", "running"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Server instance is already {instance.status}",
+            )
+
+        agent = await session.get(Agent, instance.agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        model = await session.get(Model, instance.model_id)
+        if not model:
+            raise HTTPException(status_code=404, detail="Model not found")
+
+        if agent.status != "online":
+            raise HTTPException(
+                status_code=503, detail=f"Agent {agent.name} is {agent.status}"
+            )
+
+        instance.status = "starting"
+        instance.error_message = None
+        await session.commit()
+
+        filename = model.source_file or model.path.rsplit("/", 1)[-1]
+        config = instance.config or {}
+
+        payload = {
+            "config": {
+                "id": str(instance.id),
+                "model_path": model.path,
+                "port": instance.port,
+                "gpu_layers": int(config.get("gpu_layers", 35)),
+                "context_size": int(config.get("context_size", 4096)),
+                "batch_size": 512,
+                "cache_prompt": True,
+            },
+            # The agent downloads the model file first if it is missing.
+            "source": {
+                "source": model.source,
+                "repo_id": model.source_repo_id or "",
+                "filename": filename,
+                "job_id": f"server-{instance.id}",
+            }
+            if model.source_repo_id
+            else None,
+        }
+
+        # Dispatch in the background; the row is already "starting".
+        agent_id = str(agent.id)
+        asyncio.create_task(_dispatch_start(agent_id, str(instance.id), payload))
+
+        return {
+            "status": "starting",
+            "server_id": str(instance.id),
+            "agent_id": agent_id,
+            "port": instance.port,
+            "message": "Server start request sent to agent",
+        }
+
+
 @router.post("/{server_id}/stop")
 async def stop_server(server_id: str) -> dict[str, str]:
     """Stop a server instance."""
