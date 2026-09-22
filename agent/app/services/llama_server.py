@@ -222,11 +222,14 @@ class LlamaServerManager:
                 finally:
                     fcntl.fcntl(fd, fcntl.F_SETFL, orig)
                 if raw:
-                    self._log_buffers[server_id].append((key, raw))
+                    self._log_buffers.setdefault(server_id, []).append((key, raw))
                     if len(self._log_buffers[server_id]) > self.LOG_BUFFER_CHUNKS:
                         self._log_buffers[server_id].pop(0)
-            except Exception:
-                pass
+            except TypeError:
+                # Nonblocking read with no data returns None in text mode
+                continue
+            except Exception as e:
+                logger.debug(f"Log drain error for {server_id}/{key}: {e}")
 
     def _collect_logs(
         self,
