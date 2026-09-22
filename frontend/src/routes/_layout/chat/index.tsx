@@ -2,7 +2,7 @@ import { useSuspenseQuery } from "@tanstack/react-query"
 import { createFileRoute } from "@tanstack/react-router"
 import { Send, Sparkles, Square } from "lucide-react"
 import { useState } from "react"
-import { ModelsService, V1ChatService } from "@/client"
+import { ModelsService } from "@/client"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import {
@@ -55,40 +55,63 @@ function Chat() {
 
     try {
       // Create the streaming request
-      await V1ChatService.v1.createChatCompletion({
-        body: {
+      const response = await fetch("/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
           model: selectedModel,
           messages: [...messages, userMessage].map((m) => ({
             role: m.role,
             content: m.content,
           })),
           stream: true,
-        },
+        }),
       })
+
+      if (!response.ok || !response.body) {
+        const detail = await response.text().catch(() => "")
+        throw new Error(detail || `Request failed: ${response.status}`)
+      }
 
       // Create a new assistant message for streaming
       const assistantMessage: Message = { role: "assistant", content: "" }
       setMessages((prev) => [...prev, assistantMessage])
 
-      // For streaming responses, we'll use a simple approach
-      // In a real implementation, we would handle Server-Sent Events properly
-      // But for now, we'll simulate streaming with a delay
-      const responseText =
-        "This is a simulated streaming response from the backend model. In a proper implementation, this would be streamed in real-time chunks from the backend API."
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ""
+      let done = false
 
-      // Simulate streaming by updating content incrementally
-      let fullContent = ""
-      for (let i = 0; i < responseText.length; i += 5) {
-        await new Promise((resolve) => setTimeout(resolve, 50))
-        fullContent = responseText.substring(0, i + 5)
-        setMessages((prev) => {
-          const newMessages = [...prev]
-          const lastMessage = newMessages[newMessages.length - 1]
-          if (lastMessage.role === "assistant") {
-            lastMessage.content = fullContent
+      while (!done) {
+        const { done: readerDone, value } = await reader.read()
+        if (readerDone) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split("\n\n")
+        buffer = lines.pop() ?? ""
+        for (const line of lines) {
+          const data = line.replace(/^data: /, "").trim()
+          if (!data || data === "[DONE]") {
+            if (data === "[DONE]") done = true
+            continue
           }
-          return newMessages
-        })
+          try {
+            const chunk = JSON.parse(data)
+            if (chunk.error) {
+              throw new Error(chunk.error.message ?? "Stream error")
+            }
+            const text = chunk.choices?.[0]?.delta?.content ?? ""
+            if (text) {
+              setMessages((prev) => {
+                const newMessages = [...prev]
+                const lastMessage = newMessages[newMessages.length - 1]
+                if (lastMessage.role === "assistant") {
+                  lastMessage.content += text
+                }
+                return newMessages
+              })
+            }
+          } catch {}
+        }
       }
     } catch (error) {
       console.error("Error:", error)

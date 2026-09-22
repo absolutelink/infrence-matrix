@@ -100,6 +100,21 @@ def _convert_messages_to_llama_format(
     return [{"role": msg.role, "content": msg.content} for msg in messages]
 
 
+def _extract_delta_content(chunk_data: dict) -> str:
+    """Extract content from a streamed chunk (OpenAI format or llama.cpp native)."""
+    choices = chunk_data.get("choices")
+    if choices and isinstance(choices, list):
+        choice = choices[0]
+        delta = choice.get("delta") or {}
+        if "content" in delta:
+            return delta.get("content") or ""
+        if "text" in choice:
+            return choice.get("text") or ""
+        if "content" in choice:
+            return choice.get("content") or ""
+    return chunk_data.get("content", "") or ""
+
+
 async def _stream_completion_via_agent(
     agent_id: str,
     server: ServerInstance,
@@ -150,7 +165,7 @@ async def _stream_completion_via_agent(
 
                         try:
                             chunk_data = json.loads(data)
-                            delta = {"content": chunk_data.get("content", "")}
+                            delta_content = _extract_delta_content(chunk_data)
 
                             stream_chunk = ChatCompletionChunk(
                                 id=request_id,
@@ -159,7 +174,7 @@ async def _stream_completion_via_agent(
                                 choices=[
                                     StreamChoice(
                                         index=0,
-                                        delta=delta,
+                                        delta={"content": delta_content},
                                         finish_reason=chunk_data.get("finish_reason"),
                                     )
                                 ],
