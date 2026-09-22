@@ -8,3 +8,5 @@ backend/app/frontend/
 /playwright/.cache/
 .env
 .devcontainer/.envbuilder.tmp
+__pycache__/
+*.pyc
