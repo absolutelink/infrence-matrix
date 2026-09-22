@@ -26,8 +26,8 @@ class FrontendClient:
         registration_data = {
             "agent_id": settings.AGENT_ID,
             "name": settings.AGENT_NAME,
-            "host": socket.gethostname(),
-            "port": 8080,
+            "host": settings.AGENT_HOST or socket.gethostname(),
+            "port": settings.AGENT_PORT,
             "gpu_info": await self._get_gpu_info(),
         }
 

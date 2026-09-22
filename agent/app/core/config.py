@@ -12,6 +12,12 @@ class Settings(BaseSettings):
     AGENT_ID: str
     AGENT_NAME: str = "inference-agent"
 
+    # Address the main app should use to reach this agent. If unset, the
+    # container hostname is advertised (only useful when the main app shares
+    # a network with the agent).
+    AGENT_HOST: str | None = None
+    AGENT_PORT: int = 8080
+
     # Frontend connection
     FRONTEND_URL: str
 
