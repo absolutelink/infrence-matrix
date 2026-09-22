@@ -70,7 +70,7 @@ async def create_embedding(
         raise HTTPException(400, f"Model '{request.model}' does not support embeddings")
 
     try:
-        server = _get_or_create_server(model, request.agent_id)
+        server = await _get_or_create_server(model, request.agent_id)
     except HTTPException:
         raise
     except Exception as e:

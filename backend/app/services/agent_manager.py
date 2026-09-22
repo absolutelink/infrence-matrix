@@ -64,7 +64,7 @@ class AgentManager:
                 existing.host = agent_data["host"]
                 existing.port = agent_data["port"]
                 existing.gpu_info = agent_data.get("gpu_info", {})
-                existing.last_seen = datetime.utcnow()
+                existing.last_seen = datetime.now(UTC)
                 session.add(existing)
                 agent = existing
                 logger.info(f"Updated existing agent {name}")
@@ -76,7 +76,7 @@ class AgentManager:
                     port=agent_data["port"],
                     gpu_info=agent_data.get("gpu_info", {}),
                     status="online",
-                    last_seen=datetime.utcnow(),
+                    last_seen=datetime.now(UTC),
                 )
                 session.add(agent)
                 logger.info(f"Registered new agent {name}")
@@ -432,7 +432,12 @@ class AgentManager:
 
             # Update local cache
             for agent in self.agents.values():
-                if agent.last_seen and agent.last_seen < cutoff:
+                if not agent.last_seen:
+                    continue
+                last_seen = agent.last_seen
+                if last_seen.tzinfo is None:
+                    last_seen = last_seen.replace(tzinfo=UTC)
+                if last_seen < cutoff:
                     agent.status = "offline"
 
     async def _cleanup_loop(self) -> None:

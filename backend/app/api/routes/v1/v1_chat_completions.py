@@ -286,7 +286,7 @@ async def create_chat_completion(
 
     # Get or create server
     try:
-        server = _get_or_create_server(model, request.agent_id)
+        server = await _get_or_create_server(model, request.agent_id)
     except HTTPException:
         raise
     except Exception as e:
