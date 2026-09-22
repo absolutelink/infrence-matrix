@@ -1,5 +1,7 @@
 """WebSocket endpoints for agent communication."""
 
+import asyncio
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.logging import logger
@@ -30,13 +32,43 @@ async def agent_websocket_endpoint(websocket: WebSocket, agent_id: str) -> None:
 
             # Process message (could be status update, event, etc.)
             # For now, just acknowledge
-            await websocket.send_json({
-                "status": "received",
-                "message": message,
-            })
+            await websocket.send_json(
+                {
+                    "status": "received",
+                    "message": message,
+                }
+            )
 
     except WebSocketDisconnect:
         logger.info(f"Agent {agent_id} disconnected")
         # Agent manager will handle reconnection
     except Exception as e:
         logger.error(f"WebSocket error for agent {agent_id}: {e}")
+
+
+@router.websocket("/ws/events/{agent_id}")
+async def agent_events_websocket(websocket: WebSocket, agent_id: str) -> None:
+    """Stream an agent's events to UI clients."""
+    await websocket.accept()
+
+    queue = agent_manager.subscribe_events(agent_id)
+    logger.info(f"UI client subscribed to events for agent {agent_id}")
+
+    async def forward() -> None:
+        while True:
+            event = await queue.get()
+            await websocket.send_json(event)
+
+    forward_task = asyncio.create_task(forward())
+    try:
+        # Wait for disconnect while the forward task pushes events.
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.warning(f"Events WebSocket error for agent {agent_id}: {e}")
+    finally:
+        forward_task.cancel()
+        agent_manager.unsubscribe_events(agent_id, queue)
+        logger.info(f"UI client unsubscribed from agent {agent_id} events")

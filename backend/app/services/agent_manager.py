@@ -1,7 +1,7 @@
 """Manages Agent registration, discovery, and WebSocket connections."""
 
 import asyncio
-from datetime import datetime
+from datetime import UTC, datetime
 
 import httpx
 from websockets.client import WebSocketClientProtocol, connect
@@ -18,8 +18,26 @@ class AgentManager:
     def __init__(self) -> None:
         self.agents: dict[str, Agent] = {}  # agent_id -> Agent
         self.ws_connections: dict[str, WebSocketClientProtocol] = {}
-        self._reconnect_tasks: dict[str, asyncio.Task] = {}
-        self._event_buffers: dict[str, list] = {}
+        self._reconnect_tasks: dict[str, asyncio.Task[None]] = {}
+        self._event_buffers: dict[str, list[dict[str, object]]] = {}
+        # UI subscribers per agent: agent_id -> list of asyncio.Queue
+        self._event_subscribers: dict[str, list[asyncio.Queue[dict[str, object]]]] = {}
+
+    def subscribe_events(self, agent_id: str) -> asyncio.Queue[dict[str, object]]:
+        """Register a UI subscriber queue for an agent's events."""
+        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=1000)
+        self._event_subscribers.setdefault(agent_id, []).append(queue)
+        return queue
+
+    def unsubscribe_events(
+        self, agent_id: str, queue: asyncio.Queue[dict[str, object]]
+    ) -> None:
+        """Remove a UI subscriber queue for an agent's events."""
+        subscribers = self._event_subscribers.get(agent_id, [])
+        if queue in subscribers:
+            subscribers.remove(queue)
+        if not subscribers:
+            self._event_subscribers.pop(agent_id, None)
 
     async def register_agent(self, agent_data: dict) -> Agent:
         """Register an Agent with the Frontend."""
@@ -74,7 +92,9 @@ class AgentManager:
 
         while True:
             try:
-                async with connect(ws_url, extra_headers={"X-Agent-ID": agent_id}) as websocket:
+                async with connect(
+                    ws_url, extra_headers={"X-Agent-ID": agent_id}
+                ) as websocket:
                     self.ws_connections[agent_id] = websocket
                     agent.websocket_connected = True
                     logger.info(f"WebSocket connected to agent {agent_id}")
@@ -110,7 +130,9 @@ class AgentManager:
 
                 # Try to reconnect
                 ws_url = f"ws://{agent.host}:{agent.port}/ws/status"
-                async with connect(ws_url, extra_headers={"X-Agent-ID": agent_id}) as websocket:
+                async with connect(
+                    ws_url, extra_headers={"X-Agent-ID": agent_id}
+                ) as websocket:
                     self.ws_connections[agent_id] = websocket
                     agent.websocket_connected = True
                     agent.status = "online"
@@ -123,14 +145,18 @@ class AgentManager:
 
             except Exception as e:
                 attempts += 1
-                logger.warning(f"Reconnect attempt {attempts} failed for agent {agent_id}: {e}")
+                logger.warning(
+                    f"Reconnect attempt {attempts} failed for agent {agent_id}: {e}"
+                )
 
         # Max attempts reached
         agent.status = "unreachable"
         self._reconnect_tasks.pop(agent_id, None)
         logger.error(f"Max reconnect attempts reached for agent {agent_id}")
 
-    async def _listen_websocket(self, agent_id: str, websocket: WebSocketClientProtocol) -> None:
+    async def _listen_websocket(
+        self, agent_id: str, websocket: WebSocketClientProtocol
+    ) -> None:
         """Listen for WebSocket events."""
         try:
             async for message in websocket:
@@ -142,7 +168,9 @@ class AgentManager:
                 agent.websocket_connected = False
                 self._schedule_reconnect(agent)
 
-    async def _handle_agent_event(self, agent_id: str, event: dict) -> None:
+    async def _handle_agent_event(
+        self, agent_id: str, event: dict[str, object]
+    ) -> None:
         """Process event from Agent."""
         # Buffer event
         if agent_id in self._event_buffers:
@@ -150,6 +178,13 @@ class AgentManager:
             buffer.append(event)
             if len(buffer) > 1000:
                 buffer.pop(0)
+
+        # Fan out to UI subscribers
+        for queue in self._event_subscribers.get(agent_id, []):
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                logger.warning(f"UI event queue full for agent {agent_id}")
 
         # Update database based on event type
         event_type = event.get("event")
@@ -161,12 +196,41 @@ class AgentManager:
             await self._handle_server_started(agent_id, event_data)
         elif event_type == "server.stopped":
             await self._handle_server_stopped(agent_id, event_data)
+        elif event_type == "server.error":
+            await self._handle_server_error(agent_id, event_data)
         elif event_type == "gpu.usage":
             await self._handle_gpu_usage(agent_id, event_data)
         elif event_type == "download.progress":
             await self._handle_download_progress(agent_id, event_data)
 
-    async def _handle_server_started(self, agent_id: str, data: dict) -> None:
+    async def _handle_server_error(
+        self, agent_id: str, data: dict[str, object]
+    ) -> None:
+        """Handle server.error event."""
+        async with AsyncSessionMaker() as session:
+            from sqlalchemy import select
+
+            from app.models import ServerInstance
+
+            server_id = data.get("server_id")
+            if not server_id:
+                return
+
+            result = await session.execute(
+                select(ServerInstance).where(ServerInstance.id == server_id)
+            )
+            server = result.scalar_one_or_none()
+
+            if server:
+                server.status = "error"
+                server.error_message = data.get("error", "Unknown error")
+                session.add(server)
+                await session.commit()
+                logger.warning(f"Server {server_id} error: {data.get('error')}")
+
+    async def _handle_server_started(
+        self, agent_id: str, data: dict[str, object]
+    ) -> None:
         """Handle server.started event."""
         # Update ServerInstance in database
         async with AsyncSessionMaker() as session:
@@ -184,12 +248,16 @@ class AgentManager:
                 if server:
                     server.status = "running"
                     server.health_status = "healthy"
-                    server.last_health_check = datetime.utcnow()
+                    server.last_health_check = datetime.now(UTC)
+                    if not server.started_at:
+                        server.started_at = datetime.now(UTC)
                     session.add(server)
                     await session.commit()
                     logger.info(f"Server {server_id} marked as running")
 
-    async def _handle_server_stopped(self, agent_id: str, data: dict) -> None:
+    async def _handle_server_stopped(
+        self, agent_id: str, data: dict[str, object]
+    ) -> None:
         """Handle server.stopped event."""
         async with AsyncSessionMaker() as session:
             from sqlalchemy import select
@@ -209,7 +277,7 @@ class AgentManager:
                     await session.commit()
                     logger.info(f"Server {server_id} marked as stopped")
 
-    async def _handle_gpu_usage(self, agent_id: str, data: dict) -> None:
+    async def _handle_gpu_usage(self, agent_id: str, data: dict[str, object]) -> None:
         """Handle gpu.usage event."""
         # Update agent GPU info
         agent = self.agents.get(agent_id)
@@ -219,9 +287,11 @@ class AgentManager:
             gpu_info["vram_free"] = data.get("vram_free")
             gpu_info["utilization"] = data.get("utilization")
             agent.gpu_info = gpu_info
-            agent.last_seen = datetime.utcnow()
+            agent.last_seen = datetime.now(UTC)
 
-    async def _handle_download_progress(self, agent_id: str, data: dict) -> None:
+    async def _handle_download_progress(
+        self, agent_id: str, data: dict[str, object]
+    ) -> None:
         """Handle download.progress event."""
         # Update DownloadJob in database
         async with AsyncSessionMaker() as session:
@@ -248,7 +318,7 @@ class AgentManager:
         agent_id: str,
         method: str,
         path: str,
-        json: dict | None = None,
+        json: dict[str, object] | None = None,
         timeout: float = 30.0,
     ) -> dict:
         """Send HTTP request to Agent."""
@@ -293,7 +363,7 @@ class AgentManager:
 
             return await session.get(Agent, agent_uuid)
 
-    async def list_agents(self) -> list:
+    async def list_agents(self) -> list[dict[str, object]]:
         """List all registered agents."""
         async with AsyncSessionMaker() as session:
             from sqlalchemy import select

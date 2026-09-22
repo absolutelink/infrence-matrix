@@ -24,12 +24,14 @@ router = APIRouter()
 
 class ChatMessage(BaseModel):
     """Chat message."""
+
     role: Literal["system", "user", "assistant", "developer"]
     content: str
 
 
 class ChatCompletionRequest(BaseModel):
     """Chat completion request."""
+
     model: str
     agent_id: str | None = None  # Optional: specify which agent to use
     messages: list[ChatMessage]
@@ -47,6 +49,7 @@ class ChatCompletionRequest(BaseModel):
 
 class ChatChoice(BaseModel):
     """Chat completion choice."""
+
     index: int
     message: ChatMessage
     finish_reason: str | None = None
@@ -54,6 +57,7 @@ class ChatChoice(BaseModel):
 
 class UsageInfo(BaseModel):
     """Usage information."""
+
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
@@ -61,6 +65,7 @@ class UsageInfo(BaseModel):
 
 class ChatCompletionResponse(BaseModel):
     """Chat completion response."""
+
     id: str
     object: str = "chat.completion"
     created: int
@@ -71,6 +76,7 @@ class ChatCompletionResponse(BaseModel):
 
 class StreamChoice(BaseModel):
     """Streaming choice."""
+
     index: int
     delta: dict[str, str]
     finish_reason: str | None = None
@@ -78,6 +84,7 @@ class StreamChoice(BaseModel):
 
 class ChatCompletionChunk(BaseModel):
     """Chat completion chunk for streaming."""
+
     id: str
     object: str = "chat.completion.chunk"
     created: int
@@ -85,7 +92,9 @@ class ChatCompletionChunk(BaseModel):
     choices: list[StreamChoice]
 
 
-def _convert_messages_to_llama_format(messages: list[ChatMessage]) -> list[dict[str, str]]:
+def _convert_messages_to_llama_format(
+    messages: list[ChatMessage],
+) -> list[dict[str, str]]:
     """Convert messages to llama.cpp format."""
     return [{"role": msg.role, "content": msg.content} for msg in messages]
 
@@ -146,11 +155,13 @@ async def _stream_completion_via_agent(
                                 id=request_id,
                                 created=created,
                                 model=request.model,
-                                choices=[StreamChoice(
-                                    index=0,
-                                    delta=delta,
-                                    finish_reason=chunk_data.get("finish_reason"),
-                                )],
+                                choices=[
+                                    StreamChoice(
+                                        index=0,
+                                        delta=delta,
+                                        finish_reason=chunk_data.get("finish_reason"),
+                                    )
+                                ],
                             )
 
                             yield f"data: {stream_chunk.model_dump_json()}\n\n"
@@ -161,13 +172,13 @@ async def _stream_completion_via_agent(
 
     except Exception as e:
         logger.error(f"Streaming error: {e}")
-        error_chunk = {
-            "error": {"message": str(e), "type": "server_error"}
-        }
+        error_chunk = {"error": {"message": str(e), "type": "server_error"}}
         yield f"data: {json.dumps(error_chunk)}\n\n"
 
 
-async def _get_or_create_server(model: Model, agent_id: str | None = None) -> ServerInstance:
+async def _get_or_create_server(
+    model: Model, agent_id: str | None = None
+) -> ServerInstance:
     """Get existing server or create new one via Agent."""
     async with Session() as session:
         # Try to find existing server
@@ -219,6 +230,8 @@ async def _get_or_create_server(model: Model, agent_id: str | None = None) -> Se
                 "model_id": str(model.id),
                 "model_path": model.path,
                 "config": {
+                    "id": str(uuid.uuid4()),
+                    "port": 8091,
                     "gpu_layers": 35,
                     "context_size": model.context_length or 4096,
                     "batch_size": 512,
@@ -311,19 +324,23 @@ async def create_chat_completion(
             id=request_id,
             created=created,
             model=request.model,
-            choices=[ChatChoice(
-                index=0,
-                message=ChatMessage(
-                    role="assistant",
-                    content=response["choices"][0]["message"]["content"],
-                ),
-                finish_reason=response["choices"][0].get("finish_reason"),
-            )],
+            choices=[
+                ChatChoice(
+                    index=0,
+                    message=ChatMessage(
+                        role="assistant",
+                        content=response["choices"][0]["message"]["content"],
+                    ),
+                    finish_reason=response["choices"][0].get("finish_reason"),
+                )
+            ],
             usage=UsageInfo(
                 prompt_tokens=response.get("usage", {}).get("prompt_tokens", 0),
                 completion_tokens=response.get("usage", {}).get("completion_tokens", 0),
                 total_tokens=response.get("usage", {}).get("total_tokens", 0),
-            ) if response.get("usage") else None,
+            )
+            if response.get("usage")
+            else None,
         )
 
     except Exception as e:

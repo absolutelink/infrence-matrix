@@ -1,5 +1,7 @@
 """Server management API endpoints."""
 
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -41,6 +43,29 @@ def _resolve_model_path(model_path: str) -> str:
     return str(model_manager.models_path / model_path)
 
 
+def _model_candidates(model_path: str, filename: str) -> list[Path]:
+    """Possible local locations for a model file.
+
+    Models registered from HuggingFace use paths like
+    ``/models/{repo}/{filename}`` while plain downloads land directly in
+    MODELS_PATH, so check both locations.
+    """
+    candidates = []
+    if model_path.startswith("/"):
+        candidates.append(Path(model_path))
+    candidates.append(model_manager.models_path / model_path.lstrip("/"))
+    candidates.append(model_manager.models_path / filename)
+    # Deduplicate while preserving order
+    seen = set()
+    unique = []
+    for c in candidates:
+        s = str(c)
+        if s not in seen:
+            seen.add(s)
+            unique.append(c)
+    return unique
+
+
 async def _ensure_model(
     model_path: str,
     source: dict[str, str] | None,
@@ -52,9 +77,12 @@ async def _ensure_model(
     path = _resolve_model_path(model_path)
     filename = path.rsplit("/", 1)[-1]
 
-    if model_manager.model_exists(filename):
-        return path
+    candidates = _model_candidates(model_path, filename)
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
 
+    # Not on disk: download it via hf_hub (lands under MODELS_PATH).
     if not source or not source.get("repo_id") or not source.get("filename"):
         raise HTTPException(
             status_code=404,

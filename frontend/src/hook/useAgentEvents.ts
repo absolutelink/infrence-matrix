@@ -26,7 +26,7 @@ export function useAgentEvents(agentId: string, enabled: boolean) {
       (window as any).APP_CONFIG?.API_URL ||
       import.meta.env.VITE_API_URL ||
       window.location.origin
-    const wsUrl = `${baseUrl.replace(/^http/, "ws")}/api/ws/agents/${agentId}`
+    const wsUrl = `${baseUrl.replace(/^http/, "ws")}/api/ws/events/${agentId}`
 
     let ws: WebSocket | null = null
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
