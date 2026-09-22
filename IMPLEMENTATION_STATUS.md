@@ -1,6 +1,6 @@
 # Inference Matrix - Implementation Status
 
-Last Updated: September 22, 2026
+Last Updated: September 22, 2026 (evening)
 
 ## ✅ Completed Features
 
@@ -85,6 +85,7 @@ Last Updated: September 22, 2026
 ## 🚧 In Progress
 
 - [x] **Chat Page** - UI complete with backend streaming integration
+- [x] **Server instance lifecycle** - start/stop via UI, events, live logs (see below)
 
 ---
 
@@ -101,6 +102,7 @@ Last Updated: September 22, 2026
 - [x] Agent logs viewer (llama-server stdout/stderr, 5s auto-refresh)
 - [x] Agent metrics viewer (GPU, VRAM, running servers)
 - [x] Agent auto-registration from agent service (retry until success)
+- [x] Periodic re-registration (heals backend->agent event WS after backend restarts)
 - [x] Configurable advertised address (AGENT_HOST / AGENT_PORT)
 
 #### Recipes (Agent Backend Images)
@@ -109,14 +111,29 @@ Last Updated: September 22, 2026
 - [x] Quadlet `.container` deployment file for systemd/podman
 
 #### Server Instances
-- [ ] Server instances list
-- [ ] Add server instance
-- [ ] Server health monitoring
-- [ ] Server configuration
+- [x] Server instances list (live, 5s auto-refresh)
+- [x] Start server dialog (model + agent picker)
+- [x] Start/stop existing instances from row menu
+- [x] Automatic model download on server start (agent fetches from HuggingFace if missing)
+- [x] Server lifecycle events (server.started/stopped/error) with DB state fallback (dispatch ack)
+- [x] Live llama-server log streaming (log.lines events) with 100-line history seeding + polling fallback
+- [x] Per-server llama.cpp logs sheet in UI (live tail, auto-scroll, stderr highlight)
+- [x] Stale instance cleanup: agents report running_server_ids on registration; backend marks unreported instances stopped
+- [ ] Server health monitoring (periodic health checks)
+- [ ] Server configuration editing (in-place)
 - [ ] Connection testing
 
+#### Real-time Event Streaming
+- [x] Agent event bus with buffered pub/sub (`server.*`, `download.*`, `gpu.usage`, `log.lines`)
+- [x] Agent `/ws/status` streams real events (was heartbeat-only)
+- [x] Backend fans agent events out to UI clients via `/api/ws/events/{agent_id}`
+- [x] Backend `server.error` handling, `started_at` on `server.started`
+- [x] UI live event feed sheet per agent
+- [x] Download progress events with speed_mbps (tqdm shim for hf_hub)
+- [x] Real GPU metrics via nvidia-smi sampling + periodic gpu.usage emission
+
 #### Inference Features
-- [ ] Chat completion UI
+- [x] Chat completion UI (OpenAI-compatible `/v1/chat/completions` via agent proxy)
 - [ ] Text completion UI
 - [ ] Embeddings generator
 - [ ] File upload for processing
@@ -139,7 +156,7 @@ Last Updated: September 22, 2026
 - [ ] Share prompts
 
 #### Model Enhancements
-- [ ] Model download progress
+- [x] Model download progress (download.progress events with speed_mbps)
 - [ ] Model validation checker
 - [ ] Model compatibility test
 - [ ] Model benchmarking
@@ -252,7 +269,24 @@ API_URL=https://matrix.thelink.family
 
 ## 📝 Recent Changes
 
-### September 22, 2026
+### September 22, 2026 (afternoon - server lifecycle & streaming)
+- ✅ Real agent event bus: `/ws/status` now streams server.started/stopped/error, download.progress, gpu.usage, log.lines (was heartbeat-only)
+- ✅ Implemented `/server-instances/start` (port allocation 8090-8190, DB row up front, background dispatch) and `/{id}/stop` (agent command proxy)
+- ✅ Added `/server-instances/{id}/start` to restart stopped/errored instances reusing stored port/config
+- ✅ Automatic model download on server start: agent fetches missing GGUF from source_repo_id before launching llama-server
+- ✅ Live log streaming: per-server ring buffer in agent, log.lines events every 1s, UI live tail with history seeding (last 100 lines) and polling fallback
+- ✅ UI events WS: new `/api/ws/events/{agent_id}` forwarding agent events to UI clients
+- ✅ Agents report running_server_ids on registration; backend only resets instances not actually running (fixes stopped/error loop from periodic re-register)
+- ✅ Periodic agent re-registration every 60s (heals event channel after backend restarts)
+- ✅ Start Server dialog in UI (model + agent picker), Start/Stop actions per instance row
+- ✅ Fixed llama-server flags for new llama.cpp: `--flash-attn on|off` (removed `--prompt-cache`)
+- ✅ Set LD_LIBRARY_PATH when spawning llama-server (vulkan image env not guaranteed)
+- ✅ Fixed 'str' object has no attribute 'get': backend now parses agent WS messages before handling; consolidated duplicate connection loop
+- ✅ Fixed log drain KeyError (silent buffer discard); download.progress via tqdm shim (added refresh/set_postfix_str for xet)
+- ✅ Removed tracked __pycache__ files; repo-wide gitignore rules
+- ✅ Server Instances page wired to real API (was stub)
+
+### September 22, 2026 (earlier)
 - ✅ Vulkan recipe rebuilt: layers agent app on official `ghcr.io/ggml-org/llama.cpp:full-vulkan` (no llama.cpp compilation), CI chained after agent build
 - ✅ Fixed agent registration 500 (UUID PK upsert on name), wired registration loop on agent startup
 - ✅ Fixed WebSocket URLs: agent→frontend scheme mapping (https→wss), backend→agent `/ws/status` (no /api prefix)
@@ -286,21 +320,23 @@ API_URL=https://matrix.thelink.family
 
 ## 🎯 Next Steps
 
-1. **Emit agent events** - server.started/stopped, gpu.usage, download.progress over /ws/status
-2. **Server instance lifecycle** - await agent confirmation on start; stop via command proxy
+1. **Server health monitoring** - periodic health checks; auto-mark instances unhealthy/stopped
+2. **Dashboard Metrics** - Add charts and statistics (gpu.usage events already streaming)
 3. **Schedule cleanup loop** - run cleanup_offline_agents periodically on startup
-4. **Dashboard Metrics** - Add charts and statistics
+4. **Inference UI** - text completion, embeddings, audio transcription pages
 
 ---
 
 ## 📊 Statistics
 
 - **Frontend Routes**: 6 (dashboard, models, agents, server-instances, chat, 404)
-- **API Endpoints**: 20+ implemented
+- **API Endpoints**: 25+ implemented (incl. server-instances start/stop/restart, models status)
 - **UI Components**: 50+ Shadcn components
 - **Database Models**: 8 SQLModel classes
 - **Docker Layers**: 2-stage build
 - **Entrypoint Scripts**: 3 modular scripts
+- **Event Types**: 8 (server.started/stopped/error, download.started/progress/completed/failed, gpu.usage, log.lines)
+- **Agent Recipes**: 1 (vulkan on AMD Strix Halo)
 
 ---
 
