@@ -16,6 +16,7 @@ from app.api.routes.v1 import (
     models_router,
     responses_router,
 )
+from app.api.routes.websocket import router as agent_ws_router
 from app.core.config import settings
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
@@ -43,6 +44,10 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix=settings.API_V1_STR)
+
+# Agent WebSocket - mounted at /api (not /api/v1) so agents connect to
+# /api/ws/agents/{agent_id}
+app.include_router(agent_ws_router, prefix="/api")
 
 # OpenAI-compatible endpoints - these need to be at /v1/... not /api/v1/v1/...
 app.include_router(models_router, prefix="/v1", tags=["v1/models"])
