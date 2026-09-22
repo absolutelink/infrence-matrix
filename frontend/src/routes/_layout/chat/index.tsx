@@ -30,6 +30,65 @@ type Message = {
   content: string
 }
 
+type ContentSegment =
+  | { type: "text"; content: string }
+  | { type: "thinking"; content: string }
+
+function parseContent(content: string): ContentSegment[] {
+  const segments: ContentSegment[] = []
+  let thinking = false
+  let buffer = ""
+  let i = 0
+  while (i < content.length) {
+    if (!thinking && content.startsWith("<think>", i)) {
+      if (buffer) segments.push({ type: "text", content: buffer })
+      buffer = ""
+      thinking = true
+      i += 7
+    } else if (thinking && content.startsWith("</think>", i)) {
+      if (buffer) segments.push({ type: "thinking", content: buffer })
+      buffer = ""
+      thinking = false
+      i += 8
+    } else {
+      buffer += content[i]
+      i += 1
+    }
+  }
+  if (buffer) {
+    segments.push({ type: thinking ? "thinking" : "text", content: buffer })
+  }
+  return segments
+}
+
+function AssistantContent({ content }: { content: string }) {
+  const segments = parseContent(content).filter((s) => s.content.trim())
+  if (segments.length === 0) return null
+  return (
+    <>
+      {segments.map((segment, i) =>
+        segment.type === "thinking" ? (
+          <details
+            key={i}
+            className="mb-2 rounded-md border border-black/10 bg-black/5 dark:border-white/10 dark:bg-white/5"
+          >
+            <summary className="cursor-pointer select-none px-2 py-1 text-xs text-muted-foreground">
+              Thinking
+            </summary>
+            <div className="whitespace-pre-wrap px-3 pb-2 text-xs italic text-muted-foreground">
+              {segment.content}
+            </div>
+          </details>
+        ) : (
+          <div key={i} className="whitespace-pre-wrap">
+            {segment.content}
+          </div>
+        ),
+      )}
+    </>
+  )
+}
+
 function getModelsQueryOptions() {
   return {
     queryFn: async () =>
@@ -190,7 +249,11 @@ function Chat() {
                   <div className="font-semibold text-sm mb-1">
                     {message.role === "user" ? "You" : "Assistant"}
                   </div>
-                  <div className="whitespace-pre-wrap">{message.content}</div>
+                  {message.role === "assistant" ? (
+                    <AssistantContent content={message.content} />
+                  ) : (
+                    <div className="whitespace-pre-wrap">{message.content}</div>
+                  )}
                 </div>
               </div>
             ))
