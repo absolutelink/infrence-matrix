@@ -56,7 +56,10 @@ async def create_embedding(
     db: Session = Depends(get_db),
 ) -> EmbeddingResponse:
     """Create embeddings for the given input text via Agent proxy."""
+    # Get model by name (OpenAI style) or id (UI legacy)
     model = db.exec(select(Model).where(Model.name == request.model)).first()
+    if not model:
+        model = db.exec(select(Model).where(Model.id == request.model)).first()
     if not model:
         raise HTTPException(404, f"Model {request.model} not found")
 

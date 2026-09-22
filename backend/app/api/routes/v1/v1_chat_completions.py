@@ -275,8 +275,10 @@ async def create_chat_completion(
     request_id = f"chatcmpl-{uuid.uuid4()}"
     created = int(time.time())
 
-    # Get model
+    # Get model by name (OpenAI style) or id (UI legacy)
     model = db.exec(select(Model).where(Model.name == request.model)).first()
+    if not model:
+        model = db.exec(select(Model).where(Model.id == request.model)).first()
     if not model:
         raise HTTPException(404, f"Model {request.model} not found")
 

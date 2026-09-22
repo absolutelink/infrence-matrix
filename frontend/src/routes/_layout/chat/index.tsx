@@ -127,7 +127,7 @@ function Chat() {
             </SelectTrigger>
             <SelectContent>
               {models?.map((model: any) => (
-                <SelectItem key={model.id} value={model.id}>
+                <SelectItem key={model.id} value={model.name}>
                   {model.name || "Unknown"}
                 </SelectItem>
               ))}
