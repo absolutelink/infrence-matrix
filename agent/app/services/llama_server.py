@@ -6,6 +6,7 @@ import signal
 import subprocess
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 
@@ -61,8 +62,16 @@ class LlamaServerManager:
         )
 
         try:
+            env = dict(os.environ)
+            env.setdefault(
+                "LD_LIBRARY_PATH", str(Path(settings.LLAMA_SERVER_PATH).parent)
+            )
             proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
             )
 
             self.servers[server_id] = proc
