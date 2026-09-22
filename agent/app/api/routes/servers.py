@@ -86,5 +86,11 @@ async def get_server_status(server_id: str) -> dict:
     for server in servers:
         if server["server_id"] == server_id:
             return {"status": "running", "server": server}
-    
+
     return {"status": "stopped", "server_id": server_id}
+
+
+@router.get("/logs/{server_id}")
+async def get_server_logs(server_id: str, lines: int = 100) -> dict:
+    """Get recent logs from a llama.cpp server."""
+    return llama_server_manager.get_server_logs(server_id, lines)

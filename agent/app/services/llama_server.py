@@ -1,6 +1,7 @@
 """Manages llama.cpp subprocess lifecycle."""
 
 import asyncio
+import os
 import subprocess
 import signal
 import time
@@ -132,6 +133,48 @@ class LlamaServerManager:
         if not start_time:
             return 0.0
         return time.time() - start_time
+
+    def get_server_logs(self, server_id: str, lines: int = 100) -> dict:
+        """Get recent stdout/stderr output from a llama.cpp server."""
+        if server_id not in self.servers:
+            return {"server_id": server_id, "status": "stopped", "stdout": [], "stderr": []}
+
+        proc = self.servers[server_id]
+        logs = {"server_id": server_id, "status": "running", "stdout": [], "stderr": []}
+
+        if proc.stdout:
+            try:
+                import fcntl
+
+                fd = proc.stdout.fileno()
+                orig = fcntl.fcntl(fd, fcntl.F_GETFL)
+                fcntl.fcntl(fd, fcntl.F_SETFL, orig | os.O_NONBLOCK)
+                try:
+                    raw = proc.stdout.read()
+                finally:
+                    fcntl.fcntl(fd, fcntl.F_SETFL, orig)
+                if raw:
+                    logs["stdout"] = raw.strip().splitlines()[-lines:]
+            except Exception:
+                pass
+
+        if proc.stderr:
+            try:
+                import fcntl
+
+                fd = proc.stderr.fileno()
+                orig = fcntl.fcntl(fd, fcntl.F_GETFL)
+                fcntl.fcntl(fd, fcntl.F_SETFL, orig | os.O_NONBLOCK)
+                try:
+                    raw = proc.stderr.read()
+                finally:
+                    fcntl.fcntl(fd, fcntl.F_SETFL, orig)
+                if raw:
+                    logs["stderr"] = raw.strip().splitlines()[-lines:]
+            except Exception:
+                pass
+
+        return logs
 
     def list_servers(self) -> list[dict]:
         """List all running servers."""

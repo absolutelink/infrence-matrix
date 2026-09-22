@@ -126,10 +126,21 @@ async def delete_agent(agent_id: str) -> dict:
 
 
 @router.post("/{agent_id}/command")
-async def send_command(agent_id: str, command: dict) -> dict:  # noqa: ARG001
-    """Send a command to an agent."""
+async def send_command(agent_id: str, command: dict) -> dict:
+    """Forward an HTTP request to the agent's API."""
     try:
-        # TODO: Implement command sending via WebSocket
-        return {"status": "sent", "command": command}
+        method = command.get("method", "GET")
+        path = command.get("path")
+        body = command.get("body")
+        timeout = command.get("timeout", 30.0)
+
+        if not path:
+            raise HTTPException(status_code=400, detail="Command must include 'path'")
+
+        return await agent_manager.send_to_agent(agent_id, method, path, body, timeout)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

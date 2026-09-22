@@ -1,5 +1,7 @@
 import type { ColumnDef } from "@tanstack/react-table"
 import { Activity, MoreHorizontal, Terminal, Trash2 } from "lucide-react"
+import { useState } from "react"
+import { AgentLogsSheet } from "@/components/Agents/AgentLogsSheet"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -127,38 +129,53 @@ export const columns: ColumnDef<Agent>[] = [
     cell: ({ row }) => {
       const agent = row.original
 
-      return (
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" className="h-8 w-8 p-0">
-              <span className="sr-only">Open menu</span>
-              <MoreHorizontal className="h-4 w-4" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuLabel>Actions</DropdownMenuLabel>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              onClick={() => navigator.clipboard.writeText(agent.id)}
-            >
-              Copy Agent ID
-            </DropdownMenuItem>
-            <DropdownMenuItem>
-              <Terminal className="mr-2 h-4 w-4" />
-              View Logs
-            </DropdownMenuItem>
-            <DropdownMenuItem>
-              <Activity className="mr-2 h-4 w-4" />
-              View Metrics
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem className="text-destructive">
-              <Trash2 className="mr-2 h-4 w-4" />
-              Delete Agent
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      )
+      return <AgentActions agent={agent} />
     },
   },
 ]
+
+function AgentActions({ agent }: { agent: Agent }) {
+  const [logsOpen, setLogsOpen] = useState(false)
+
+  return (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" className="h-8 w-8 p-0">
+            <span className="sr-only">Open menu</span>
+            <MoreHorizontal className="h-4 w-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuLabel>Actions</DropdownMenuLabel>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            onClick={() => navigator.clipboard.writeText(agent.id)}
+          >
+            Copy Agent ID
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => setLogsOpen(true)}>
+            <Terminal className="mr-2 h-4 w-4" />
+            View Logs
+          </DropdownMenuItem>
+          <DropdownMenuItem>
+            <Activity className="mr-2 h-4 w-4" />
+            View Metrics
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem className="text-destructive">
+            <Trash2 className="mr-2 h-4 w-4" />
+            Delete Agent
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      <AgentLogsSheet
+        isOpen={logsOpen}
+        onClose={() => setLogsOpen(false)}
+        agentId={agent.id}
+        agentName={agent.name}
+      />
+    </>
+  )
+}

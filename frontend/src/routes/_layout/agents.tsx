@@ -44,7 +44,7 @@ function Agents() {
 
 function AgentsTableContent() {
   const { data: agents } = useSuspenseQuery(getAgentsQueryOptions())
-  
+
   if (!agents || agents.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center text-center py-12">

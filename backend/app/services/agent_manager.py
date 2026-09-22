@@ -254,6 +254,8 @@ class AgentManager:
         """Send HTTP request to Agent."""
         agent = self.agents.get(agent_id)
         if not agent:
+            agent = await self.get_agent(agent_id)
+        if not agent:
             raise ValueError(f"Agent {agent_id} not found")
 
         if agent.status != "online":

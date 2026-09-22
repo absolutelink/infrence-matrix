@@ -58,45 +58,49 @@ function Chat() {
       await V1ChatService.v1.createChatCompletion({
         body: {
           model: selectedModel,
-          messages: [...messages, userMessage].map(m => ({
+          messages: [...messages, userMessage].map((m) => ({
             role: m.role,
-            content: m.content
+            content: m.content,
           })),
-          stream: true
-        }
-      });
+          stream: true,
+        },
+      })
 
       // Create a new assistant message for streaming
-      const assistantMessage: Message = { role: "assistant", content: "" };
-      setMessages(prev => [...prev, assistantMessage]);
+      const assistantMessage: Message = { role: "assistant", content: "" }
+      setMessages((prev) => [...prev, assistantMessage])
 
       // For streaming responses, we'll use a simple approach
       // In a real implementation, we would handle Server-Sent Events properly
       // But for now, we'll simulate streaming with a delay
-      const responseText = "This is a simulated streaming response from the backend model. In a proper implementation, this would be streamed in real-time chunks from the backend API.";
-      
+      const responseText =
+        "This is a simulated streaming response from the backend model. In a proper implementation, this would be streamed in real-time chunks from the backend API."
+
       // Simulate streaming by updating content incrementally
-      let fullContent = "";
+      let fullContent = ""
       for (let i = 0; i < responseText.length; i += 5) {
-        await new Promise(resolve => setTimeout(resolve, 50));
-        fullContent = responseText.substring(0, i + 5);
-        setMessages(prev => {
-          const newMessages = [...prev];
-          const lastMessage = newMessages[newMessages.length - 1];
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        fullContent = responseText.substring(0, i + 5)
+        setMessages((prev) => {
+          const newMessages = [...prev]
+          const lastMessage = newMessages[newMessages.length - 1]
           if (lastMessage.role === "assistant") {
-            lastMessage.content = fullContent;
+            lastMessage.content = fullContent
           }
-          return newMessages;
-        });
+          return newMessages
+        })
       }
     } catch (error) {
-      console.error("Error:", error);
-      setMessages((prev) => [...prev, {
-        role: "assistant",
-        content: "Error occurred while generating response."
-      }]);
+      console.error("Error:", error)
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: "Error occurred while generating response.",
+        },
+      ])
     } finally {
-      setIsLoading(false);
+      setIsLoading(false)
     }
   }
 
