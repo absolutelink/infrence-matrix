@@ -268,6 +268,9 @@ async def _get_or_create_server(
             model_id=model.id,
             agent_id=agent.id,
             port=8081,  # Default agent port
+            gpu_layers=35,
+            context_size=model.context_length or 4096,
+            flash_attn=True,
             proxy_url=start_response.get("proxy_url"),
             status="starting",
             inactivity_timeout_seconds=300,

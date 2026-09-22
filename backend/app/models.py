@@ -15,6 +15,7 @@ def get_datetime_utc() -> datetime:
 # ============================================================================
 class Message(SQLModel):
     """Generic message response."""
+
     message: str
 
 
@@ -110,6 +111,7 @@ class Model(SQLModel, table=True):
 
 class ModelCreate(SQLModel):
     """Model creation model."""
+
     name: str = Field(max_length=512)
     path: str = Field(max_length=1024)
     size_bytes: int = Field(sa_type=BigInteger)  # type: ignore[call-arg]
@@ -130,6 +132,7 @@ class ModelCreate(SQLModel):
 
 class ModelUpdate(SQLModel):
     """Model update model."""
+
     name: str | None = Field(default=None, max_length=512)
     path: str | None = Field(default=None, max_length=1024)
     size_bytes: int | None = Field(default=None, sa_type=BigInteger)  # type: ignore[call-arg]
@@ -355,6 +358,12 @@ class ServerInstance(SQLModel, table=True):
     pid: int | None = None
     process_command: str
 
+    # Editable server settings (source of truth; legacy JSON `config` kept
+    # for rows written before these columns existed)
+    gpu_layers: int = 35
+    context_size: int = 4096
+    flash_attn: bool = True
+
     config: dict[str, str] = Field(
         default_factory=dict,
         sa_column=Column(JSON),
@@ -375,7 +384,7 @@ class ServerInstance(SQLModel, table=True):
     ram_usage_bytes: int | None = None
     cpu_usage_percent: float | None = None
 
-    inactivity_timeout_seconds: int
+    inactivity_timeout_seconds: int = 300
     auto_shutdown_at: datetime | None = None
 
     error_message: str | None = None

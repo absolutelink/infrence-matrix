@@ -1121,6 +1121,22 @@ export type ServerInstanceResponse = {
      * Vram Usage Bytes
      */
     vram_usage_bytes?: number | null;
+    /**
+     * Gpu Layers
+     */
+    gpu_layers?: number;
+    /**
+     * Context Size
+     */
+    context_size?: number;
+    /**
+     * Flash Attn
+     */
+    flash_attn?: boolean;
+    /**
+     * Inactivity Timeout Seconds
+     */
+    inactivity_timeout_seconds?: number;
 };
 
 /**
@@ -1195,6 +1211,34 @@ export type TranslationResponse = {
      * Text
      */
     text: string;
+};
+
+/**
+ * UpdateServerRequest
+ *
+ * Editable server settings. All fields optional.
+ */
+export type UpdateServerRequest = {
+    /**
+     * Gpu Layers
+     */
+    gpu_layers?: number | null;
+    /**
+     * Context Size
+     */
+    context_size?: number | null;
+    /**
+     * Flash Attn
+     */
+    flash_attn?: boolean | null;
+    /**
+     * Inactivity Timeout Seconds
+     */
+    inactivity_timeout_seconds?: number | null;
+    /**
+     * Restart
+     */
+    restart?: boolean;
 };
 
 /**
@@ -1466,6 +1510,40 @@ export type serverInstancesGetServerInstanceResponses = {
 };
 
 export type serverInstancesGetServerInstanceResponse = serverInstancesGetServerInstanceResponses[keyof serverInstancesGetServerInstanceResponses];
+
+export type serverInstancesUpdateServerData = {
+    body: UpdateServerRequest;
+    path: {
+        /**
+         * Server Id
+         */
+        server_id: string;
+    };
+    query?: never;
+    url: '/api/v1/server-instances/{server_id}';
+};
+
+export type serverInstancesUpdateServerErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type serverInstancesUpdateServerError = serverInstancesUpdateServerErrors[keyof serverInstancesUpdateServerErrors];
+
+export type serverInstancesUpdateServerResponses = {
+    /**
+     * Response Server-Instances-Update Server
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type serverInstancesUpdateServerResponse = serverInstancesUpdateServerResponses[keyof serverInstancesUpdateServerResponses];
 
 export type serverInstancesStartServerData = {
     body: StartServerRequest;

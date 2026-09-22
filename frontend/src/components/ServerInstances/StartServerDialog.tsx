@@ -12,6 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { LoadingButton } from "@/components/ui/loading-button"
 import {
@@ -31,6 +32,8 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
   const queryClient = useQueryClient()
   const [modelId, setModelId] = useState<string>("")
   const [agentId, setAgentId] = useState<string>("")
+  const [gpuLayers, setGpuLayers] = useState("35")
+  const [contextSize, setContextSize] = useState("4096")
 
   const modelsQuery = useQuery({
     queryKey: ["models"],
@@ -54,6 +57,8 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
     mutationFn: async () => {
       const body: StartServerRequest = {
         model_id: modelId,
+        gpu_layers: Number(gpuLayers) || 35,
+        context_size: Number(contextSize) || 4096,
       }
       if (agentId && agentId !== "auto") {
         body.agent_id = agentId
@@ -127,6 +132,34 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
                 ))}
               </SelectContent>
             </Select>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <Label htmlFor="start-gpu-layers">GPU layers</Label>
+              <Input
+                id="start-gpu-layers"
+                type="number"
+                min={0}
+                max={1000}
+                value={gpuLayers}
+                onChange={(e) => setGpuLayers(e.target.value)}
+                className="mt-1"
+              />
+            </div>
+            <div>
+              <Label htmlFor="start-context-size">Context size</Label>
+              <Input
+                id="start-context-size"
+                type="number"
+                min={256}
+                max={1048576}
+                step={256}
+                value={contextSize}
+                onChange={(e) => setContextSize(e.target.value)}
+                className="mt-1"
+              />
+            </div>
           </div>
         </div>
 

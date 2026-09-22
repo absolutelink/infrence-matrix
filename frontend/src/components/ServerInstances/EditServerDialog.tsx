@@ -1,0 +1,171 @@
+import { useMutation, useQueryClient } from "@tanstack/react-query"
+import { useEffect, useState } from "react"
+import { toast } from "sonner"
+import { ServerInstancesService } from "@/client"
+import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { LoadingButton } from "@/components/ui/loading-button"
+
+interface EditServerDialogProps {
+  isOpen: boolean
+  onClose: () => void
+  instance: {
+    id: string
+    model_name: string | null
+    status: string
+    gpu_layers: number
+    context_size: number
+    flash_attn: boolean
+    inactivity_timeout_seconds: number
+  }
+}
+
+export function EditServerDialog({
+  isOpen,
+  onClose,
+  instance,
+}: EditServerDialogProps) {
+  const queryClient = useQueryClient()
+  const [gpuLayers, setGpuLayers] = useState("35")
+  const [contextSize, setContextSize] = useState("4096")
+  const [flashAttn, setFlashAttn] = useState(true)
+  const [inactivityTimeout, setInactivityTimeout] = useState("300")
+
+  useEffect(() => {
+    if (isOpen) {
+      setGpuLayers(String(instance.gpu_layers))
+      setContextSize(String(instance.context_size))
+      setFlashAttn(instance.flash_attn)
+      setInactivityTimeout(String(instance.inactivity_timeout_seconds))
+    }
+  }, [isOpen, instance])
+
+  const wasRunning = instance.status === "running"
+
+  const updateMutation = useMutation({
+    mutationFn: async () => {
+      return ServerInstancesService.instancesUpdateServer({
+        path: { server_id: instance.id },
+        body: {
+          gpu_layers: Number(gpuLayers),
+          context_size: Number(contextSize),
+          flash_attn: flashAttn,
+          inactivity_timeout_seconds: Number(inactivityTimeout),
+        },
+      })
+    },
+    onSuccess: (data) => {
+      const status = (data as unknown as { status?: string }).status
+      if (status === "restarting") {
+        toast.success("Settings saved — restarting server")
+      } else {
+        toast.success("Settings saved")
+      }
+      queryClient.invalidateQueries({ queryKey: ["server-instances"] })
+      onClose()
+    },
+    onError: (error: Error) => {
+      toast.error(`Failed to update server: ${error.message}`)
+    },
+  })
+
+  return (
+    <Dialog
+      open={isOpen}
+      onOpenChange={(open) => {
+        if (!open) {
+          onClose()
+        }
+      }}
+    >
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Edit Server Settings</DialogTitle>
+          <DialogDescription>
+            {instance.model_name || "Server"}
+            {wasRunning
+              ? " — saving will restart the server with the new settings"
+              : ""}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid grid-cols-2 gap-4 py-2">
+          <div>
+            <Label htmlFor="gpu-layers">GPU layers</Label>
+            <Input
+              id="gpu-layers"
+              type="number"
+              min={0}
+              max={1000}
+              value={gpuLayers}
+              onChange={(e) => setGpuLayers(e.target.value)}
+              className="mt-1"
+            />
+          </div>
+          <div>
+            <Label htmlFor="context-size">Context size</Label>
+            <Input
+              id="context-size"
+              type="number"
+              min={256}
+              max={1048576}
+              step={256}
+              value={contextSize}
+              onChange={(e) => setContextSize(e.target.value)}
+              className="mt-1"
+            />
+          </div>
+          <div>
+            <Label htmlFor="inactivity-timeout">
+              Inactivity timeout (seconds)
+            </Label>
+            <Input
+              id="inactivity-timeout"
+              type="number"
+              min={0}
+              max={86400}
+              value={inactivityTimeout}
+              onChange={(e) => setInactivityTimeout(e.target.value)}
+              className="mt-1"
+            />
+          </div>
+          <div className="flex items-end pb-2">
+            <Label
+              htmlFor="flash-attn"
+              className="flex items-center gap-2 text-sm font-medium"
+            >
+              <Checkbox
+                id="flash-attn"
+                checked={flashAttn}
+                onCheckedChange={(checked) => setFlashAttn(checked === true)}
+              />
+              Flash attention
+            </Label>
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <LoadingButton
+            onClick={() => updateMutation.mutate()}
+            loading={updateMutation.isPending}
+          >
+            {wasRunning ? "Save & Restart" : "Save"}
+          </LoadingButton>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}

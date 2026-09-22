@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlmodel import col
 
@@ -42,6 +42,10 @@ class ServerInstanceResponse(BaseModel):
     cpu_usage_percent: float | None = None
     ram_usage_bytes: int | None = None
     vram_usage_bytes: int | None = None
+    gpu_layers: int = 35
+    context_size: int = 4096
+    flash_attn: bool = True
+    inactivity_timeout_seconds: int = 300
 
 
 class ServerInstanceListResponse(BaseModel):
@@ -53,6 +57,16 @@ class StartServerRequest(BaseModel):
     agent_id: str | None = None
     gpu_layers: int = 35
     context_size: int = 4096
+
+
+class UpdateServerRequest(BaseModel):
+    """Editable server settings. All fields optional."""
+
+    gpu_layers: int | None = Field(None, ge=0, le=1000)
+    context_size: int | None = Field(None, ge=256, le=1_048_576)
+    flash_attn: bool | None = None
+    inactivity_timeout_seconds: int | None = Field(None, ge=0, le=86400)
+    restart: bool = True  # restart immediately if the server is running
 
 
 @router.get("", response_model=ServerInstanceListResponse)
@@ -88,6 +102,10 @@ async def list_server_instances() -> ServerInstanceListResponse:
                     cpu_usage_percent=instance.cpu_usage_percent,
                     ram_usage_bytes=instance.ram_usage_bytes,
                     vram_usage_bytes=instance.vram_usage_bytes,
+                    gpu_layers=instance.gpu_layers,
+                    context_size=instance.context_size,
+                    flash_attn=instance.flash_attn,
+                    inactivity_timeout_seconds=instance.inactivity_timeout_seconds,
                 )
             )
 
@@ -126,6 +144,10 @@ async def get_server_instance(server_id: str) -> ServerInstanceResponse:
             cpu_usage_percent=instance.cpu_usage_percent,
             ram_usage_bytes=instance.ram_usage_bytes,
             vram_usage_bytes=instance.vram_usage_bytes,
+            gpu_layers=instance.gpu_layers,
+            context_size=instance.context_size,
+            flash_attn=instance.flash_attn,
+            inactivity_timeout_seconds=instance.inactivity_timeout_seconds,
         )
 
 
@@ -184,10 +206,9 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
             agent_id=agent.id,
             port=port,
             process_command=f"{model.source_file or model.path}",
-            config={
-                "gpu_layers": str(request.gpu_layers),
-                "context_size": str(request.context_size),
-            },
+            gpu_layers=request.gpu_layers,
+            context_size=request.context_size,
+            flash_attn=True,
             status="starting",
             health_status="unknown",
             inactivity_timeout_seconds=300,
@@ -197,29 +218,8 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
         await session.refresh(server)
 
         server_id = str(server.id)
-        filename = model.source_file or model.path.rsplit("/", 1)[-1]
 
-        payload = {
-            "config": {
-                "id": server_id,
-                "model_path": model.path,
-                "port": port,
-                "gpu_layers": request.gpu_layers,
-                "context_size": request.context_size,
-                "batch_size": 512,
-                "cache_prompt": True,
-                "flash_attn": True,
-            },
-            # The agent downloads the model file first if it is missing.
-            "source": {
-                "source": model.source,
-                "repo_id": model.source_repo_id or "",
-                "filename": filename,
-                "job_id": f"server-{server_id}",
-            }
-            if model.source_repo_id
-            else None,
-        }
+        payload = _build_start_payload(server, model)
 
         # Dispatch to the agent in the background: the download can take a
         # long time and the HTTP request from the UI must not block on it.
@@ -243,6 +243,32 @@ def _port_in_use(host: str, port: int) -> bool:
             return True
     except OSError:
         return False
+
+
+def _build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any]:
+    """Build the agent /servers/start payload from instance + model."""
+    filename = model.source_file or model.path.rsplit("/", 1)[-1]
+    return {
+        "config": {
+            "id": str(instance.id),
+            "model_path": model.path,
+            "port": instance.port,
+            "gpu_layers": instance.gpu_layers,
+            "context_size": instance.context_size,
+            "batch_size": 512,
+            "cache_prompt": True,
+            "flash_attn": instance.flash_attn,
+        },
+        # The agent downloads the model file first if it is missing.
+        "source": {
+            "source": model.source,
+            "repo_id": model.source_repo_id or "",
+            "filename": filename,
+            "job_id": f"server-{instance.id}",
+        }
+        if model.source_repo_id
+        else None,
+    }
 
 
 async def _dispatch_start(
@@ -279,6 +305,89 @@ async def _dispatch_start(
                 await session.commit()
 
 
+@router.put("/{server_id}")
+async def update_server(server_id: str, request: UpdateServerRequest) -> dict[str, Any]:
+    """Update server settings; restart the server if it is running."""
+    async with AsyncSessionMaker() as session:
+        instance = await session.get(ServerInstance, uuid_module.UUID(server_id))
+        if not instance:
+            raise HTTPException(status_code=404, detail="Server instance not found")
+
+        if instance.status == "starting":
+            raise HTTPException(
+                status_code=409,
+                detail="Server is starting; wait for it to finish before editing",
+            )
+
+        was_running = instance.status == "running"
+
+        if request.gpu_layers is not None:
+            instance.gpu_layers = request.gpu_layers
+        if request.context_size is not None:
+            instance.context_size = request.context_size
+        if request.flash_attn is not None:
+            instance.flash_attn = request.flash_attn
+        if request.inactivity_timeout_seconds is not None:
+            instance.inactivity_timeout_seconds = request.inactivity_timeout_seconds
+
+        # Keep the legacy JSON config in sync for old readers
+        instance.config = {
+            **(instance.config or {}),
+            "gpu_layers": str(instance.gpu_layers),
+            "context_size": str(instance.context_size),
+            "flash_attn": str(instance.flash_attn).lower(),
+        }
+        await session.commit()
+
+        if was_running and request.restart:
+            await session.refresh(instance)
+            agent = await session.get(Agent, instance.agent_id)
+            if not agent or agent.status != "online":
+                raise HTTPException(
+                    status_code=503,
+                    detail="Settings saved, but agent is offline — restart manually",
+                )
+            model = await session.get(Model, instance.model_id)
+            if not model:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Settings saved, but model no longer exists",
+                )
+
+            # Stop the running llama-server on the agent
+            try:
+                await agent_manager.send_to_agent(
+                    str(instance.agent_id),
+                    "POST",
+                    "/servers/stop",
+                    {"server_id": str(instance.id)},
+                    timeout=60.0,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to stop server before restart: {e}")
+
+            instance.status = "starting"
+            instance.error_message = None
+            await session.commit()
+
+            payload = _build_start_payload(instance, model)
+            asyncio.create_task(
+                _dispatch_start(str(instance.agent_id), str(instance.id), payload)
+            )
+
+            return {
+                "status": "restarting",
+                "server_id": str(instance.id),
+                "message": "Settings saved — restarting server",
+            }
+
+        return {
+            "status": instance.status,
+            "server_id": str(instance.id),
+            "message": "Settings saved",
+        }
+
+
 @router.post("/{server_id}/start")
 async def restart_server(server_id: str) -> dict[str, Any]:
     """Start an existing (stopped or errored) server instance."""
@@ -310,29 +419,7 @@ async def restart_server(server_id: str) -> dict[str, Any]:
         instance.error_message = None
         await session.commit()
 
-        filename = model.source_file or model.path.rsplit("/", 1)[-1]
-        config = instance.config or {}
-
-        payload = {
-            "config": {
-                "id": str(instance.id),
-                "model_path": model.path,
-                "port": instance.port,
-                "gpu_layers": int(config.get("gpu_layers", 35)),
-                "context_size": int(config.get("context_size", 4096)),
-                "batch_size": 512,
-                "cache_prompt": True,
-            },
-            # The agent downloads the model file first if it is missing.
-            "source": {
-                "source": model.source,
-                "repo_id": model.source_repo_id or "",
-                "filename": filename,
-                "job_id": f"server-{instance.id}",
-            }
-            if model.source_repo_id
-            else None,
-        }
+        payload = _build_start_payload(instance, model)
 
         # Dispatch in the background; the row is already "starting".
         agent_id = str(agent.id)

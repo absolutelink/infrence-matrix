@@ -6,6 +6,7 @@ import {
   Cpu,
   MemoryStick,
   MoreHorizontal,
+  Pencil,
   Play,
   Power,
   Terminal,
@@ -14,6 +15,7 @@ import { useState } from "react"
 import { toast } from "sonner"
 
 import { AgentsService, ServerInstancesService } from "@/client"
+import { EditServerDialog } from "@/components/ServerInstances/EditServerDialog"
 import { ServerLogsSheet } from "@/components/ServerInstances/ServerLogsSheet"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -43,6 +45,10 @@ type ServerInstance = {
   cpu_usage_percent: number | null
   ram_usage_bytes: number | null
   vram_usage_bytes: number | null
+  gpu_layers: number
+  context_size: number
+  flash_attn: boolean
+  inactivity_timeout_seconds: number
 }
 
 export const columns: ColumnDef<ServerInstance>[] = [
@@ -220,6 +226,7 @@ export const columns: ColumnDef<ServerInstance>[] = [
 function InstanceActions({ instance }: { instance: ServerInstance }) {
   const queryClient = useQueryClient()
   const [logsOpen, setLogsOpen] = useState(false)
+  const [editOpen, setEditOpen] = useState(false)
 
   const stopMutation = useMutation({
     mutationFn: async () => {
@@ -280,6 +287,10 @@ function InstanceActions({ instance }: { instance: ServerInstance }) {
             <Terminal className="mr-2 h-4 w-4" />
             View Logs
           </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => setEditOpen(true)}>
+            <Pencil className="mr-2 h-4 w-4" />
+            Edit Settings
+          </DropdownMenuItem>
           <DropdownMenuSeparator />
           {instance.status === "running" ? (
             <DropdownMenuItem
@@ -306,6 +317,12 @@ function InstanceActions({ instance }: { instance: ServerInstance }) {
       <ServerLogsSheet
         isOpen={logsOpen}
         onClose={() => setLogsOpen(false)}
+        instance={instance}
+      />
+
+      <EditServerDialog
+        isOpen={editOpen}
+        onClose={() => setEditOpen(false)}
         instance={instance}
       />
     </>
