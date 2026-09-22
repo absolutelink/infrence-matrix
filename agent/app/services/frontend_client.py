@@ -84,9 +84,23 @@ class FrontendClient:
 
         await self.connect_websocket()
 
+    def _build_ws_url(self, frontend_url: str) -> str:
+        """Convert the frontend HTTP(S) URL to a WebSocket URL."""
+        if frontend_url.startswith("https://"):
+            scheme = "wss://"
+        elif frontend_url.startswith("http://"):
+            scheme = "ws://"
+        else:
+            raise ValueError(
+                f"FRONTEND_URL must start with http:// or https://, got: {frontend_url}"
+            )
+
+        host = frontend_url.split("://", 1)[1].rstrip("/")
+        return f"{scheme}{host}/api/ws/agents/{settings.AGENT_ID}"
+
     async def connect_websocket(self) -> None:
         """Establish WebSocket connection to Frontend."""
-        ws_url = f"ws://{settings.FRONTEND_URL.replace('http://', '').replace('https://', '')}/api/ws/agents/{settings.AGENT_ID}"
+        ws_url = self._build_ws_url(settings.FRONTEND_URL)
 
         while True:
             try:
