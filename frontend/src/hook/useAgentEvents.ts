@@ -4,6 +4,8 @@ export type AgentEvent = {
   event: string
   data: Record<string, unknown>
   timestamp: string
+  /** Monotonic per-hook sequence for consumers to dedupe processed events */
+  seq: number
 }
 
 const MAX_EVENTS = 200
@@ -16,6 +18,7 @@ export function useAgentEvents(agentId: string, enabled: boolean) {
   const [events, setEvents] = useState<AgentEvent[]>([])
   const [connected, setConnected] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
+  const seqRef = useRef(0)
 
   useEffect(() => {
     if (!enabled || !agentId) {
@@ -49,7 +52,10 @@ export function useAgentEvents(agentId: string, enabled: boolean) {
           if (parsed.event === "heartbeat") {
             return
           }
-          setEvents((prev) => [...prev.slice(-(MAX_EVENTS - 1)), parsed])
+          setEvents((prev) => [
+            ...prev.slice(-(MAX_EVENTS - 1)),
+            { ...parsed, seq: seqRef.current++ },
+          ])
         } catch {
           // ignore malformed messages
         }

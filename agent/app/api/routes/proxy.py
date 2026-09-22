@@ -31,6 +31,11 @@ async def proxy_request(
         return StreamingResponse(
             proxy.proxy_stream(server_id, request.method, f"/{path}", body),
             media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
         )
     else:
         response = await proxy.proxy_request(

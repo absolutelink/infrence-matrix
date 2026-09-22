@@ -45,15 +45,23 @@ export function ServerLogsSheet({
   // Marks which historical lines are already seeded from the poll so live
   // lines are only appended once.
   const [seeded, setSeeded] = useState(false)
+  // Highest event seq already merged into the tail (events is cumulative)
+  const processedSeqRef = useRef(-1)
 
   useEffect(() => {
     setTail([])
     setSeeded(false)
+    processedSeqRef.current = -1
   }, [])
 
   useEffect(() => {
     const newLines: LogLine[] = []
     for (const event of events) {
+      // Skip events already merged into the tail — events is cumulative
+      if (event.seq <= processedSeqRef.current) {
+        continue
+      }
+      processedSeqRef.current = event.seq
       if (
         event.event === "log.lines" &&
         (event.data as { server_id?: string }).server_id === instance.id

@@ -318,6 +318,11 @@ async def create_chat_completion(
                 request_id,
             ),
             media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
         )
 
     # Non-streaming response
