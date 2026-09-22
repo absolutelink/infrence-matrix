@@ -2,6 +2,7 @@ import type { ColumnDef } from "@tanstack/react-table"
 import { Activity, MoreHorizontal, Terminal, Trash2 } from "lucide-react"
 import { useState } from "react"
 import { AgentLogsSheet } from "@/components/Agents/AgentLogsSheet"
+import { AgentMetricsSheet } from "@/components/Agents/AgentMetricsSheet"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -136,6 +137,7 @@ export const columns: ColumnDef<Agent>[] = [
 
 function AgentActions({ agent }: { agent: Agent }) {
   const [logsOpen, setLogsOpen] = useState(false)
+  const [metricsOpen, setMetricsOpen] = useState(false)
 
   return (
     <>
@@ -158,7 +160,7 @@ function AgentActions({ agent }: { agent: Agent }) {
             <Terminal className="mr-2 h-4 w-4" />
             View Logs
           </DropdownMenuItem>
-          <DropdownMenuItem>
+          <DropdownMenuItem onClick={() => setMetricsOpen(true)}>
             <Activity className="mr-2 h-4 w-4" />
             View Metrics
           </DropdownMenuItem>
@@ -173,6 +175,13 @@ function AgentActions({ agent }: { agent: Agent }) {
       <AgentLogsSheet
         isOpen={logsOpen}
         onClose={() => setLogsOpen(false)}
+        agentId={agent.id}
+        agentName={agent.name}
+      />
+
+      <AgentMetricsSheet
+        isOpen={metricsOpen}
+        onClose={() => setMetricsOpen(false)}
         agentId={agent.id}
         agentName={agent.name}
       />
