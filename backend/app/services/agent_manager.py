@@ -69,7 +69,7 @@ class AgentManager:
 
     async def connect_websocket(self, agent: Agent) -> None:
         """Establish WebSocket connection to Agent."""
-        ws_url = f"ws://{agent.host}:{agent.port}/api/ws/status"
+        ws_url = f"ws://{agent.host}:{agent.port}/ws/status"
         agent_id = str(agent.id)
 
         while True:
@@ -109,7 +109,7 @@ class AgentManager:
                 await asyncio.sleep(settings.WS_RECONNECT_INTERVAL)
 
                 # Try to reconnect
-                ws_url = f"ws://{agent.host}:{agent.port}/api/ws/status"
+                ws_url = f"ws://{agent.host}:{agent.port}/ws/status"
                 async with connect(ws_url, extra_headers={"X-Agent-ID": agent_id}) as websocket:
                     self.ws_connections[agent_id] = websocket
                     agent.websocket_connected = True
@@ -261,7 +261,9 @@ class AgentManager:
         if agent.status != "online":
             raise RuntimeError(f"Agent {agent_id} is {agent.status}")
 
-        url = f"http://{agent.host}:{agent.port}/api{path}"
+        # The agent mounts its routes at the root (e.g. /servers/list),
+        # with no /api prefix.
+        url = f"http://{agent.host}:{agent.port}{path}"
 
         async with httpx.AsyncClient(timeout=timeout) as client:
             try:
