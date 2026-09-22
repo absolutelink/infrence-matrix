@@ -9,6 +9,8 @@ from app.services.model_manager import model_manager
 
 router = APIRouter(prefix="/servers", tags=["servers"])
 
+server_manager = llama_server_manager
+
 
 class ServerConfig(BaseModel):
     id: str

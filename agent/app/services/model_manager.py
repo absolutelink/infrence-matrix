@@ -97,3 +97,5 @@ class ModelManager:
             "size_bytes": model_path.stat().st_size,
             "modified_time": model_path.stat().st_mtime,
         }
+
+model_manager = ModelManager()

@@ -10,7 +10,11 @@ from app.services.proxy import LlamaCppProxy
 router = APIRouter(prefix="/proxy", tags=["proxy"])
 
 
-@router.api_route("/{server_id}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+@router.api_route(
+    "/{server_id}/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+    response_model=None,
+)
 async def proxy_request(
     server_id: str,
     path: str,
