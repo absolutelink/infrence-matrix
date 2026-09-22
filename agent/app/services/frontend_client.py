@@ -28,12 +28,17 @@ class FrontendClient:
 
     async def register(self) -> bool:
         """Register Agent with Frontend."""
+        from app.services.llama_server import llama_server_manager
+
         registration_data = {
             "agent_id": settings.AGENT_ID,
             "name": settings.AGENT_NAME,
             "host": settings.AGENT_HOST or socket.gethostname(),
             "port": settings.AGENT_PORT,
             "gpu_info": await self._get_gpu_info(),
+            # Server ids live in the agent's memory; the backend uses this
+            # to only clear instances that are no longer actually running.
+            "running_server_ids": list(llama_server_manager.servers.keys()),
         }
 
         url = f"{settings.FRONTEND_URL}/api/v1/agents/register"

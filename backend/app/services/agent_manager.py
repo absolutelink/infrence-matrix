@@ -80,14 +80,20 @@ class AgentManager:
                 session.add(agent)
                 logger.info(f"Registered new agent {name}")
 
-            # The agent restarts with no running llama-server processes, so
-            # anything still marked starting/running for it is stale.
+            # The agent reports the server ids it currently has running. Any
+            # instance still marked starting/running that is NOT in that set
+            # is stale (e.g. agent restarted). Instances the agent confirms
+            # as running are left alone.
+            running_ids = agent_data.get("running_server_ids") or []
+            conditions = [
+                col(ServerInstance.agent_id) == agent.id,
+                col(ServerInstance.status).in_(["starting", "running"]),
+            ]
+            if running_ids:
+                conditions.append(col(ServerInstance.id).not_in(running_ids))
             stale = await session.execute(
                 update(ServerInstance)
-                .where(
-                    col(ServerInstance.agent_id) == agent.id,
-                    col(ServerInstance.status).in_(["starting", "running"]),
-                )
+                .where(*conditions)
                 .values(status="stopped", health_status="unknown")
             )
             stale_count = getattr(stale, "rowcount", 0)

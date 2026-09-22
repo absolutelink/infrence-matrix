@@ -2,8 +2,6 @@
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
-from sqlmodel import update
 
 from app.db.session import AsyncSessionMaker
 from app.models import Agent
@@ -18,6 +16,7 @@ class AgentRegisterRequest(BaseModel):
     host: str
     port: int
     gpu_info: dict | None = None
+    running_server_ids: list[str] | None = None
 
 
 class AgentRegisterResponse(BaseModel):
@@ -122,7 +121,10 @@ async def delete_agent(agent_id: str) -> dict:
         await session.delete(agent)
         await session.commit()
 
-        return {"status": "deleted", "message": f"Agent {agent_id} deleted successfully"}
+        return {
+            "status": "deleted",
+            "message": f"Agent {agent_id} deleted successfully",
+        }
 
 
 @router.post("/{agent_id}/command")

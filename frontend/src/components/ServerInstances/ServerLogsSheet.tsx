@@ -42,9 +42,13 @@ export function ServerLogsSheet({
   // Live tail via the agent event stream
   const { events, connected } = useAgentEvents(instance.agent_id, isOpen)
   const [tail, setTail] = useState<LogLine[]>([])
+  // Marks which historical lines are already seeded from the poll so live
+  // lines are only appended once.
+  const [seeded, setSeeded] = useState(false)
 
   useEffect(() => {
     setTail([])
+    setSeeded(false)
   }, [])
 
   useEffect(() => {
@@ -69,15 +73,16 @@ export function ServerLogsSheet({
     }
   }, [events, instance.id])
 
-  // Fallback: full-log poll (in case the live stream is not connected)
-  const logsQuery = useQuery({
-    queryKey: ["server-logs", instance.id],
+  // History: fetch the last 100 lines from the agent's buffer and seed the
+  // tail before (or alongside) live lines.
+  const historyQuery = useQuery({
+    queryKey: ["server-logs-history", instance.id],
     queryFn: async () => {
       const response = await AgentsService.sendCommand({
         path: { agent_id: instance.agent_id },
         body: {
           method: "GET",
-          path: `/servers/logs/${instance.id}`,
+          path: `/servers/logs/${instance.id}?lines=100`,
         },
       })
       return response.data as {
@@ -86,9 +91,37 @@ export function ServerLogsSheet({
         stderr?: string[]
       }
     },
-    enabled: isOpen && Boolean(instance.agent_id) && !connected,
-    refetchInterval: 5000,
+    enabled: isOpen && Boolean(instance.agent_id),
+    refetchOnWindowFocus: false,
   })
+
+  useEffect(() => {
+    if (!historyQuery.data || !connected) {
+      return
+    }
+    if (seeded) {
+      return
+    }
+    const history: LogLine[] = [
+      ...(historyQuery.data.stdout ?? []).map((line) => ({
+        stream: "stdout" as const,
+        line,
+      })),
+      ...(historyQuery.data.stderr ?? []).map((line) => ({
+        stream: "stderr" as const,
+        line,
+      })),
+    ]
+    if (history.length > 0) {
+      setTail((prev) => {
+        const merged = [...history, ...prev]
+        return merged.length > MAX_TAIL_LINES
+          ? merged.slice(-MAX_TAIL_LINES)
+          : merged
+      })
+    }
+    setSeeded(true)
+  }, [historyQuery.data, connected, seeded])
 
   useEffect(() => {
     if (logRef.current && autoScroll) {
@@ -99,11 +132,11 @@ export function ServerLogsSheet({
   const fallbackLines: LogLine[] = connected
     ? []
     : [
-        ...(logsQuery.data?.stdout ?? []).map((line) => ({
+        ...(historyQuery.data?.stdout ?? []).map((line) => ({
           stream: "stdout" as const,
           line,
         })),
-        ...(logsQuery.data?.stderr ?? []).map((line) => ({
+        ...(historyQuery.data?.stderr ?? []).map((line) => ({
           stream: "stderr" as const,
           line,
         })),
@@ -124,8 +157,8 @@ export function ServerLogsSheet({
               variant="ghost"
               size="icon"
               className="h-6 w-6"
-              onClick={() => logsQuery.refetch()}
-              disabled={logsQuery.isFetching}
+              onClick={() => historyQuery.refetch()}
+              disabled={historyQuery.isFetching}
             >
               <RefreshCw className="h-4 w-4" />
             </Button>
@@ -154,6 +187,12 @@ export function ServerLogsSheet({
               {connected
                 ? "Connected - waiting for log output..."
                 : "No logs available yet."}
+            </div>
+          )}
+
+          {connected && seeded && tail.length > 0 && (
+            <div className="text-muted-foreground mb-2 text-[10px] uppercase tracking-wider border-b border-muted-foreground/20 pb-1">
+              Last {Math.min(tail.length, 100)} lines before attaching live
             </div>
           )}
 
