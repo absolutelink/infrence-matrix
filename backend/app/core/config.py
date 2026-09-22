@@ -83,6 +83,10 @@ class Settings(BaseSettings):
     WS_RECONNECT_INTERVAL: int = 5
     AGENT_MAX_RECONNECT_ATTEMPTS: int = 10
 
+    # Agent cleanup
+    AGENT_OFFLINE_AFTER: int = 300
+    AGENT_CLEANUP_INTERVAL: int = 60
+
     # Audio Processing
     WHISPER_MODEL_PATH: str = "/models/whisper"
     AUDIO_MAX_FILE_SIZE: int = 25

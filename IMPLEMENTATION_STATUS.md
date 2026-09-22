@@ -322,7 +322,7 @@ API_URL=https://matrix.thelink.family
 
 1. **Server health monitoring** - periodic health checks; auto-mark instances unhealthy/stopped
 2. **Dashboard Metrics** - Add charts and statistics (gpu.usage events already streaming)
-3. **Schedule cleanup loop** - run cleanup_offline_agents periodically on startup
+3. ~~Schedule cleanup loop~~ - run cleanup_offline_agents periodically on startup ✅
 4. **Inference UI** - text completion, embeddings, audio transcription pages
 
 ---

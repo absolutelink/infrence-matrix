@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import sentry_sdk
@@ -18,8 +19,15 @@ from app.api.routes.v1 import (
 )
 from app.api.routes.websocket import router as agent_ws_router
 from app.core.config import settings
+from app.services.agent_manager import agent_manager
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    agent_manager.start_cleanup_loop()
+    yield
 
 
 def custom_generate_unique_id(route: APIRoute) -> str:
@@ -33,6 +41,7 @@ app = FastAPI(
     title=settings.PROJECT_NAME,
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
     generate_unique_id_function=custom_generate_unique_id,
+    lifespan=lifespan,
 )
 
 app.add_middleware(

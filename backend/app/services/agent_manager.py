@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from sqlalchemy import update
@@ -24,6 +24,7 @@ class AgentManager:
         self._reconnect_tasks: dict[str, asyncio.Task[None]] = {}
         self._event_buffers: dict[str, list[dict]] = {}
         self._connect_tasks: dict[str, asyncio.Task[None]] = {}
+        self._cleanup_task: asyncio.Task[None] | None = None
         # UI subscribers per agent: agent_id -> list of asyncio.Queue
         self._event_subscribers: dict[str, list[asyncio.Queue[dict[str, object]]]] = {}
 
@@ -412,16 +413,17 @@ class AgentManager:
 
     async def cleanup_offline_agents(self) -> None:
         """Mark agents as offline if not seen recently."""
+        interval = timedelta(seconds=settings.AGENT_OFFLINE_AFTER)
         async with AsyncSessionMaker() as session:
             from sqlalchemy import update
 
-            # Find agents not seen in last 5 minutes
-            cutoff = datetime.utcnow()
+            # Find agents not seen within the offline threshold
+            cutoff = datetime.now(UTC) - interval
 
             stmt = (
                 update(Agent)
-                .where(Agent.last_seen < cutoff)
-                .where(Agent.status == "online")
+                .where(col(Agent.last_seen) < cutoff)
+                .where(col(Agent.status) == "online")
                 .values(status="offline")
             )
 
@@ -432,6 +434,23 @@ class AgentManager:
             for agent in self.agents.values():
                 if agent.last_seen and agent.last_seen < cutoff:
                     agent.status = "offline"
+
+    async def _cleanup_loop(self) -> None:
+        """Periodically run cleanup_offline_agents until cancelled."""
+        while True:
+            try:
+                await asyncio.sleep(settings.AGENT_CLEANUP_INTERVAL)
+                await self.cleanup_offline_agents()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Agent cleanup failed: {e}")
+
+    def start_cleanup_loop(self) -> None:
+        """Start the periodic agent cleanup task."""
+        if not self._cleanup_task or self._cleanup_task.done():
+            self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+            logger.info("Agent cleanup loop started")
 
 
 # Global instance

@@ -1,144 +1,63 @@
-# Agent Instructions - Inference Matrix
+# AGENTS.md - Inference Matrix
 
-## Project Overview
+OpenAI API-compatible inference server for local GGUF models with a WebUI. Routes requests to llama.cpp servers on local/remote agents.
 
-Inference Matrix is an OpenAI API-compatible inference server for local GGUF models with a full WebUI. It routes requests to llama.cpp servers running on local or remote agents.
+Monorepo: `backend/` (FastAPI + SQLModel), `frontend/` (React/TS + Bun), `agent/` (optional agent service), `recipes/` (agent Docker images).
 
-**Architecture**: Monorepo with backend (FastAPI/Python), frontend (React/TypeScript), and optional agent service.
-
-## Quick Commands
-
-### Development Setup
+## Commands
 
 ```bash
-# Start supporting services (PostgreSQL)
+# Infra
 docker compose up -d db
 
-# Backend setup
-cd backend
-uv sync
-uv run bash scripts/prestart.sh  # Run migrations
-uv run fastapi dev               # Start on port 8000
+# Backend (port 8000)
+cd backend && uv sync
+uv run bash scripts/prestart.sh   # migrations; also runs automatically on startup
+uv run fastapi dev
 
-# Frontend setup (separate terminal)
-cd frontend
-bun install
-bun run dev  # Start on port 5173
+# Frontend (port 5173, proxies /api/v1 and /v1 to :8000)
+cd frontend && bun install && bun run dev
+
+# Checks — mypy/ty have pre-existing errors; ruff on touched files must be clean
+cd backend && uv run ruff check app && uv run ruff format --check app
+cd agent && MODELS_PATH=/tmp/models uv run ruff check app && uv run pytest tests/
+
+# Production
+cd frontend && bun run build    # outputs to backend/app/frontend
+cd backend && uv run python -m app.main
 ```
 
-### Build & Test
+Backend tests need PostgreSQL running; agent tests are self-contained (set `AGENT_ID`/`FRONTEND_URL` env first — see `agent/tests/test_llama_server.py:10`).
 
-```bash
-# Generate TypeScript client from OpenAPI spec
-bash scripts/generate-client.sh
+## Non-obvious workflows
 
-# Run all checks (pre-commit)
-pre-commit run --all-files
+- **API client is codegen** (`frontend/src/client/`): regenerate with `bash scripts/generate-client.sh`; runs in pre-commit when `backend/app/**.py` changes. Never edit by hand. After backend route changes, regenerate before the UI compiles — the script writes `openapi.json` to repo root then `frontend/openapi.json`.
+- **TanStack Router** generates `routeTree.gen.ts`; if routes 404, delete it and restart dev server.
+- **Migrations** run automatically at startup via `scripts/prestart.sh` (alembic).
+- **Agent runtime env is required**: `AGENT_ID` and `FRONTEND_URL` must be set or the agent crashes at import (settings validation in `agent/app/core/config.py`).
+- **Deployment flow**: CI builds three images on push to main/develop — `matrix-app` (root `Dockerfile`, serves API+frontend on 8000), `agent`, `agent-vulkan` (`recipes/llama-cpp-vulkan/Dockerfile`, layers agent on `ghcr.io/ggml-org/llama.cpp:full-vulkan`).
+- **Production deploy**: agent runs on AMD Strix Halo box (`core@10.100.2.111`, podman quadlet `/etc/containers/systemd/inference-matrix-agent.container`, models at `/var/lib/inference-matrix/models`); backend at `matrix.thelink.family`. Deploy = rebuild image, `podman pull` happens automatically via `Pull=newer`.
 
-# Backend tests
-cd backend
-uv run pytest
+## Architecture facts
 
-# Frontend tests
-cd frontend
-bun run test
-```
-
-### Production Build
-
-```bash
-# Build frontend (outputs to backend/app/frontend)
-cd frontend
-bun run build
-
-# Start backend (serves both API and frontend on port 8000)
-cd backend
-uv run python -m app.main
-```
-
-## Key Directories
-
-- `backend/app/` - FastAPI application
-  - `api/routes/` - API endpoints
-  - `core/config.py` - Settings (loads from `.env`)
-  - `models.py` - SQLModel database models
-  - `services/` - Business logic (llama-server management, agents, etc.)
-- `frontend/src/` - React application
-  - `routes/_layout/` - Page components (TanStack Router)
-  - `components/` - UI components
-  - `client/` - Auto-generated API client (DO NOT EDIT)
-- `agent/` - Optional agent service for remote GPU management
-
-## Important Workflows
-
-### OpenAPI Client Generation
-
-The frontend client is auto-generated from the backend OpenAPI spec:
-
-```bash
-bash scripts/generate-client.sh
-```
-
-This runs automatically in pre-commit when backend files change. **Never manually edit `frontend/src/client/`**.
-
-### Database Migrations
-
-Alembic is configured but migrations run automatically on startup via `scripts/prestart.sh`. For manual migrations:
-
-```bash
-cd backend
-uv run alembic revision --autogenerate -m "description"
-uv run alembic upgrade head
-```
-
-### Environment Variables
-
-Key variables in `.env`:
-- `POSTGRES_PASSWORD` - Database password
-- `FASTAPI_ENV` - `development` or `production`
-- `MODELS_PATH` - Where GGUF models are stored (default: `/models`)
+- Backend is stateless broker: UI ↔ backend (REST + WS `/api/ws/events/{agent_id}`) ↔ agents. Agents connect **inbound**: agent POSTs `/api/v1/agents/register` (backend then opens WS to agent `/ws/status`), and holds a WS to backend `/api/ws/agents/{agent_id}` for events/commands.
+- Agent event flow: `agent/app/services/event_bus.py` (buffered pub/sub) → events `server.started/stopped/error`, `download.*`, `gpu.usage`, `log.lines` → backend `agent_manager` fans out to UI queues + updates DB.
+- llama-server lifecycle lives in agent memory (`llama_server_manager.servers`); `ServerInstance` DB rows in backend mirror it. Agents re-register every 60s; on registration backend resets instances the agent does not report as running.
+- ServerInstance ids are UUIDs generated by the backend; the agent identifies llama-server processes by that id. Agent ports are allocated from range 8090–8190 (`server_instances.py`).
+- llama.cpp flags: `--flash-attn on|off` (new value syntax, `None` = omit); `--prompt-cache` no longer exists. llama-server needs `LD_LIBRARY_PATH` set to the binary's dir (agent sets it at spawn).
 
 ## Gotchas
 
-1. **Port conflicts**: Backend uses 8000, frontend dev server uses 5173/5174. Stop one before starting the other in Docker.
+- **mypy/ty have ~80 pre-existing errors** across `backend/app` (untyped `dict`s, SQLModel quirks). Don't try to fix wholesale; keep touched files at/below their existing count. Pre-commit mypy hook (`mypy backend/app`) will pass/fail accordingly.
+- **`frontend/src/client/` is generated** — excluded from some pre-commit hooks via `exclude:` patterns.
+- **Agent env**: `LD_LIBRARY_PATH` not guaranteed in vulkan container; model files land flat in `MODELS_PATH` but registered Model paths can be `/models/{repo}/{file}` — resolve both (`agent/app/api/routes/servers.py:_model_candidates`).
+- Port collisions: 8000 (backend), 5173/5174 (vite), 8080 (agent), 13305 (lemonade on the GPU box).
+- `npm run lint` in pre-commit runs biome; it **rewrites files** (`--write --unsafe`) — expect auto-fixes in `git status` after any frontend change.
 
-2. **Frontend build**: After building frontend, restart backend to serve new assets.
+## Skills
 
-3. **Agent service**: The agent service (`agent/`) is separate from the main backend. It's optional for single-machine setups.
+Custom agent skills in `.agents/skills/`: `api-helpers`, `backup-restore`, `cache-management`, `fastapi`, `gpu-config`, `library-skills`, `llama-server-manager`, `model-management`, `sqlmodel`.
 
-4. **GPU backends**: llama.cpp must be compiled with the right backend (CUDA, Metal, Vulkan). Check `DEFAULT_GPU_LAYERS` in `.env`.
+## Docs
 
-5. **Route generation**: TanStack Router auto-generates `routeTree.gen.ts`. If routes don't work, delete this file and restart dev server.
-
-## Testing Quirks
-
-- Backend tests require PostgreSQL running
-- Integration tests need both backend and frontend
-- Mock llama.cpp server for tests without GPU
-- Use `FASTAPI_ENV=development` for test runs
-
-## Skills Available
-
-This repo has custom agent skills in `.agents/skills/`:
-- `api-helpers` - OpenAI API endpoint helpers
-- `backup-restore` - Database/config backup
-- `cache-management` - Prompt cache handling
-- `gpu-config` - GPU acceleration setup
-- `llama-server-manager` - llama.cpp process management
-- `model-management` - GGUF model downloads
-- `sqlmodel` - Database operations
-
-## CI/CD
-
-- Pre-commit hooks run on every commit
-- GitHub Actions build Docker images
-- Release notes auto-generated by `scripts/prepare_release.py`
-- Security scans with `zizmor`
-
-## Documentation
-
-- `README.md` - User-facing docs
-- `development.md` - Detailed dev setup
-- `deployment.md` - Production deployment
-- `docs/` - Architecture, API endpoints, monitoring
-- `IMPLEMENTATION_STATUS.md` - Feature completion tracking
+`IMPLEMENTATION_STATUS.md` (feature tracking, current next-steps), `docs/architecture.md`, `docs/deployment.md`, `development.md`, `deployment.md`.
