@@ -73,6 +73,9 @@ jobs:
           POSTGRES_DB: inference_matrix_test
           POSTGRES_HOST: localhost
           POSTGRES_PORT: 5432
+          # Skip the frontend build dir check in app/main.py (frontend/ is
+          # gitignored and absent in CI); fastapi reads this env var directly
+          FASTAPI_ENV: development
         run: uv run pytest tests/ -v --tb=short
 
   test-agent:
