@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class GPUInfo:
     """GPU information."""
+
     index: int
     name: str
     total_memory_bytes: int
@@ -23,6 +24,7 @@ class GPUInfo:
 @dataclass
 class GPUConfig:
     """GPU configuration for llama.cpp."""
+
     enabled: bool = True
     gpu_layers: int = 35
     split_mode: Literal["layer", "row", "none"] = "layer"
@@ -71,8 +73,11 @@ class GPUManager:
         """Detect NVIDIA GPUs using nvidia-smi."""
         try:
             result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,temperature.gpu",
-                 "--format=csv,noheader,nounits"],
+                [
+                    "nvidia-smi",
+                    "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,temperature.gpu",
+                    "--format=csv,noheader,nounits",
+                ],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -91,19 +96,21 @@ class GPUManager:
                             utilization = float(parts[4])
                             temp = float(parts[5]) if len(parts) > 5 else None
 
-                            self._gpu_info.append(GPUInfo(
-                                index=index,
-                                name=name,
-                                total_memory_bytes=total_mem,
-                                used_memory_bytes=used_mem,
-                                free_memory_bytes=total_mem - used_mem,
-                                utilization_percent=utilization,
-                                temperature_celsius=temp,
-                            ))
+                            self._gpu_info.append(
+                                GPUInfo(
+                                    index=index,
+                                    name=name,
+                                    total_memory_bytes=total_mem,
+                                    used_memory_bytes=used_mem,
+                                    free_memory_bytes=total_mem - used_mem,
+                                    utilization_percent=utilization,
+                                    temperature_celsius=temp,
+                                )
+                            )
 
                 return len(self._gpu_info) > 0
 
-        except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+        except subprocess.TimeoutExpired, FileNotFoundError, ValueError:
             pass
 
         return False
@@ -122,35 +129,40 @@ class GPUManager:
                 lines = result.stdout.strip().split("\n")
                 for i, line in enumerate(lines):
                     if "GPU" in line or "Card" in line:
-                        self._gpu_info.append(GPUInfo(
-                            index=i,
-                            name=line.strip(),
-                            total_memory_bytes=8 * 1024 * 1024 * 1024,
-                            used_memory_bytes=0,
-                            free_memory_bytes=8 * 1024 * 1024 * 1024,
-                            utilization_percent=0.0,
-                        ))
+                        self._gpu_info.append(
+                            GPUInfo(
+                                index=i,
+                                name=line.strip(),
+                                total_memory_bytes=8 * 1024 * 1024 * 1024,
+                                used_memory_bytes=0,
+                                free_memory_bytes=8 * 1024 * 1024 * 1024,
+                                utilization_percent=0.0,
+                            )
+                        )
 
                 return len(self._gpu_info) > 0
 
-        except (subprocess.TimeoutExpired, FileNotFoundError):
+        except subprocess.TimeoutExpired, FileNotFoundError:
             pass
 
         try:
             import pyamdgpuinfo
+
             gpus = pyamdgpuinfo.detect_gpus()
             for i, gpu in enumerate(gpus):
-                self._gpu_info.append(GPUInfo(
-                    index=i,
-                    name=gpu.name,
-                    total_memory_bytes=gpu.memory_info["vram_size"],
-                    used_memory_bytes=0,
-                    free_memory_bytes=gpu.memory_info["vram_size"],
-                    utilization_percent=0.0,
-                ))
+                self._gpu_info.append(
+                    GPUInfo(
+                        index=i,
+                        name=gpu.name,
+                        total_memory_bytes=gpu.memory_info["vram_size"],
+                        used_memory_bytes=0,
+                        free_memory_bytes=gpu.memory_info["vram_size"],
+                        utilization_percent=0.0,
+                    )
+                )
             return len(self._gpu_info) > 0
 
-        except (ImportError, Exception):
+        except ImportError, Exception:
             pass
 
         return False
@@ -158,6 +170,7 @@ class GPUManager:
     def _detect_apple_metal(self) -> bool:
         """Detect Apple Metal GPU."""
         import platform
+
         if platform.system() != "Darwin":
             return False
 
@@ -171,18 +184,25 @@ class GPUManager:
 
             if result.returncode == 0:
                 output = result.stdout
-                if "Apple" in output or "M1" in output or "M2" in output or "M3" in output:
-                    self._gpu_info.append(GPUInfo(
-                        index=0,
-                        name="Apple Metal",
-                        total_memory_bytes=psutil.virtual_memory().total,
-                        used_memory_bytes=psutil.virtual_memory().used,
-                        free_memory_bytes=psutil.virtual_memory().available,
-                        utilization_percent=0.0,
-                    ))
+                if (
+                    "Apple" in output
+                    or "M1" in output
+                    or "M2" in output
+                    or "M3" in output
+                ):
+                    self._gpu_info.append(
+                        GPUInfo(
+                            index=0,
+                            name="Apple Metal",
+                            total_memory_bytes=psutil.virtual_memory().total,
+                            used_memory_bytes=psutil.virtual_memory().used,
+                            free_memory_bytes=psutil.virtual_memory().available,
+                            utilization_percent=0.0,
+                        )
+                    )
                     return True
 
-        except (subprocess.TimeoutExpired, FileNotFoundError):
+        except subprocess.TimeoutExpired, FileNotFoundError:
             pass
 
         return False
@@ -213,7 +233,7 @@ class GPUManager:
             return 0
 
         total_vram = sum(gpu.free_memory_bytes for gpu in self._gpu_info)
-        total_vram_gb = total_vram / (1024 ** 3)
+        total_vram_gb = total_vram / (1024**3)
 
         if total_vram_gb < model_size_gb * 0.5:
             return 0
@@ -236,7 +256,9 @@ class GPUManager:
         gpu_layers = self.get_recommended_gpu_layers(model_size_gb)
 
         if len(self._gpu_info) > 1:
-            tensor_split_list: list[float] = [float(gpu.free_memory_bytes) for gpu in self._gpu_info]
+            tensor_split_list: list[float] = [
+                float(gpu.free_memory_bytes) for gpu in self._gpu_info
+            ]
             total = sum(tensor_split_list)
             tensor_split = [v / total for v in tensor_split_list]
         else:
@@ -250,7 +272,9 @@ class GPUManager:
             tensor_split=tensor_split,
         )
 
-    def get_vram_usage(self) -> dict[str, int | list[dict[str, int | float | str | None]]]:
+    def get_vram_usage(
+        self,
+    ) -> dict[str, int | list[dict[str, int | float | str | None]]]:
         """Get VRAM usage across all GPUs."""
         if not self._gpu_info:
             return {"total_used": 0, "total_free": 0, "gpus": []}

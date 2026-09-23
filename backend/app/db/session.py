@@ -15,4 +15,6 @@ engine = create_async_engine(
     connect_args={"client_encoding": "utf8"},
 )
 
-AsyncSessionMaker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+AsyncSessionMaker = async_sessionmaker(
+    engine, class_=AsyncSession, expire_on_commit=False
+)

@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ServerConfig:
     """Configuration for llama-server instance."""
+
     model_path: str
     port: int
     gpu_layers: int = settings.DEFAULT_GPU_LAYERS
@@ -50,12 +51,18 @@ class LlamaServerManager:
 
         cmd = [
             settings.LLAMA_SERVER_PATH,
-            "-m", config.model_path,
-            "--port", str(config.port),
-            "-ngl", str(config.gpu_layers),
-            "-c", str(config.context_size),
-            "-b", str(config.batch_size),
-            "-t", str(config.threads),
+            "-m",
+            config.model_path,
+            "--port",
+            str(config.port),
+            "-ngl",
+            str(config.gpu_layers),
+            "-c",
+            str(config.context_size),
+            "-b",
+            str(config.batch_size),
+            "-t",
+            str(config.threads),
         ]
 
         if config.flash_attn:
@@ -86,7 +93,9 @@ class LlamaServerManager:
                 server_instance.auto_shutdown_at = datetime.now(UTC).replace(
                     second=datetime.now(UTC).second + settings.SERVER_INACTIVITY_TIMEOUT
                 )
-                logger.info(f"Server on port {config.port} started successfully (PID: {process.pid})")
+                logger.info(
+                    f"Server on port {config.port} started successfully (PID: {process.pid})"
+                )
                 return True
             else:
                 server_instance.status = "failed"
@@ -120,7 +129,9 @@ class LlamaServerManager:
             return True
 
         except subprocess.TimeoutExpired:
-            logger.warning(f"Server on port {port} did not terminate gracefully, killing")
+            logger.warning(
+                f"Server on port {port} did not terminate gracefully, killing"
+            )
             if os.name != "nt":
                 os.killpg(os.getpgid(process.pid), signal.SIGKILL)
             else:
@@ -167,14 +178,16 @@ class LlamaServerManager:
                     response = await client.get(health_url, timeout=5.0)
                     if response.status_code == 200:
                         return True
-            except (httpx.HTTPError, httpx.ConnectError):
+            except httpx.HTTPError, httpx.ConnectError:
                 pass
 
             await asyncio.sleep(1)
 
         return False
 
-    async def check_health(self, port: int) -> Literal["healthy", "unhealthy", "unknown"]:
+    async def check_health(
+        self, port: int
+    ) -> Literal["healthy", "unhealthy", "unknown"]:
         """Check health of a server instance."""
         if port not in self.servers:
             return "unknown"
@@ -189,13 +202,14 @@ class LlamaServerManager:
                 response = await client.get(health_url, timeout=5.0)
                 if response.status_code == 200:
                     return "healthy"
-        except (httpx.HTTPError, httpx.ConnectError):
+        except httpx.HTTPError, httpx.ConnectError:
             pass
 
         return "unhealthy"
 
     async def start_health_monitor(self) -> None:
         """Start background health monitoring task."""
+
         async def monitor() -> None:
             while True:
                 for port in list(self.servers.keys()):
@@ -205,7 +219,9 @@ class LlamaServerManager:
                     if health == "unhealthy":
                         config = self.configs.get(port)
                         if config:
-                            logger.warning(f"Server on port {port} unhealthy, restarting...")
+                            logger.warning(
+                                f"Server on port {port} unhealthy, restarting..."
+                            )
                             await self.restart_server(port)
 
                 await asyncio.sleep(self._health_check_interval)

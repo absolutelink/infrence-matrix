@@ -109,9 +109,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _enforce_non_default_secrets(self) -> Self:
         if self.FASTAPI_ENV == "production":
-            self._check_default_secret(
-                "POSTGRES_PASSWORD", self.POSTGRES_PASSWORD
-            )
+            self._check_default_secret("POSTGRES_PASSWORD", self.POSTGRES_PASSWORD)
         return self
 
 

@@ -13,46 +13,42 @@ router = APIRouter(tags=["metrics"])
 
 # Metrics definitions
 AGENT_COUNT = Gauge(
-    "inference_matrix_agents_total",
-    "Total number of registered agents",
-    ["status"]
+    "inference_matrix_agents_total", "Total number of registered agents", ["status"]
 )
 
 SERVER_COUNT = Gauge(
     "inference_matrix_servers_total",
     "Total number of running servers",
-    ["agent_id", "status"]
+    ["agent_id", "status"],
 )
 
 INFERENCE_REQUESTS = Counter(
     "inference_matrix_inference_requests_total",
     "Total number of inference requests",
-    ["model", "agent_id", "status"]
+    ["model", "agent_id", "status"],
 )
 
 INFERENCE_LATENCY = Histogram(
     "inference_matrix_inference_latency_seconds",
     "Inference request latency",
     ["model", "agent_id"],
-    buckets=(0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, float("inf"))
+    buckets=(0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, float("inf")),
 )
 
 TOKENS_GENERATED = Counter(
     "inference_matrix_tokens_generated_total",
     "Total tokens generated",
-    ["model", "agent_id"]
+    ["model", "agent_id"],
 )
 
 VRAM_USAGE = Gauge(
-    "inference_matrix_vram_usage_bytes",
-    "VRAM usage in bytes",
-    ["agent_id", "gpu_id"]
+    "inference_matrix_vram_usage_bytes", "VRAM usage in bytes", ["agent_id", "gpu_id"]
 )
 
 MODEL_CACHE_SIZE = Gauge(
     "inference_matrix_cache_size_bytes",
     "Prompt cache size in bytes",
-    ["model", "agent_id"]
+    ["model", "agent_id"],
 )
 
 
@@ -82,39 +78,22 @@ def update_server_metrics(servers: list) -> None:
     for server in servers:
         SERVER_COUNT.labels(
             agent_id=server.get("agent_id", "unknown"),
-            status=server.get("status", "unknown")
+            status=server.get("status", "unknown"),
         ).set(1)
 
 
 def record_inference_request(
-    model: str,
-    agent_id: str,
-    status: str,
-    latency: float,
-    tokens: int
+    model: str, agent_id: str, status: str, latency: float, tokens: int
 ) -> None:
     """Record inference request metrics."""
-    INFERENCE_REQUESTS.labels(
-        model=model,
-        agent_id=agent_id,
-        status=status
-    ).inc()
+    INFERENCE_REQUESTS.labels(model=model, agent_id=agent_id, status=status).inc()
 
-    INFERENCE_LATENCY.labels(
-        model=model,
-        agent_id=agent_id
-    ).observe(latency)
+    INFERENCE_LATENCY.labels(model=model, agent_id=agent_id).observe(latency)
 
     if tokens > 0:
-        TOKENS_GENERATED.labels(
-            model=model,
-            agent_id=agent_id
-        ).inc(tokens)
+        TOKENS_GENERATED.labels(model=model, agent_id=agent_id).inc(tokens)
 
 
 def update_vram_metrics(agent_id: str, gpu_id: int, vram_bytes: int) -> None:
     """Update VRAM usage metrics."""
-    VRAM_USAGE.labels(
-        agent_id=agent_id,
-        gpu_id=str(gpu_id)
-    ).set(vram_bytes)
+    VRAM_USAGE.labels(agent_id=agent_id, gpu_id=str(gpu_id)).set(vram_bytes)
