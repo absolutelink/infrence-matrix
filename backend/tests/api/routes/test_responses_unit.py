@@ -321,6 +321,39 @@ class TestSSEFraming:
     def test_done_terminator(self) -> None:
         assert "data: [DONE]\n\n" != None
 
+    def test_emitter_queues_and_drains_once(self) -> None:
+        """Regression for blank streamed messages: make() must queue events so
+        drain_frames() emits each exactly once (build -> drain pattern), and
+        StreamState-built deltas actually reach the wire."""
+        seq = ev.SSEmitter()
+        req = CreateResponseBody(model="m", input="hi")
+        ev.response_created(seq, build_response_resource(req, "resp_x", 1))
+        ev.response_in_progress(seq, build_response_resource(req, "resp_x", 1))
+
+        state = StreamState(seq, "m")
+        state.add_text_delta("Hel")
+        state.add_text_delta("lo")
+        state.finish_message()
+
+        frames = seq.drain_frames()
+        types = [f.split("\n")[0][7:] for f in frames]
+        assert types == [
+            "response.created",
+            "response.in_progress",
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.output_text.delta",
+            "response.output_text.delta",
+            "response.output_text.done",
+            "response.content_part.done",
+            "response.output_item.done",
+        ]
+        # Each sequence number appears exactly once across all frames
+        seqs = [json.loads(f.split("data: ", 1)[1])["sequence_number"] for f in frames]
+        assert seqs == list(range(1, len(frames) + 1))
+        # Draining again yields nothing
+        assert seq.drain_frames() == []
+
 
 class TestResponseResourceEcho:
     def test_echo_fields(self) -> None:

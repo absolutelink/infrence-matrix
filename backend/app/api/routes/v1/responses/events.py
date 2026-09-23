@@ -56,10 +56,16 @@ class StreamingEvent(BaseModel):
 
 
 class SSEmitter:
-    """Assigns monotonic sequence numbers and frames SSE lines."""
+    """Assigns monotonic sequence numbers and frames SSE lines.
+
+    make() records every built event into a pending queue; generators
+    drain it with drain_frames() so item/delta events built by StreamState
+    actually reach the wire.
+    """
 
     def __init__(self) -> None:
         self._seq = 0
+        self._pending: list[dict[str, Any]] = []
 
     @property
     def sequence_number(self) -> int:
@@ -76,7 +82,14 @@ class SSEmitter:
 
     def make(self, etype: EventType, **payload: Any) -> dict[str, Any]:
         event = {"type": etype, "sequence_number": self.next_sequence(), **payload}
+        self._pending.append(event)
         return event
+
+    def drain_frames(self) -> list[str]:
+        """Frame and clear all pending events."""
+        frames = [self.frame(event) for event in self._pending]
+        self._pending.clear()
+        return frames
 
     async def stream(self, events: AsyncIterator[dict[str, Any]]) -> AsyncIterator[str]:
         """Wrap an event iterator, framing each event and ending with [DONE]."""

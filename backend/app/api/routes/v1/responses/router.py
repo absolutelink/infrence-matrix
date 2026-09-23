@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import TypeAdapter
 from sqlmodel import Session, select
 
 from app.api.deps import get_db
@@ -23,7 +24,10 @@ from app.api.routes.v1.responses.schemas import (
     Error,
     ErrorBody,
     ErrorResponse,
+    IncompleteDetails,
+    OutputItem,
     ResponseResource,
+    Usage,
     new_id,
 )
 from app.api.routes.v1.responses.translator import (
@@ -122,6 +126,14 @@ def _llama_payload(
     return payload
 
 
+_OUTPUT_ITEM_ADAPTER: TypeAdapter = TypeAdapter(OutputItem)
+
+
+def _coerce_output_item(item: dict[str, Any]) -> OutputItem:
+    """Validate a raw item dict into the proper OutputItem model (spec union)."""
+    return _OUTPUT_ITEM_ADAPTER.validate_python(item)
+
+
 def _build_usage(
     usage_data: dict[str, Any], fallback_chars: int, reasoning_tokens: int
 ) -> dict[str, Any]:
@@ -190,11 +202,11 @@ async def _complete(
         response_id,
         created_at,
         status="incomplete" if incomplete else "completed",
-        output=state.output_items,
+        output=[_coerce_output_item(item) for item in state.output_items],
         usage=usage,
     )
     if incomplete:
-        result.incomplete_details = {"reason": "max_output_tokens"}
+        result.incomplete_details = IncompleteDetails(reason="max_output_tokens")
     return result
 
 
@@ -218,8 +230,12 @@ async def _stream_events(
         created_at,
         previous_response_id=request.previous_response_id,
     )
-    yield seq.frame(ev.response_created(seq, response))
-    yield seq.frame(ev.response_in_progress(seq, response))
+    # Build then drain: make() queues events so everything flows through
+    # drain_frames() exactly once (no double-emitted lifecycle frames).
+    ev.response_created(seq, response)
+    ev.response_in_progress(seq, response)
+    for frame in seq.drain_frames():
+        yield frame
 
     state = StreamState(seq, request.model)
     allowed = allowed_tool_names(request)
@@ -287,31 +303,44 @@ async def _stream_events(
                     for tc in delta.get("tool_calls") or []:
                         state.add_tool_call_delta(tc.get("index", 0), tc)
 
+                    # Emit the item/delta events built during this chunk
+                    for frame in seq.drain_frames():
+                        yield frame
+
         state.apply_allowed_tools(allowed)
         state.finish_reasoning()
         state.finish_calls()
         state.finish_message()
 
+        # Drain the final close-out events (arguments done, item done, etc.)
+        for frame in seq.drain_frames():
+            yield frame
+
         usage = _build_usage(final_usage_data, fallback_chars, state.reasoning_tokens)
 
         if finish_reason == "length":
             response.status = "incomplete"
-            response.incomplete_details = {"reason": "max_output_tokens"}
+            response.incomplete_details = IncompleteDetails(reason="max_output_tokens")
         else:
             response.status = "completed"
-        response.output = state.output_items  # type: ignore[assignment]
-        response.usage = usage  # type: ignore[arg-type]
+        # Typed models (not dicts) so pydantic serializes without warnings
+        response.output = [_coerce_output_item(item) for item in state.output_items]
+        response.usage = Usage.model_validate(usage)
 
         if response.status == "incomplete":
-            yield seq.frame(ev.response_incomplete(seq, response))
+            ev.response_incomplete(seq, response)
         else:
-            yield seq.frame(ev.response_completed(seq, response))
+            ev.response_completed(seq, response)
+        for frame in seq.drain_frames():
+            yield frame
 
     except Exception as e:
         logger.error(f"Responses streaming error: {e}")
         response.status = "failed"
         response.error = Error(code="server_error", message=str(e))
-        yield seq.frame(ev.response_failed(seq, response))
+        ev.response_failed(seq, response)
+        for frame in seq.drain_frames():
+            yield frame
 
     yield "data: [DONE]\n\n"
 
