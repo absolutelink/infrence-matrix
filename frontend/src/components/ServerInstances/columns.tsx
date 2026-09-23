@@ -54,12 +54,17 @@ type ServerInstance = {
 
 export const columns: ColumnDef<ServerInstance>[] = [
   {
-    accessorKey: "model_name",
-    header: "Model",
+    accessorKey: "alias",
+    header: "Alias",
     cell: ({ row }) => {
       const instance = row.original
       return (
-        <div className="font-medium">{instance.model_name || "Unknown"}</div>
+        <div>
+          <div className="font-medium">{instance.alias || "—"}</div>
+          <div className="text-xs text-muted-foreground">
+            {instance.model_name || "Unknown"}
+          </div>
+        </div>
       )
     },
   },
