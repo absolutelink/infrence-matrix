@@ -18,6 +18,7 @@ router = APIRouter()
 
 class BatchRequest(BaseModel):
     """Batch creation request."""
+
     input_file_id: str
     endpoint: str
     completion_window: str = "24h"
@@ -25,6 +26,7 @@ class BatchRequest(BaseModel):
 
 class BatchData(BaseModel):
     """Batch data for OpenAI API response."""
+
     id: str
     object: str = "batch"
     created_at: int
@@ -44,6 +46,7 @@ class BatchData(BaseModel):
 
 class BatchesList(BaseModel):
     """List of batches response."""
+
     object: str = "list"
     data: list[BatchData]
 
@@ -73,10 +76,14 @@ def create_batch(
     Args:
         request: Batch creation request
     """
-    if request.endpoint not in ["/v1/chat/completions", "/v1/completions", "/v1/embeddings"]:
+    if request.endpoint not in [
+        "/v1/chat/completions",
+        "/v1/completions",
+        "/v1/embeddings",
+    ]:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid endpoint: {request.endpoint}. Must be one of: /v1/chat/completions, /v1/completions, /v1/embeddings"
+            detail=f"Invalid endpoint: {request.endpoint}. Must be one of: /v1/chat/completions, /v1/completions, /v1/embeddings",
         )
 
     try:
@@ -93,7 +100,7 @@ def create_batch(
     if input_file.status != "uploaded":
         raise HTTPException(
             status_code=400,
-            detail=f"Input file status is '{input_file.status}', expected 'uploaded'"
+            detail=f"Input file status is '{input_file.status}', expected 'uploaded'",
         )
 
     completion_hours = _parse_completion_window(request.completion_window)
@@ -145,22 +152,30 @@ def list_batches(
 
     batch_data = []
     for batch in batches:
-        batch_data.append(BatchData(
-            id=str(batch.id),
-            created_at=int(batch.created_at.timestamp()),
-            endpoint=batch.endpoint,
-            input_file_id=str(batch.input_file_id),
-            output_file_id=str(batch.output_file_id) if batch.output_file_id else None,
-            results_file_id=str(batch.results_file_id) if batch.results_file_id else None,
-            status=batch.status,
-            completion_window=f"{batch.completion_window_hours}h",
-            total_requests=batch.total_requests,
-            processed_requests=batch.processed_requests,
-            successful_requests=batch.successful_requests,
-            failed_requests=batch.failed_requests,
-            expires_at=int(batch.expires_at.timestamp()) if batch.expires_at else None,
-            error_message=batch.error_message,
-        ))
+        batch_data.append(
+            BatchData(
+                id=str(batch.id),
+                created_at=int(batch.created_at.timestamp()),
+                endpoint=batch.endpoint,
+                input_file_id=str(batch.input_file_id),
+                output_file_id=str(batch.output_file_id)
+                if batch.output_file_id
+                else None,
+                results_file_id=str(batch.results_file_id)
+                if batch.results_file_id
+                else None,
+                status=batch.status,
+                completion_window=f"{batch.completion_window_hours}h",
+                total_requests=batch.total_requests,
+                processed_requests=batch.processed_requests,
+                successful_requests=batch.successful_requests,
+                failed_requests=batch.failed_requests,
+                expires_at=int(batch.expires_at.timestamp())
+                if batch.expires_at
+                else None,
+                error_message=batch.error_message,
+            )
+        )
 
     return BatchesList(data=batch_data)
 
@@ -229,8 +244,7 @@ def cancel_batch(
 
     if batch.status in ["completed", "cancelled", "failed"]:
         raise HTTPException(
-            status_code=400,
-            detail=f"Cannot cancel batch with status '{batch.status}'"
+            status_code=400, detail=f"Cannot cancel batch with status '{batch.status}'"
         )
 
     batch.status = "cancelling"

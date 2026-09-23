@@ -30,6 +30,8 @@ class ServerSpec(BaseModel):
     cache_prompt: bool = True
     # None lets llama.cpp decide; True/False maps to --flash-attn on/off
     flash_attn: bool | None = True
+    # Jinja chat templates (required for tool calling); default on
+    jinja: bool = True
 
 
 class ServerStartRequest(BaseModel):
@@ -143,6 +145,7 @@ async def start_server(request: ServerStartRequest) -> dict:
             batch_size=request.config.batch_size,
             cache_prompt=request.config.cache_prompt,
             flash_attn=request.config.flash_attn,
+            jinja=request.config.jinja,
         )
 
         success = await llama_server_manager.start_server(request.config.id, config)

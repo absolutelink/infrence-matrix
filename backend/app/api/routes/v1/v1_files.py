@@ -21,6 +21,7 @@ router = APIRouter()
 
 class FileData(BaseModel):
     """File data for OpenAI API response."""
+
     id: str
     object: str = "file"
     bytes: int
@@ -32,12 +33,14 @@ class FileData(BaseModel):
 
 class FilesList(BaseModel):
     """List of files response."""
+
     object: str = "list"
     data: list[FileData]
 
 
 class DeleteFileResponse(BaseModel):
     """Delete file response."""
+
     id: str
     object: str = "file"
     deleted: bool
@@ -77,14 +80,16 @@ def list_files(
 
     file_data = []
     for file_model in files:
-        file_data.append(FileData(
-            id=str(file_model.id),
-            bytes=file_model.size_bytes,
-            created_at=int(file_model.created_at.timestamp()),
-            filename=file_model.filename,
-            purpose=file_model.purpose,
-            status=file_model.status,
-        ))
+        file_data.append(
+            FileData(
+                id=str(file_model.id),
+                bytes=file_model.size_bytes,
+                created_at=int(file_model.created_at.timestamp()),
+                filename=file_model.filename,
+                purpose=file_model.purpose,
+                status=file_model.status,
+            )
+        )
 
     return FilesList(data=file_data)
 
@@ -105,11 +110,15 @@ async def upload_file(
     if purpose not in ["batch", "retrieval", "assistants"]:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid purpose: {purpose}. Must be one of: batch, retrieval, assistants"
+            detail=f"Invalid purpose: {purpose}. Must be one of: batch, retrieval, assistants",
         )
 
     try:
-        files_dir = Path(settings.FILES_PATH if hasattr(settings, "FILES_PATH") else "/tmp/inference-matrix/files")
+        files_dir = Path(
+            settings.FILES_PATH
+            if hasattr(settings, "FILES_PATH")
+            else "/tmp/inference-matrix/files"
+        )
         files_dir.mkdir(parents=True, exist_ok=True)
 
         file_id = f"file-{uuid.uuid4().hex[:12]}"

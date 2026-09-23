@@ -81,6 +81,24 @@ export type AgentUpdateRequest = {
 };
 
 /**
+ * AllowedToolsChoice
+ */
+export type AllowedToolsChoice = {
+    /**
+     * Type
+     */
+    type?: 'allowed_tools';
+    /**
+     * Tools
+     */
+    tools: Array<SpecificFunctionChoice>;
+    /**
+     * Mode
+     */
+    mode?: 'none' | 'auto' | 'required';
+};
+
+/**
  * BatchData
  *
  * Batch data for OpenAI API response.
@@ -350,6 +368,24 @@ export type ChatMessage = {
 };
 
 /**
+ * CompactionSummaryItemParam
+ */
+export type CompactionSummaryItemParam = {
+    /**
+     * Type
+     */
+    type?: 'compaction';
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Encrypted Content
+     */
+    encrypted_content: string;
+};
+
+/**
  * CompletionRequest
  *
  * Completion request for legacy /v1/completions endpoint.
@@ -412,6 +448,123 @@ export type CompletionRequest = {
      */
     suffix?: string | null;
     stream_options?: StreamOptions | null;
+};
+
+/**
+ * CreateResponseBody
+ *
+ * POST /v1/responses request body.
+ */
+export type CreateResponseBody = {
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Input
+     */
+    input: string | Array<({
+        type: 'message';
+    } & UserMessageItemParam) | ({
+        type: 'reasoning';
+    } & ReasoningItemParam) | ({
+        type: 'function_call';
+    } & FunctionCallItemParam) | ({
+        type: 'function_call_output';
+    } & FunctionCallOutputItemParam) | ({
+        type: 'item_reference';
+    } & ItemReferenceParam) | ({
+        type: 'compaction';
+    } & CompactionSummaryItemParam)>;
+    /**
+     * Previous Response Id
+     */
+    previous_response_id?: string | null;
+    /**
+     * Include
+     */
+    include?: Array<'reasoning.encrypted_content' | 'message.output_text.logprobs'>;
+    /**
+     * Tools
+     */
+    tools?: Array<FunctionToolParam>;
+    /**
+     * Tool Choice
+     */
+    tool_choice?: 'none' | 'auto' | 'required' | SpecificFunctionChoice | AllowedToolsChoice;
+    /**
+     * Metadata
+     */
+    metadata?: {
+        [key: string]: string;
+    };
+    text?: TextParam | null;
+    /**
+     * Temperature
+     */
+    temperature?: number | null;
+    /**
+     * Top P
+     */
+    top_p?: number | null;
+    /**
+     * Presence Penalty
+     */
+    presence_penalty?: number | null;
+    /**
+     * Frequency Penalty
+     */
+    frequency_penalty?: number | null;
+    /**
+     * Parallel Tool Calls
+     */
+    parallel_tool_calls?: boolean | null;
+    /**
+     * Stream
+     */
+    stream?: boolean;
+    stream_options?: StreamOptionsParam | null;
+    /**
+     * Background
+     */
+    background?: boolean;
+    /**
+     * Max Output Tokens
+     */
+    max_output_tokens?: number | null;
+    /**
+     * Max Tool Calls
+     */
+    max_tool_calls?: number | null;
+    reasoning?: ReasoningParam | null;
+    /**
+     * Safety Identifier
+     */
+    safety_identifier?: string | null;
+    /**
+     * Prompt Cache Key
+     */
+    prompt_cache_key?: string | null;
+    /**
+     * Truncation
+     */
+    truncation?: 'auto' | 'disabled';
+    /**
+     * Instructions
+     */
+    instructions?: string | null;
+    /**
+     * Store
+     */
+    store?: boolean;
+    /**
+     * Service Tier
+     */
+    service_tier?: 'auto' | 'default' | 'flex' | 'priority';
+    /**
+     * Top Logprobs
+     */
+    top_logprobs?: number | null;
 };
 
 /**
@@ -570,6 +723,100 @@ export type FilesList = {
 };
 
 /**
+ * FunctionCallItemParam
+ */
+export type FunctionCallItemParam = {
+    /**
+     * Type
+     */
+    type?: 'function_call';
+    /**
+     * Call Id
+     */
+    call_id: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Arguments
+     */
+    arguments: string;
+    /**
+     * Id
+     */
+    id?: string | null;
+    /**
+     * Status
+     */
+    status?: 'in_progress' | 'completed' | 'incomplete' | null;
+};
+
+/**
+ * FunctionCallOutputItemParam
+ */
+export type FunctionCallOutputItemParam = {
+    /**
+     * Type
+     */
+    type?: 'function_call_output';
+    /**
+     * Call Id
+     */
+    call_id: string;
+    /**
+     * Output
+     */
+    output: string | Array<({
+        type: 'input_text';
+    } & InputTextContent) | ({
+        type: 'input_image';
+    } & InputImageContent) | ({
+        type: 'input_file';
+    } & InputFileContent) | ({
+        type: 'input_video';
+    } & InputVideoContent)>;
+    /**
+     * Id
+     */
+    id?: string | null;
+    /**
+     * Status
+     */
+    status?: 'in_progress' | 'completed' | 'incomplete' | null;
+};
+
+/**
+ * FunctionToolParam
+ *
+ * Flat function tool definition (Responses API shape).
+ */
+export type FunctionToolParam = {
+    /**
+     * Type
+     */
+    type?: 'function';
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Description
+     */
+    description?: string | null;
+    /**
+     * Parameters
+     */
+    parameters?: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * Strict
+     */
+    strict?: boolean | null;
+};
+
+/**
  * HTTPValidationError
  */
 export type HTTPValidationError = {
@@ -580,25 +827,131 @@ export type HTTPValidationError = {
 };
 
 /**
- * InputItem
+ * InputFileContent
  *
- * Input item for Responses API.
+ * A file input to the model.
  */
-export type InputItem = {
+export type InputFileContent = {
     /**
      * Type
      */
-    type: 'message' | 'function_call' | 'function_call_output' | 'reasoning';
+    type?: 'input_file';
     /**
-     * Role
+     * Filename
      */
-    role?: 'user' | 'assistant' | 'system' | 'developer' | null;
+    filename?: string | null;
     /**
-     * Content
+     * File Data
      */
-    content?: string | Array<{
-        [key: string]: string;
-    }> | null;
+    file_data?: string | null;
+    /**
+     * File Url
+     */
+    file_url?: string | null;
+};
+
+/**
+ * InputImageContent
+ *
+ * An image input to the model.
+ */
+export type InputImageContent = {
+    /**
+     * Type
+     */
+    type?: 'input_image';
+    /**
+     * Image Url
+     */
+    image_url: string;
+    /**
+     * Detail
+     */
+    detail?: 'low' | 'high' | 'auto';
+};
+
+/**
+ * InputTextContent
+ *
+ * A text input to the model.
+ */
+export type InputTextContent = {
+    /**
+     * Type
+     */
+    type?: 'input_text';
+    /**
+     * Text
+     */
+    text: string;
+};
+
+/**
+ * InputVideoContent
+ *
+ * A video input to the model.
+ */
+export type InputVideoContent = {
+    /**
+     * Type
+     */
+    type?: 'input_video';
+    /**
+     * Video Url
+     */
+    video_url: string;
+};
+
+/**
+ * ItemReferenceParam
+ */
+export type ItemReferenceParam = {
+    /**
+     * Type
+     */
+    type?: 'item_reference';
+    /**
+     * Id
+     */
+    id: string;
+};
+
+/**
+ * JsonObjectResponseFormat
+ */
+export type JsonObjectResponseFormat = {
+    /**
+     * Type
+     */
+    type?: 'json_object';
+};
+
+/**
+ * JsonSchemaResponseFormat
+ */
+export type JsonSchemaResponseFormat = {
+    /**
+     * Type
+     */
+    type?: 'json_schema';
+    /**
+     * Name
+     */
+    name?: string | null;
+    /**
+     * Description
+     */
+    description?: string | null;
+    /**
+     * Schema
+     */
+    schema?: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * Strict
+     */
+    strict?: boolean | null;
 };
 
 /**
@@ -880,15 +1233,77 @@ export type ModelsList = {
 };
 
 /**
- * OutputContent
- *
- * Output content.
+ * OutputTextContentParam
  */
-export type OutputContent = {
+export type OutputTextContentParam = {
     /**
      * Type
      */
-    type?: string;
+    type?: 'output_text';
+    /**
+     * Text
+     */
+    text: string;
+    /**
+     * Annotations
+     */
+    annotations?: Array<{
+        [key: string]: unknown;
+    }>;
+};
+
+/**
+ * ReasoningItemParam
+ */
+export type ReasoningItemParam = {
+    /**
+     * Type
+     */
+    type?: 'reasoning';
+    /**
+     * Summary
+     */
+    summary?: Array<ReasoningSummaryContentParam>;
+    /**
+     * Id
+     */
+    id?: string | null;
+    /**
+     * Content
+     */
+    content?: Array<ReasoningTextContent> | null;
+    /**
+     * Encrypted Content
+     */
+    encrypted_content?: string | null;
+    /**
+     * Status
+     */
+    status?: 'in_progress' | 'completed' | 'incomplete' | null;
+};
+
+/**
+ * ReasoningParam
+ */
+export type ReasoningParam = {
+    /**
+     * Effort
+     */
+    effort?: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | null;
+    /**
+     * Summary
+     */
+    summary?: 'concise' | 'detailed' | 'auto' | null;
+};
+
+/**
+ * ReasoningSummaryContentParam
+ */
+export type ReasoningSummaryContentParam = {
+    /**
+     * Type
+     */
+    type?: 'summary_text';
     /**
      * Text
      */
@@ -896,165 +1311,33 @@ export type OutputContent = {
 };
 
 /**
- * OutputItem
+ * ReasoningTextContent
  *
- * Output item.
+ * Raw reasoning text content.
  */
-export type OutputItem = {
+export type ReasoningTextContent = {
     /**
      * Type
      */
-    type: 'message' | 'function_call' | 'reasoning';
+    type?: 'reasoning_text';
     /**
-     * Id
+     * Text
      */
-    id: string;
-    /**
-     * Role
-     */
-    role: 'assistant';
-    /**
-     * Content
-     */
-    content: Array<OutputContent>;
+    text: string;
 };
 
 /**
- * ReasoningConfig
- *
- * Reasoning configuration.
+ * RefusalContentParam
  */
-export type ReasoningConfig = {
+export type RefusalContentParam = {
     /**
-     * Effort
+     * Type
      */
-    effort?: 'none' | 'low' | 'medium' | 'high' | 'xhigh';
+    type?: 'refusal';
     /**
-     * Summary
+     * Refusal
      */
-    summary?: 'concise' | 'detailed' | 'auto';
-};
-
-/**
- * ResponseData
- *
- * Response data.
- */
-export type ResponseData = {
-    /**
-     * Id
-     */
-    id: string;
-    /**
-     * Object
-     */
-    object?: string;
-    /**
-     * Created At
-     */
-    created_at: number;
-    /**
-     * Model
-     */
-    model: string;
-    /**
-     * Input
-     */
-    input: Array<{
-        [key: string]: string;
-    }>;
-    /**
-     * Output
-     */
-    output: Array<OutputItem>;
-    /**
-     * Status
-     */
-    status: 'in_progress' | 'completed' | 'failed';
-    usage?: ResponseUsage | null;
-};
-
-/**
- * ResponseRequest
- *
- * Response request.
- */
-export type ResponseRequest = {
-    /**
-     * Model
-     */
-    model: string;
-    /**
-     * Input
-     */
-    input: string | Array<InputItem>;
-    /**
-     * Previous Response Id
-     */
-    previous_response_id?: string | null;
-    /**
-     * Stream
-     */
-    stream?: boolean;
-    /**
-     * Temperature
-     */
-    temperature?: number;
-    /**
-     * Max Output Tokens
-     */
-    max_output_tokens?: number | null;
-    /**
-     * Tools
-     */
-    tools?: Array<{
-        [key: string]: string;
-    }>;
-    /**
-     * Tool Choice
-     */
-    tool_choice?: string | {
-        [key: string]: string;
-    };
-    /**
-     * Metadata
-     */
-    metadata?: {
-        [key: string]: string;
-    };
-    reasoning?: ReasoningConfig | null;
-    /**
-     * Include
-     */
-    include?: Array<string>;
-    /**
-     * Store
-     */
-    store?: boolean;
-    /**
-     * Truncation
-     */
-    truncation?: 'auto' | 'disabled';
-};
-
-/**
- * ResponseUsage
- *
- * Response usage.
- */
-export type ResponseUsage = {
-    /**
-     * Input Tokens
-     */
-    input_tokens: number;
-    /**
-     * Output Tokens
-     */
-    output_tokens: number;
-    /**
-     * Total Tokens
-     */
-    total_tokens: number;
+    refusal: string;
 };
 
 /**
@@ -1154,6 +1437,20 @@ export type ServerInstanceResponse = {
 };
 
 /**
+ * SpecificFunctionChoice
+ */
+export type SpecificFunctionChoice = {
+    /**
+     * Type
+     */
+    type?: 'function';
+    /**
+     * Name
+     */
+    name: string;
+};
+
+/**
  * SpeechRequest
  *
  * Speech generation request.
@@ -1217,6 +1514,46 @@ export type StreamOptions = {
      * Include Usage
      */
     include_usage?: boolean;
+};
+
+/**
+ * StreamOptionsParam
+ */
+export type StreamOptionsParam = {
+    /**
+     * Include Obfuscation
+     */
+    include_obfuscation?: boolean;
+};
+
+/**
+ * TextParam
+ */
+export type TextParam = {
+    /**
+     * Format
+     */
+    format?: ({
+        type: 'text';
+    } & TextResponseFormat) | ({
+        type: 'json_object';
+    } & JsonObjectResponseFormat) | ({
+        type: 'json_schema';
+    } & JsonSchemaResponseFormat) | null;
+    /**
+     * Verbosity
+     */
+    verbosity?: 'low' | 'medium' | 'high' | null;
+};
+
+/**
+ * TextResponseFormat
+ */
+export type TextResponseFormat = {
+    /**
+     * Type
+     */
+    type?: 'text';
 };
 
 /**
@@ -1312,6 +1649,44 @@ export type UpdateServerRequest = {
      * Restart
      */
     restart?: boolean;
+};
+
+/**
+ * UserMessageItemParam
+ */
+export type UserMessageItemParam = {
+    /**
+     * Type
+     */
+    type?: 'message';
+    /**
+     * Role
+     */
+    role?: 'user' | 'assistant' | 'system' | 'developer';
+    /**
+     * Content
+     */
+    content: string | Array<({
+        type: 'input_text';
+    } & InputTextContent) | ({
+        type: 'input_image';
+    } & InputImageContent) | ({
+        type: 'input_file';
+    } & InputFileContent) | ({
+        type: 'input_video';
+    } & InputVideoContent) | OutputTextContentParam | RefusalContentParam>;
+    /**
+     * Id
+     */
+    id?: string | null;
+    /**
+     * Status
+     */
+    status?: 'in_progress' | 'completed' | 'incomplete' | null;
+    /**
+     * Phase
+     */
+    phase?: 'commentary' | 'final_answer' | null;
 };
 
 /**
@@ -2192,7 +2567,7 @@ export type v1EmbeddingsCreateEmbeddingResponses = {
 export type v1EmbeddingsCreateEmbeddingResponse = v1EmbeddingsCreateEmbeddingResponses[keyof v1EmbeddingsCreateEmbeddingResponses];
 
 export type v1ResponsesCreateResponseData = {
-    body: ResponseRequest;
+    body: CreateResponseBody;
     path?: never;
     query?: never;
     url: '/v1/responses';
@@ -2211,40 +2586,8 @@ export type v1ResponsesCreateResponseResponses = {
     /**
      * Successful Response
      */
-    200: ResponseData;
+    200: unknown;
 };
-
-export type v1ResponsesCreateResponseResponse = v1ResponsesCreateResponseResponses[keyof v1ResponsesCreateResponseResponses];
-
-export type v1ResponsesRetrieveResponseData = {
-    body?: never;
-    path: {
-        /**
-         * Response Id
-         */
-        response_id: string;
-    };
-    query?: never;
-    url: '/v1/responses/{response_id}';
-};
-
-export type v1ResponsesRetrieveResponseErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type v1ResponsesRetrieveResponseError = v1ResponsesRetrieveResponseErrors[keyof v1ResponsesRetrieveResponseErrors];
-
-export type v1ResponsesRetrieveResponseResponses = {
-    /**
-     * Successful Response
-     */
-    200: ResponseData;
-};
-
-export type v1ResponsesRetrieveResponseResponse = v1ResponsesRetrieveResponseResponses[keyof v1ResponsesRetrieveResponseResponses];
 
 export type v1FilesListFilesData = {
     body?: never;

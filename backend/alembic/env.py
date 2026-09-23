@@ -23,7 +23,16 @@ if config.config_file_name is not None:
 # add your model's MetaData object here
 # for 'autogenerate' support
 from sqlmodel import SQLModel
-from app.models import Model, Conversation, PromptCache, DownloadJob, ServerInstance, AudioJob, BatchJob, File
+from app.models import (
+    Model,
+    ResponseRecord,
+    PromptCache,
+    DownloadJob,
+    ServerInstance,
+    AudioJob,
+    BatchJob,
+    File,
+)
 
 target_metadata = SQLModel.metadata
 
@@ -71,9 +80,7 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection, target_metadata=target_metadata
-        )
+        context.configure(connection=connection, target_metadata=target_metadata)
 
         with context.begin_transaction():
             context.run_migrations()

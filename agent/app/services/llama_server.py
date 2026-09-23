@@ -25,6 +25,9 @@ class ServerConfig:
     cache_prompt: bool = True
     # None lets llama.cpp decide; True/False maps to --flash-attn on/off
     flash_attn: bool | None = None
+    # Always-on: enables Jinja chat templates (required for tool calling,
+    # used by chat/completions and OpenResponses alike)
+    jinja: bool = True
 
 
 class LlamaServerManager:
@@ -96,6 +99,9 @@ class LlamaServerManager:
 
         if config.flash_attn is not None:
             cmd.extend(["--flash-attn", "on" if config.flash_attn else "off"])
+
+        if config.jinja:
+            cmd.append("--jinja")
 
         logger.info(
             f"Starting llama.cpp server {server_id} with command: {' '.join(cmd)}"

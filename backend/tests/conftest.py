@@ -6,7 +6,16 @@ from sqlmodel import Session, delete
 
 from app.core.db import engine
 from app.main import app
-from app.models import AudioJob, BatchJob, Conversation, File, Model, PromptCache
+from app.models import (
+    Agent,
+    AudioJob,
+    BatchJob,
+    File,
+    Model,
+    PromptCache,
+    ResponseRecord,
+    ServerInstance,
+)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -19,7 +28,16 @@ def db() -> Generator[Session]:
 def _clean_db() -> None:
     """Remove test data between tests so each test starts from a known state."""
     with Session(engine) as session:
-        for model in (PromptCache, AudioJob, BatchJob, Conversation, File, Model):
+        for model in (
+            PromptCache,
+            AudioJob,
+            BatchJob,
+            ResponseRecord,
+            ServerInstance,
+            File,
+            Model,
+            Agent,
+        ):
             session.exec(delete(model))  # type: ignore[arg-type]
         session.commit()
 

@@ -1,6 +1,6 @@
 # Inference Matrix - Implementation Status
 
-Last Updated: September 22, 2026 (evening)
+Last Updated: September 23, 2026
 
 ## ✅ Completed Features
 
@@ -139,6 +139,23 @@ Last Updated: September 22, 2026 (evening)
 - [ ] File upload for processing
 - [ ] Batch job management
 - [ ] Audio transcription UI
+
+#### OpenResponses API (`/v1/responses`) — in progress
+Target: [Open Responses spec v2026-04-24](https://www.openresponses.org/specification) (full core scope; WebSocket transport + `/responses/compact` deferred).
+
+- [ ] **Schemas module** (`backend/app/api/routes/v1/responses/schemas.py`): content parts (input_text/image/file/video, output_text, refusal, reasoning_text, summary_text), item params (user/system/developer/assistant messages, function_call, function_call_output, reasoning, item_reference, compaction), FunctionToolParam, tool_choice union incl. `allowed_tools`, text.format (text/json_object/json_schema), ReasoningParam, TextParam, StreamOptionsParam, Usage (+details), CreateResponseBody, ResponseResource
+- [ ] **Streaming events** (`events.py`): all ~24 spec events (response.created/queued/in_progress/completed/failed/incomplete, output_item.added/done, content_part.added/done, output_text.delta/done, refusal.*, reasoning.*, reasoning_summary_*, function_call_arguments.delta/done, error) with monotonic `sequence_number`, `event:`/`data:` SSE framing, terminal `[DONE]`
+- [ ] **Persistence**: new `responses` table mirroring ResponseResource 1:1 (replaces `conversations` table); `previous_response_id` chaining = previous.input + previous.output + new input; `store=false` → no persistence, `previous_response_not_found` error on missing chain
+- [ ] **Translator** (Responses items ↔ llama.cpp chat messages/chunks): input items → messages (instructions → system, function_call → assistant.tool_calls, function_call_output → tool role); llama.cpp tool_calls + reasoning_content → function_call/reasoning items; `allowed_tools` → client-side enforcement (OpenWebUI-style clients own tool execution; violations suppressed, response completes)
+- [ ] **POST /v1/responses**: model/alias resolution, non-streaming + SSE, error envelopes (previous_response_not_found etc.); `background=true` → 400; no GET retrieval endpoint (spec doesn't document one)
+- [ ] **Agent `--jinja` always-on**: llama.cpp tool calling requires `--jinja`; agent starts every llama-server with it (behavior change: templates drive formatting/parsing for chat/completions too)
+- [ ] **Reasoning**: map llama.cpp `reasoning_content` deltas → reasoning items + response.reasoning.delta/done events (thinking models)
+- [ ] Deferred: WebSocket transport, `/responses/compact`, service_tier behavior (accepted, maps to default)
+
+Key llama.cpp facts (researched):
+- Tool calling on `/v1/chat/completions` only works with `--jinja` (template autoparser builds PEG grammar; parses model output into structured tool_calls; grammar-constrains arguments from tool JSON schemas)
+- Wire shapes: request `tools:[{type:"function",function:{name,description,parameters}}]`, `tool_choice:"auto"|"none"|"required"|{type:"function",function:{name}}`; non-streaming result `message.tool_calls[]` + `finish_reason:"tool_calls"`; streaming via `delta.tool_calls[]` fragments
+- We translate flat Responses `FunctionToolParam` ↔ llama's nested `function:{...}` shape; `allowed_tools` is ours to enforce (llama.cpp unaware)
 
 #### Dashboard Improvements
 - [ ] System metrics dashboard
@@ -320,10 +337,27 @@ API_URL=https://matrix.thelink.family
 
 ## 🎯 Next Steps
 
-1. **Server health monitoring** - periodic health checks; auto-mark instances unhealthy/stopped
-2. **Dashboard Metrics** - Add charts and statistics (gpu.usage events already streaming)
-3. ~~Schedule cleanup loop~~ - run cleanup_offline_agents periodically on startup ✅
-4. **Inference UI** - text completion, embeddings, audio transcription pages
+1. **OpenResponses API** - implement `/v1/responses` per plan in section above (schemas → events → persistence → translator → route → agent --jinja → tests → client regen)
+2. **Server health monitoring** - periodic health checks; auto-mark instances unhealthy/stopped
+3. **Dashboard Metrics** - Add charts and statistics (gpu.usage events already streaming)
+4. ~~Schedule cleanup loop~~ - run cleanup_offline_agents periodically on startup ✅
+5. **Inference UI** - text completion, embeddings, audio transcription pages
+
+---
+
+## 📝 Recent Changes
+
+### September 23, 2026 (invisible cold starts)
+- ✅ New shared service `backend/app/services/server_startup.py`: `ensure_server_ready` / `ensure_server_ready_by_id` / `find_alias_instance` — running servers pass through, `starting` instances are waited on (dedup: parallel requests share one startup), `stopped`/`error` instances are auto-started via agent dispatch and the request waits for health
+- ✅ Client connection is held during the entire cold start (including model download, 900s budget) so the first token arrives as soon as the server is healthy — start is invisible to users
+- ✅ `/v1/chat/completions`: alias resolution now includes stopped/errored instances (auto-restarts them); `_get_or_create_server` dedups in-flight startups and passes `jinja` + 900s timeout; streaming generator awaits readiness itself
+- ✅ `/v1/responses`: same alias auto-start + ensure-ready for both SSE and JSON paths
+- ✅ Chat + completions UI selectors now list **all** server instances (running first), stopped ones annotated "(will start on first message)" — no more dead selections
+- ✅ Tests: `tests/services/test_server_startup.py` (7 cases: running/starting/error/stopped/missing paths)
+
+### September 23, 2026 (OpenResponses API planning)
+- ✅ Planned OpenResponses (`/v1/responses`) implementation targeting spec v2026-04-24 (full core scope; WebSocket + `/responses/compact` deferred) — see plan in Inference Features section
+- ✅ Decisions locked: rewrite in new `responses/` package (stub `v1_responses.py` to be deleted); new `responses` table replaces `conversations`; tools wired through llama.cpp native function calling (requires agent `--jinja` always-on); reasoning items included; `allowed_tools` enforced backend-side (clients like OpenWebUI own tool execution); no GET retrieval endpoint (spec doesn't document one)
 
 ---
 

@@ -22,11 +22,13 @@ router = APIRouter()
 
 class TranscriptionResponse(BaseModel):
     """Transcription response."""
+
     text: str
 
 
 class VerboseTranscriptionResponse(BaseModel):
     """Verbose transcription response."""
+
     task: str = "transcribe"
     language: str
     duration: float
@@ -36,11 +38,13 @@ class VerboseTranscriptionResponse(BaseModel):
 
 class TranslationResponse(BaseModel):
     """Translation response."""
+
     text: str
 
 
 class VerboseTranslationResponse(BaseModel):
     """Verbose translation response."""
+
     task: str = "translate"
     language: str = "en"
     duration: float
@@ -50,6 +54,7 @@ class VerboseTranslationResponse(BaseModel):
 
 class SpeechRequest(BaseModel):
     """Speech generation request."""
+
     model: str
     input: str
     voice: str = "alloy"
@@ -64,7 +69,7 @@ def _validate_audio_file(file: UploadFile) -> None:
     if file_extension not in allowed_extensions:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid audio format: {file_extension}. Allowed: {', '.join(allowed_extensions)}"
+            detail=f"Invalid audio format: {file_extension}. Allowed: {', '.join(allowed_extensions)}",
         )
 
 
@@ -98,7 +103,11 @@ async def create_transcription(
         raise HTTPException(status_code=404, detail=f"Model '{model}' not found")
 
     try:
-        audio_dir = Path(settings.AUDIO_PATH if hasattr(settings, "AUDIO_PATH") else "/tmp/inference-matrix/audio")
+        audio_dir = Path(
+            settings.AUDIO_PATH
+            if hasattr(settings, "AUDIO_PATH")
+            else "/tmp/inference-matrix/audio"
+        )
         audio_dir.mkdir(parents=True, exist_ok=True)
 
         file_id = f"file-{uuid.uuid4().hex[:12]}"
@@ -194,7 +203,11 @@ async def create_translation(
         raise HTTPException(status_code=404, detail=f"Model '{model}' not found")
 
     try:
-        audio_dir = Path(settings.AUDIO_PATH if hasattr(settings, "AUDIO_PATH") else "/tmp/inference-matrix/audio")
+        audio_dir = Path(
+            settings.AUDIO_PATH
+            if hasattr(settings, "AUDIO_PATH")
+            else "/tmp/inference-matrix/audio"
+        )
         audio_dir.mkdir(parents=True, exist_ok=True)
 
         file_id = f"file-{uuid.uuid4().hex[:12]}"
@@ -276,10 +289,16 @@ async def create_speech(
     model_instance = db.exec(statement).first()
 
     if not model_instance:
-        raise HTTPException(status_code=404, detail=f"Model '{request.model}' not found")
+        raise HTTPException(
+            status_code=404, detail=f"Model '{request.model}' not found"
+        )
 
     try:
-        audio_dir = Path(settings.AUDIO_PATH if hasattr(settings, "AUDIO_PATH") else "/tmp/inference-matrix/audio")
+        audio_dir = Path(
+            settings.AUDIO_PATH
+            if hasattr(settings, "AUDIO_PATH")
+            else "/tmp/inference-matrix/audio"
+        )
         audio_dir.mkdir(parents=True, exist_ok=True)
 
         output_filename = f"speech-{uuid.uuid4().hex[:12]}.{request.response_format}"

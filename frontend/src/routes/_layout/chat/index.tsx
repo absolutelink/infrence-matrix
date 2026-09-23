@@ -1,14 +1,16 @@
 import { useSuspenseQuery } from "@tanstack/react-query"
 import { createFileRoute } from "@tanstack/react-router"
 import { Send, Sparkles, Square } from "lucide-react"
-import { useState } from "react"
-import { ModelsService } from "@/client"
+import { useRef, useState } from "react"
+import { ServerInstancesService } from "@/client"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
@@ -28,6 +30,7 @@ export const Route = createFileRoute("/_layout/chat/")({
 type Message = {
   role: "user" | "assistant" | "system"
   content: string
+  reasoning?: string
 }
 
 type ContentSegment =
@@ -61,11 +64,35 @@ function parseContent(content: string): ContentSegment[] {
   return segments
 }
 
-function AssistantContent({ content }: { content: string }) {
+function ThinkingBlock({ content }: { content: string }) {
+  return (
+    <details
+      className="mb-2 rounded-md border border-black/10 bg-black/5 dark:border-white/10 dark:bg-white/5"
+      open
+    >
+      <summary className="cursor-pointer select-none px-2 py-1 text-xs text-muted-foreground">
+        Thinking
+      </summary>
+      <div className="whitespace-pre-wrap px-3 pb-2 text-xs italic text-muted-foreground">
+        {content}
+      </div>
+    </details>
+  )
+}
+
+function AssistantContent({
+  content,
+  reasoning,
+}: {
+  content: string
+  reasoning?: string
+}) {
   const segments = parseContent(content).filter((s) => s.content.trim())
-  if (segments.length === 0) return null
+  const trimmedReasoning = reasoning?.trim()
+  if (segments.length === 0 && !trimmedReasoning) return null
   return (
     <>
+      {trimmedReasoning ? <ThinkingBlock content={trimmedReasoning} /> : null}
       {segments.map((segment, i) =>
         segment.type === "thinking" ? (
           <details
@@ -89,40 +116,49 @@ function AssistantContent({ content }: { content: string }) {
   )
 }
 
-function getModelsQueryOptions() {
+function getServersQueryOptions() {
   return {
-    queryFn: async () =>
-      (await ModelsService.readModels({ query: { skip: 0, limit: 100 } })).data,
-    queryKey: ["models-chat"],
+    queryFn: async () => {
+      const response =
+        await ServerInstancesService.instancesListServerInstances()
+      const instances = response.data.server_instances || []
+      return [...instances].sort((a, b) => {
+        const rank = (s: string) =>
+          s === "running" ? 0 : s === "starting" ? 1 : 2
+        return rank(a.status) - rank(b.status)
+      })
+    },
+    queryKey: ["servers-chat"],
+    refetchInterval: 5000,
   }
 }
 
 function Chat() {
-  const { data: models } = useSuspenseQuery(getModelsQueryOptions())
+  const { data: servers } = useSuspenseQuery(getServersQueryOptions())
   const [selectedModel, setSelectedModel] = useState<string>("")
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState("")
   const [isLoading, setIsLoading] = useState(false)
+  const abortRef = useRef<AbortController | null>(null)
 
   const handleSend = async () => {
     if (!input.trim() || !selectedModel) return
 
     const userMessage: Message = { role: "user", content: input }
-    setMessages((prev) => [...prev, userMessage])
+    const history = [...messages, userMessage]
+    setMessages(history)
     setInput("")
     setIsLoading(true)
+    abortRef.current = new AbortController()
 
     try {
-      // Create the streaming request
       const response = await fetch("/v1/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: abortRef.current.signal,
         body: JSON.stringify({
           model: selectedModel,
-          messages: [...messages, userMessage].map((m) => ({
-            role: m.role,
-            content: m.content,
-          })),
+          messages: history.map((m) => ({ role: m.role, content: m.content })),
           stream: true,
         }),
       })
@@ -132,9 +168,7 @@ function Chat() {
         throw new Error(detail || `Request failed: ${response.status}`)
       }
 
-      // Create a new assistant message for streaming
-      const assistantMessage: Message = { role: "assistant", content: "" }
-      setMessages((prev) => [...prev, assistantMessage])
+      setMessages((prev) => [...prev, { role: "assistant", content: "" }])
 
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
@@ -158,13 +192,21 @@ function Chat() {
             if (chunk.error) {
               throw new Error(chunk.error.message ?? "Stream error")
             }
-            const text = chunk.choices?.[0]?.delta?.content ?? ""
-            if (text) {
+            const delta = chunk.choices?.[0]?.delta ?? {}
+            const text = delta.content ?? ""
+            const reasoning = delta.reasoning_content ?? ""
+            if (text || reasoning) {
               setMessages((prev) => {
                 const newMessages = [...prev]
                 const lastMessage = newMessages[newMessages.length - 1]
                 if (lastMessage.role === "assistant") {
-                  lastMessage.content += text
+                  if (reasoning) {
+                    lastMessage.reasoning =
+                      (lastMessage.reasoning ?? "") + reasoning
+                  }
+                  if (text) {
+                    lastMessage.content += text
+                  }
                 }
                 return newMessages
               })
@@ -173,21 +215,26 @@ function Chat() {
         }
       }
     } catch (error) {
-      console.error("Error:", error)
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: "Error occurred while generating response.",
-        },
-      ])
+      if ((error as Error).name === "AbortError") {
+        // User-initiated stop; keep partial output
+      } else {
+        console.error("Error:", error)
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: "Error occurred while generating response.",
+          },
+        ])
+      }
     } finally {
       setIsLoading(false)
+      abortRef.current = null
     }
   }
 
   const handleStop = () => {
-    setIsLoading(false)
+    abortRef.current?.abort()
   }
 
   const handleClear = () => {
@@ -200,19 +247,45 @@ function Chat() {
       <div className="flex items-center justify-between mb-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Chat</h1>
-          <p className="text-muted-foreground">Chat with your local models</p>
+          <p className="text-muted-foreground">
+            Chat with your running servers
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <Select value={selectedModel} onValueChange={setSelectedModel}>
             <SelectTrigger className="w-[300px]">
-              <SelectValue placeholder="Select a model" />
+              <SelectValue placeholder="Select a server" />
             </SelectTrigger>
             <SelectContent>
-              {models?.map((model: any) => (
-                <SelectItem key={model.id} value={model.name}>
-                  {model.name || "Unknown"}
-                </SelectItem>
-              ))}
+              {servers && servers.length > 0 ? (
+                <SelectGroup>
+                  <SelectLabel>Servers</SelectLabel>
+                  {servers.map((server) => (
+                    <SelectItem key={server.id} value={server.alias}>
+                      <div className="flex flex-col items-start">
+                        <span>
+                          {server.alias || server.model_name}
+                          {server.status === "stopped" ||
+                          server.status === "error" ? (
+                            <span className="ml-2 text-xs text-muted-foreground">
+                              (will start on first message)
+                            </span>
+                          ) : null}
+                        </span>
+                        <span className="text-xs text-muted-foreground">
+                          {server.model_name || "Unknown model"}
+                          {server.agent_name ? ` · ${server.agent_name}` : ""}
+                        </span>
+                      </div>
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              ) : (
+                <div className="px-3 py-2 text-sm text-muted-foreground">
+                  No servers configured — create one on the Server Instances
+                  page
+                </div>
+              )}
             </SelectContent>
           </Select>
           <Button
@@ -231,7 +304,7 @@ function Chat() {
             <div className="flex flex-col items-center justify-center h-full text-center text-muted-foreground">
               <Sparkles className="h-12 w-12 mb-4" />
               <h3 className="text-lg font-semibold">Start a conversation</h3>
-              <p>Select a model and type your message below</p>
+              <p>Select a server and type your message below</p>
             </div>
           ) : (
             messages.map((message, index) => (
@@ -250,7 +323,10 @@ function Chat() {
                     {message.role === "user" ? "You" : "Assistant"}
                   </div>
                   {message.role === "assistant" ? (
-                    <AssistantContent content={message.content} />
+                    <AssistantContent
+                      content={message.content}
+                      reasoning={message.reasoning}
+                    />
                   ) : (
                     <div className="whitespace-pre-wrap">{message.content}</div>
                   )}

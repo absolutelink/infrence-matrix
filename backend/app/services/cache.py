@@ -23,12 +23,12 @@ class PromptCacheManager:
     def generate_cache_key(
         self,
         model_id: UUID,
-        conversation_id: UUID | None = None,
+        response_id: str | None = None,
         cache_type: Literal["conversation", "hierarchical"] = "conversation",
     ) -> str:
         """Generate a unique cache key."""
-        if cache_type == "conversation" and conversation_id:
-            key_data = f"conv:{conversation_id}:{model_id}"
+        if cache_type == "conversation" and response_id:
+            key_data = f"resp:{response_id}:{model_id}"
         else:
             key_data = f"hierarchical:{model_id}"
 
@@ -49,7 +49,6 @@ class PromptCacheManager:
         content_hash: str,
         token_count: int,
         ttl_seconds: int = 3600,
-        conversation_id: UUID | None = None,
         llama_cache_id: str | None = None,
     ) -> PromptCache:
         """Create a new cache entry in the database."""
@@ -69,7 +68,6 @@ class PromptCacheManager:
             created_at=now,
             expires_at=now.replace(second=now.second + ttl_seconds),
             last_accessed_at=now,
-            conversation_id=conversation_id,
             cache_path=cache_path,
         )
 
@@ -150,7 +148,9 @@ class PromptCacheManager:
         cache_entry.size_bytes = size_bytes
         session.add(cache_entry)
         session.commit()
-        logger.debug(f"Updated cache size for {cache_entry.cache_key}: {size_bytes} bytes")
+        logger.debug(
+            f"Updated cache size for {cache_entry.cache_key}: {size_bytes} bytes"
+        )
 
     def get_cache_stats(self, session: Session) -> dict[str, int | float]:
         """Get cache statistics."""
@@ -174,37 +174,6 @@ class PromptCacheManager:
             "total_tokens": total_tokens,
             "hit_rate": total_hits / len(active_entries) if active_entries else 0.0,
         }
-
-    def get_conversation_cache(
-        self,
-        session: Session,
-        conversation_id: UUID,
-    ) -> PromptCache | None:
-        """Get cache entry for a specific conversation."""
-        statement = select(PromptCache).where(
-            PromptCache.conversation_id == conversation_id,
-            PromptCache.cache_type == "conversation",
-        )
-        return session.exec(statement).first()
-
-    def invalidate_conversation_cache(
-        self,
-        session: Session,
-        conversation_id: UUID,
-    ) -> int:
-        """Invalidate all cache entries for a conversation."""
-        statement = select(PromptCache).where(
-            PromptCache.conversation_id == conversation_id
-        )
-        entries = session.exec(statement).all()
-
-        deleted_count = 0
-        for entry in entries:
-            if self.delete_cache_entry(session, entry):
-                deleted_count += 1
-
-        logger.info(f"Invalidated {deleted_count} cache entries for conversation {conversation_id}")
-        return deleted_count
 
 
 prompt_cache_manager = PromptCacheManager()

@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import uuid as uuid_module
-from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -14,6 +13,12 @@ from sqlmodel import col
 from app.db.session import AsyncSessionMaker
 from app.models import Agent, Model, ServerInstance
 from app.services.agent_manager import agent_manager
+from app.services.server_startup import (
+    build_start_payload as _build_start_payload,
+)
+from app.services.server_startup import (
+    dispatch_start as _dispatch_start,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -221,76 +226,6 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
             "agent_id": agent_id,
             "message": "Server start request sent to agent",
         }
-
-
-def _build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any]:
-    """Build the agent /servers/start payload from instance + model.
-
-    The agent allocates the port (random free one) when none is sent.
-    """
-    filename = model.source_file or model.path.rsplit("/", 1)[-1]
-    return {
-        "config": {
-            "id": str(instance.id),
-            "model_path": model.path,
-            "gpu_layers": instance.gpu_layers,
-            "context_size": instance.context_size,
-            "batch_size": 512,
-            "cache_prompt": True,
-            "flash_attn": instance.flash_attn,
-        },
-        # The agent downloads the model file first if it is missing.
-        "source": {
-            "source": model.source,
-            "repo_id": model.source_repo_id or "",
-            "filename": filename,
-            "job_id": f"server-{instance.id}",
-        }
-        if model.source_repo_id
-        else None,
-    }
-
-
-async def _dispatch_start(
-    agent_id: str, server_id: str, payload: dict[str, Any]
-) -> None:
-    """Send the start command to the agent, marking failure on the row."""
-    try:
-        response = await agent_manager.send_to_agent(
-            agent_id,
-            "POST",
-            "/servers/start",
-            payload,
-            timeout=900.0,
-        )
-        # The agent returned success (llama-server healthy). Mark running in
-        # case the server.started event was lost (e.g. backend restart). The
-        # agent-allocated port is echoed back and kept in the JSON config
-        # for display only (not a column).
-        allocated_port = response.get("port") if isinstance(response, dict) else None
-        async with AsyncSessionMaker() as session:
-            server = await session.get(ServerInstance, uuid_module.UUID(server_id))
-            if server and server.status != "running":
-                server.status = "running"
-                server.health_status = "healthy"
-                server.started_at = server.started_at or datetime.now(UTC)
-                if allocated_port:
-                    server.config = {
-                        **(server.config or {}),
-                        "port": str(allocated_port),
-                    }
-                session.add(server)
-                await session.commit()
-                logger.info(f"Server {server_id} marked as running (dispatch ack)")
-    except Exception as e:
-        logger.error(f"Failed to start server {server_id} on agent {agent_id}: {e}")
-        async with AsyncSessionMaker() as session:
-            server = await session.get(ServerInstance, uuid_module.UUID(server_id))
-            if server:
-                server.status = "error"
-                server.error_message = str(e)
-                session.add(server)
-                await session.commit()
 
 
 @router.put("/{server_id}")

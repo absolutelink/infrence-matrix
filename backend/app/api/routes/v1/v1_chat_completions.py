@@ -17,6 +17,11 @@ from app.api.deps import get_db
 from app.core.db import engine
 from app.models import Model, ServerInstance
 from app.services.agent_manager import agent_manager
+from app.services.server_startup import (
+    START_DISPATCH_TIMEOUT,
+    ServerStartupError,
+    ensure_server_ready,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -286,6 +291,10 @@ async def _stream_completion_via_agent(
     final_usage: UsageInfo | None = None
 
     try:
+        # Hold the client connection while a cold start completes so the
+        # first token arrives as soon as the server is healthy.
+        server = await ensure_server_ready(server)
+
         # Get agent
         agent = await agent_manager.get_agent(agent_id)
         if not agent:
@@ -381,15 +390,39 @@ def _find_existing_server(
         return session.exec(stmt).first()
 
 
+def _find_starting_server(
+    model_id: Any, agent_id: str | None = None
+) -> ServerInstance | None:
+    """Find an in-flight (starting) instance so parallel requests share one startup."""
+    with Session(engine) as session:
+        stmt = select(ServerInstance).where(
+            ServerInstance.model_id == model_id,
+            ServerInstance.status == "starting",
+        )
+        if agent_id:
+            stmt = stmt.where(ServerInstance.agent_id == agent_id)
+        return session.exec(stmt).first()
+
+
 async def _get_or_create_server(
     model: Model, agent_id: str | None = None
 ) -> ServerInstance:
-    """Get existing server or create new one via Agent."""
+    """Get existing server or create new one via Agent.
+
+    Deduplication: if another request already has a server starting for
+    this model, return that instance so parallel cold-starts share one
+    llama-server instead of racing to create duplicates.
+    """
     server = _find_existing_server(model.id, agent_id)
 
     if server:
         logger.info(f"Using existing server {server.id}")
         return server
+
+    starting = _find_starting_server(model.id, agent_id)
+    if starting:
+        logger.info(f"Joining in-flight startup for server {starting.id}")
+        return starting
 
     # Need to start a new server
     logger.info("No existing server found, starting new one")
@@ -426,6 +459,7 @@ async def _get_or_create_server(
                 "context_size": model.context_length or 4096,
                 "batch_size": 512,
                 "cache_prompt": True,
+                "jinja": True,
             },
             # If the model file is not on the agent yet, it downloads it
             # from the source repo before launching llama-server.
@@ -437,6 +471,9 @@ async def _get_or_create_server(
             if model.source_repo_id
             else None,
         },
+        # Cold start can include a model download; the default 30s is far
+        # too short for that.
+        timeout=START_DISPATCH_TIMEOUT,
     )
 
     # Create ServerInstance record. The port is agent-allocated per start
@@ -469,24 +506,30 @@ async def create_chat_completion(
     request: ChatCompletionRequest,
     db: Session = Depends(get_db),
 ) -> ChatCompletionResponse | StreamingResponse:
-    """Create chat completion via Agent proxy."""
+    """Create chat completion via Agent proxy.
+
+    Cold starts are handled transparently: a stopped/errored server is
+    (re)started and the request waits for it to become healthy before the
+    completion is generated, so the client just sees a longer first-token
+    latency.
+    """
     request_id = f"chatcmpl-{uuid.uuid4()}"
     created = int(time.time())
 
     # Resolve model field: a server alias (public name from /v1/models)
-    # routes directly to that server; otherwise it is a model name/id and
-    # a server is found or started for it.
+    # routes directly to that server (auto-starting stopped instances);
+    # otherwise it is a model name/id and a server is found or started.
     server: ServerInstance | None = None
     instance = db.exec(
-        select(ServerInstance).where(
-            ServerInstance.alias == request.model,
-            ServerInstance.status.in_(["starting", "running"]),
-        )
+        select(ServerInstance).where(ServerInstance.alias == request.model)
     ).first()
 
     if instance is not None:
-        server = instance
-        model = db.exec(select(Model).where(Model.id == instance.model_id)).first()
+        try:
+            server = await ensure_server_ready(instance)
+        except ServerStartupError as e:
+            raise HTTPException(503, f"Server not available: {e}")
+        model = db.exec(select(Model).where(Model.id == server.model_id)).first()
         if not model:
             raise HTTPException(
                 404, f"Model for server alias {request.model} not found"
@@ -505,14 +548,18 @@ async def create_chat_completion(
         # Get or create server
         try:
             server = await _get_or_create_server(model, request.agent_id)
+            server = await ensure_server_ready(server)
         except HTTPException:
             raise
+        except ServerStartupError as e:
+            raise HTTPException(503, f"Server not available: {e}")
         except Exception as e:
             logger.error(f"Server creation failed: {e}")
             raise HTTPException(503, f"Failed to start server: {e}")
 
     if request.stream:
-        # Stream response
+        # Stream response. The generator awaits readiness itself, so the
+        # client connection is held during a cold start (invisible retry).
         return StreamingResponse(
             _stream_completion_via_agent(
                 str(server.agent_id),

@@ -95,7 +95,7 @@ class Model(SQLModel, table=True):
     downloaded_at: datetime = Field(default_factory=get_datetime_utc)
     updated_at: datetime | None = None
 
-    conversations: list[Conversation] = Relationship(
+    responses: list[ResponseRecord] = Relationship(
         back_populates="model",
         sa_relationship_kwargs={"lazy": "selectin"},
     )
@@ -152,15 +152,15 @@ class ModelUpdate(SQLModel):
 
 
 # ============================================================================
-# Conversation - Tree-structured conversation history
+# ResponseRecord - Stored OpenResponses API response (spec ResponseResource)
 # ============================================================================
-class Conversation(SQLModel, table=True):
-    __tablename__ = "conversations"
+class ResponseRecord(SQLModel, table=True):
+    __tablename__ = "responses"
     __table_args__ = (
-        Index("idx_conversations_parent_id", "parent_id"),
-        Index("idx_conversations_model_id", "model_id"),
-        Index("idx_conversations_response_id", "response_id"),
-        Index("idx_conversations_created_at", "created_at"),
+        Index("idx_responses_response_id", "response_id", unique=True),
+        Index("idx_responses_previous_response_id", "previous_response_id"),
+        Index("idx_responses_model_id", "model_id"),
+        Index("idx_responses_created_at", "created_at"),
     )
 
     id: uuid.UUID = Field(
@@ -169,58 +169,43 @@ class Conversation(SQLModel, table=True):
         sa_type=UUID(as_uuid=True),  # type: ignore[call-arg,arg-type]
     )
 
-    parent_id: uuid.UUID | None = Field(
-        default=None,
-        foreign_key="conversations.id",
-        ondelete="CASCADE",
-    )
-    response_id: str | None = None
+    # Spec id ("resp_..."), unique
+    response_id: str = Field(max_length=255, index=True)
 
-    input_items: list[dict[str, str]] = Field(
-        default_factory=list,
-        sa_column=Column(JSON),
-    )
-    output_items: list[dict[str, str]] = Field(
-        default_factory=list,
-        sa_column=Column(JSON),
-    )
+    # Chaining: response_id of the prior turn
+    previous_response_id: str | None = Field(default=None, max_length=255)
+
+    # Full input/output item payloads (spec item shapes, JSON)
+    input_items: list[dict] = Field(default_factory=list, sa_column=Column(JSON))
+    output_items: list[dict] = Field(default_factory=list, sa_column=Column(JSON))
 
     model_id: uuid.UUID = Field(
         foreign_key="models.id",
         ondelete="CASCADE",
     )
-    parameters: dict[str, str] = Field(
-        default_factory=dict,
-        sa_column=Column(JSON),
-    )
-    conversation_metadata: dict[str, str] = Field(
-        default_factory=dict,
-        sa_column=Column(JSON),
-    )
+    agent_id: uuid.UUID | None = Field(default=None, foreign_key="agents.id")
+
+    # Full ResponseResource echo fields
+    parameters: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    response_metadata: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
     status: str
+    error_code: str | None = None
     error_message: str | None = None
+    incomplete_reason: str | None = None
 
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
 
+    store: bool = True
+    background: bool = False
+
     created_at: datetime = Field(default_factory=get_datetime_utc)
     completed_at: datetime | None = None
 
     model: Model = Relationship(
-        back_populates="conversations",
-        sa_relationship_kwargs={"lazy": "selectin"},
-    )
-    children: list[Conversation] = Relationship(
-        back_populates="parent",
-        sa_relationship_kwargs={
-            "lazy": "selectin",
-            "remote_side": "Conversation.id",
-        },
-    )
-    parent: Conversation = Relationship(
-        back_populates="children",
+        back_populates="responses",
         sa_relationship_kwargs={"lazy": "selectin"},
     )
 
@@ -234,7 +219,6 @@ class PromptCache(SQLModel, table=True):
         Index("idx_prompt_cache_cache_key", "cache_key"),
         Index("idx_prompt_cache_model_id", "model_id"),
         Index("idx_prompt_cache_expires_at", "expires_at"),
-        Index("idx_prompt_cache_conversation_id", "conversation_id"),
     )
 
     id: uuid.UUID = Field(
@@ -263,11 +247,6 @@ class PromptCache(SQLModel, table=True):
     expires_at: datetime
     last_accessed_at: datetime = Field(default_factory=get_datetime_utc)
 
-    conversation_id: uuid.UUID | None = Field(
-        default=None,
-        foreign_key="conversations.id",
-        ondelete="SET NULL",
-    )
     agent_id: uuid.UUID | None = Field(
         default=None,
         foreign_key="agents.id",

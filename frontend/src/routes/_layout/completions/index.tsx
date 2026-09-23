@@ -2,13 +2,15 @@ import { useSuspenseQuery } from "@tanstack/react-query"
 import { createFileRoute } from "@tanstack/react-router"
 import { Send, Sparkles, Square } from "lucide-react"
 import { useRef, useState } from "react"
-import { ModelsService, V1CompletionsService } from "@/client"
+import { ServerInstancesService, V1CompletionsService } from "@/client"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
@@ -26,16 +28,25 @@ type CompletionResponse = {
   choices?: { text?: string }[]
 }
 
-function getModelsQueryOptions() {
+function getServersQueryOptions() {
   return {
-    queryFn: async () =>
-      (await ModelsService.readModels({ query: { skip: 0, limit: 100 } })).data,
-    queryKey: ["models-completions"],
+    queryFn: async () => {
+      const response =
+        await ServerInstancesService.instancesListServerInstances()
+      const instances = response.data.server_instances || []
+      return [...instances].sort((a, b) => {
+        const rank = (s: string) =>
+          s === "running" ? 0 : s === "starting" ? 1 : 2
+        return rank(a.status) - rank(b.status)
+      })
+    },
+    queryKey: ["servers-completions"],
+    refetchInterval: 5000,
   }
 }
 
 function TextCompletion() {
-  const { data: models } = useSuspenseQuery(getModelsQueryOptions())
+  const { data: servers } = useSuspenseQuery(getServersQueryOptions())
   const [selectedModel, setSelectedModel] = useState<string>("")
   const [prompt, setPrompt] = useState("")
   const [output, setOutput] = useState("")
@@ -140,14 +151,38 @@ function TextCompletion() {
           </Button>
           <Select value={selectedModel} onValueChange={setSelectedModel}>
             <SelectTrigger className="w-[300px]">
-              <SelectValue placeholder="Select a model" />
+              <SelectValue placeholder="Select a server" />
             </SelectTrigger>
             <SelectContent>
-              {models?.map((model) => (
-                <SelectItem key={model.id} value={model.name}>
-                  {model.name || "Unknown"}
-                </SelectItem>
-              ))}
+              {servers && servers.length > 0 ? (
+                <SelectGroup>
+                  <SelectLabel>Servers</SelectLabel>
+                  {servers.map((server) => (
+                    <SelectItem key={server.id} value={server.alias}>
+                      <div className="flex flex-col items-start">
+                        <span>
+                          {server.alias || server.model_name}
+                          {server.status === "stopped" ||
+                          server.status === "error" ? (
+                            <span className="ml-2 text-xs text-muted-foreground">
+                              (will start on first prompt)
+                            </span>
+                          ) : null}
+                        </span>
+                        <span className="text-xs text-muted-foreground">
+                          {server.model_name || "Unknown model"}
+                          {server.agent_name ? ` · ${server.agent_name}` : ""}
+                        </span>
+                      </div>
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              ) : (
+                <div className="px-3 py-2 text-sm text-muted-foreground">
+                  No servers configured — create one on the Server Instances
+                  page
+                </div>
+              )}
             </SelectContent>
           </Select>
         </div>
