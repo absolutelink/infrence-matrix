@@ -218,8 +218,8 @@ async def _stream_events(
         created_at,
         previous_response_id=request.previous_response_id,
     )
-    yield seq.frame(ev.response_created(seq, response.model_dump()))
-    yield seq.frame(ev.response_in_progress(seq, response.model_dump()))
+    yield seq.frame(ev.response_created(seq, response))
+    yield seq.frame(ev.response_in_progress(seq, response))
 
     state = StreamState(seq, request.model)
     allowed = allowed_tool_names(request)
@@ -303,15 +303,15 @@ async def _stream_events(
         response.usage = usage  # type: ignore[arg-type]
 
         if response.status == "incomplete":
-            yield seq.frame(ev.response_incomplete(seq, response.model_dump()))
+            yield seq.frame(ev.response_incomplete(seq, response))
         else:
-            yield seq.frame(ev.response_completed(seq, response.model_dump()))
+            yield seq.frame(ev.response_completed(seq, response))
 
     except Exception as e:
         logger.error(f"Responses streaming error: {e}")
         response.status = "failed"
         response.error = Error(code="server_error", message=str(e))
-        yield seq.frame(ev.response_failed(seq, response.model_dump()))
+        yield seq.frame(ev.response_failed(seq, response))
 
     yield "data: [DONE]\n\n"
 

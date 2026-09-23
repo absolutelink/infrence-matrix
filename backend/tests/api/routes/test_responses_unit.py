@@ -295,6 +295,29 @@ class TestSSEFraming:
         assert "sequence_number" in payload
         assert payload["response"]["object"] == "response"
 
+    def test_lifecycle_builders_accept_model_not_dict(self) -> None:
+        """Regression: router passed response.model_dump() into builders that
+        already call model_dump() internally -> AttributeError('dict' object
+        has no attribute 'model_dump') crashed the SSE stream on first frame."""
+        seq = ev.SSEmitter()
+        req = CreateResponseBody(model="m", input="hi")
+        for builder in (
+            ev.response_created,
+            ev.response_in_progress,
+            ev.response_completed,
+            ev.response_incomplete,
+            ev.response_failed,
+        ):
+            snapshot = build_response_resource(req, "resp_x", 1)
+            snapshot.status = {
+                ev.response_completed: "completed",
+                ev.response_incomplete: "incomplete",
+                ev.response_failed: "failed",
+            }.get(builder, snapshot.status)
+            event = builder(seq, snapshot)
+            assert "sequence_number" in event
+            assert event["response"]["object"] == "response"
+
     def test_done_terminator(self) -> None:
         assert "data: [DONE]\n\n" != None
 
