@@ -132,6 +132,25 @@ def _build_chain_history(
     return history
 
 
+def _chain_depth(db: Session, previous: ResponseRecord | None) -> int:
+    """Number of stored records in the previous_response_id chain."""
+    depth = 0
+    seen: set[str] = set()
+    current: ResponseRecord | None = previous
+    while current is not None and current.response_id not in seen:
+        seen.add(current.response_id)
+        depth += 1
+        if not current.previous_response_id:
+            break
+        current = db.exec(
+            select(ResponseRecord).where(
+                ResponseRecord.response_id == current.previous_response_id,
+                ResponseRecord.store.is_(True),
+            )
+        ).first()
+    return depth
+
+
 def _llama_payload(
     request: CreateResponseBody, history: list[dict[str, Any]], stream: bool
 ) -> dict[str, Any]:
@@ -430,6 +449,18 @@ async def _stream_events(
         for frame in seq.drain_frames():
             yield frame
 
+        logger.info(
+            "responses %s: %s status=%s items=%d usage=%s finish_reason=%s",
+            response_id,
+            "streamed" if request.stream else "completed",
+            response.status,
+            len(response.output),
+            f"{response.usage.input_tokens}/{response.usage.output_tokens} tok"
+            if response.usage
+            else "n/a",
+            finish_reason,
+        )
+
         if persist:
             _persist_response(
                 request=request,
@@ -446,6 +477,12 @@ async def _stream_events(
                     else None
                 ),
             )
+            logger.info(
+                "responses %s: stored (chain continues from this turn)",
+                response_id,
+            )
+        else:
+            logger.info("responses %s: not stored (store=false)", response_id)
 
     except Exception as e:
         logger.error(f"Responses streaming error: {e}")
@@ -499,6 +536,11 @@ async def create_response(
     try:
         previous = _load_previous(db, request.previous_response_id)
     except HTTPException as e:
+        logger.warning(
+            "responses: previous_response_id '%s' not found — %s",
+            request.previous_response_id,
+            e.detail,
+        )
         return _error_response(
             404,
             "not_found",
@@ -567,6 +609,22 @@ async def create_response(
     # concatenate each record's input+output in order (full conversation).
     history: list[dict[str, Any]] = _build_chain_history(db, previous)
 
+    continuation = previous is not None
+    logger.info(
+        "responses: %s model=%s server=%s stream=%s store=%s "
+        "previous_response_id=%s chain_depth=%d history_items=%d "
+        "history_chars=%d",
+        "continuation" if continuation else "new response",
+        request.model,
+        server.id,
+        request.stream,
+        request.store,
+        request.previous_response_id or "none",
+        _chain_depth(db, previous),
+        len(history),
+        sum(len(json.dumps(item)) for item in history),
+    )
+
     response_id = new_id("resp")
     created_at = int(time.time())
 
@@ -616,5 +674,10 @@ async def create_response(
                 result.incomplete_details.reason if result.incomplete_details else None
             ),
         )
+        logger.info(
+            "responses %s: stored (chain continues from this turn)", response_id
+        )
+    else:
+        logger.info("responses %s: not stored (store=false)", response_id)
 
     return result

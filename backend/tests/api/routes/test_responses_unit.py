@@ -490,3 +490,22 @@ class TestChainHistory:
         history = _build_chain_history(db, r2)
         contents = [_item_text(item) for item in history]
         assert contents == ["in-resp_x2", "out-resp_x2"]
+
+
+class TestChainDepth:
+    def test_depth_zero_without_previous(self, db) -> None:
+        from app.api.routes.v1.responses.router import _chain_depth
+
+        assert _chain_depth(db, None) == 0
+
+    def test_depth_counts_hops(self, db) -> None:
+        from app.api.routes.v1.responses.router import _chain_depth
+
+        class TestChainHistory_method:  # reuse the fixture helper
+            pass
+
+        helper = TestChainHistory()
+        helper._record(db, "resp_d1", None)
+        helper._record(db, "resp_d2", "resp_d1")
+        r3 = helper._record(db, "resp_d3", "resp_d2")
+        assert _chain_depth(db, r3) == 3
