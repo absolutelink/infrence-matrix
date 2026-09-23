@@ -24,10 +24,33 @@ router = APIRouter()
 
 
 class ChatMessage(BaseModel):
-    """Chat message."""
+    """Chat message (content may be null for assistant tool-call turns)."""
 
-    role: Literal["system", "user", "assistant", "developer"]
-    content: str
+    role: Literal["system", "user", "assistant", "developer", "tool"]
+    content: str | None = None
+    name: str | None = None
+    tool_call_id: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+
+    def llama_content(self) -> str:
+        """Content as llama.cpp expects it (null -> empty string)."""
+        return self.content if self.content is not None else ""
+
+
+class ToolFunction(BaseModel):
+    """OpenAI tool function definition."""
+
+    name: str
+    description: str = ""
+    # JSON Schema for the function parameters (arbitrary structure)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+class Tool(BaseModel):
+    """OpenAI tool definition ({"type": "function", "function": {...}})."""
+
+    type: str = "function"
+    function: ToolFunction
 
 
 class ChatCompletionRequest(BaseModel):
@@ -43,8 +66,9 @@ class ChatCompletionRequest(BaseModel):
     frequency_penalty: float | None = None
     presence_penalty: float | None = None
     stop: str | list[str] | None = None
-    tools: list[dict[str, str]] | None = None
-    tool_choice: str | dict[str, str] | None = None
+    # OpenAI tools shape: [{"type": "function", "function": {name, description, parameters}}]
+    tools: list[Tool] | None = None
+    tool_choice: str | dict[str, Any] | None = None
     prompt_cache_options: dict | None = None
 
 
@@ -96,8 +120,33 @@ class ChatCompletionChunk(BaseModel):
 def _convert_messages_to_llama_format(
     messages: list[ChatMessage],
 ) -> list[dict[str, str]]:
-    """Convert messages to llama.cpp format."""
-    return [{"role": msg.role, "content": msg.content} for msg in messages]
+    """Convert messages to llama.cpp chat format.
+
+    llama.cpp's OpenAI endpoint has limited tool-role support, so tool
+    results are flattened into user messages and assistant tool_calls are
+    described in text — the model still sees the full exchange.
+    """
+    converted: list[dict[str, str]] = []
+    for msg in messages:
+        content = msg.llama_content()
+        if msg.role == "tool":
+            label = msg.name or msg.tool_call_id or "tool"
+            converted.append(
+                {"role": "user", "content": f"[Tool result ({label})]: {content}"}
+            )
+        elif msg.role == "assistant" and msg.tool_calls:
+            calls = ", ".join(
+                c.get("function", {}).get("name", "unknown") for c in msg.tool_calls
+            )
+            converted.append(
+                {
+                    "role": "assistant",
+                    "content": f"{content}\n[Called tools: {calls}]".strip(),
+                }
+            )
+        else:
+            converted.append({"role": msg.role, "content": content})
+    return converted
 
 
 def _extract_delta_content(chunk_data: dict) -> str:
@@ -113,6 +162,16 @@ def _extract_delta_content(chunk_data: dict) -> str:
         if "content" in choice:
             return choice.get("content") or ""
     return chunk_data.get("content", "") or ""
+
+
+def _build_tools_payload(request: ChatCompletionRequest) -> dict[str, Any]:
+    """Serialize OpenAI tool fields for the llama.cpp payload."""
+    extra: dict[str, Any] = {}
+    if request.tools:
+        extra["tools"] = [tool.model_dump(exclude_none=True) for tool in request.tools]
+    if request.tool_choice is not None:
+        extra["tool_choice"] = request.tool_choice
+    return extra
 
 
 async def _stream_completion_via_agent(
@@ -136,6 +195,8 @@ async def _stream_completion_via_agent(
         value = getattr(request, key)
         if value is not None:
             payload[key] = value
+
+    payload.update(_build_tools_payload(request))
 
     created = int(time.time())
 
@@ -340,16 +401,23 @@ async def create_chat_completion(
         if not agent:
             raise ValueError("Agent not found")
 
+        non_stream_payload: dict[str, Any] = {
+            "messages": _convert_messages_to_llama_format(request.messages),
+            "temperature": request.temperature,
+            "max_tokens": request.max_tokens,
+            "stream": False,
+        }
+        for key in ["top_p", "frequency_penalty", "presence_penalty", "stop"]:
+            value = getattr(request, key)
+            if value is not None:
+                non_stream_payload[key] = value
+        non_stream_payload.update(_build_tools_payload(request))
+
         response = await agent_manager.send_to_agent(
             str(server.agent_id),
             "POST",
             f"/proxy/{server.id}/v1/chat/completions",
-            {
-                "messages": _convert_messages_to_llama_format(request.messages),
-                "temperature": request.temperature,
-                "max_tokens": request.max_tokens,
-                "stream": False,
-            },
+            non_stream_payload,
             timeout=300.0,
         )
 
