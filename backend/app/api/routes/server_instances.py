@@ -2,8 +2,6 @@
 
 import asyncio
 import logging
-import random
-import socket
 import uuid as uuid_module
 from datetime import UTC, datetime
 from typing import Any
@@ -11,7 +9,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlmodel import col
 
 from app.db.session import AsyncSessionMaker
@@ -22,16 +19,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/server-instances", tags=["server-instances"])
 
-# Port range used for llama.cpp servers on agents
-AGENT_SERVER_PORT_START = 8090
-AGENT_SERVER_PORT_END = 8190
-
 
 class ServerInstanceResponse(BaseModel):
     id: str
     model_id: str
     model_name: str | None = None
-    port: int
     status: str
     health_status: str
     agent_id: str
@@ -89,7 +81,6 @@ async def list_server_instances() -> ServerInstanceListResponse:
                     id=str(instance.id),
                     model_id=str(instance.model_id),
                     model_name=instance.model.name if instance.model else None,
-                    port=instance.port,
                     status=instance.status,
                     health_status=instance.health_status,
                     agent_id=str(instance.agent_id),
@@ -133,7 +124,6 @@ async def get_server_instance(server_id: str) -> ServerInstanceResponse:
             id=str(instance.id),
             model_id=str(instance.model_id),
             model_name=instance.model.name if instance.model else None,
-            port=instance.port,
             status=instance.status,
             health_status=instance.health_status,
             agent_id=str(instance.agent_id),
@@ -177,44 +167,21 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
                 status_code=503, detail="No online agent available to start server"
             )
 
-        # Allocate a random port on the agent. Collision safety comes from
-        # the listening probe plus the partial unique index on
-        # (agent_id, port) for active instances — on IntegrityError we just
-        # draw again.
-        candidates = list(range(AGENT_SERVER_PORT_START, AGENT_SERVER_PORT_END))
-        random.shuffle(candidates)
-
-        server: ServerInstance | None = None
-
-        for candidate in candidates:
-            if _port_in_use(agent.host, candidate):
-                continue
-            try:
-                server = ServerInstance(
-                    model_id=model.id,
-                    agent_id=agent.id,
-                    port=candidate,
-                    process_command=f"{model.source_file or model.path}",
-                    gpu_layers=request.gpu_layers,
-                    context_size=request.context_size,
-                    flash_attn=True,
-                    status="starting",
-                    health_status="unknown",
-                    inactivity_timeout_seconds=300,
-                )
-                session.add(server)
-                await session.commit()
-                break
-            except IntegrityError:
-                await session.rollback()
-                server = None
-                continue
-
-        if server is None:
-            raise HTTPException(
-                status_code=503, detail=f"No free ports on agent {agent.name}"
-            )
-
+        # The agent allocates a random free port per start; the port is not
+        # persisted. Create the instance row up front so the UI can track it.
+        server = ServerInstance(
+            model_id=model.id,
+            agent_id=agent.id,
+            process_command=f"{model.source_file or model.path}",
+            gpu_layers=request.gpu_layers,
+            context_size=request.context_size,
+            flash_attn=True,
+            status="starting",
+            health_status="unknown",
+            inactivity_timeout_seconds=300,
+        )
+        session.add(server)
+        await session.commit()
         await session.refresh(server)
 
         server_id = str(server.id)
@@ -231,28 +198,20 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
             "server_id": server_id,
             "model_id": request.model_id,
             "agent_id": agent_id,
-            "port": server.port,
             "message": "Server start request sent to agent",
         }
 
 
-def _port_in_use(host: str, port: int) -> bool:
-    """Check whether something already listens on host:port."""
-    try:
-        with socket.create_connection((host, port), timeout=1):
-            return True
-    except OSError:
-        return False
-
-
 def _build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any]:
-    """Build the agent /servers/start payload from instance + model."""
+    """Build the agent /servers/start payload from instance + model.
+
+    The agent allocates the port (random free one) when none is sent.
+    """
     filename = model.source_file or model.path.rsplit("/", 1)[-1]
     return {
         "config": {
             "id": str(instance.id),
             "model_path": model.path,
-            "port": instance.port,
             "gpu_layers": instance.gpu_layers,
             "context_size": instance.context_size,
             "batch_size": 512,
@@ -276,7 +235,7 @@ async def _dispatch_start(
 ) -> None:
     """Send the start command to the agent, marking failure on the row."""
     try:
-        await agent_manager.send_to_agent(
+        response = await agent_manager.send_to_agent(
             agent_id,
             "POST",
             "/servers/start",
@@ -284,13 +243,21 @@ async def _dispatch_start(
             timeout=900.0,
         )
         # The agent returned success (llama-server healthy). Mark running in
-        # case the server.started event was lost (e.g. backend restart).
+        # case the server.started event was lost (e.g. backend restart). The
+        # agent-allocated port is echoed back and kept in the JSON config
+        # for display only (not a column).
+        allocated_port = response.get("port") if isinstance(response, dict) else None
         async with AsyncSessionMaker() as session:
             server = await session.get(ServerInstance, uuid_module.UUID(server_id))
             if server and server.status != "running":
                 server.status = "running"
                 server.health_status = "healthy"
                 server.started_at = server.started_at or datetime.now(UTC)
+                if allocated_port:
+                    server.config = {
+                        **(server.config or {}),
+                        "port": str(allocated_port),
+                    }
                 session.add(server)
                 await session.commit()
                 logger.info(f"Server {server_id} marked as running (dispatch ack)")
@@ -429,7 +396,6 @@ async def restart_server(server_id: str) -> dict[str, Any]:
             "status": "starting",
             "server_id": str(instance.id),
             "agent_id": agent_id,
-            "port": instance.port,
             "message": "Server start request sent to agent",
         }
 

@@ -234,7 +234,10 @@ async def _get_or_create_server(
     if not agent or agent.status != "online":
         raise HTTPException(503, "No online agents available")
 
-    # Start server via agent
+    # Start server via agent. The agent allocates a random free port; we
+    # generate the instance id here since the record is created after the
+    # start call returns.
+    server_id = str(uuid.uuid4())
     start_response = await agent_manager.send_to_agent(
         agent.id,
         "POST",
@@ -243,8 +246,7 @@ async def _get_or_create_server(
             "model_id": str(model.id),
             "model_path": model.path,
             "config": {
-                "id": str(uuid.uuid4()),
-                "port": 8091,
+                "id": server_id,
                 "gpu_layers": 35,
                 "context_size": model.context_length or 4096,
                 "batch_size": 512,
@@ -262,17 +264,19 @@ async def _get_or_create_server(
         },
     )
 
-    # Create ServerInstance record. The agent allocated the actual port in
-    # its config (echoed back via the payload we sent); use it or fall back
-    # to the default range start.
+    # Create ServerInstance record. The port is agent-allocated per start
+    # and not persisted; stash it in the JSON config for display only.
+    allocated_port = (
+        start_response.get("port") if isinstance(start_response, dict) else None
+    )
     with Session(engine) as session:
         server = ServerInstance(
             model_id=model.id,
             agent_id=agent.id,
-            port=start_response.get("config", {}).get("port", 8090),
             gpu_layers=35,
             context_size=model.context_length or 4096,
             flash_attn=True,
+            config={"port": str(allocated_port)} if allocated_port else {},
             proxy_url=start_response.get("proxy_url"),
             status="starting",
             inactivity_timeout_seconds=300,

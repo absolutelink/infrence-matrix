@@ -32,7 +32,6 @@ type ServerInstance = {
   id: string
   model_id: string
   model_name: string | null
-  port: number
   status: string
   health_status: string
   agent_id: string
@@ -104,18 +103,6 @@ export const columns: ColumnDef<ServerInstance>[] = [
           <Badge variant={healthVariant} className="text-xs">
             {instance.health_status}
           </Badge>
-        </div>
-      )
-    },
-  },
-  {
-    accessorKey: "port",
-    header: "Port",
-    cell: ({ row }) => {
-      const instance = row.original
-      return (
-        <div className="text-muted-foreground font-mono text-sm">
-          {instance.port}
         </div>
       )
     },

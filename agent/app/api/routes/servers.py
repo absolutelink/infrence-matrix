@@ -1,5 +1,6 @@
 """Server management API endpoints."""
 
+import socket
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -13,11 +14,16 @@ router = APIRouter(prefix="/servers", tags=["servers"])
 
 server_manager = llama_server_manager
 
+# Range for ephemeral llama-server ports when the caller doesn't pin one
+EPHEMERAL_PORT_START = 8090
+EPHEMERAL_PORT_END = 8190
+
 
 class ServerSpec(BaseModel):
     id: str
     model_path: str
-    port: int
+    # Omit to let the agent allocate a free random port
+    port: int | None = None
     gpu_layers: int = 35
     context_size: int = 4096
     batch_size: int = 512
@@ -35,6 +41,25 @@ class ServerStartRequest(BaseModel):
 
 class ServerStopRequest(BaseModel):
     server_id: str
+
+
+def _allocate_port() -> int:
+    """Pick a random free port in the ephemeral llama-server range."""
+    import random
+
+    candidates = list(range(EPHEMERAL_PORT_START, EPHEMERAL_PORT_END))
+    random.shuffle(candidates)
+    for port in candidates:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.bind(("0.0.0.0", port))
+            return port
+        except OSError:
+            continue
+    raise HTTPException(
+        status_code=503,
+        detail=f"No free ports in {EPHEMERAL_PORT_START}-{EPHEMERAL_PORT_END}",
+    )
 
 
 def _resolve_model_path(model_path: str) -> str:
@@ -106,9 +131,13 @@ async def start_server(request: ServerStartRequest) -> dict:
     try:
         model_path = await _ensure_model(request.config.model_path, request.source)
 
+        # The agent owns port allocation: pick a free random port unless the
+        # caller pinned one explicitly.
+        port = request.config.port or _allocate_port()
+
         config = ServerConfig(
             model_path=model_path,
-            port=request.config.port,
+            port=port,
             gpu_layers=request.config.gpu_layers,
             context_size=request.config.context_size,
             batch_size=request.config.batch_size,
@@ -124,6 +153,7 @@ async def start_server(request: ServerStartRequest) -> dict:
             "status": "started",
             "server_id": request.config.id,
             "model_path": model_path,
+            "port": port,
         }
     except HTTPException:
         raise
@@ -160,12 +190,8 @@ async def list_servers() -> dict:
 @router.get("/status/{server_id}")
 async def get_server_status(server_id: str) -> dict:
     """Get status of a specific server."""
-    servers = llama_server_manager.list_servers()
-    for server in servers:
-        if server["server_id"] == server_id:
-            return {"status": "running", "server": server}
-
-    return {"status": "stopped", "server_id": server_id}
+    status = await llama_server_manager.get_server_status(server_id)
+    return status
 
 
 @router.get("/logs/{server_id}")

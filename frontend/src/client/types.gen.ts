@@ -1070,10 +1070,6 @@ export type ServerInstanceResponse = {
      */
     model_name?: string | null;
     /**
-     * Port
-     */
-    port: number;
-    /**
      * Status
      */
     status: string;
