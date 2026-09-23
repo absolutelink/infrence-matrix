@@ -57,12 +57,16 @@ class Agent(SQLModel, table=True):
 # ============================================================================
 # Model - Registry of available models
 # ============================================================================
+MODEL_TYPES = ("llm", "mtp", "mmproj", "dflash")
+
+
 class Model(SQLModel, table=True):
     __tablename__ = "models"
     __table_args__ = (
         Index("idx_models_name", "name"),
         Index("idx_models_architecture", "architecture"),
         Index("idx_models_source", "source"),
+        Index("idx_models_model_type", "model_type"),
     )
 
     id: uuid.UUID = Field(
@@ -76,6 +80,7 @@ class Model(SQLModel, table=True):
     size_bytes: int = Field(sa_type=BigInteger)  # type: ignore[call-arg]
 
     architecture: str
+    model_type: str = Field(default="llm")
     parameter_count: int | None = Field(default=None, sa_type=BigInteger)  # type: ignore[call-arg]
     quantization: str
 
@@ -116,6 +121,7 @@ class ModelCreate(SQLModel):
     path: str = Field(max_length=1024)
     size_bytes: int = Field(sa_type=BigInteger)  # type: ignore[call-arg]
     architecture: str
+    model_type: str = "llm"
     parameter_count: int | None = Field(default=None, sa_type=BigInteger)  # type: ignore[call-arg]
     quantization: str
     supports_embeddings: bool = False
@@ -137,6 +143,7 @@ class ModelUpdate(SQLModel):
     path: str | None = Field(default=None, max_length=1024)
     size_bytes: int | None = Field(default=None, sa_type=BigInteger)  # type: ignore[call-arg]
     architecture: str | None = None
+    model_type: str | None = None
     parameter_count: int | None = Field(default=None, sa_type=BigInteger)  # type: ignore[call-arg]
     quantization: str | None = None
     supports_embeddings: bool | None = None

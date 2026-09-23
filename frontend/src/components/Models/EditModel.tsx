@@ -21,13 +21,23 @@ import {
 } from "@/components/ui/form"
 import { Input } from "@/components/ui/input"
 import { LoadingButton } from "@/components/ui/loading-button"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import useCustomToast from "@/hooks/useCustomToast"
+
+const MODEL_TYPES = ["llm", "mtp", "mmproj", "dflash"] as const
 
 const formSchema = z.object({
   name: z.string().min(1, { message: "Name is required" }),
   path: z.string().min(1, { message: "Path is required" }),
   size_bytes: z.coerce.number().min(0, { message: "Size must be positive" }),
   architecture: z.string().min(1, { message: "Architecture is required" }),
+  model_type: z.enum(MODEL_TYPES),
   parameter_count: z.coerce.number().optional(),
   quantization: z.string().min(1, { message: "Quantization is required" }),
   supports_embeddings: z.boolean().default(false),
@@ -64,6 +74,7 @@ export default function EditModel({ isOpen, onClose, model }: EditModelProps) {
       path: "",
       size_bytes: 0,
       architecture: "",
+      model_type: "llm",
       parameter_count: undefined,
       quantization: "",
       supports_embeddings: false,
@@ -86,6 +97,7 @@ export default function EditModel({ isOpen, onClose, model }: EditModelProps) {
         path: model.path,
         size_bytes: model.size_bytes,
         architecture: model.architecture,
+        model_type: (model.model_type as (typeof MODEL_TYPES)[number]) || "llm",
         parameter_count: model.parameter_count ?? undefined,
         quantization: model.quantization,
         supports_embeddings: model.supports_embeddings,
@@ -155,6 +167,31 @@ export default function EditModel({ isOpen, onClose, model }: EditModelProps) {
                 )}
               />
             </div>
+
+            <FormField
+              control={form.control}
+              name="model_type"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Model Type</FormLabel>
+                  <Select value={field.value} onValueChange={field.onChange}>
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select model type" />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      {MODEL_TYPES.map((type) => (
+                        <SelectItem key={type} value={type}>
+                          {type}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
 
             <FormField
               control={form.control}

@@ -14,6 +14,14 @@ export const columns: ColumnDef<Model>[] = [
   {
     accessorKey: "architecture",
     header: "Architecture",
+    cell: ({ row }) => (
+      <div>
+        <div>{row.getValue("architecture")}</div>
+        <div className="text-xs text-muted-foreground">
+          {row.original.model_type || "llm"}
+        </div>
+      </div>
+    ),
   },
   {
     accessorKey: "quantization",

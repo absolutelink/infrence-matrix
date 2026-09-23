@@ -3,6 +3,8 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, HTTPException, Query
 
+from app.services.models import guess_model_type
+
 router = APIRouter(prefix="/huggingface", tags=["huggingface"])
 
 HUGGINGFACE_API_BASE = "https://huggingface.co/api"
@@ -32,14 +34,15 @@ def search_models(
             return response.json()
     except httpx.HTTPError as e:
         raise HTTPException(
-            status_code=503,
-            detail=f"Failed to search HuggingFace: {str(e)}"
+            status_code=503, detail=f"Failed to search HuggingFace: {str(e)}"
         )
 
 
 @router.get("/models/files")
 def list_model_files(
-    repo_id: str = Query(..., description="HuggingFace repository ID (e.g., 'unsloth/Qwen3.8-27B-GGUF')"),
+    repo_id: str = Query(
+        ..., description="HuggingFace repository ID (e.g., 'unsloth/Qwen3.8-27B-GGUF')"
+    ),
 ) -> list[dict[str, Any]]:
     """
     List GGUF files in a HuggingFace repository with their sizes.
@@ -59,8 +62,7 @@ def list_model_files(
 
             # Filter for GGUF files only
             gguf_files = [
-                file for file in siblings
-                if file.get("rfilename", "").endswith(".gguf")
+                file for file in siblings if file.get("rfilename", "").endswith(".gguf")
             ]
 
             # If sizes are not included, fetch them from the tree endpoint
@@ -82,7 +84,7 @@ def list_model_files(
                     gguf_files = [
                         {
                             "path": file.get("rfilename"),
-                            "size": size_map.get(file.get("rfilename"), 0)
+                            "size": size_map.get(file.get("rfilename"), 0),
                         }
                         for file in gguf_files
                     ]
@@ -93,11 +95,14 @@ def list_model_files(
                     for file in gguf_files
                 ]
 
+            # Attach a model_type guess so the UI can pre-select it
+            for file in gguf_files:
+                file["model_type"] = guess_model_type(file.get("path"))
+
             return gguf_files
     except httpx.HTTPError as e:
         raise HTTPException(
-            status_code=503,
-            detail=f"Failed to fetch model files: {str(e)}"
+            status_code=503, detail=f"Failed to fetch model files: {str(e)}"
         )
 
 
@@ -137,8 +142,7 @@ def get_model_info(
             }
     except httpx.HTTPError as e:
         raise HTTPException(
-            status_code=503,
-            detail=f"Failed to fetch model info: {str(e)}"
+            status_code=503, detail=f"Failed to fetch model info: {str(e)}"
         )
 
 
@@ -183,7 +187,9 @@ def get_parameter_count(
                 vocab_size = config.get("vocab_size", 0)
                 # Rough estimate: layers * hidden^2 + vocab * hidden
                 if hidden_layers and hidden_size:
-                    param_count = hidden_layers * (hidden_size ** 2) + (vocab_size * hidden_size)
+                    param_count = hidden_layers * (hidden_size**2) + (
+                        vocab_size * hidden_size
+                    )
 
             # Also check gguf specific fields
             if "gguf" in config:
@@ -205,17 +211,10 @@ def get_parameter_count(
                 "parameter_count": None,
                 "error": "config.json not found",
             }
-        raise HTTPException(
-            status_code=503,
-            detail=f"Failed to fetch config: {str(e)}"
-        )
+        raise HTTPException(status_code=503, detail=f"Failed to fetch config: {str(e)}")
     except httpx.HTTPError as e:
         raise HTTPException(
-            status_code=503,
-            detail=f"Failed to fetch parameter count: {str(e)}"
+            status_code=503, detail=f"Failed to fetch parameter count: {str(e)}"
         )
     except Exception as e:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Failed to parse config: {str(e)}"
-        )
+        raise HTTPException(status_code=503, detail=f"Failed to parse config: {str(e)}")

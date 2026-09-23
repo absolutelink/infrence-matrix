@@ -142,14 +142,16 @@ export function EditServerDialog({
                 <SelectValue placeholder="Select a model" />
               </SelectTrigger>
               <SelectContent>
-                {(modelsQuery.data ?? []).map((model: Model) => (
-                  <SelectItem
-                    key={model.id ?? model.name}
-                    value={model.id ?? model.name}
-                  >
-                    {model.name}
-                  </SelectItem>
-                ))}
+                {((modelsQuery.data ?? []) as Model[])
+                  .filter((model) => model.model_type === "llm")
+                  .map((model) => (
+                    <SelectItem
+                      key={model.id ?? model.name}
+                      value={model.id ?? model.name}
+                    >
+                      {model.name}
+                    </SelectItem>
+                  ))}
               </SelectContent>
             </Select>
           </div>

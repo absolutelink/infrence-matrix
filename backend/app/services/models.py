@@ -12,6 +12,26 @@ from app.models import DownloadJob, Model
 
 logger = logging.getLogger(__name__)
 
+ModelType = Literal["llm", "mtp", "mmproj", "dflash"]
+
+
+def guess_model_type(path: str | None, gguf_type: str | None = None) -> ModelType:
+    """Guess the model type from the GGUF general.type and filename.
+
+    mmproj / mtp / dflash files are auxiliary; everything else is a llm.
+    """
+    haystack_parts = []
+    if gguf_type:
+        haystack_parts.append(gguf_type.lower())
+    if path:
+        haystack_parts.append(Path(path).name.lower())
+    haystack = " ".join(haystack_parts)
+
+    for candidate in ("mmproj", "dflash", "mtp"):
+        if candidate in haystack:
+            return candidate  # type: ignore[return-value]
+    return "llm"
+
 
 class ModelManager:
     """Manages model downloads and registration."""
@@ -90,6 +110,7 @@ class ModelManager:
                     from modelscope.hub.snapshot_download import (
                         snapshot_download as ms_snapshot_download,
                     )
+
                     return ms_snapshot_download(
                         repo_id=repo_id,
                         allow_patterns=[filename],
@@ -111,7 +132,9 @@ class ModelManager:
             download_job.completed_at = datetime.now(UTC)
             download_job.destination_path = str(downloaded_file)
 
-            logger.info(f"Downloaded {filename} from ModelScope {repo_id} to {downloaded_file}")
+            logger.info(
+                f"Downloaded {filename} from ModelScope {repo_id} to {downloaded_file}"
+            )
             return True
 
         except Exception as e:
@@ -121,7 +144,9 @@ class ModelManager:
             download_job.last_error_at = datetime.now(UTC)
             return False
 
-    def extract_model_metadata(self, model_path: str) -> dict[str, str | int | bool | None]:
+    def extract_model_metadata(
+        self, model_path: str
+    ) -> dict[str, str | int | bool | None]:
         """Extract metadata from a GGUF model file."""
         try:
             from gguf import GGUFReader
@@ -129,6 +154,7 @@ class ModelManager:
             reader = GGUFReader(model_path)
             metadata = {
                 "architecture": "unknown",
+                "model_type": "llm",
                 "parameter_count": None,
                 "quantization": "unknown",
                 "context_length": 4096,
@@ -136,22 +162,33 @@ class ModelManager:
                 "supports_vision": False,
             }
 
+            gguf_type = None
             if reader.metadata:
                 if "general.architecture" in reader.metadata:
-                    metadata["architecture"] = str(reader.metadata["general.architecture"])
+                    metadata["architecture"] = str(
+                        reader.metadata["general.architecture"]
+                    )
 
                 if "general.parameter_count" in reader.metadata:
-                    metadata["parameter_count"] = int(reader.metadata["general.parameter_count"])
+                    metadata["parameter_count"] = int(
+                        reader.metadata["general.parameter_count"]
+                    )
 
                 if "general.quantization_version" in reader.metadata:
-                    metadata["quantization"] = str(reader.metadata["general.quantization_version"])
+                    metadata["quantization"] = str(
+                        reader.metadata["general.quantization_version"]
+                    )
 
                 if "llama.context_length" in reader.metadata:
-                    metadata["context_length"] = int(reader.metadata["llama.context_length"])
+                    metadata["context_length"] = int(
+                        reader.metadata["llama.context_length"]
+                    )
 
                 if "general.type" in reader.metadata:
-                    model_type = str(reader.metadata["general.type"])
-                    metadata["supports_embeddings"] = "embedding" in model_type.lower()
+                    gguf_type = str(reader.metadata["general.type"])
+                    metadata["supports_embeddings"] = "embedding" in gguf_type.lower()
+
+            metadata["model_type"] = guess_model_type(model_path, gguf_type)
 
             return metadata
 
@@ -159,6 +196,7 @@ class ModelManager:
             logger.warning("gguf package not installed, using default metadata")
             return {
                 "architecture": "unknown",
+                "model_type": "llm",
                 "parameter_count": None,
                 "quantization": "unknown",
                 "context_length": 4096,
@@ -169,6 +207,7 @@ class ModelManager:
             logger.error(f"Failed to extract metadata from {model_path}: {e}")
             return {
                 "architecture": "unknown",
+                "model_type": "llm",
                 "parameter_count": None,
                 "quantization": "unknown",
                 "context_length": 4096,
@@ -204,6 +243,7 @@ class ModelManager:
             path=str(model_path.absolute()),
             size_bytes=file_size,
             architecture=metadata["architecture"],
+            model_type=metadata["model_type"],
             parameter_count=metadata["parameter_count"],
             quantization=metadata["quantization"],
             supports_embeddings=metadata["supports_embeddings"],

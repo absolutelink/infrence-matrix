@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException
 from sqlmodel import col, func, select
 
 from app.api.deps import SessionDep
-from app.models import Message, Model, ModelCreate, ModelUpdate
+from app.models import MODEL_TYPES, Message, Model, ModelCreate, ModelUpdate
 
 router = APIRouter(prefix="/models", tags=["models"])
 
@@ -21,9 +21,7 @@ def read_models(
     """
     count_statement = select(func.count()).select_from(Model)
     session.exec(count_statement).one()
-    statement = (
-        select(Model).order_by(col(Model.name).asc()).offset(skip).limit(limit)
-    )
+    statement = select(Model).order_by(col(Model.name).asc()).offset(skip).limit(limit)
     models = session.exec(statement).all()
     return models
 
@@ -54,7 +52,15 @@ def create_model(
     # Check if model with this name already exists
     existing = session.exec(select(Model).where(Model.name == model_in.name)).first()
     if existing:
-        raise HTTPException(status_code=400, detail="Model with this name already exists")
+        raise HTTPException(
+            status_code=400, detail="Model with this name already exists"
+        )
+
+    if model_in.model_type not in MODEL_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid model_type '{model_in.model_type}'. Must be one of: {', '.join(MODEL_TYPES)}",
+        )
 
     model = Model.model_validate(model_in)
     session.add(model)
@@ -78,6 +84,11 @@ def update_model(
         raise HTTPException(status_code=404, detail="Model not found")
 
     update_dict = model_in.model_dump(exclude_unset=True)
+    if "model_type" in update_dict and update_dict["model_type"] not in MODEL_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid model_type '{update_dict['model_type']}'. Must be one of: {', '.join(MODEL_TYPES)}",
+        )
     model.sqlmodel_update(update_dict)
     session.add(model)
     session.commit()

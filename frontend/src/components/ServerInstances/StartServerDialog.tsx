@@ -77,7 +77,9 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
     },
   })
 
-  const models = (modelsQuery.data ?? []) as Model[]
+  const models = ((modelsQuery.data ?? []) as Model[]).filter(
+    (model) => model.model_type === "llm",
+  )
   const agents = (agentsQuery.data ?? []) as Array<{
     id: string
     name: string

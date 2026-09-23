@@ -752,6 +752,11 @@ export class V12 {
      * Create Chat Completion
      *
      * Create chat completion via Agent proxy.
+     *
+     * Cold starts are handled transparently: a stopped/errored server is
+     * (re)started and the request waits for it to become healthy before the
+     * completion is generated, so the client just sees a longer first-token
+     * latency.
      */
     public static createChatCompletion<ThrowOnError extends boolean = true>(options: Options<v1ChatCreateChatCompletionData, ThrowOnError>) {
         return (options.client ?? client).post<v1ChatCreateChatCompletionResponses, v1ChatCreateChatCompletionErrors, ThrowOnError>({
@@ -821,6 +826,10 @@ export class V15 {
      * Create Response
      *
      * Create a model response (Open Responses spec).
+     *
+     * Cold starts are handled transparently: a stopped/errored server for
+     * the requested alias is (re)started and the request waits for health
+     * before generation, so clients just see a longer first-token latency.
      */
     public static createResponse<ThrowOnError extends boolean = true>(options: Options<v1ResponsesCreateResponseData, ThrowOnError>) {
         return (options.client ?? client).post<v1ResponsesCreateResponseResponses, v1ResponsesCreateResponseErrors, ThrowOnError>({

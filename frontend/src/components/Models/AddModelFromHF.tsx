@@ -36,6 +36,7 @@ interface AddModelFromHFProps {
 interface GGUFFile {
   path: string
   size: number
+  model_type?: string
 }
 
 interface GGUFFileGroup {
@@ -45,6 +46,20 @@ interface GGUFFileGroup {
   totalSize: number
   fileCount: number
   isSplit: boolean
+}
+
+const MODEL_TYPE_OPTIONS = ["llm", "mtp", "mmproj", "dflash"] as const
+
+// Detect model type from filenames (mmproj/mtp/dflash are auxiliary files)
+const guessTypeFromFiles = (paths: string[]): string => {
+  const haystack = paths
+    .map((p) => p.split("/").pop() || p)
+    .join(" ")
+    .toLowerCase()
+  for (const candidate of ["mmproj", "dflash", "mtp"]) {
+    if (haystack.includes(candidate)) return candidate
+  }
+  return "llm"
 }
 
 // Detect if files are part of a split model (e.g., model-00001-of-00003.gguf)
@@ -99,6 +114,7 @@ export function AddModelFromHF({ model, onClose }: AddModelFromHFProps) {
   const [parameterCount, setParameterCount] = useState<number | undefined>(
     undefined,
   )
+  const [modelType, setModelType] = useState<string>("llm")
 
   // Fetch GGUF files for this model and group split files
   useEffect(() => {
@@ -152,6 +168,15 @@ export function AddModelFromHF({ model, onClose }: AddModelFromHFProps) {
     fetchParams()
   }, [model.modelId])
 
+  // Re-guess the model type whenever the selected file group changes
+  useEffect(() => {
+    if (!selectedGroup) return
+    const group = fileGroups.find((g) => g.id === selectedGroup)
+    if (!group) return
+    const guessed = guessTypeFromFiles(group.files.map((f) => f.path))
+    setModelType(guessed)
+  }, [selectedGroup, fileGroups])
+
   const createModelMutation = useMutation({
     mutationFn: async (modelData: any) => {
       return await ModelsService.createModel({ body: modelData })
@@ -186,6 +211,7 @@ export function AddModelFromHF({ model, onClose }: AddModelFromHFProps) {
       path: `/models/${model.modelId}/${baseName}`,
       size_bytes: group.totalSize,
       architecture: "llama",
+      model_type: modelType,
       quantization: baseName?.includes("Q4_K_M")
         ? "Q4_K_M"
         : baseName?.includes("Q5_K_M")
@@ -264,6 +290,22 @@ export function AddModelFromHF({ model, onClose }: AddModelFromHFProps) {
                 No GGUF files found in this repository
               </div>
             )}
+          </div>
+
+          <div>
+            <Label>Model Type</Label>
+            <Select value={modelType} onValueChange={setModelType}>
+              <SelectTrigger className="mt-1">
+                <SelectValue placeholder="Select model type" />
+              </SelectTrigger>
+              <SelectContent>
+                {MODEL_TYPE_OPTIONS.map((type) => (
+                  <SelectItem key={type} value={type}>
+                    {type}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
 
           <div className="flex justify-end gap-2 pt-4">

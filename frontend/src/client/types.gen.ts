@@ -991,6 +991,10 @@ export type Model = {
      */
     architecture: string;
     /**
+     * Model Type
+     */
+    model_type?: string;
+    /**
      * Parameter Count
      */
     parameter_count?: number | null;
@@ -1070,6 +1074,10 @@ export type ModelCreate = {
      * Architecture
      */
     architecture: string;
+    /**
+     * Model Type
+     */
+    model_type?: string;
     /**
      * Parameter Count
      */
@@ -1166,6 +1174,10 @@ export type ModelUpdate = {
      * Architecture
      */
     architecture?: string | null;
+    /**
+     * Model Type
+     */
+    model_type?: string | null;
     /**
      * Parameter Count
      */
