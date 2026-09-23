@@ -216,7 +216,7 @@ function ResponsesPage() {
       patchLastAssistant((entry) => {
         entry.text += event.delta as string
       })
-    } else if (type === "response.reasoning.delta") {
+    } else if (type === "response.reasoning_text.delta") {
       patchLastAssistant((entry) => {
         entry.reasoning += event.delta as string
       })

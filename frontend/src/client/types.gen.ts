@@ -352,6 +352,10 @@ export type ChatMessage = {
      */
     content?: string | null;
     /**
+     * Reasoning Content
+     */
+    reasoning_content?: string | null;
+    /**
      * Name
      */
     name?: string | null;

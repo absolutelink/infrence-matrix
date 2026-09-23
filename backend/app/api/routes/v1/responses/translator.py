@@ -187,7 +187,7 @@ class StreamState:
     output_text.delta*, output_text.done, content_part.done,
     output_item.done. Function calls follow the same pattern with
     function_call_arguments.* events. Reasoning deltas map to
-    response.reasoning.* events on a leading reasoning item.
+    response.reasoning_text.* events on a leading reasoning item.
     """
 
     def __init__(self, seq: ev.SSEmitter, model: str) -> None:

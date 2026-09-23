@@ -33,8 +33,8 @@ EventType = Literal[
     "response.output_text.done",
     "response.refusal.delta",
     "response.refusal.done",
-    "response.reasoning.delta",
-    "response.reasoning.done",
+    "response.reasoning_text.delta",
+    "response.reasoning_text.done",
     "response.reasoning_summary_text.delta",
     "response.reasoning_summary_text.done",
     "response.reasoning_summary_part.added",
@@ -223,7 +223,7 @@ def reasoning_delta(
     seq: SSEmitter, item_id: str, output_index: int, content_index: int, delta: str
 ) -> dict[str, Any]:
     return seq.make(
-        "response.reasoning.delta",
+        "response.reasoning_text.delta",
         item_id=item_id,
         output_index=output_index,
         content_index=content_index,
@@ -235,7 +235,7 @@ def reasoning_done(
     seq: SSEmitter, item_id: str, output_index: int, content_index: int, text: str
 ) -> dict[str, Any]:
     return seq.make(
-        "response.reasoning.done",
+        "response.reasoning_text.done",
         item_id=item_id,
         output_index=output_index,
         content_index=content_index,

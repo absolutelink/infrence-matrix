@@ -33,6 +33,8 @@ class ChatMessage(BaseModel):
 
     role: Literal["system", "user", "assistant", "developer", "tool"]
     content: str | None = None
+    # Thinking models: raw reasoning text (assistant responses only)
+    reasoning_content: str | None = None
     name: str | None = None
     tool_call_id: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
@@ -74,7 +76,7 @@ class ChatCompletionRequest(BaseModel):
     # OpenAI tools shape: [{"type": "function", "function": {name, description, parameters}}]
     tools: list[Tool] | None = None
     tool_choice: str | dict[str, Any] | None = None
-    prompt_cache_options: dict | None = None
+    prompt_cache_options: dict[str, Any] | None = None
     # OpenAI-compatible: {"include_usage": true} adds a final usage chunk
     stream_options: StreamOptions | None = None
 
@@ -195,6 +197,15 @@ def _extract_delta_content(chunk_data: dict) -> str:
         if "content" in choice:
             return choice.get("content") or ""
     return chunk_data.get("content", "") or ""
+
+
+def _extract_delta_reasoning(chunk_data: dict) -> str:
+    """Extract reasoning delta from a streamed chunk (thinking models)."""
+    choices = chunk_data.get("choices")
+    if choices and isinstance(choices, list):
+        delta = choices[0].get("delta") or {}
+        return delta.get("reasoning_content") or ""
+    return ""
 
 
 def _build_tools_payload(request: ChatCompletionRequest) -> dict[str, Any]:
@@ -326,6 +337,7 @@ async def _stream_completion_via_agent(
                                 final_usage = chunk_usage
 
                             delta_content = _extract_delta_content(chunk_data)
+                            delta_reasoning = _extract_delta_reasoning(chunk_data)
                             fallback_completion_chars += len(delta_content)
 
                             stream_chunk = ChatCompletionChunk(
@@ -335,7 +347,10 @@ async def _stream_completion_via_agent(
                                 choices=[
                                     StreamChoice(
                                         index=0,
-                                        delta={"content": delta_content},
+                                        delta={
+                                            "content": delta_content,
+                                            "reasoning_content": delta_reasoning,
+                                        },
                                         finish_reason=chunk_data.get("finish_reason"),
                                     )
                                 ],
@@ -604,7 +619,9 @@ async def create_chat_completion(
         # Usage: server-provided numbers win; fall back to estimating
         # prompt tokens from message length and completion from content.
         usage_data = response.get("usage") or {}
-        content = response["choices"][0]["message"]["content"]
+        message = response["choices"][0]["message"]
+        content = message["content"]
+        reasoning_content = message.get("reasoning_content") or None
         prompt_tokens = (
             usage_data.get("prompt_tokens")
             or sum(len(m["content"]) for m in non_stream_payload["messages"]) // 4
@@ -624,6 +641,7 @@ async def create_chat_completion(
                     message=ChatMessage(
                         role="assistant",
                         content=content,
+                        reasoning_content=reasoning_content,
                     ),
                     finish_reason=response["choices"][0].get("finish_reason"),
                 )
