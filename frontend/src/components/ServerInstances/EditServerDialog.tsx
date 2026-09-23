@@ -1,7 +1,8 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
-import { ServerInstancesService } from "@/client"
+import type { Model } from "@/client"
+import { ModelsService, ServerInstancesService } from "@/client"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
@@ -15,12 +16,20 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { LoadingButton } from "@/components/ui/loading-button"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 
 interface EditServerDialogProps {
   isOpen: boolean
   onClose: () => void
   instance: {
     id: string
+    model_id: string
     model_name: string | null
     status: string
     alias: string
@@ -37,14 +46,25 @@ export function EditServerDialog({
   instance,
 }: EditServerDialogProps) {
   const queryClient = useQueryClient()
+  const [modelId, setModelId] = useState("")
   const [alias, setAlias] = useState("")
   const [gpuLayers, setGpuLayers] = useState("35")
   const [contextSize, setContextSize] = useState("4096")
   const [flashAttn, setFlashAttn] = useState(true)
   const [inactivityTimeout, setInactivityTimeout] = useState("300")
 
+  const modelsQuery = useQuery({
+    queryKey: ["models"],
+    queryFn: async () => {
+      const response = await ModelsService.readModels()
+      return response.data
+    },
+    enabled: isOpen,
+  })
+
   useEffect(() => {
     if (isOpen) {
+      setModelId(instance.model_id)
       setAlias(instance.alias)
       setGpuLayers(String(instance.gpu_layers))
       setContextSize(String(instance.context_size))
@@ -61,6 +81,7 @@ export function EditServerDialog({
         path: { server_id: instance.id },
         body: {
           alias: alias.trim() || instance.alias,
+          model_id: modelId,
           gpu_layers: Number(gpuLayers),
           context_size: Number(contextSize),
           flash_attn: flashAttn,
@@ -98,7 +119,7 @@ export function EditServerDialog({
           <DialogDescription>
             {instance.model_name || "Server"}
             {wasRunning
-              ? " — saving will restart the server with the new settings"
+              ? " — saving will stop the server and restart it with the new settings/model"
               : ""}
           </DialogDescription>
         </DialogHeader>
@@ -113,6 +134,24 @@ export function EditServerDialog({
               placeholder="Public name clients use in requests"
               className="mt-1"
             />
+          </div>
+          <div className="col-span-2">
+            <Label>Model</Label>
+            <Select value={modelId} onValueChange={setModelId}>
+              <SelectTrigger className="mt-1">
+                <SelectValue placeholder="Select a model" />
+              </SelectTrigger>
+              <SelectContent>
+                {(modelsQuery.data ?? []).map((model: Model) => (
+                  <SelectItem
+                    key={model.id ?? model.name}
+                    value={model.id ?? model.name}
+                  >
+                    {model.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
           <div>
             <Label htmlFor="gpu-layers">GPU layers</Label>

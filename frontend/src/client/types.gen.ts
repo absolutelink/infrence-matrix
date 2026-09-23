@@ -1289,6 +1289,10 @@ export type UpdateServerRequest = {
      */
     alias?: string | null;
     /**
+     * Model Id
+     */
+    model_id?: string | null;
+    /**
      * Gpu Layers
      */
     gpu_layers?: number | null;

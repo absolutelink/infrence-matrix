@@ -60,6 +60,8 @@ class UpdateServerRequest(BaseModel):
     """Editable server settings. All fields optional."""
 
     alias: str | None = Field(None, min_length=1, max_length=255)
+    # Swap the model this server serves (requires stop + restart when running)
+    model_id: str | None = None
     gpu_layers: int | None = Field(None, ge=0, le=1000)
     context_size: int | None = Field(None, ge=256, le=1_048_576)
     flash_attn: bool | None = None
@@ -306,6 +308,7 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
             )
 
         was_running = instance.status == "running"
+        model_changed = False
 
         if request.alias is not None and request.alias != instance.alias:
             existing_alias = await session.execute(
@@ -319,6 +322,14 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
                     status_code=409, detail=f"Alias '{request.alias}' already exists"
                 )
             instance.alias = request.alias
+
+        if request.model_id is not None and request.model_id != str(instance.model_id):
+            new_model = await session.get(Model, uuid_module.UUID(request.model_id))
+            if not new_model:
+                raise HTTPException(status_code=404, detail="Model not found")
+            instance.model_id = new_model.id
+            instance.process_command = new_model.source_file or new_model.path
+            model_changed = True
 
         if request.gpu_layers is not None:
             instance.gpu_layers = request.gpu_layers
@@ -338,7 +349,8 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
         }
         await session.commit()
 
-        if was_running and request.restart:
+        # A running server must restart to load a different model file
+        if was_running and (request.restart or model_changed):
             await session.refresh(instance)
             agent = await session.get(Agent, instance.agent_id)
             if not agent or agent.status != "online":
