@@ -1,6 +1,7 @@
 """Unit tests for OpenResponses schemas, events, and translator."""
 
 import json
+import uuid
 
 import pytest
 
@@ -380,3 +381,112 @@ class TestResponseResourceEcho:
         )
         resp = build_response_resource(req, "resp_1", 123)
         assert resp.text.format.type == "json_schema"
+
+
+def _item_text(item: dict) -> str:
+    """Extract user text or assistant output text from a stored item."""
+    if item.get("role") == "user":
+        return item["content"]
+    return "".join(
+        part["text"]
+        for part in item.get("content", [])
+        if part.get("type") == "output_text"
+    )
+
+
+class TestChainHistory:
+    """_build_chain_history must walk the full previous_response_id chain."""
+
+    def _record(self, db, response_id, previous_id):
+        from app.models import Agent, Model, ResponseRecord
+
+        suffix = uuid.uuid4().hex[:8]
+        agent = Agent(
+            name=f"chain-{suffix}",
+            host="127.0.0.1",
+            port=8080,
+            status="online",
+        )
+        model = Model(
+            name=f"chain-model-{suffix}.gguf",
+            path="/models/x.gguf",
+            size_bytes=1,
+            architecture="llama",
+            quantization="Q4_K_M",
+            context_length=4096,
+            source="local",
+        )
+        db.add(agent)
+        db.add(model)
+        db.commit()
+        record = ResponseRecord(
+            response_id=response_id,
+            previous_response_id=previous_id,
+            input_items=[
+                {"type": "message", "role": "user", "content": f"in-{response_id}"}
+            ],
+            output_items=[
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": f"out-{response_id}",
+                            "annotations": [],
+                        }
+                    ],
+                }
+            ],
+            model_id=model.id,
+            agent_id=agent.id,
+            status="completed",
+            store=True,
+        )
+        db.add(record)
+        db.commit()
+        return record
+
+    def test_full_chain_replay(self, db) -> None:
+        """Regression: history must span all hops, not just one level back."""
+        from app.api.routes.v1.responses.router import _build_chain_history
+
+        self._record(db, "resp_1", None)
+        self._record(db, "resp_2", "resp_1")
+        r3 = self._record(db, "resp_3", "resp_2")
+
+        history = _build_chain_history(db, r3)
+        contents = [_item_text(item) for item in history]
+        assert contents == [
+            "in-resp_1",
+            "out-resp_1",
+            "in-resp_2",
+            "out-resp_2",
+            "in-resp_3",
+            "out-resp_3",
+        ]
+
+    def test_cycle_protection(self, db) -> None:
+        from app.api.routes.v1.responses.router import _build_chain_history
+
+        self._record(db, "resp_a", None)
+        r2 = self._record(db, "resp_b", "resp_a")
+        # Fabricate a cycle
+        r2.previous_response_id = "resp_b"
+        db.add(r2)
+        db.commit()
+        db.refresh(r2)
+
+        history = _build_chain_history(db, r2)
+        # Terminates; contains resp_b only
+        contents = [_item_text(item) for item in history]
+        assert contents == ["in-resp_b", "out-resp_b"]
+
+    def test_broken_link_stops_gracefully(self, db) -> None:
+        from app.api.routes.v1.responses.router import _build_chain_history
+
+        r2 = self._record(db, "resp_x2", "resp_missing")
+        history = _build_chain_history(db, r2)
+        contents = [_item_text(item) for item in history]
+        assert contents == ["in-resp_x2", "out-resp_x2"]

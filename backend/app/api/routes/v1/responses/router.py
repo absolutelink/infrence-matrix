@@ -99,6 +99,39 @@ def _load_previous(
     return record
 
 
+def _build_chain_history(
+    db: Session, previous: ResponseRecord | None
+) -> list[dict[str, Any]]:
+    """Full conversation context for chaining: walk previous_response_id
+    links back to the root and collect input+output in order.
+
+    Spec: the model is sampled over previous.input + previous.output + input.
+    Each record stores only its own delta, so a single hop would drop
+    earlier turns — the chain must be resolved recursively.
+    """
+    if previous is None:
+        return []
+    chain: list[ResponseRecord] = []
+    seen: set[str] = set()
+    current: ResponseRecord | None = previous
+    while current is not None and current.response_id not in seen:
+        seen.add(current.response_id)
+        chain.append(current)
+        if not current.previous_response_id:
+            break
+        current = db.exec(
+            select(ResponseRecord).where(
+                ResponseRecord.response_id == current.previous_response_id,
+                ResponseRecord.store.is_(True),
+            )
+        ).first()
+    history: list[dict[str, Any]] = []
+    for record in reversed(chain):
+        history.extend(record.input_items or [])
+        history.extend(record.output_items or [])
+    return history
+
+
 def _llama_payload(
     request: CreateResponseBody, history: list[dict[str, Any]], stream: bool
 ) -> dict[str, Any]:
@@ -530,11 +563,9 @@ async def create_response(
                 f"Server not available: {e}",
             )
 
-    # Chaining context: previous.input + previous.output + this input
-    history: list[dict[str, Any]] = []
-    if previous is not None:
-        history.extend(previous.input_items or [])
-        history.extend(previous.output_items or [])
+    # Chaining context: walk the previous_response_id chain to the root and
+    # concatenate each record's input+output in order (full conversation).
+    history: list[dict[str, Any]] = _build_chain_history(db, previous)
 
     response_id = new_id("resp")
     created_at = int(time.time())
