@@ -38,6 +38,7 @@ from app.api.routes.v1.responses.translator import (
     input_items_to_llama_messages,
     tools_to_llama,
 )
+from app.core.db import engine
 from app.models import Model, ResponseRecord
 from app.services.agent_manager import agent_manager
 from app.services.server_startup import (
@@ -210,6 +211,65 @@ async def _complete(
     return result
 
 
+def _stored_input_items(request: CreateResponseBody) -> list[dict[str, Any]]:
+    """Request input as plain dicts for the responses table."""
+    if isinstance(request.input, str):
+        return [{"type": "message", "role": "user", "content": request.input}]
+    return [item.model_dump(exclude_none=True) for item in request.input]
+
+
+def _persist_response(
+    request: CreateResponseBody,
+    model_id: Any,
+    agent_id: Any,
+    response_id: str,
+    output_items: list[dict[str, Any]],
+    status: str,
+    usage: dict[str, Any] | None,
+    error: Error | None,
+    incomplete_reason: str | None,
+) -> None:
+    """Insert the ResponseRecord for a stored (store=true) response.
+
+    Opens its own session: streaming generators run after the request's
+    dependency session has been closed.
+    """
+    record = ResponseRecord(
+        response_id=response_id,
+        previous_response_id=request.previous_response_id,
+        input_items=_stored_input_items(request),
+        output_items=output_items,
+        model_id=model_id,
+        agent_id=agent_id,
+        parameters={
+            "temperature": request.temperature,
+            "top_p": request.top_p,
+            "max_output_tokens": request.max_output_tokens,
+            "tool_choice": (
+                request.tool_choice
+                if isinstance(request.tool_choice, str)
+                else str(request.tool_choice)
+            ),
+            "truncation": request.truncation,
+        },
+        response_metadata=request.metadata,
+        status=status,
+        error_code=error.code if error else None,
+        error_message=error.message if error else None,
+        incomplete_reason=incomplete_reason,
+        input_tokens=usage["input_tokens"] if usage else 0,
+        output_tokens=usage["output_tokens"] if usage else 0,
+        total_tokens=usage["total_tokens"] if usage else 0,
+        store=True,
+        background=False,
+        created_at=datetime.now(UTC),
+        completed_at=datetime.now(UTC),
+    )
+    with Session(engine) as session:
+        session.add(record)
+        session.commit()
+
+
 # ============================================================================
 # Streaming path
 # ============================================================================
@@ -222,6 +282,9 @@ async def _stream_events(
     history: list[dict[str, Any]],
     response_id: str,
     created_at: int,
+    model_id: Any | None = None,
+    instance_agent_id: Any | None = None,
+    persist: bool = False,
 ) -> AsyncIterator[str]:
     seq = ev.SSEmitter()
     response = build_response_resource(
@@ -334,6 +397,23 @@ async def _stream_events(
         for frame in seq.drain_frames():
             yield frame
 
+        if persist:
+            _persist_response(
+                request=request,
+                model_id=model_id,
+                agent_id=instance_agent_id,
+                response_id=response_id,
+                output_items=[i.model_dump(exclude_none=True) for i in response.output],
+                status=response.status,
+                usage=usage,
+                error=response.error,
+                incomplete_reason=(
+                    response.incomplete_details.reason
+                    if response.incomplete_details
+                    else None
+                ),
+            )
+
     except Exception as e:
         logger.error(f"Responses streaming error: {e}")
         response.status = "failed"
@@ -341,6 +421,19 @@ async def _stream_events(
         ev.response_failed(seq, response)
         for frame in seq.drain_frames():
             yield frame
+
+        if persist:
+            _persist_response(
+                request=request,
+                model_id=model_id,
+                agent_id=instance_agent_id,
+                response_id=response_id,
+                output_items=[],
+                status=response.status,
+                usage=None,
+                error=response.error,
+                incomplete_reason=None,
+            )
 
     yield "data: [DONE]\n\n"
 
@@ -455,6 +548,9 @@ async def create_response(
                 history,
                 response_id,
                 created_at,
+                model_id=model.id,
+                instance_agent_id=server.agent_id,
+                persist=request.store,
             ),
             media_type="text/event-stream",
             headers=SSE_HEADERS,
@@ -476,49 +572,18 @@ async def create_response(
         return _error_response(500, "model_error", "model_error", str(e))
 
     if request.store:
-        stored_input: list[dict[str, Any]] = []
-        if isinstance(request.input, str):
-            stored_input = [
-                {"type": "message", "role": "user", "content": request.input}
-            ]
-        else:
-            stored_input = [
-                item.model_dump(exclude_none=True) for item in request.input
-            ]
-        record = ResponseRecord(
-            response_id=response_id,
-            previous_response_id=request.previous_response_id,
-            input_items=stored_input,
-            output_items=[i.model_dump(exclude_none=True) for i in result.output],
+        _persist_response(
+            request=request,
             model_id=model.id,
             agent_id=server.agent_id,
-            parameters={
-                "temperature": request.temperature,
-                "top_p": request.top_p,
-                "max_output_tokens": request.max_output_tokens,
-                "tool_choice": (
-                    request.tool_choice
-                    if isinstance(request.tool_choice, str)
-                    else str(request.tool_choice)
-                ),
-                "truncation": request.truncation,
-            },
-            response_metadata=request.metadata,
+            response_id=response_id,
+            output_items=[i.model_dump(exclude_none=True) for i in result.output],
             status=result.status,
-            error_code=result.error.code if result.error else None,
-            error_message=result.error.message if result.error else None,
+            usage=result.usage.model_dump() if result.usage else None,
+            error=result.error,
             incomplete_reason=(
                 result.incomplete_details.reason if result.incomplete_details else None
             ),
-            input_tokens=result.usage.input_tokens if result.usage else 0,
-            output_tokens=result.usage.output_tokens if result.usage else 0,
-            total_tokens=result.usage.total_tokens if result.usage else 0,
-            store=True,
-            background=False,
-            created_at=datetime.now(UTC),
-            completed_at=datetime.now(UTC),
         )
-        db.add(record)
-        db.commit()
 
     return result
