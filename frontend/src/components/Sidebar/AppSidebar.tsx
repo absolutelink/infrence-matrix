@@ -5,6 +5,7 @@ import {
   Cpu,
   Home,
   MessageSquare,
+  MessagesSquare,
   Server,
   Type,
 } from "lucide-react"
@@ -25,6 +26,7 @@ const baseItems: Item[] = [
   { icon: Cpu, title: "Agents", path: "/agents" },
   { icon: Box, title: "Server Instances", path: "/server-instances" },
   { icon: MessageSquare, title: "Chat", path: "/chat" },
+  { icon: MessagesSquare, title: "Responses API", path: "/responses" },
   { icon: Type, title: "Text Completion", path: "/completions" },
   { icon: Braces, title: "Embeddings", path: "/embeddings" },
   { icon: AudioLines, title: "Transcriptions", path: "/audio" },

@@ -18,6 +18,7 @@ import { Route as LayoutAudioIndexRouteImport } from './routes/_layout/audio/ind
 import { Route as LayoutChatIndexRouteImport } from './routes/_layout/chat/index'
 import { Route as LayoutCompletionsIndexRouteImport } from './routes/_layout/completions/index'
 import { Route as LayoutEmbeddingsIndexRouteImport } from './routes/_layout/embeddings/index'
+import { Route as LayoutResponsesIndexRouteImport } from './routes/_layout/responses/index'
 
 const LayoutRoute = LayoutRouteImport.update({
   id: '/_layout',
@@ -63,6 +64,11 @@ const LayoutEmbeddingsIndexRoute = LayoutEmbeddingsIndexRouteImport.update({
   path: '/embeddings/',
   getParentRoute: () => LayoutRoute,
 } as any)
+const LayoutResponsesIndexRoute = LayoutResponsesIndexRouteImport.update({
+  id: '/responses/',
+  path: '/responses/',
+  getParentRoute: () => LayoutRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof LayoutIndexRoute
@@ -73,6 +79,7 @@ export interface FileRoutesByFullPath {
   '/chat/': typeof LayoutChatIndexRoute
   '/completions/': typeof LayoutCompletionsIndexRoute
   '/embeddings/': typeof LayoutEmbeddingsIndexRoute
+  '/responses/': typeof LayoutResponsesIndexRoute
 }
 export interface FileRoutesByTo {
   '/agents': typeof LayoutAgentsRoute
@@ -83,6 +90,7 @@ export interface FileRoutesByTo {
   '/chat': typeof LayoutChatIndexRoute
   '/completions': typeof LayoutCompletionsIndexRoute
   '/embeddings': typeof LayoutEmbeddingsIndexRoute
+  '/responses': typeof LayoutResponsesIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -95,6 +103,7 @@ export interface FileRoutesById {
   '/_layout/chat/': typeof LayoutChatIndexRoute
   '/_layout/completions/': typeof LayoutCompletionsIndexRoute
   '/_layout/embeddings/': typeof LayoutEmbeddingsIndexRoute
+  '/_layout/responses/': typeof LayoutResponsesIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -107,6 +116,7 @@ export interface FileRouteTypes {
     | '/chat/'
     | '/completions/'
     | '/embeddings/'
+    | '/responses/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/agents'
@@ -117,6 +127,7 @@ export interface FileRouteTypes {
     | '/chat'
     | '/completions'
     | '/embeddings'
+    | '/responses'
   id:
     | '__root__'
     | '/_layout'
@@ -128,6 +139,7 @@ export interface FileRouteTypes {
     | '/_layout/chat/'
     | '/_layout/completions/'
     | '/_layout/embeddings/'
+    | '/_layout/responses/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -199,6 +211,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LayoutEmbeddingsIndexRouteImport
       parentRoute: typeof LayoutRoute
     }
+    '/_layout/responses/': {
+      id: '/_layout/responses/'
+      path: '/responses'
+      fullPath: '/responses/'
+      preLoaderRoute: typeof LayoutResponsesIndexRouteImport
+      parentRoute: typeof LayoutRoute
+    }
   }
 }
 
@@ -211,6 +230,7 @@ interface LayoutRouteChildren {
   LayoutChatIndexRoute: typeof LayoutChatIndexRoute
   LayoutCompletionsIndexRoute: typeof LayoutCompletionsIndexRoute
   LayoutEmbeddingsIndexRoute: typeof LayoutEmbeddingsIndexRoute
+  LayoutResponsesIndexRoute: typeof LayoutResponsesIndexRoute
 }
 
 const LayoutRouteChildren: LayoutRouteChildren = {
@@ -222,6 +242,7 @@ const LayoutRouteChildren: LayoutRouteChildren = {
   LayoutChatIndexRoute: LayoutChatIndexRoute,
   LayoutCompletionsIndexRoute: LayoutCompletionsIndexRoute,
   LayoutEmbeddingsIndexRoute: LayoutEmbeddingsIndexRoute,
+  LayoutResponsesIndexRoute: LayoutResponsesIndexRoute,
 }
 
 const LayoutRouteWithChildren =

@@ -35,7 +35,8 @@
 		"vscode": {
 			"extensions": [
 				"oven.bun-vscode",
-				"ms-python.python"
+				"ms-python.python",
+				"github.vscode-github-actions"
 			]
 		}
 	}

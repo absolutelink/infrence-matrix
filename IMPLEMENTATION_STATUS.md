@@ -140,16 +140,18 @@ Last Updated: September 23, 2026
 - [ ] Batch job management
 - [ ] Audio transcription UI
 
-#### OpenResponses API (`/v1/responses`) — in progress
+#### OpenResponses API (`/v1/responses`) — ✅ implemented (core scope)
 Target: [Open Responses spec v2026-04-24](https://www.openresponses.org/specification) (full core scope; WebSocket transport + `/responses/compact` deferred).
 
-- [ ] **Schemas module** (`backend/app/api/routes/v1/responses/schemas.py`): content parts (input_text/image/file/video, output_text, refusal, reasoning_text, summary_text), item params (user/system/developer/assistant messages, function_call, function_call_output, reasoning, item_reference, compaction), FunctionToolParam, tool_choice union incl. `allowed_tools`, text.format (text/json_object/json_schema), ReasoningParam, TextParam, StreamOptionsParam, Usage (+details), CreateResponseBody, ResponseResource
-- [ ] **Streaming events** (`events.py`): all ~24 spec events (response.created/queued/in_progress/completed/failed/incomplete, output_item.added/done, content_part.added/done, output_text.delta/done, refusal.*, reasoning.*, reasoning_summary_*, function_call_arguments.delta/done, error) with monotonic `sequence_number`, `event:`/`data:` SSE framing, terminal `[DONE]`
-- [ ] **Persistence**: new `responses` table mirroring ResponseResource 1:1 (replaces `conversations` table); `previous_response_id` chaining = previous.input + previous.output + new input; `store=false` → no persistence, `previous_response_not_found` error on missing chain
-- [ ] **Translator** (Responses items ↔ llama.cpp chat messages/chunks): input items → messages (instructions → system, function_call → assistant.tool_calls, function_call_output → tool role); llama.cpp tool_calls + reasoning_content → function_call/reasoning items; `allowed_tools` → client-side enforcement (OpenWebUI-style clients own tool execution; violations suppressed, response completes)
-- [ ] **POST /v1/responses**: model/alias resolution, non-streaming + SSE, error envelopes (previous_response_not_found etc.); `background=true` → 400; no GET retrieval endpoint (spec doesn't document one)
-- [ ] **Agent `--jinja` always-on**: llama.cpp tool calling requires `--jinja`; agent starts every llama-server with it (behavior change: templates drive formatting/parsing for chat/completions too)
-- [ ] **Reasoning**: map llama.cpp `reasoning_content` deltas → reasoning items + response.reasoning.delta/done events (thinking models)
+- [x] **Schemas module** (`backend/app/api/routes/v1/responses/schemas.py`): content parts (input_text/image/file/video, output_text, refusal, reasoning_text, summary_text), item params (user/system/developer/assistant messages, function_call, function_call_output, reasoning, item_reference, compaction), FunctionToolParam, tool_choice union incl. `allowed_tools`, text.format (text/json_object/json_schema), ReasoningParam, TextParam, StreamOptionsParam, Usage (+details), CreateResponseBody, ResponseResource
+- [x] **Streaming events** (`events.py`): all ~24 spec events (response.created/queued/in_progress/completed/failed/incomplete, output_item.added/done, content_part.added/done, output_text.delta/done, refusal.*, reasoning.*, reasoning_summary_*, function_call_arguments.delta/done, error) with monotonic `sequence_number`, `event:`/`data:` SSE framing, terminal `[DONE]`
+- [x] **Persistence**: new `responses` table mirroring ResponseResource 1:1 (replaces `conversations` table, migration `b1f8c2a47d90`); `previous_response_id` chaining = previous.input + previous.output + new input; `store=false` → no persistence, `previous_response_not_found` error on missing chain
+- [x] **Translator** (`translator.py`, Responses items ↔ llama.cpp chat messages/chunks): input items → messages (instructions → system, function_call/output replay as text, reasoning skipped); llama.cpp tool_calls + reasoning_content → function_call/reasoning items; `allowed_tools` → backend enforcement (violating calls suppressed into a note message)
+- [x] **POST /v1/responses**: alias resolution (incl. stopped/errored auto-start) + name/id fallback, non-streaming + SSE, spec error envelopes (previous_response_not_found, model_not_found); `background=true` → 400; no GET retrieval endpoint (spec doesn't document one)
+- [x] **Agent `--jinja` always-on**: llama.cpp tool calling requires `--jinja`; agent starts every llama-server with it (behavior change: templates drive formatting/parsing for chat/completions too)
+- [x] **Reasoning**: map llama.cpp `reasoning_content` deltas → reasoning items + response.reasoning.delta/done events (thinking models)
+- [x] **Tests**: `tests/api/routes/test_responses_unit.py` (schemas/translator/StreamState/SSE framing), `tests/api/routes/test_v1_responses.py` (routes), regenerated frontend client
+- [x] **UI test page** (`/responses`): dedicated playground — server selector, spec SSE parsing (`event:`+`data:` frames), rendered items (text, Thinking, tool-call chips), **raw streaming-event inspector** (sequence_number + collapsible JSON payloads), `store` toggle with `previous_response_id` chaining ("New conversation" resets), temperature/max_tokens sliders, non-streaming mode rendering the full ResponseResource; added Switch component (`radix-ui`); sidebar entry "Responses API" after Chat
 - [ ] Deferred: WebSocket transport, `/responses/compact`, service_tier behavior (accepted, maps to default)
 
 Key llama.cpp facts (researched):
@@ -284,7 +286,7 @@ API_URL=https://matrix.thelink.family
 
 ---
 
-## 📝 Recent Changes
+## 🗄️ Change Archive
 
 ### September 22, 2026 (afternoon - server lifecycle & streaming)
 - ✅ Real agent event bus: `/ws/status` now streams server.started/stopped/error, download.progress, gpu.usage, log.lines (was heartbeat-only)
@@ -337,15 +339,24 @@ API_URL=https://matrix.thelink.family
 
 ## 🎯 Next Steps
 
-1. **OpenResponses API** - implement `/v1/responses` per plan in section above (schemas → events → persistence → translator → route → agent --jinja → tests → client regen)
+1. ~~OpenResponses API~~ ✅ implemented (see Inference Features section)
 2. **Server health monitoring** - periodic health checks; auto-mark instances unhealthy/stopped
 3. **Dashboard Metrics** - Add charts and statistics (gpu.usage events already streaming)
 4. ~~Schedule cleanup loop~~ - run cleanup_offline_agents periodically on startup ✅
-5. **Inference UI** - text completion, embeddings, audio transcription pages
+5. **Inference UI** - embeddings, audio transcription pages (text completion done)
 
 ---
 
 ## 📝 Recent Changes
+
+### September 23, 2026 (Responses API test page)
+- ✅ New UI page `/responses` ("Responses API" in sidebar after Chat): playground for the OpenResponses endpoint
+- ✅ Spec-framed SSE parsing (`event:` + `data:` blocks, `[DONE]` terminator — richer than the chat page's data-line-only parser)
+- ✅ Rendered output items: text bubbles, Thinking disclosures (response.reasoning.delta), tool-call chips (function_call items)
+- ✅ Raw streaming-event inspector panel: every event with sequence_number, type color coding, collapsible JSON payload
+- ✅ Test affordances: `store` toggle with `previous_response_id` chaining (New-conversation button resets), temperature / max_output_tokens sliders, non-streaming mode via generated client
+- ✅ Added missing `switch.tsx` Shadcn component (unified `radix-ui` package); empty `Sparkles` cleanup
+- ✅ tsc clean, biome clean, production build green, routeTree regenerated
 
 ### September 23, 2026 (invisible cold starts)
 - ✅ New shared service `backend/app/services/server_startup.py`: `ensure_server_ready` / `ensure_server_ready_by_id` / `find_alias_instance` — running servers pass through, `starting` instances are waited on (dedup: parallel requests share one startup), `stopped`/`error` instances are auto-started via agent dispatch and the request waits for health
@@ -355,21 +366,20 @@ API_URL=https://matrix.thelink.family
 - ✅ Chat + completions UI selectors now list **all** server instances (running first), stopped ones annotated "(will start on first message)" — no more dead selections
 - ✅ Tests: `tests/services/test_server_startup.py` (7 cases: running/starting/error/stopped/missing paths)
 
-### September 23, 2026 (OpenResponses API planning)
-- ✅ Planned OpenResponses (`/v1/responses`) implementation targeting spec v2026-04-24 (full core scope; WebSocket + `/responses/compact` deferred) — see plan in Inference Features section
-- ✅ Decisions locked: rewrite in new `responses/` package (stub `v1_responses.py` to be deleted); new `responses` table replaces `conversations`; tools wired through llama.cpp native function calling (requires agent `--jinja` always-on); reasoning items included; `allowed_tools` enforced backend-side (clients like OpenWebUI own tool execution); no GET retrieval endpoint (spec doesn't document one)
+### September 23, 2026 (OpenResponses API)
+- ✅ Planned + implemented OpenResponses (`/v1/responses`) targeting spec v2026-04-24 — schemas, streaming events, `responses` table (drops `conversations`), translator, agent `--jinja` always-on, unit + route tests, regenerated client (see Inference Features section for the full checklist)
 
 ---
 
 ## 📊 Statistics
 
-- **Frontend Routes**: 6 (dashboard, models, agents, server-instances, chat, 404)
-- **API Endpoints**: 25+ implemented (incl. server-instances start/stop/restart, models status)
-- **UI Components**: 50+ Shadcn components
-- **Database Models**: 8 SQLModel classes
+- **Frontend Routes**: 9 (dashboard, models, agents, server-instances, chat, responses, completions, embeddings, audio)
+- **API Endpoints**: 30+ implemented (incl. server-instances start/stop/restart, `/v1/responses`, models status)
+- **UI Components**: 50+ Shadcn components (incl. new Switch)
+- **Database Models**: 8 SQLModel classes (ResponseRecord replaced Conversation)
 - **Docker Layers**: 2-stage build
 - **Entrypoint Scripts**: 3 modular scripts
-- **Event Types**: 8 (server.started/stopped/error, download.started/progress/completed/failed, gpu.usage, log.lines)
+- **Event Types**: 8 agent events + 24 OpenResponses streaming events
 - **Agent Recipes**: 1 (vulkan on AMD Strix Halo)
 
 ---
