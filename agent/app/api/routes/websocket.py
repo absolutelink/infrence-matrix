@@ -6,7 +6,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.config import settings
 from app.core.logging import logger
-from app.services.event_bus import event_buffer, subscribe, unsubscribe
+from app.services.event_bus import subscribe, unsubscribe
 
 router = APIRouter(tags=["websocket"])
 
@@ -48,11 +48,13 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
 
 async def _send_events(websocket: WebSocket, queue: asyncio.Queue) -> None:
-    """Forward queued events to the WebSocket client."""
-    # Replay buffered events on (re)connect
-    for event in event_buffer.get_all():
-        await websocket.send_json(event)
+    """Forward queued events to the WebSocket client.
 
+    Buffered events are NOT replayed on (re)connect: stale server.started /
+    server.stopped events from a previous connection used to be replayed to
+    the backend, making instance state flap between running and stopped.
+    Fresh state arrives via registration (running_server_ids) instead.
+    """
     while True:
         event = await queue.get()
         await websocket.send_json(event)

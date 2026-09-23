@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import uuid as uuid_module
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -226,16 +227,24 @@ class AgentManager:
 
         logger.debug(f"Received event from agent {agent_id}: {event_type}")
 
-        if event_type == "server.started":
-            await self._handle_server_started(agent_id, event_data)
-        elif event_type == "server.stopped":
-            await self._handle_server_stopped(agent_id, event_data)
-        elif event_type == "server.error":
-            await self._handle_server_error(agent_id, event_data)
-        elif event_type == "gpu.usage":
-            await self._handle_gpu_usage(agent_id, event_data)
-        elif event_type == "download.progress":
-            await self._handle_download_progress(agent_id, event_data)
+        try:
+            if event_type == "server.started":
+                await self._handle_server_started(agent_id, event_data)
+            elif event_type == "server.stopped":
+                await self._handle_server_stopped(agent_id, event_data)
+            elif event_type == "server.error":
+                await self._handle_server_error(agent_id, event_data)
+            elif event_type == "gpu.usage":
+                await self._handle_gpu_usage(agent_id, event_data)
+            elif event_type == "download.progress":
+                await self._handle_download_progress(agent_id, event_data)
+        except Exception as e:
+            # A bad event must not kill the agent WebSocket (an exception
+            # here previously tore down the connection and triggered a
+            # reconnect storm).
+            logger.warning(
+                f"Failed handling {event_type} event from agent {agent_id}: {e}"
+            )
 
     async def _handle_server_error(self, agent_id: str, data: dict) -> None:
         """Handle server.error event."""
@@ -326,18 +335,27 @@ class AgentManager:
             from app.models import DownloadJob
 
             job_id = data.get("job_id")
-            if job_id:
-                result = await session.execute(
-                    select(DownloadJob).where(DownloadJob.id == job_id)
-                )
-                job = result.scalar_one_or_none()
+            if not job_id:
+                return
+            # Auto-start downloads use synthetic ids like "server-<uuid>"
+            # (not DownloadJob rows). Skip them instead of letting the UUID
+            # cast fail — it used to crash the whole agent WS handler.
+            try:
+                job_uuid = uuid_module.UUID(str(job_id))
+            except ValueError, AttributeError:
+                logger.debug(f"Ignoring download.progress for non-job id {job_id}")
+                return
+            result = await session.execute(
+                select(DownloadJob).where(DownloadJob.id == job_uuid)
+            )
+            job = result.scalar_one_or_none()
 
-                if job:
-                    job.progress_percent = data.get("progress_percent", 0)
-                    job.bytes_downloaded = data.get("bytes_downloaded", 0)
-                    job.current_speed = data.get("speed_mbps", 0) * 1_000_000
-                    session.add(job)
-                    await session.commit()
+            if job:
+                job.progress_percent = data.get("progress_percent", 0)
+                job.bytes_downloaded = data.get("bytes_downloaded", 0)
+                job.current_speed = data.get("speed_mbps", 0) * 1_000_000
+                session.add(job)
+                await session.commit()
 
     async def send_to_agent(
         self,
