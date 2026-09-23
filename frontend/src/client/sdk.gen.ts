@@ -688,7 +688,9 @@ export class V1 {
      *
      * List available models.
      *
-     * Returns a list of models that are available for inference.
+     * Returns the aliases of server instances that are starting or running —
+     * these are the names clients can use in the `model` field of
+     * /v1/chat/completions, /v1/completions, and /v1/embeddings.
      */
     public static listModels<ThrowOnError extends boolean = true>(options?: Options<v1ModelsListModelsData, ThrowOnError>) {
         return (options?.client ?? client).get<v1ModelsListModelsResponses, unknown, ThrowOnError>({
@@ -701,10 +703,10 @@ export class V1 {
     /**
      * Retrieve Model
      *
-     * Retrieve a specific model.
+     * Retrieve a specific model by alias.
      *
      * Args:
-     * model_id: The ID of the model to retrieve
+     * model_id: The server alias to retrieve
      */
     public static retrieveModel<ThrowOnError extends boolean = true>(options: Options<v1ModelsRetrieveModelData, ThrowOnError>) {
         return (options.client ?? client).get<v1ModelsRetrieveModelResponses, v1ModelsRetrieveModelErrors, ThrowOnError>({

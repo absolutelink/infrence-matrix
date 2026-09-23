@@ -9,7 +9,7 @@ from sqlmodel import Session, select
 
 from app.api.deps import get_db
 from app.api.routes.v1.v1_chat_completions import _get_or_create_server
-from app.models import Model
+from app.models import Model, ServerInstance
 from app.services.agent_manager import agent_manager
 
 logger = logging.getLogger(__name__)
@@ -56,26 +56,45 @@ async def create_embedding(
     db: Session = Depends(get_db),
 ) -> EmbeddingResponse:
     """Create embeddings for the given input text via Agent proxy."""
-    # Get model by name (OpenAI style) or id (UI legacy)
-    model = db.exec(select(Model).where(Model.name == request.model)).first()
-    if not model:
+    # Resolve model field: a server alias routes to that server directly;
+    # otherwise it is a model name/id and a server is found or started.
+    server: ServerInstance | None = None
+    server_q = select(ServerInstance).where(
+        ServerInstance.alias == request.model,
+        ServerInstance.status.in_(["starting", "running"]),
+    )
+    instance = db.exec(server_q).first()
+
+    if instance is not None:
+        server = instance
+        model = db.exec(select(Model).where(Model.id == instance.model_id)).first()
+        if not model:
+            raise HTTPException(
+                404, f"Model for server alias {request.model} not found"
+            )
+    else:
+        # Get model by name (OpenAI style) or id (UI legacy)
+        model = db.exec(select(Model).where(Model.name == request.model)).first()
+        if not model:
+            try:
+                model = db.exec(select(Model).where(Model.id == request.model)).first()
+            except Exception:
+                model = None
+        if not model:
+            raise HTTPException(404, f"Model {request.model} not found")
+
+        if not model.supports_embeddings:
+            raise HTTPException(
+                400, f"Model '{request.model}' does not support embeddings"
+            )
+
         try:
-            model = db.exec(select(Model).where(Model.id == request.model)).first()
-        except Exception:
-            model = None
-    if not model:
-        raise HTTPException(404, f"Model {request.model} not found")
-
-    if not model.supports_embeddings:
-        raise HTTPException(400, f"Model '{request.model}' does not support embeddings")
-
-    try:
-        server = await _get_or_create_server(model, request.agent_id)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Server creation failed: {e}")
-        raise HTTPException(503, f"Failed to start server: {e}")
+            server = await _get_or_create_server(model, request.agent_id)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Server creation failed: {e}")
+            raise HTTPException(503, f"Failed to start server: {e}")
 
     inputs = request.input if isinstance(request.input, list) else [request.input]
 

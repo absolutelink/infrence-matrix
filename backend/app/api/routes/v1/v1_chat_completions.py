@@ -473,24 +473,43 @@ async def create_chat_completion(
     request_id = f"chatcmpl-{uuid.uuid4()}"
     created = int(time.time())
 
-    # Get model by name (OpenAI style) or id (UI legacy)
-    model = db.exec(select(Model).where(Model.name == request.model)).first()
-    if not model:
-        try:
-            model = db.exec(select(Model).where(Model.id == request.model)).first()
-        except Exception:
-            model = None
-    if not model:
-        raise HTTPException(404, f"Model {request.model} not found")
+    # Resolve model field: a server alias (public name from /v1/models)
+    # routes directly to that server; otherwise it is a model name/id and
+    # a server is found or started for it.
+    server: ServerInstance | None = None
+    instance = db.exec(
+        select(ServerInstance).where(
+            ServerInstance.alias == request.model,
+            ServerInstance.status.in_(["starting", "running"]),
+        )
+    ).first()
 
-    # Get or create server
-    try:
-        server = await _get_or_create_server(model, request.agent_id)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Server creation failed: {e}")
-        raise HTTPException(503, f"Failed to start server: {e}")
+    if instance is not None:
+        server = instance
+        model = db.exec(select(Model).where(Model.id == instance.model_id)).first()
+        if not model:
+            raise HTTPException(
+                404, f"Model for server alias {request.model} not found"
+            )
+    else:
+        # Get model by name (OpenAI style) or id (UI legacy)
+        model = db.exec(select(Model).where(Model.name == request.model)).first()
+        if not model:
+            try:
+                model = db.exec(select(Model).where(Model.id == request.model)).first()
+            except Exception:
+                model = None
+        if not model:
+            raise HTTPException(404, f"Model {request.model} not found")
+
+        # Get or create server
+        try:
+            server = await _get_or_create_server(model, request.agent_id)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Server creation failed: {e}")
+            raise HTTPException(503, f"Failed to start server: {e}")
 
     if request.stream:
         # Stream response

@@ -32,6 +32,7 @@ type ServerInstance = {
   id: string
   model_id: string
   model_name: string | null
+  alias: string
   status: string
   health_status: string
   agent_id: string
@@ -310,7 +311,10 @@ function InstanceActions({ instance }: { instance: ServerInstance }) {
       <EditServerDialog
         isOpen={editOpen}
         onClose={() => setEditOpen(false)}
-        instance={instance}
+        instance={{
+          ...instance,
+          alias: instance.alias ?? "",
+        }}
       />
     </>
   )

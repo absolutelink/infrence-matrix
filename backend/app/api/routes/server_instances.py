@@ -24,6 +24,7 @@ class ServerInstanceResponse(BaseModel):
     id: str
     model_id: str
     model_name: str | None = None
+    alias: str
     status: str
     health_status: str
     agent_id: str
@@ -51,11 +52,14 @@ class StartServerRequest(BaseModel):
     agent_id: str | None = None
     gpu_layers: int = 35
     context_size: int = 4096
+    # Public name clients use in OpenAI-compatible requests
+    alias: str = Field(..., min_length=1, max_length=255)
 
 
 class UpdateServerRequest(BaseModel):
     """Editable server settings. All fields optional."""
 
+    alias: str | None = Field(None, min_length=1, max_length=255)
     gpu_layers: int | None = Field(None, ge=0, le=1000)
     context_size: int | None = Field(None, ge=256, le=1_048_576)
     flash_attn: bool | None = None
@@ -81,6 +85,7 @@ async def list_server_instances() -> ServerInstanceListResponse:
                     id=str(instance.id),
                     model_id=str(instance.model_id),
                     model_name=instance.model.name if instance.model else None,
+                    alias=instance.alias,
                     status=instance.status,
                     health_status=instance.health_status,
                     agent_id=str(instance.agent_id),
@@ -124,6 +129,7 @@ async def get_server_instance(server_id: str) -> ServerInstanceResponse:
             id=str(instance.id),
             model_id=str(instance.model_id),
             model_name=instance.model.name if instance.model else None,
+            alias=instance.alias,
             status=instance.status,
             health_status=instance.health_status,
             agent_id=str(instance.agent_id),
@@ -167,11 +173,24 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
                 status_code=503, detail="No online agent available to start server"
             )
 
+        # Reject duplicate aliases up front for a clean 4xx (the DB unique
+        # constraint stays as the race backstop).
+        existing_alias = await session.execute(
+            select(col(ServerInstance.id)).where(
+                col(ServerInstance.alias) == request.alias
+            )
+        )
+        if existing_alias.scalar_one_or_none() is not None:
+            raise HTTPException(
+                status_code=409, detail=f"Alias '{request.alias}' already exists"
+            )
+
         # The agent allocates a random free port per start; the port is not
         # persisted. Create the instance row up front so the UI can track it.
         server = ServerInstance(
             model_id=model.id,
             agent_id=agent.id,
+            alias=request.alias,
             process_command=f"{model.source_file or model.path}",
             gpu_layers=request.gpu_layers,
             context_size=request.context_size,
@@ -287,6 +306,19 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
             )
 
         was_running = instance.status == "running"
+
+        if request.alias is not None and request.alias != instance.alias:
+            existing_alias = await session.execute(
+                select(col(ServerInstance.id)).where(
+                    col(ServerInstance.alias) == request.alias,
+                    col(ServerInstance.id) != instance.id,
+                )
+            )
+            if existing_alias.scalar_one_or_none() is not None:
+                raise HTTPException(
+                    status_code=409, detail=f"Alias '{request.alias}' already exists"
+                )
+            instance.alias = request.alias
 
         if request.gpu_layers is not None:
             instance.gpu_layers = request.gpu_layers

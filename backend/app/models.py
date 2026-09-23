@@ -353,6 +353,10 @@ class ServerInstance(SQLModel, table=True):
         ondelete="CASCADE",
     )
 
+    # Public name clients use in OpenAI-compatible requests (/v1/models,
+    # model field of chat/completions). Unique across all instances.
+    alias: str = Field(unique=True, index=True, max_length=255)
+
     pid: int | None = None
     process_command: str
 

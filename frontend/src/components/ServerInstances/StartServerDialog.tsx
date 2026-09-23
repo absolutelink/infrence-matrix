@@ -32,6 +32,7 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
   const queryClient = useQueryClient()
   const [modelId, setModelId] = useState<string>("")
   const [agentId, setAgentId] = useState<string>("")
+  const [alias, setAlias] = useState("")
   const [gpuLayers, setGpuLayers] = useState("35")
   const [contextSize, setContextSize] = useState("4096")
 
@@ -57,6 +58,7 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
     mutationFn: async () => {
       const body: StartServerRequest = {
         model_id: modelId,
+        alias: alias.trim(),
         gpu_layers: Number(gpuLayers) || 35,
         context_size: Number(contextSize) || 4096,
       }
@@ -101,6 +103,16 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
         </DialogHeader>
 
         <div className="space-y-4 py-2">
+          <div>
+            <Label htmlFor="start-alias">Alias</Label>
+            <Input
+              id="start-alias"
+              value={alias}
+              onChange={(e) => setAlias(e.target.value)}
+              placeholder="Public name clients will use (e.g. qwen-4b)"
+              className="mt-1"
+            />
+          </div>
           <div>
             <Label>Model</Label>
             <Select value={modelId} onValueChange={setModelId}>
@@ -170,7 +182,7 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
           <LoadingButton
             onClick={() => startMutation.mutate()}
             loading={startMutation.isPending}
-            disabled={!modelId}
+            disabled={!modelId || !alias.trim()}
           >
             Start Server
           </LoadingButton>

@@ -303,14 +303,12 @@ export type ChatCompletionRequest = {
     /**
      * Tools
      */
-    tools?: Array<{
-        [key: string]: string;
-    }> | null;
+    tools?: Array<Tool> | null;
     /**
      * Tool Choice
      */
     tool_choice?: string | {
-        [key: string]: string;
+        [key: string]: unknown;
     } | null;
     /**
      * Prompt Cache Options
@@ -318,22 +316,37 @@ export type ChatCompletionRequest = {
     prompt_cache_options?: {
         [key: string]: unknown;
     } | null;
+    stream_options?: StreamOptions | null;
 };
 
 /**
  * ChatMessage
  *
- * Chat message.
+ * Chat message (content may be null for assistant tool-call turns).
  */
 export type ChatMessage = {
     /**
      * Role
      */
-    role: 'system' | 'user' | 'assistant' | 'developer';
+    role: 'system' | 'user' | 'assistant' | 'developer' | 'tool';
     /**
      * Content
      */
-    content: string;
+    content?: string | null;
+    /**
+     * Name
+     */
+    name?: string | null;
+    /**
+     * Tool Call Id
+     */
+    tool_call_id?: string | null;
+    /**
+     * Tool Calls
+     */
+    tool_calls?: Array<{
+        [key: string]: unknown;
+    }> | null;
 };
 
 /**
@@ -398,6 +411,7 @@ export type CompletionRequest = {
      * Suffix
      */
     suffix?: string | null;
+    stream_options?: StreamOptions | null;
 };
 
 /**
@@ -1070,6 +1084,10 @@ export type ServerInstanceResponse = {
      */
     model_name?: string | null;
     /**
+     * Alias
+     */
+    alias: string;
+    /**
      * Status
      */
     status: string;
@@ -1183,6 +1201,57 @@ export type StartServerRequest = {
      * Context Size
      */
     context_size?: number;
+    /**
+     * Alias
+     */
+    alias: string;
+};
+
+/**
+ * StreamOptions
+ *
+ * OpenAI stream_options (include_usage emits a final usage chunk).
+ */
+export type StreamOptions = {
+    /**
+     * Include Usage
+     */
+    include_usage?: boolean;
+};
+
+/**
+ * Tool
+ *
+ * OpenAI tool definition ({"type": "function", "function": {...}}).
+ */
+export type Tool = {
+    /**
+     * Type
+     */
+    type?: string;
+    function: ToolFunction;
+};
+
+/**
+ * ToolFunction
+ *
+ * OpenAI tool function definition.
+ */
+export type ToolFunction = {
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Description
+     */
+    description?: string;
+    /**
+     * Parameters
+     */
+    parameters?: {
+        [key: string]: unknown;
+    };
 };
 
 /**
@@ -1215,6 +1284,10 @@ export type TranslationResponse = {
  * Editable server settings. All fields optional.
  */
 export type UpdateServerRequest = {
+    /**
+     * Alias
+     */
+    alias?: string | null;
     /**
      * Gpu Layers
      */

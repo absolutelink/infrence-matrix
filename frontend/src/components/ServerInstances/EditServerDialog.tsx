@@ -23,6 +23,7 @@ interface EditServerDialogProps {
     id: string
     model_name: string | null
     status: string
+    alias: string
     gpu_layers: number
     context_size: number
     flash_attn: boolean
@@ -36,6 +37,7 @@ export function EditServerDialog({
   instance,
 }: EditServerDialogProps) {
   const queryClient = useQueryClient()
+  const [alias, setAlias] = useState("")
   const [gpuLayers, setGpuLayers] = useState("35")
   const [contextSize, setContextSize] = useState("4096")
   const [flashAttn, setFlashAttn] = useState(true)
@@ -43,6 +45,7 @@ export function EditServerDialog({
 
   useEffect(() => {
     if (isOpen) {
+      setAlias(instance.alias)
       setGpuLayers(String(instance.gpu_layers))
       setContextSize(String(instance.context_size))
       setFlashAttn(instance.flash_attn)
@@ -57,6 +60,7 @@ export function EditServerDialog({
       return ServerInstancesService.instancesUpdateServer({
         path: { server_id: instance.id },
         body: {
+          alias: alias.trim() || instance.alias,
           gpu_layers: Number(gpuLayers),
           context_size: Number(contextSize),
           flash_attn: flashAttn,
@@ -100,6 +104,16 @@ export function EditServerDialog({
         </DialogHeader>
 
         <div className="grid grid-cols-2 gap-4 py-2">
+          <div className="col-span-2">
+            <Label htmlFor="alias">Alias</Label>
+            <Input
+              id="alias"
+              value={alias}
+              onChange={(e) => setAlias(e.target.value)}
+              placeholder="Public name clients use in requests"
+              className="mt-1"
+            />
+          </div>
           <div>
             <Label htmlFor="gpu-layers">GPU layers</Label>
             <Input
