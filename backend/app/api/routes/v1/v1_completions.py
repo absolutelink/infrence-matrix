@@ -39,6 +39,8 @@ class CompletionRequest(BaseModel):
     n: int = 1
     logprobs: int | None = None
     suffix: str | None = None
+    # OpenAI-compatible: {"include_usage": true} adds a final usage chunk
+    stream_options: StreamOptions | None = None
 
 
 class CompletionChoice(BaseModel):
@@ -56,6 +58,24 @@ class UsageInfo(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    prompt_tokens_details: dict[str, int] | None = None
+    completion_tokens_details: dict[str, int] | None = None
+
+    @classmethod
+    def build(cls, prompt_tokens: int, completion_tokens: int) -> UsageInfo:
+        """Build with OpenAI-style detail sub-objects (zeros)."""
+        return cls(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            prompt_tokens_details={"cached_tokens": 0, "audio_tokens": 0},
+            completion_tokens_details={
+                "reasoning_tokens": 0,
+                "audio_tokens": 0,
+                "accepted_prediction_tokens": 0,
+                "rejected_prediction_tokens": 0,
+            },
+        )
 
 
 class CompletionResponse(BaseModel):
@@ -86,6 +106,14 @@ class CompletionChunk(BaseModel):
     created: int
     model: str
     choices: list[StreamChoice]
+    # Populated only on the final usage chunk (choices: []); null otherwise
+    usage: UsageInfo | None = None
+
+
+class StreamOptions(BaseModel):
+    """OpenAI stream_options (include_usage emits a final usage chunk)."""
+
+    include_usage: bool = True
 
 
 def _convert_prompt_to_llama_format(
@@ -139,6 +167,11 @@ async def _stream_completion_via_agent(
     """Stream completion via Agent proxy."""
     payload = _build_payload(request, stream=True)
     created = int(time.time())
+    include_usage = not (
+        request.stream_options and not request.stream_options.include_usage
+    )
+    fallback_completion_chars = 0
+    final_usage: UsageInfo | None = None
 
     try:
         agent = await agent_manager.get_agent(agent_id)
@@ -161,12 +194,17 @@ async def _stream_completion_via_agent(
                     if line.startswith("data: "):
                         data = line[6:]
                         if data.strip() == "[DONE]":
-                            yield "data: [DONE]\n\n"
                             break
 
                         try:
                             chunk_data = json.loads(data)
+
+                            chunk_usage = _extract_completion_usage(chunk_data)
+                            if chunk_usage is not None:
+                                final_usage = chunk_usage
+
                             text = _extract_chunk_text(chunk_data)
+                            fallback_completion_chars += len(text)
 
                             stream_chunk = CompletionChunk(
                                 id=request_id,
@@ -179,6 +217,7 @@ async def _stream_completion_via_agent(
                                         finish_reason=chunk_data.get("finish_reason"),
                                     )
                                 ],
+                                usage=None,
                             )
 
                             yield f"data: {stream_chunk.model_dump_json()}\n\n"
@@ -187,10 +226,65 @@ async def _stream_completion_via_agent(
                             logger.warning(f"Invalid JSON in stream: {data}")
                             continue
 
+                if include_usage:
+                    usage = final_usage
+                    if usage is None:
+                        # Fallback: estimate from prompt length + streamed chars
+                        prompt = _convert_prompt_to_llama_format(request.prompt)
+                        usage = UsageInfo.build(
+                            prompt_tokens=len(prompt) // 4,
+                            completion_tokens=fallback_completion_chars // 4,
+                        )
+                    final_chunk = CompletionChunk(
+                        id=request_id,
+                        created=created,
+                        model=request.model,
+                        choices=[],
+                        usage=usage,
+                    )
+                    yield f"data: {final_chunk.model_dump_json()}\n\n"
+
+                yield "data: [DONE]\n\n"
+
     except Exception as e:
         logger.error(f"Streaming error: {e}")
         error_chunk = {"error": {"message": str(e), "type": "server_error"}}
         yield f"data: {json.dumps(error_chunk)}\n\n"
+
+
+def _extract_completion_usage(chunk_data: dict) -> UsageInfo | None:
+    """Extract usage from a chunk (OpenAI usage obj or llama.cpp timings)."""
+    usage = chunk_data.get("usage")
+    if not isinstance(usage, dict) or not usage:
+        if "tokens_evaluated" in chunk_data or "tokens_predicted" in chunk_data:
+            usage = {
+                "prompt_tokens": chunk_data.get("tokens_evaluated", 0),
+                "completion_tokens": chunk_data.get("tokens_predicted", 0),
+            }
+        else:
+            return None
+
+    prompt_tokens = int(usage.get("prompt_tokens", 0)) or 0
+    completion_tokens = int(usage.get("completion_tokens", 0)) or 0
+    total = usage.get("total_tokens")
+    total_tokens = (
+        int(total) if total is not None else prompt_tokens + completion_tokens
+    )
+
+    return UsageInfo(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        prompt_tokens_details=usage.get("prompt_tokens_details")
+        or {"cached_tokens": 0, "audio_tokens": 0},
+        completion_tokens_details=usage.get("completion_tokens_details")
+        or {
+            "reasoning_tokens": 0,
+            "audio_tokens": 0,
+            "accepted_prediction_tokens": 0,
+            "rejected_prediction_tokens": 0,
+        },
+    )
 
 
 def _extract_chunk_text(chunk_data: dict) -> str:
@@ -290,11 +384,7 @@ async def create_completion(
                     finish_reason=finish_reason,
                 )
             ],
-            usage=UsageInfo(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
-            ),
+            usage=UsageInfo.build(prompt_tokens, completion_tokens),
         )
 
     except Exception as e:
