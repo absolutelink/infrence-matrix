@@ -456,3 +456,40 @@ async def stop_server(server_id: str) -> dict[str, str]:
             logger.warning(f"Failed to stop server on agent: {e}")
 
         return {"status": "stopped", "message": "Server stop request sent"}
+
+
+@router.delete("/{server_id}")
+async def delete_server(server_id: str) -> dict[str, str]:
+    """Delete a server instance, stopping it on the agent if needed."""
+    async with AsyncSessionMaker() as session:
+        instance = await session.get(ServerInstance, uuid_module.UUID(server_id))
+        if not instance:
+            raise HTTPException(status_code=404, detail="Server instance not found")
+
+        was_active = instance.status in ("starting", "running")
+        agent_id = str(instance.agent_id)
+        instance_id = str(instance.id)
+
+        # Stop the llama-server on the agent first (best effort) so the
+        # process does not outlive its row.
+        if was_active:
+            try:
+                await agent_manager.send_to_agent(
+                    agent_id,
+                    "POST",
+                    "/servers/stop",
+                    {"server_id": instance_id},
+                    timeout=60.0,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to stop server on agent before delete: {e}")
+
+        await session.delete(instance)
+        await session.commit()
+
+    return {
+        "status": "deleted",
+        "server_id": instance_id,
+        "message": "Server instance deleted"
+        + (" (stop request sent to agent)" if was_active else ""),
+    }

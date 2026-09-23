@@ -10,6 +10,7 @@ import {
   Play,
   Power,
   Terminal,
+  Trash2,
 } from "lucide-react"
 import { useState } from "react"
 import { toast } from "sonner"
@@ -256,6 +257,20 @@ function InstanceActions({ instance }: { instance: ServerInstance }) {
     },
   })
 
+  const deleteMutation = useMutation({
+    mutationFn: async () =>
+      ServerInstancesService.instancesDeleteServer({
+        path: { server_id: instance.id },
+      }),
+    onSuccess: () => {
+      toast.success("Server instance deleted")
+      queryClient.invalidateQueries({ queryKey: ["server-instances"] })
+    },
+    onError: (error: Error) => {
+      toast.error(`Failed to delete server: ${error.message}`)
+    },
+  })
+
   const canStart =
     instance.status !== "running" && instance.status !== "starting"
 
@@ -299,6 +314,26 @@ function InstanceActions({ instance }: { instance: ServerInstance }) {
               Start Server
             </DropdownMenuItem>
           ) : null}
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            className="text-destructive"
+            onClick={() => {
+              if (
+                window.confirm(
+                  `Delete server instance "${instance.alias || instance.id}"?` +
+                    (instance.status === "running"
+                      ? " It will be stopped first."
+                      : ""),
+                )
+              ) {
+                deleteMutation.mutate()
+              }
+            }}
+            disabled={deleteMutation.isPending}
+          >
+            <Trash2 className="mr-2 h-4 w-4" />
+            Delete
+          </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
 

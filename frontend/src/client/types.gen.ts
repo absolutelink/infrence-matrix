@@ -1550,6 +1550,40 @@ export type serverInstancesListServerInstancesResponses = {
 
 export type serverInstancesListServerInstancesResponse = serverInstancesListServerInstancesResponses[keyof serverInstancesListServerInstancesResponses];
 
+export type serverInstancesDeleteServerData = {
+    body?: never;
+    path: {
+        /**
+         * Server Id
+         */
+        server_id: string;
+    };
+    query?: never;
+    url: '/api/v1/server-instances/{server_id}';
+};
+
+export type serverInstancesDeleteServerErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type serverInstancesDeleteServerError = serverInstancesDeleteServerErrors[keyof serverInstancesDeleteServerErrors];
+
+export type serverInstancesDeleteServerResponses = {
+    /**
+     * Response Server-Instances-Delete Server
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: string;
+    };
+};
+
+export type serverInstancesDeleteServerResponse = serverInstancesDeleteServerResponses[keyof serverInstancesDeleteServerResponses];
+
 export type serverInstancesGetServerInstanceData = {
     body?: never;
     path: {
