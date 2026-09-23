@@ -609,11 +609,17 @@ async def create_response(
     # concatenate each record's input+output in order (full conversation).
     history: list[dict[str, Any]] = _build_chain_history(db, previous)
 
+    # Log the actual message list sent to llama.cpp (request input + chain
+    # history) — this is the ground truth for context debugging.
+    try:
+        llama_messages = input_items_to_llama_messages(request, history)
+    except TranslationError as e:
+        return _error_response(400, "invalid_request", "invalid_input", str(e))
     continuation = previous is not None
     logger.info(
         "responses: %s model=%s server=%s stream=%s store=%s "
         "previous_response_id=%s chain_depth=%d history_items=%d "
-        "history_chars=%d",
+        "history_chars=%d llama_messages=%d prompt_chars=%d",
         "continuation" if continuation else "new response",
         request.model,
         server.id,
@@ -623,6 +629,12 @@ async def create_response(
         _chain_depth(db, previous),
         len(history),
         sum(len(json.dumps(item)) for item in history),
+        len(llama_messages),
+        sum(len(m["content"]) for m in llama_messages),
+    )
+    logger.debug(
+        "responses prompt: %s",
+        " | ".join(f"{m['role']}:{m['content'][:80]}" for m in llama_messages),
     )
 
     response_id = new_id("resp")
