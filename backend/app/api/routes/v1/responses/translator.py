@@ -228,6 +228,9 @@ class StreamState:
         if not delta:
             return
         if not self._msg_open:
+            # llama.cpp gives no explicit end-of-reasoning marker mid-stream;
+            # content starting means thinking is over — close it first.
+            self.finish_reasoning()
             self._open_message()
         assert self._msg_id is not None
         self._msg_text += delta
@@ -257,6 +260,8 @@ class StreamState:
     # -- function calls ---------------------------------------------------
 
     def add_tool_call_delta(self, index: int, tc: dict[str, Any]) -> None:
+        # A tool call after reasoning also ends the thinking item
+        self.finish_reasoning()
         call = self._calls.get(index)
         if call is None:
             call = {
