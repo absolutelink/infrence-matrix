@@ -1,7 +1,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import BigInteger, Index
+from sqlalchemy import BigInteger, Index, text
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlmodel import Column, Field, Relationship, SQLModel
 
@@ -341,6 +341,15 @@ class ServerInstance(SQLModel, table=True):
         Index("idx_server_instances_model_id", "model_id"),
         Index("idx_server_instances_status", "status"),
         Index("idx_server_instances_port", "port"),
+        # Port must be unique only among active instances on the same agent;
+        # stopped/errored instances release their port for reuse.
+        Index(
+            "uq_server_instances_active_port",
+            "agent_id",
+            "port",
+            unique=True,
+            postgresql_where=text("status IN ('starting', 'running')"),
+        ),
     )
 
     id: uuid.UUID = Field(
@@ -354,7 +363,7 @@ class ServerInstance(SQLModel, table=True):
         ondelete="CASCADE",
     )
 
-    port: int = Field(unique=True)
+    port: int
     pid: int | None = None
     process_command: str
 

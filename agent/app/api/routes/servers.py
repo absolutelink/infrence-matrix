@@ -133,11 +133,17 @@ async def start_server(request: ServerStartRequest) -> dict:
 
 @router.post("/stop")
 async def stop_server(request: ServerStopRequest) -> dict:
-    """Stop a llama.cpp server."""
+    """Stop a llama.cpp server (idempotent: already-stopped is success)."""
     try:
         success = await llama_server_manager.stop_server(request.server_id)
         if not success:
-            raise HTTPException(status_code=404, detail="Server not found")
+            # Already stopped/unknown — treat as success so callers can
+            # stop-then-start without racing the process table.
+            return {
+                "status": "stopped",
+                "server_id": request.server_id,
+                "already_stopped": True,
+            }
 
         return {"status": "stopped", "server_id": request.server_id}
     except Exception as e:

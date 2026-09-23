@@ -262,12 +262,14 @@ async def _get_or_create_server(
         },
     )
 
-    # Create ServerInstance record
+    # Create ServerInstance record. The agent allocated the actual port in
+    # its config (echoed back via the payload we sent); use it or fall back
+    # to the default range start.
     with Session(engine) as session:
         server = ServerInstance(
             model_id=model.id,
             agent_id=agent.id,
-            port=8081,  # Default agent port
+            port=start_response.get("config", {}).get("port", 8090),
             gpu_layers=35,
             context_size=model.context_length or 4096,
             flash_attn=True,

@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import random
 import socket
 import uuid as uuid_module
 from datetime import UTC, datetime
@@ -10,6 +11,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import col
 
 from app.db.session import AsyncSessionMaker
@@ -175,46 +177,44 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
                 status_code=503, detail="No online agent available to start server"
             )
 
-        # Allocate a port on the agent: pick one not used by an active
-        # instance of this agent, then double-check nothing is listening.
-        result = await session.execute(
-            select(col(ServerInstance.port)).where(
-                col(ServerInstance.agent_id) == agent.id,
-                col(ServerInstance.status).in_(["starting", "running"]),
-            )
-        )
-        used_ports = set(result.scalars().all())
+        # Allocate a random port on the agent. Collision safety comes from
+        # the listening probe plus the partial unique index on
+        # (agent_id, port) for active instances — on IntegrityError we just
+        # draw again.
+        candidates = list(range(AGENT_SERVER_PORT_START, AGENT_SERVER_PORT_END))
+        random.shuffle(candidates)
 
-        port = None
-        for candidate in range(AGENT_SERVER_PORT_START, AGENT_SERVER_PORT_END):
-            if candidate in used_ports:
-                continue
+        server: ServerInstance | None = None
+
+        for candidate in candidates:
             if _port_in_use(agent.host, candidate):
                 continue
-            port = candidate
-            break
+            try:
+                server = ServerInstance(
+                    model_id=model.id,
+                    agent_id=agent.id,
+                    port=candidate,
+                    process_command=f"{model.source_file or model.path}",
+                    gpu_layers=request.gpu_layers,
+                    context_size=request.context_size,
+                    flash_attn=True,
+                    status="starting",
+                    health_status="unknown",
+                    inactivity_timeout_seconds=300,
+                )
+                session.add(server)
+                await session.commit()
+                break
+            except IntegrityError:
+                await session.rollback()
+                server = None
+                continue
 
-        if port is None:
+        if server is None:
             raise HTTPException(
                 status_code=503, detail=f"No free ports on agent {agent.name}"
             )
 
-        # Create the instance row up front so the UI can track it. The agent
-        # identifies the llama-server by this id.
-        server = ServerInstance(
-            model_id=model.id,
-            agent_id=agent.id,
-            port=port,
-            process_command=f"{model.source_file or model.path}",
-            gpu_layers=request.gpu_layers,
-            context_size=request.context_size,
-            flash_attn=True,
-            status="starting",
-            health_status="unknown",
-            inactivity_timeout_seconds=300,
-        )
-        session.add(server)
-        await session.commit()
         await session.refresh(server)
 
         server_id = str(server.id)
@@ -231,7 +231,7 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
             "server_id": server_id,
             "model_id": request.model_id,
             "agent_id": agent_id,
-            "port": port,
+            "port": server.port,
             "message": "Server start request sent to agent",
         }
 
