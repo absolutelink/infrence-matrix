@@ -358,6 +358,7 @@ class ServerInstance(SQLModel, table=True):
     gpu_layers: int = 35
     context_size: int = 4096
     flash_attn: bool = True
+    mtp_draft_max: int | None = None
 
     config: dict[str, str] = Field(
         default_factory=dict,

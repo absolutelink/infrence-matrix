@@ -54,6 +54,7 @@ export function EditServerDialog({
   const [flashAttn, setFlashAttn] = useState(true)
   const [inactivityTimeout, setInactivityTimeout] = useState("300")
   const [mmprojModelId, setMmprojModelId] = useState<string>("none")
+  const [mtpDraftMax, setMtpDraftMax] = useState("0")
 
   const modelsQuery = useQuery({
     queryKey: ["models"],
@@ -73,6 +74,9 @@ export function EditServerDialog({
       setFlashAttn(instance.flash_attn)
       setInactivityTimeout(String(instance.inactivity_timeout_seconds))
       setMmprojModelId(instance.mmproj_model_id || "none")
+      setMtpDraftMax(
+        instance.mtp_draft_max ? String(instance.mtp_draft_max) : "0",
+      )
     }
   }, [isOpen, instance])
 
@@ -90,6 +94,7 @@ export function EditServerDialog({
           flash_attn: flashAttn,
           inactivity_timeout_seconds: Number(inactivityTimeout),
           mmproj_model_id: mmprojModelId === "none" ? "" : mmprojModelId,
+          mtp_draft_max: mtpDraftMax === "0" ? null : Number(mtpDraftMax),
         },
       })
     },
@@ -231,6 +236,19 @@ export function EditServerDialog({
               />
               Flash attention
             </Label>
+          </div>
+
+          <div>
+            <Label htmlFor="mtp-draft-max">MTP Draft N-Max</Label>
+            <Input
+              id="mtp-draft-max"
+              type="number"
+              min={0}
+              value={mtpDraftMax}
+              onChange={(e) => setMtpDraftMax(e.target.value)}
+              className="mt-1"
+              placeholder="0 (no flags)"
+            />
           </div>
         </div>
 

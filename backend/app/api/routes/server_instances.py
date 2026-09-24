@@ -64,6 +64,7 @@ class ServerInstanceResponse(BaseModel):
     gpu_layers: int = 35
     context_size: int = 4096
     flash_attn: bool = True
+    mtp_draft_max: int | None = None
     inactivity_timeout_seconds: int = 300
 
 
@@ -78,6 +79,8 @@ class StartServerRequest(BaseModel):
     context_size: int = 4096
     # Optional multimodal projector; omitted from server flags when None
     mmproj_model_id: str | None = None
+    # MTP Draft N-Max value; when 0 no MTP flags are added, when > 0 add --spec-type draft-mtp --spec-draft-max <value>
+    mtp_draft_max: int | None = None
     # Public name clients use in OpenAI-compatible requests
     alias: str = Field(..., min_length=1, max_length=255)
 
@@ -91,6 +94,7 @@ class UpdateServerRequest(BaseModel):
     gpu_layers: int | None = Field(None, ge=0, le=1000)
     context_size: int | None = Field(None, ge=256, le=1_048_576)
     flash_attn: bool | None = None
+    mtp_draft_max: int | None = None
     inactivity_timeout_seconds: int | None = Field(None, ge=0, le=86400)
     # Multimodal projector; None = no change, "" = clear selection
     mmproj_model_id: str | None = None
@@ -139,6 +143,7 @@ async def list_server_instances() -> ServerInstanceListResponse:
                     gpu_layers=instance.gpu_layers,
                     context_size=instance.context_size,
                     flash_attn=instance.flash_attn,
+                    mtp_draft_max=instance.mtp_draft_max,
                     inactivity_timeout_seconds=instance.inactivity_timeout_seconds,
                 )
             )
@@ -187,6 +192,7 @@ async def get_server_instance(server_id: str) -> ServerInstanceResponse:
             gpu_layers=instance.gpu_layers,
             context_size=instance.context_size,
             flash_attn=instance.flash_attn,
+            mtp_draft_max=instance.mtp_draft_max,
             inactivity_timeout_seconds=instance.inactivity_timeout_seconds,
         )
 
@@ -238,6 +244,7 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
             gpu_layers=request.gpu_layers,
             context_size=request.context_size,
             flash_attn=True,
+            mtp_draft_max=request.mtp_draft_max,
             mmproj_model_id=mmproj_model.id if mmproj_model else None,
             status="starting",
             health_status="unknown",
@@ -320,6 +327,8 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
             instance.context_size = request.context_size
         if request.flash_attn is not None:
             instance.flash_attn = request.flash_attn
+        if request.mtp_draft_max is not None:
+            instance.mtp_draft_max = request.mtp_draft_max
         if request.inactivity_timeout_seconds is not None:
             instance.inactivity_timeout_seconds = request.inactivity_timeout_seconds
 
@@ -329,6 +338,9 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
             "gpu_layers": str(instance.gpu_layers),
             "context_size": str(instance.context_size),
             "flash_attn": str(instance.flash_attn).lower(),
+            "mtp_draft_max": str(instance.mtp_draft_max)
+            if instance.mtp_draft_max is not None
+            else None,
         }
         await session.commit()
 

@@ -56,6 +56,7 @@ def build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any
             "batch_size": 512,
             "cache_prompt": True,
             "flash_attn": instance.flash_attn,
+            "mtp_draft_max": instance.mtp_draft_max,
         },
         # The agent downloads the model file first if it is missing.
         "source": {

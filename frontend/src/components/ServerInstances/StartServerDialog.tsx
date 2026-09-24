@@ -36,6 +36,7 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
   const [gpuLayers, setGpuLayers] = useState("35")
   const [contextSize, setContextSize] = useState("4096")
   const [mmprojModelId, setMmprojModelId] = useState<string>("none")
+  const [mtpDraftMax, setMtpDraftMax] = useState("0")
 
   const modelsQuery = useQuery({
     queryKey: ["models"],
@@ -62,6 +63,7 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
         alias: alias.trim(),
         gpu_layers: Number(gpuLayers) || 35,
         context_size: Number(contextSize) || 4096,
+        mtp_draft_max: mtpDraftMax === "0" ? null : Number(mtpDraftMax),
       }
       if (agentId && agentId !== "auto") {
         body.agent_id = agentId
@@ -198,6 +200,19 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
                 className="mt-1"
               />
             </div>
+          </div>
+
+          <div>
+            <Label htmlFor="start-mtp-draft-max">MTP Draft N-Max</Label>
+            <Input
+              id="start-mtp-draft-max"
+              type="number"
+              min={0}
+              value={mtpDraftMax}
+              onChange={(e) => setMtpDraftMax(e.target.value)}
+              className="mt-1"
+              placeholder="0 (no flags)"
+            />
           </div>
         </div>
 
