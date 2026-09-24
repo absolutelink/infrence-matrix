@@ -21,6 +21,7 @@ from app.api.routes.v1 import (
 from app.api.routes.websocket import router as agent_ws_router
 from app.core.config import settings
 from app.services.agent_manager import agent_manager
+from app.services.benchmark import start_queue_worker, stop_queue_worker
 from app.services.request_activity import (
     request_finished,
     request_started,
@@ -32,7 +33,9 @@ FRONTEND_DIR = Path(__file__).parent / "frontend"
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     agent_manager.start_cleanup_loop()
+    start_queue_worker()
     yield
+    await stop_queue_worker()
 
 
 def custom_generate_unique_id(route: APIRoute) -> str:

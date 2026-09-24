@@ -21,6 +21,7 @@ _run_tasks: dict[str, asyncio.Task[None]] = {}
 _run_controls: dict[str, asyncio.Event] = {}
 _run_decisions: dict[str, str] = {}
 _execution_lock = asyncio.Lock()
+_queue_task: asyncio.Task[None] | None = None
 
 
 async def is_benchmark_blocking() -> bool:
@@ -248,6 +249,40 @@ async def _execute(run_id: str) -> None:
 
 def schedule_run(run_id: str) -> None:
     _run_tasks[run_id] = asyncio.create_task(_execute(run_id))
+
+
+async def _queue_loop() -> None:
+    """Resume persisted queued runs after startup or a worker interruption."""
+    while True:
+        try:
+            async with AsyncSessionMaker() as session:
+                result = await session.execute(
+                    select(BenchmarkRun.id)
+                    .where(BenchmarkRun.status == "queued")
+                    .order_by(BenchmarkRun.created_at)
+                )
+                queued_ids = [str(row[0]) for row in result.all()]
+            for run_id in queued_ids:
+                if run_id not in _run_tasks:
+                    schedule_run(run_id)
+            await asyncio.sleep(2)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Benchmark queue dispatcher failed")
+            await asyncio.sleep(2)
+
+
+def start_queue_worker() -> None:
+    global _queue_task
+    if _queue_task is None or _queue_task.done():
+        _queue_task = asyncio.create_task(_queue_loop())
+
+
+async def stop_queue_worker() -> None:
+    if _queue_task and not _queue_task.done():
+        _queue_task.cancel()
+        await asyncio.gather(_queue_task, return_exceptions=True)
 
 
 def resolve_timeout(run_id: str, decision: str) -> None:
