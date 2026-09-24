@@ -143,13 +143,13 @@ export function DefinitionDialog({
       ),
   })
 
-  const models = (modelsQuery.data as Model[]).filter(
+  const models = ((modelsQuery.data ?? []) as Model[]).filter(
     (model) => model.model_type === "llm",
   )
-  const mmprojModels = (modelsQuery.data as Model[]).filter(
+  const mmprojModels = ((modelsQuery.data ?? []) as Model[]).filter(
     (model) => model.model_type === "mmproj",
   )
-  const agents = agentsQuery.data as Array<{
+  const agents = (agentsQuery.data ?? []) as Array<{
     id: string
     name: string
     status: string
