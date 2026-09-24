@@ -31,6 +31,7 @@ interface EditServerDialogProps {
     id: string
     model_id: string
     model_name: string | null
+    mmproj_model_id?: string | null
     status: string
     alias: string
     gpu_layers: number
@@ -52,6 +53,7 @@ export function EditServerDialog({
   const [contextSize, setContextSize] = useState("4096")
   const [flashAttn, setFlashAttn] = useState(true)
   const [inactivityTimeout, setInactivityTimeout] = useState("300")
+  const [mmprojModelId, setMmprojModelId] = useState<string>("none")
 
   const modelsQuery = useQuery({
     queryKey: ["models"],
@@ -70,6 +72,7 @@ export function EditServerDialog({
       setContextSize(String(instance.context_size))
       setFlashAttn(instance.flash_attn)
       setInactivityTimeout(String(instance.inactivity_timeout_seconds))
+      setMmprojModelId(instance.mmproj_model_id || "none")
     }
   }, [isOpen, instance])
 
@@ -86,6 +89,7 @@ export function EditServerDialog({
           context_size: Number(contextSize),
           flash_attn: flashAttn,
           inactivity_timeout_seconds: Number(inactivityTimeout),
+          mmproj_model_id: mmprojModelId === "none" ? "" : mmprojModelId,
         },
       })
     },
@@ -144,6 +148,27 @@ export function EditServerDialog({
               <SelectContent>
                 {((modelsQuery.data ?? []) as Model[])
                   .filter((model) => model.model_type === "llm")
+                  .map((model) => (
+                    <SelectItem
+                      key={model.id ?? model.name}
+                      value={model.id ?? model.name}
+                    >
+                      {model.name}
+                    </SelectItem>
+                  ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="col-span-2">
+            <Label>mmproj (vision projector)</Label>
+            <Select value={mmprojModelId} onValueChange={setMmprojModelId}>
+              <SelectTrigger className="mt-1">
+                <SelectValue placeholder="None (no --mmproj flag)" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">None</SelectItem>
+                {((modelsQuery.data ?? []) as Model[])
+                  .filter((model) => model.model_type === "mmproj")
                   .map((model) => (
                     <SelectItem
                       key={model.id ?? model.name}

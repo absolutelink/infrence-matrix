@@ -35,6 +35,7 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
   const [alias, setAlias] = useState("")
   const [gpuLayers, setGpuLayers] = useState("35")
   const [contextSize, setContextSize] = useState("4096")
+  const [mmprojModelId, setMmprojModelId] = useState<string>("none")
 
   const modelsQuery = useQuery({
     queryKey: ["models"],
@@ -65,6 +66,9 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
       if (agentId && agentId !== "auto") {
         body.agent_id = agentId
       }
+      if (mmprojModelId && mmprojModelId !== "none") {
+        body.mmproj_model_id = mmprojModelId
+      }
       return ServerInstancesService.instancesStartServer({ body })
     },
     onSuccess: () => {
@@ -79,6 +83,9 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
 
   const models = ((modelsQuery.data ?? []) as Model[]).filter(
     (model) => model.model_type === "llm",
+  )
+  const mmprojModels = ((modelsQuery.data ?? []) as Model[]).filter(
+    (model) => model.model_type === "mmproj",
   )
   const agents = (agentsQuery.data ?? []) as Array<{
     id: string
@@ -142,6 +149,23 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
                 {agents.map((agent) => (
                   <SelectItem key={agent.id} value={agent.id}>
                     {agent.name} ({agent.status})
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div>
+            <Label>mmproj (vision projector)</Label>
+            <Select value={mmprojModelId} onValueChange={setMmprojModelId}>
+              <SelectTrigger className="mt-1">
+                <SelectValue placeholder="None (no --mmproj flag)" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">None</SelectItem>
+                {mmprojModels.map((model) => (
+                  <SelectItem key={model.id} value={model.id as string}>
+                    {model.name}
                   </SelectItem>
                 ))}
               </SelectContent>

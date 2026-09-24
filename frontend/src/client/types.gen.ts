@@ -1423,6 +1423,14 @@ export type ServerInstanceResponse = {
      */
     model_name?: string | null;
     /**
+     * Mmproj Model Id
+     */
+    mmproj_model_id?: string | null;
+    /**
+     * Mmproj Model Name
+     */
+    mmproj_model_name?: string | null;
+    /**
      * Alias
      */
     alias: string;
@@ -1554,6 +1562,10 @@ export type StartServerRequest = {
      * Context Size
      */
     context_size?: number;
+    /**
+     * Mmproj Model Id
+     */
+    mmproj_model_id?: string | null;
     /**
      * Alias
      */
@@ -1701,6 +1713,10 @@ export type UpdateServerRequest = {
      * Inactivity Timeout Seconds
      */
     inactivity_timeout_seconds?: number | null;
+    /**
+     * Mmproj Model Id
+     */
+    mmproj_model_id?: string | null;
     /**
      * Restart
      */

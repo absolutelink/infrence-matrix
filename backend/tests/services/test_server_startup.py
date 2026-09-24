@@ -91,6 +91,58 @@ class TestBuildStartPayload:
         payload = build_start_payload(instance, model)
         assert payload["source"] is None
 
+    def test_selected_mmproj_included_in_payload(self, db) -> None:
+        model = _make_model(db, "vision-model.Q4_K_M.gguf")
+        model.source_repo_id = "test-org/vision-repo"
+        mmproj = Model(
+            name="vision-mmproj.gguf",
+            path="/models/vision-mmproj.gguf",
+            size_bytes=123456789,
+            architecture="clip",
+            model_type="mmproj",
+            quantization="F16",
+            context_length=4096,
+            source="huggingface",
+            source_repo_id="test-org/vision-repo",
+        )
+        db.add(mmproj)
+        db.commit()
+        db.refresh(mmproj)
+        instance = ServerInstance(
+            model_id=model.id,
+            agent_id=self._agent(db).id,
+            alias="mmproj-alias",
+            process_command="llama-server",
+            mmproj_model_id=mmproj.id,
+            status="stopped",
+        )
+        db.add(instance)
+        db.commit()
+        db.refresh(instance)
+
+        payload = build_start_payload(instance, model)
+        assert payload["config"]["mmproj_path"] == mmproj.path
+
+    def test_no_mmproj_selected_omits_flag(self, db) -> None:
+        model = _make_model(db, "plain-model.Q4_K_M.gguf")
+        model.source_repo_id = None
+        db.add(model)
+        db.commit()
+        instance = ServerInstance(
+            model_id=model.id,
+            agent_id=self._agent(db).id,
+            alias="no-mmproj-alias",
+            process_command="llama-server",
+            status="stopped",
+        )
+        db.add(instance)
+        db.commit()
+        db.refresh(instance)
+
+        payload = build_start_payload(instance, model)
+        assert "mmproj_path" not in payload["config"]
+        assert "mmproj_source" not in payload
+
 
 class TestEnsureServerReady:
     def _instance(self, db, model: Model, status: str) -> ServerInstance:

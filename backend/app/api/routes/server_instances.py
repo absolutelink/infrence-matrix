@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
 from app.db.session import AsyncSessionMaker
@@ -25,10 +26,28 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/server-instances", tags=["server-instances"])
 
 
+async def _resolve_mmproj_model(
+    session: AsyncSession, mmproj_model_id: str | None
+) -> Model | None:
+    """Fetch and validate the selected mmproj model (None = no projector)."""
+    if not mmproj_model_id:
+        return None
+    found = await session.get(Model, uuid_module.UUID(mmproj_model_id))
+    if not found:
+        raise HTTPException(status_code=404, detail="mmproj model not found")
+    if found.model_type != "mmproj":
+        raise HTTPException(
+            status_code=400, detail="Selected model is not an mmproj projector"
+        )
+    return found
+
+
 class ServerInstanceResponse(BaseModel):
     id: str
     model_id: str
     model_name: str | None = None
+    mmproj_model_id: str | None = None
+    mmproj_model_name: str | None = None
     alias: str
     status: str
     health_status: str
@@ -57,6 +76,8 @@ class StartServerRequest(BaseModel):
     agent_id: str | None = None
     gpu_layers: int = 35
     context_size: int = 4096
+    # Optional multimodal projector; omitted from server flags when None
+    mmproj_model_id: str | None = None
     # Public name clients use in OpenAI-compatible requests
     alias: str = Field(..., min_length=1, max_length=255)
 
@@ -71,6 +92,8 @@ class UpdateServerRequest(BaseModel):
     context_size: int | None = Field(None, ge=256, le=1_048_576)
     flash_attn: bool | None = None
     inactivity_timeout_seconds: int | None = Field(None, ge=0, le=86400)
+    # Multimodal projector; None = no change, "" = clear selection
+    mmproj_model_id: str | None = None
     restart: bool = True  # restart immediately if the server is running
 
 
@@ -92,6 +115,12 @@ async def list_server_instances() -> ServerInstanceListResponse:
                     id=str(instance.id),
                     model_id=str(instance.model_id),
                     model_name=instance.model.name if instance.model else None,
+                    mmproj_model_id=str(instance.mmproj_model_id)
+                    if instance.mmproj_model_id
+                    else None,
+                    mmproj_model_name=instance.mmproj_model.name
+                    if instance.mmproj_model
+                    else None,
                     alias=instance.alias,
                     status=instance.status,
                     health_status=instance.health_status,
@@ -136,6 +165,12 @@ async def get_server_instance(server_id: str) -> ServerInstanceResponse:
             id=str(instance.id),
             model_id=str(instance.model_id),
             model_name=instance.model.name if instance.model else None,
+            mmproj_model_id=str(instance.mmproj_model_id)
+            if instance.mmproj_model_id
+            else None,
+            mmproj_model_name=instance.mmproj_model.name
+            if instance.mmproj_model
+            else None,
             alias=instance.alias,
             status=instance.status,
             health_status=instance.health_status,
@@ -194,6 +229,7 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
 
         # The agent allocates a random free port per start; the port is not
         # persisted. Create the instance row up front so the UI can track it.
+        mmproj_model = await _resolve_mmproj_model(session, request.mmproj_model_id)
         server = ServerInstance(
             model_id=model.id,
             agent_id=agent.id,
@@ -202,6 +238,7 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
             gpu_layers=request.gpu_layers,
             context_size=request.context_size,
             flash_attn=True,
+            mmproj_model_id=mmproj_model.id if mmproj_model else None,
             status="starting",
             health_status="unknown",
             inactivity_timeout_seconds=300,
@@ -244,6 +281,7 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
 
         was_running = instance.status == "running"
         model_changed = False
+        mmproj_changed = False
 
         if request.alias is not None and request.alias != instance.alias:
             existing_alias = await session.execute(
@@ -266,6 +304,16 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
             instance.process_command = new_model.source_file or new_model.path
             model_changed = True
 
+        # "" clears the projector selection; None leaves it unchanged
+        if request.mmproj_model_id is not None:
+            mmproj_model = await _resolve_mmproj_model(
+                session, request.mmproj_model_id or None
+            )
+            new_mmproj_id = mmproj_model.id if mmproj_model else None
+            if new_mmproj_id != instance.mmproj_model_id:
+                instance.mmproj_model_id = new_mmproj_id
+                mmproj_changed = True
+
         if request.gpu_layers is not None:
             instance.gpu_layers = request.gpu_layers
         if request.context_size is not None:
@@ -285,7 +333,7 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
         await session.commit()
 
         # A running server must restart to load a different model file
-        if was_running and (request.restart or model_changed):
+        if was_running and (request.restart or model_changed or mmproj_changed):
             await session.refresh(instance)
             agent = await session.get(Agent, instance.agent_id)
             if not agent or agent.status != "online":

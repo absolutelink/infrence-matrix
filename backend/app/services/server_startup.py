@@ -42,11 +42,12 @@ def build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any
     """Build the agent /servers/start payload from instance + model.
 
     The agent allocates the port (random free one) when none is sent.
-    A vision-capable model with a registered mmproj sibling gets the
-    projector attached so llama-server loads it (--mmproj).
+    When the instance has an mmproj projector selected it is attached so
+    llama-server loads it (--mmproj); with none selected the flag is
+    omitted entirely.
     """
     filename = model.source_file or model.path.rsplit("/", 1)[-1]
-    mmproj = _find_mmproj(model)
+    mmproj = _find_mmproj(instance, model)
     payload: dict[str, Any] = {
         "config": {
             "id": str(instance.id),
@@ -81,21 +82,25 @@ def build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any
     return payload
 
 
-def _find_mmproj(model: Model) -> tuple[Model, str] | None:
-    """Registered mmproj model for a vision model, else None.
+def _find_mmproj(instance: ServerInstance, model: Model) -> tuple[Model, str] | None:
+    """mmproj projector for a server instance, else None.
 
-    Matched by source repo: the projector must come from the same
-    HuggingFace repo as the base model (standard vision GGUF layout).
+    The instance row is the source of truth: whatever projector was
+    selected in the UI (start/edit dialog) is used, None means no
+    --mmproj flag. Legacy rows without a selection fall back to
+    repo-matching a registered mmproj model.
     """
-    if not model.source_repo_id:
-        return None
-    with Session(engine) as session:
-        mmproj_model = session.exec(
-            select(Model).where(
-                Model.source_repo_id == model.source_repo_id,
-                Model.model_type == "mmproj",
-            )
-        ).first()
+    mmproj_model = instance.mmproj_model
+    if mmproj_model is None and instance.mmproj_model_id is None:
+        # Legacy rows predating the per-instance selection.
+        with Session(engine) as session:
+            if model.source_repo_id:
+                mmproj_model = session.exec(
+                    select(Model).where(
+                        Model.source_repo_id == model.source_repo_id,
+                        Model.model_type == "mmproj",
+                    )
+                ).first()
     if not mmproj_model:
         return None
     filename = mmproj_model.source_file or mmproj_model.path.rsplit("/", 1)[-1]
