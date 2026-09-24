@@ -58,3 +58,4 @@ Baseline run: 2026-09-24 — **3 passed / 14 failed / 17 total**
 | Date | Commit | Passed | Failed | Notes |
 |---|---|---|---|---|
 | 2026-09-24 | (baseline) | 3 | 14 | Initial full run |
+| 2026-09-24 | pending deploy | ? | ? | Clusters 1–3 fix: spec serializer (`serialize_spec`) — concrete echo params, nullable keys present-as-null, key-absent item optionals, tool echo nulls, `completed_at` at finalize; dropped `reasoning_text.*` event twins (harness union rejects them). Expected to unblock: basic-response, system-prompt, image-input, tool-calling, streaming-response; reduces noise for compact-response |

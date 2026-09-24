@@ -32,6 +32,7 @@ from app.api.routes.v1.responses.schemas import (
     ResponseResource,
     Usage,
     new_id,
+    serialize_spec,
 )
 from app.api.routes.v1.responses.translator import (
     StreamState,
@@ -299,6 +300,7 @@ async def _complete(
         output=_coerced_output_items(state.output_items),
         usage=usage,
     )
+    result.completed_at = int(time.time())
     if incomplete:
         result.incomplete_details = IncompleteDetails(reason="max_output_tokens")
     return result
@@ -480,6 +482,7 @@ async def _stream_events(
             response.incomplete_details = IncompleteDetails(reason="max_output_tokens")
         else:
             response.status = "completed"
+        response.completed_at = int(time.time())
         # Typed models (not dicts) so pydantic serializes without warnings
         response.output = _coerced_output_items(state.output_items)
         response.usage = Usage.model_validate(usage)
@@ -835,7 +838,10 @@ async def create_response(
     else:
         logger.info("responses %s: not stored (store=false)", response_id)
 
-    return result
+    # Spec serialization: concrete echo params, nullable keys present as
+    # null. Return JSONResponse so FastAPI's null-filling encoder can't
+    # re-break the shape.
+    return JSONResponse(content=serialize_spec(result))
 
 
 # ============================================================================
@@ -955,4 +961,4 @@ async def compact_response(
         sum(len(json.dumps(m)) for m in messages),
         len(summary_text),
     )
-    return resource
+    return JSONResponse(content=serialize_spec(resource))

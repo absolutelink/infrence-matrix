@@ -521,17 +521,53 @@ class TestConformanceSchemaRules:
 
     responseResourceSchema marks temperature/top_p/presence_penalty/
     frequency_penalty/top_logprobs/parallel_tool_calls strictly non-nullable
-    and text.verbosity optional() — None values fail the schema.
+    (concrete values required — null AND absent fail) and requires every
+    other top-level key present (null-allowed). text.verbosity is optional()
+    — null fails, key must be absent when unset.
     """
 
     def _serialize(self, request: CreateResponseBody) -> dict:
-        from app.api.routes.v1.responses.schemas import serialize
+        from app.api.routes.v1.responses.schemas import serialize_spec
 
-        return serialize(build_response_resource(request, "resp_x", 1))
+        return serialize_spec(build_response_resource(request, "resp_x", 1))
 
-    def test_unset_params_omitted_not_null(self) -> None:
+    def test_nullable_keys_present_as_null(self) -> None:
         req = CreateResponseBody(model="m", input="hi")
         data = self._serialize(req)
+        for key in (
+            "completed_at",
+            "incomplete_details",
+            "previous_response_id",
+            "instructions",
+            "error",
+            "reasoning",
+            "usage",
+            "max_output_tokens",
+            "max_tool_calls",
+            "safety_identifier",
+            "prompt_cache_key",
+        ):
+            assert key in data, f"{key} must be present (null allowed)"
+            assert data[key] is None
+
+    def test_echo_params_get_concrete_defaults(self) -> None:
+        """Null or absent both fail the harness's non-nullable echo fields."""
+        req = CreateResponseBody(model="m", input="hi")
+        data = self._serialize(req)
+        assert data["temperature"] == 1.0
+        assert data["top_p"] == 1.0
+        assert data["presence_penalty"] == 0.0
+        assert data["frequency_penalty"] == 0.0
+        assert data["top_logprobs"] == 0
+        assert data["parallel_tool_calls"] is True
+
+    def test_unset_params_omitted_not_null(self) -> None:
+        """serialize() semantics for non-spec contexts: unset optional keys
+        are omitted, not null."""
+        from app.api.routes.v1.responses.schemas import serialize
+
+        req = CreateResponseBody(model="m", input="hi")
+        data = serialize(build_response_resource(req, "resp_x", 1))
         for key in (
             "parallel_tool_calls",
             "temperature",
@@ -597,7 +633,9 @@ class TestConformanceSchemaRules:
         assert "schema_" not in fmt
         assert "description" not in fmt
 
-    def test_tools_echo_strict_defaults_true(self) -> None:
+    def test_tools_echo_required_nullable_keys(self) -> None:
+        """The harness's toolSchema requires description/parameters present
+        (null allowed); strict defaults true."""
         req = CreateResponseBody.model_validate(
             {
                 "model": "m",
@@ -608,7 +646,8 @@ class TestConformanceSchemaRules:
         data = self._serialize(req)
         tool = data["tools"][0]
         assert tool["strict"] is True
-        assert "description" not in tool
+        assert tool["description"] is None
+        assert tool["parameters"] is None
 
     def test_output_items_omit_null_optionals(self) -> None:
         """phase/logprobs/encrypted_content serialize as None and would fail
@@ -636,9 +675,10 @@ class TestConformanceSchemaRules:
 
 
 class TestConformanceStreamingEvents:
-    def test_reasoning_events_emitted_under_both_names(self) -> None:
-        """Spec conformance validates response.reasoning.delta/done; OpenWebUI
-        renders response.reasoning_text.delta — both must reach the wire."""
+    def test_reasoning_events_use_spec_names(self) -> None:
+        """The conformance harness validates every streamed event against its
+        event union, which only has response.reasoning.delta/done — the legacy
+        reasoning_text.* twins failed validation and poisoned streaming tests."""
         seq = ev.SSEmitter()
         state = StreamState(seq, "m")
         state.add_reasoning_delta("hmm")
@@ -647,20 +687,8 @@ class TestConformanceStreamingEvents:
         frames = seq.drain_frames()
         types = [f.split("\n")[0][7:] for f in frames]
         assert "response.reasoning.delta" in types
-        assert "response.reasoning_text.delta" in types
         assert "response.reasoning.done" in types
-        assert "response.reasoning_text.done" in types
-        # Both payloads carry identical fields
-        payloads = {}
-        for f in frames:
-            payload = json.loads(f.split("data: ", 1)[1])
-            if payload["type"].startswith("response.reasoning"):
-                payloads[payload["type"]] = payload
-        for shared in ("item_id", "output_index", "content_index"):
-            assert (
-                payloads["response.reasoning.delta"][shared]
-                == (payloads["response.reasoning_text.delta"][shared])
-            )
+        assert not any("reasoning_text" in t for t in types)
 
     def test_phase_passthrough_replayed_with_cue(self) -> None:
         messages = input_items_to_llama_messages(

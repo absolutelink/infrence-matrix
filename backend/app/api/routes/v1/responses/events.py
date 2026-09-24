@@ -16,7 +16,7 @@ from app.api.routes.v1.responses.schemas import (
     IncompleteDetails,
     ResponseResource,
     Usage,
-    serialize,
+    serialize_spec,
 )
 
 EventType = Literal[
@@ -36,8 +36,6 @@ EventType = Literal[
     "response.refusal.done",
     "response.reasoning.delta",
     "response.reasoning.done",
-    "response.reasoning_text.delta",
-    "response.reasoning_text.done",
     "response.reasoning_summary_text.delta",
     "response.reasoning_summary_text.done",
     "response.reasoning_summary_part.added",
@@ -107,27 +105,27 @@ class SSEmitter:
 
 
 def response_created(seq: SSEmitter, response: ResponseResource) -> dict[str, Any]:
-    return seq.make("response.created", response=serialize(response))
+    return seq.make("response.created", response=serialize_spec(response))
 
 
 def response_queued(seq: SSEmitter, response: ResponseResource) -> dict[str, Any]:
-    return seq.make("response.queued", response=serialize(response))
+    return seq.make("response.queued", response=serialize_spec(response))
 
 
 def response_in_progress(seq: SSEmitter, response: ResponseResource) -> dict[str, Any]:
-    return seq.make("response.in_progress", response=serialize(response))
+    return seq.make("response.in_progress", response=serialize_spec(response))
 
 
 def response_completed(seq: SSEmitter, response: ResponseResource) -> dict[str, Any]:
-    return seq.make("response.completed", response=serialize(response))
+    return seq.make("response.completed", response=serialize_spec(response))
 
 
 def response_failed(seq: SSEmitter, response: ResponseResource) -> dict[str, Any]:
-    return seq.make("response.failed", response=serialize(response))
+    return seq.make("response.failed", response=serialize_spec(response))
 
 
 def response_incomplete(seq: SSEmitter, response: ResponseResource) -> dict[str, Any]:
-    return seq.make("response.incomplete", response=serialize(response))
+    return seq.make("response.incomplete", response=serialize_spec(response))
 
 
 def output_item_added(
@@ -224,34 +222,30 @@ def refusal_done(
 
 def reasoning_delta(
     seq: SSEmitter, item_id: str, output_index: int, content_index: int, delta: str
-) -> list[dict[str, Any]]:
-    """Emit under both names: response.reasoning.delta (spec conformance
-    schemas) and response.reasoning_text.delta (OpenWebUI)."""
-    payload = {
-        "item_id": item_id,
-        "output_index": output_index,
-        "content_index": content_index,
-        "delta": delta,
-    }
-    return [
-        seq.make("response.reasoning.delta", **payload),
-        seq.make("response.reasoning_text.delta", **payload),
-    ]
+) -> dict[str, Any]:
+    """Emit response.reasoning.delta (spec conformance schemas). The legacy
+    reasoning_text.* twin was dropped — the conformance harness validates
+    every streamed event against its event union, which has no reasoning_text
+    variants."""
+    return seq.make(
+        "response.reasoning.delta",
+        item_id=item_id,
+        output_index=output_index,
+        content_index=content_index,
+        delta=delta,
+    )
 
 
 def reasoning_done(
     seq: SSEmitter, item_id: str, output_index: int, content_index: int, text: str
-) -> list[dict[str, Any]]:
-    payload = {
-        "item_id": item_id,
-        "output_index": output_index,
-        "content_index": content_index,
-        "text": text,
-    }
-    return [
-        seq.make("response.reasoning.done", **payload),
-        seq.make("response.reasoning_text.done", **payload),
-    ]
+) -> dict[str, Any]:
+    return seq.make(
+        "response.reasoning.done",
+        item_id=item_id,
+        output_index=output_index,
+        content_index=content_index,
+        text=text,
+    )
 
 
 def reasoning_summary_text_delta(

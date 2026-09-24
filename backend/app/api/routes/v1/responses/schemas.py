@@ -489,6 +489,70 @@ class ResponseResource(BaseModel):
 
 
 # ============================================================================
+# Spec serialization (conformance schemas)
+# ============================================================================
+
+
+# Nullable ResponseResource keys the conformance schemas require PRESENT
+# (null-allowed): their absence (undefined) fails validation.
+_RESPONSE_NULLABLE_FIELDS: tuple[str, ...] = (
+    "completed_at",
+    "incomplete_details",
+    "previous_response_id",
+    "instructions",
+    "error",
+    "reasoning",
+    "usage",
+    "max_output_tokens",
+    "max_tool_calls",
+    "safety_identifier",
+    "prompt_cache_key",
+)
+
+# Echo params the conformance schemas mark strictly non-nullable — both null
+# and absent fail. Defaults mirror the OpenAI Responses API echo.
+_RESPONSE_ECHO_DEFAULTS: dict[str, Any] = {
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "presence_penalty": 0.0,
+    "frequency_penalty": 0.0,
+    "top_logprobs": 0,
+    "parallel_tool_calls": True,
+}
+
+
+def serialize_spec(model: BaseModel, **kwargs: Any) -> dict[str, Any]:
+    """Serialize a ResponseResource/CompactResource per the conformance schemas.
+
+    Extends serialize() (None-stripped, aliased) with the shape the harness's
+    Zod schemas require:
+    - Nullable top-level response keys re-added as explicit null (key must be
+      present); echo params defaulted to concrete values (null/absent fail).
+    - Tool echoes get description/parameters back as null (required-but-
+      nullable there).
+    - reasoning echoes get effort/summary back as null.
+    Output *items* keep serialize()'s key-absent behavior for their optional
+    fields (phase, logprobs, encrypted_content, content) — null fails the
+    item schemas' optional() semantics.
+    """
+    data = serialize(model, **kwargs)
+    if isinstance(model, ResponseResource):
+        for key in _RESPONSE_NULLABLE_FIELDS:
+            data.setdefault(key, None)
+        for key, value in _RESPONSE_ECHO_DEFAULTS.items():
+            data.setdefault(key, value)
+        for tool in data.get("tools") or []:
+            if isinstance(tool, dict):
+                tool.setdefault("description", None)
+                tool.setdefault("parameters", None)
+        reasoning = data.get("reasoning")
+        if isinstance(reasoning, dict):
+            reasoning.setdefault("effort", None)
+            reasoning.setdefault("summary", None)
+    return data
+
+
+# ============================================================================
 # Error envelope (JSON error responses)
 # ============================================================================
 

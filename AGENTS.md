@@ -56,7 +56,7 @@ Backend tests need PostgreSQL running; agent tests are self-contained (set `AGEN
 
 ## Skills
 
-Custom agent skills in `.agents/skills/`: `api-helpers`, `backup-restore`, `cache-management`, `fastapi`, `gpu-config`, `library-skills`, `llama-server-manager`, `model-management`, `sqlmodel`.
+Custom agent skills in `.agents/skills/`: `api-helpers`, `backup-restore`, `cache-management`, `fastapi`, `gpu-config`, `integration-testing`, `library-skills`, `llama-server-manager`, `model-management`, `sqlmodel`.
 
 ## Docs
 

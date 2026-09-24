@@ -36,7 +36,7 @@ from app.api.routes.v1.responses.schemas import (
     IncompleteDetails,
     Usage,
     new_id,
-    serialize,
+    serialize_spec,
 )
 from app.api.routes.v1.responses.translator import StreamState, build_response_resource
 from app.core.db import engine
@@ -160,6 +160,7 @@ async def _stream_to_ws(
             resource.incomplete_details = IncompleteDetails(reason="max_output_tokens")
         else:
             resource.status = "completed"
+        resource.completed_at = int(time.time())
         resource.output = state.output_items
         resource.usage = Usage.model_validate(usage)
         if resource.status == "incomplete":
@@ -169,7 +170,7 @@ async def _stream_to_ws(
         for frame in seq.drain_frames():
             await websocket.send_text(frame)
 
-        return serialize(resource)
+        return serialize_spec(resource)
     except TargetError as e:
         await websocket.send_text(
             _error_event(
