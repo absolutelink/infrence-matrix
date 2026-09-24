@@ -1580,11 +1580,11 @@ export type ServerOptions = {
     /**
      * Cache Type K
      */
-    cache_type_k?: 'f32' | 'f16' | 'bf16' | 'q8_0' | 'q4_0' | 'q4_1' | 'iq4_nl' | 'q5_0' | 'q5_1' | null;
+    cache_type_k?: 'f32' | 'f16' | 'bf16' | 'q8_0' | 'q4_0' | 'q4_1' | 'iq4_nl' | 'q5_0' | 'q5_1' | 'turbo4' | null;
     /**
      * Cache Type V
      */
-    cache_type_v?: 'f32' | 'f16' | 'bf16' | 'q8_0' | 'q4_0' | 'q4_1' | 'iq4_nl' | 'q5_0' | 'q5_1' | null;
+    cache_type_v?: 'f32' | 'f16' | 'bf16' | 'q8_0' | 'q4_0' | 'q4_1' | 'iq4_nl' | 'q5_0' | 'q5_1' | 'turbo4' | null;
     /**
      * Kv Offload
      */
@@ -1597,6 +1597,22 @@ export type ServerOptions = {
      * Cache Reuse
      */
     cache_reuse?: number | null;
+    /**
+     * Ctx Checkpoints
+     */
+    ctx_checkpoints?: number | null;
+    /**
+     * Checkpoint Every
+     */
+    checkpoint_every?: number | null;
+    /**
+     * Cache Ram
+     */
+    cache_ram?: number | null;
+    /**
+     * Slot Save Path
+     */
+    slot_save_path?: string | null;
     /**
      * Gpu Layers
      */
@@ -1665,6 +1681,34 @@ export type ServerOptions = {
      * Parallel
      */
     parallel?: number | null;
+    /**
+     * Reasoning
+     */
+    reasoning?: 'on' | 'off' | 'auto' | null;
+    /**
+     * Reasoning Budget
+     */
+    reasoning_budget?: number | null;
+    /**
+     * Spec Draft P Min
+     */
+    spec_draft_p_min?: number | null;
+    /**
+     * Strict Mtp Qwen
+     */
+    strict_mtp_qwen?: boolean | null;
+    /**
+     * Kv Unified
+     */
+    kv_unified?: boolean | null;
+    /**
+     * No Mmap
+     */
+    no_mmap?: boolean | null;
+    /**
+     * No Cache Idle Slots
+     */
+    no_cache_idle_slots?: boolean | null;
     /**
      * Cont Batching
      */

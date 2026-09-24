@@ -211,6 +211,8 @@ export function EditServerDialog({
             <ServerSettingsFields
               options={serverOptions}
               onChange={setServerOptions}
+              mtpDraftMax={mtpDraftMax}
+              onMtpDraftMaxChange={setMtpDraftMax}
             />
           </div>
           <div>
@@ -252,19 +254,6 @@ export function EditServerDialog({
               />
               Flash attention
             </Label>
-          </div>
-
-          <div>
-            <Label htmlFor="mtp-draft-max">MTP Draft N-Max</Label>
-            <Input
-              id="mtp-draft-max"
-              type="number"
-              min={0}
-              value={mtpDraftMax}
-              onChange={(e) => setMtpDraftMax(e.target.value)}
-              className="mt-1"
-              placeholder="0 (no flags)"
-            />
           </div>
         </div>
 

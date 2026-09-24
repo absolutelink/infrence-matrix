@@ -32,6 +32,21 @@ docker build \
 
 **Use case:** Cross-platform GPU acceleration, especially for AMD GPUs.
 
+### 3. llama.cpp q38rocm (`recipes/llama-cpp-q38rocm/`)
+
+Agent layered on `ghcr.io/julianmb/q38rocm:latest`, using the ROCmFP4 engine
+for AMD Strix Halo systems.
+
+```bash
+docker build \
+  --build-arg AGENT_IMAGE=ghcr.io/<owner>/agent:main \
+  -t inference-matrix-agent:q38rocm \
+  -f recipes/llama-cpp-q38rocm/Dockerfile .
+```
+
+**Use case:** ROCmFP4 inference on AMD Strix Halo hardware. See the recipe
+README for required device mappings and permissions.
+
 ## Future Recipes (Planned)
 
 ### llama.cpp CUDA (`recipes/llama-cpp-cuda/`)
@@ -62,6 +77,12 @@ docker build \
   --build-arg AGENT_IMAGE=inference-matrix-agent:base \
   -t inference-matrix-agent:vulkan \
   -f recipes/llama-cpp-vulkan/Dockerfile .
+
+# Build q38rocm (requires the agent image as base)
+docker build \
+  --build-arg AGENT_IMAGE=inference-matrix-agent:base \
+  -t inference-matrix-agent:q38rocm \
+  -f recipes/llama-cpp-q38rocm/Dockerfile .
 ```
 
 ### Using Pre-built Images
@@ -98,6 +119,9 @@ recipes/
 ├── llama-cpp-vulkan/
 │   ├── Dockerfile          # Build instructions
 │   └── README.md           # Usage documentation
+├── llama-cpp-q38rocm/
+│   ├── Dockerfile          # Build instructions
+│   └── README.md           # Usage documentation
 ├── llama-cpp-cuda/         # (future)
 │   ├── Dockerfile
 │   └── README.md
@@ -113,7 +137,9 @@ GitHub Actions automatically builds all recipes on:
 - New version tags
 - Pull requests (no push)
 
-See `.github/workflows/build-and-push.yml` for configuration. The `build-recipes` job runs after `build-agent` and passes the freshly built agent image via the `AGENT_IMAGE` build-arg.
+See `.github/workflows/build-and-push.yml` for configuration. The
+`build-vulkan-recipe` and `build-q38rocm-recipe` jobs run in parallel after
+`build-agent` and pass the freshly built agent image via `AGENT_IMAGE`.
 
 ## Choosing a Backend
 

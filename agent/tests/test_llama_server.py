@@ -96,7 +96,15 @@ class TestLlamaServerManager:
                     "ubatch_size": 256,
                     "cache_prompt": False,
                     "temperature": 0.7,
+                    "device": "ROCm0",
+                    "cache_type_k": "q8_0",
+                    "cache_type_v": "turbo4",
+                    "kv_unified": True,
+                    "spec_draft_p_min": 0.0,
+                    "strict_mtp_qwen": True,
+                    "reasoning": "off",
                 },
+                mtp_draft_max=4,
             ),
         )
 
@@ -105,6 +113,14 @@ class TestLlamaServerManager:
         assert ["--ubatch-size", "256"] == command[command.index("--ubatch-size") : command.index("--ubatch-size") + 2]
         assert "--no-cache-prompt" in command
         assert ["--temperature", "0.7"] == command[command.index("--temperature") : command.index("--temperature") + 2]
+        assert ["--device", "ROCm0"] == command[command.index("--device") : command.index("--device") + 2]
+        assert ["--cache-type-k", "q8_0"] == command[command.index("--cache-type-k") : command.index("--cache-type-k") + 2]
+        assert ["--cache-type-v", "turbo4"] == command[command.index("--cache-type-v") : command.index("--cache-type-v") + 2]
+        assert "--kv-unified" in command
+        assert ["--spec-draft-n-max", "4"] == command[command.index("--spec-draft-n-max") : command.index("--spec-draft-n-max") + 2]
+        assert ["--spec-draft-p-min", "0.0"] == command[command.index("--spec-draft-p-min") : command.index("--spec-draft-p-min") + 2]
+        assert "--spec-mtp-strict-qwen" in command
+        assert ["--reasoning", "off"] == command[command.index("--reasoning") : command.index("--reasoning") + 2]
 
     def test_start_existing_server(self):
         """Test starting a server that already exists."""

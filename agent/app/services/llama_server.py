@@ -148,6 +148,10 @@ class LlamaServerManager:
             "cache_type_k": "--cache-type-k",
             "cache_type_v": "--cache-type-v",
             "cache_reuse": "--cache-reuse",
+            "ctx_checkpoints": "--ctx-checkpoints",
+            "checkpoint_every": "--checkpoint-min-step",
+            "cache_ram": "--cache-ram",
+            "slot_save_path": "--slot-save-path",
             "device": "--device",
             "split_mode": "--split-mode",
             "tensor_split": "--tensor-split",
@@ -164,6 +168,9 @@ class LlamaServerManager:
             "frequency_penalty": "--frequency-penalty",
             "seed": "--seed",
             "parallel": "--parallel",
+            "reasoning": "--reasoning",
+            "reasoning_budget": "--reasoning-budget",
+            "spec_draft_p_min": "--spec-draft-p-min",
         }
         for name, flag in value_flags.items():
             if name in options and options[name] is not None:
@@ -176,6 +183,13 @@ class LlamaServerManager:
             "cont_batching": ("--cont-batching", "--no-cont-batching"),
             "warmup": ("--warmup", "--no-warmup"),
             "context_shift": ("--context-shift", "--no-context-shift"),
+            "kv_unified": "--kv-unified",
+            "no_mmap": ("--no-mmap", "--mmap"),
+            "no_cache_idle_slots": (
+                "--no-cache-idle-slots",
+                "--cache-idle-slots",
+            ),
+            "strict_mtp_qwen": "--spec-mtp-strict-qwen",
         }
         for name, flags in boolean_flags.items():
             if name not in options or options[name] is None:

@@ -22,16 +22,42 @@ class ServerOptions(BaseModel):
     predict: int | None = Field(default=None, ge=-1)
     swa_full: bool | None = None
     cache_type_k: (
-        Literal["f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"]
+        Literal[
+            "f32",
+            "f16",
+            "bf16",
+            "q8_0",
+            "q4_0",
+            "q4_1",
+            "iq4_nl",
+            "q5_0",
+            "q5_1",
+            "turbo4",
+        ]
         | None
     ) = None
     cache_type_v: (
-        Literal["f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"]
+        Literal[
+            "f32",
+            "f16",
+            "bf16",
+            "q8_0",
+            "q4_0",
+            "q4_1",
+            "iq4_nl",
+            "q5_0",
+            "q5_1",
+            "turbo4",
+        ]
         | None
     ) = None
     kv_offload: bool | None = None
     cache_prompt: bool | None = None
     cache_reuse: int | None = Field(default=None, ge=0)
+    ctx_checkpoints: int | None = Field(default=None, ge=0)
+    checkpoint_every: int | None = Field(default=None, ge=0)
+    cache_ram: int | None = Field(default=None, ge=0)
+    slot_save_path: str | None = None
     gpu_layers: int | str | None = Field(default=None, pattern=r"^(auto|all)$")
     device: str | None = None
     split_mode: Literal["none", "layer", "row", "tensor"] | None = None
@@ -49,6 +75,13 @@ class ServerOptions(BaseModel):
     frequency_penalty: float | None = None
     seed: int | None = None
     parallel: int | None = Field(default=None, ge=1)
+    reasoning: Literal["on", "off", "auto"] | None = None
+    reasoning_budget: int | None = Field(default=None, ge=0)
+    spec_draft_p_min: float | None = Field(default=None, ge=0, le=1)
+    strict_mtp_qwen: bool | None = None
+    kv_unified: bool | None = None
+    no_mmap: bool | None = None
+    no_cache_idle_slots: bool | None = None
     cont_batching: bool | None = None
     warmup: bool | None = None
     context_shift: bool | None = None

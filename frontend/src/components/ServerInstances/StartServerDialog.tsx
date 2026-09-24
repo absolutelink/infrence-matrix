@@ -134,6 +134,8 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
           <ServerSettingsFields
             options={serverOptions}
             onChange={setServerOptions}
+            mtpDraftMax={mtpDraftMax}
+            onMtpDraftMaxChange={setMtpDraftMax}
           />
           <div>
             <Label>Model</Label>
@@ -211,19 +213,6 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
                 className="mt-1"
               />
             </div>
-          </div>
-
-          <div>
-            <Label htmlFor="start-mtp-draft-max">MTP Draft N-Max</Label>
-            <Input
-              id="start-mtp-draft-max"
-              type="number"
-              min={0}
-              value={mtpDraftMax}
-              onChange={(e) => setMtpDraftMax(e.target.value)}
-              className="mt-1"
-              placeholder="0 (no flags)"
-            />
           </div>
         </div>
 
