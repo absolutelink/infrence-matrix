@@ -20,6 +20,9 @@ from sqlmodel import Session, select
 from app.api.deps import get_db
 from app.api.routes.v1.responses import events as ev
 from app.api.routes.v1.responses.schemas import (
+    CompactionItem,
+    CompactRequestBody,
+    CompactResource,
     CreateResponseBody,
     Error,
     ErrorBody,
@@ -39,7 +42,7 @@ from app.api.routes.v1.responses.translator import (
     tools_to_llama,
 )
 from app.core.db import engine
-from app.models import Model, ResponseRecord
+from app.models import Model, ResponseRecord, ServerInstance
 from app.services.agent_manager import agent_manager
 from app.services.server_startup import (
     ServerStartupError,
@@ -65,7 +68,7 @@ def _error_response(
     body = ErrorResponse(
         error=ErrorBody(message=message, type=etype, param=param, code=code)
     )
-    return JSONResponse(status_code=status, content=body.model_dump())
+    return JSONResponse(status_code=status, content=body.model_dump(exclude_none=True))
 
 
 def _resolve_model(db: Session, name: str) -> Model:
@@ -187,6 +190,32 @@ def _coerce_output_item(item: dict[str, Any]) -> OutputItem:
     return _OUTPUT_ITEM_ADAPTER.validate_python(item)
 
 
+def _coerced_output_items(items: list[dict[str, Any]]) -> list[OutputItem]:
+    """Coerce raw item dicts; drop unset optional keys (phase/logprobs/
+    encrypted_content serialize as None otherwise, which fails the
+    conformance schemas' optional() (key-absent) semantics)."""
+    return [
+        _coerce_output_item({k: v for k, v in item.items() if v is not None})
+        for item in items
+    ]
+
+
+def _last_assistant_phase(request: CreateResponseBody) -> str | None:
+    """Phase label of the final assistant message in the request input,
+    for echoing on this response's output message (spec 2026-04-24)."""
+    if isinstance(request.input, str):
+        return None
+    phase: str | None = None
+    for item in request.input:
+        if (
+            item.type == "message"
+            and item.role == "assistant"
+            and getattr(item, "phase", None)
+        ):
+            phase = item.phase
+    return phase
+
+
 def _build_usage(
     usage_data: dict[str, Any], fallback_chars: int, reasoning_tokens: int
 ) -> dict[str, Any]:
@@ -196,7 +225,7 @@ def _build_usage(
         completion_tokens = fallback_chars // 4
     return ev.usage_from_llama(
         prompt_tokens, completion_tokens, reasoning_tokens
-    ).model_dump()
+    ).model_dump(exclude_none=True)
 
 
 # ============================================================================
@@ -228,6 +257,7 @@ async def _complete(
 
     seq = ev.SSEmitter()
     state = StreamState(seq, request.model)
+    state.assistant_phase = _last_assistant_phase(request)
     allowed = allowed_tool_names(request)
 
     reasoning_content = message.get("reasoning_content") or ""
@@ -255,7 +285,7 @@ async def _complete(
         response_id,
         created_at,
         status="incomplete" if incomplete else "completed",
-        output=[_coerce_output_item(item) for item in state.output_items],
+        output=_coerced_output_items(state.output_items),
         usage=usage,
     )
     if incomplete:
@@ -353,6 +383,7 @@ async def _stream_events(
         yield frame
 
     state = StreamState(seq, request.model)
+    state.assistant_phase = _last_assistant_phase(request)
     allowed = allowed_tool_names(request)
     fallback_chars = 0
     final_usage_data: dict[str, Any] = {}
@@ -439,7 +470,7 @@ async def _stream_events(
         else:
             response.status = "completed"
         # Typed models (not dicts) so pydantic serializes without warnings
-        response.output = [_coerce_output_item(item) for item in state.output_items]
+        response.output = _coerced_output_items(state.output_items)
         response.usage = Usage.model_validate(usage)
 
         if response.status == "incomplete":
@@ -511,6 +542,69 @@ async def _stream_events(
 # ============================================================================
 # Route
 # ============================================================================
+
+
+class TargetError(Exception):
+    """Server/model resolution failure carrying spec error fields."""
+
+    def __init__(self, status: int, code: str, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.message = message
+
+
+async def resolve_target(model_ref: str) -> tuple[ServerInstance, Model | None]:
+    """Resolve a server alias / model name / model id to a ready server.
+
+    Aliases route directly (auto-starting stopped/errored instances);
+    names/ids resolve to a model and a server is found or started. Raises
+    TargetError with spec error codes on failure.
+    """
+    from app.api.routes.v1.v1_chat_completions import _get_or_create_server
+
+    instance = await find_alias_instance(model_ref)
+    if instance is not None:
+        try:
+            server = await ensure_server_ready(instance)
+        except ServerStartupError as e:
+            raise TargetError(
+                503, "no_agent_available", f"Server not available: {e}"
+            ) from e
+        with Session(engine) as session:
+            model = session.exec(
+                select(Model).where(Model.id == server.model_id)
+            ).first()
+        if not model:
+            raise TargetError(
+                404, "model_not_found", f"Model for server alias {model_ref} not found"
+            )
+        return server, model
+
+    with Session(engine) as session:
+        try:
+            model = _resolve_model(session, model_ref)
+        except HTTPException as e:
+            if e.status_code == 404:
+                raise TargetError(404, "model_not_found", str(e.detail)) from e
+            raise TargetError(400, "invalid_request", str(e.detail)) from e
+
+    try:
+        server = await _get_or_create_server(model, None)
+        server = await ensure_server_ready(server)
+    except HTTPException as e:
+        raise TargetError(
+            e.status_code or 503, "no_agent_available", str(e.detail)
+        ) from e
+    except ServerStartupError as e:
+        raise TargetError(
+            503, "no_agent_available", f"Server not available: {e}"
+        ) from e
+    except Exception as e:
+        raise TargetError(
+            503, "no_agent_available", f"Failed to start server: {e}"
+        ) from e
+    return server, model
 
 
 @router.post("/responses", response_model=None)
@@ -630,11 +724,19 @@ async def create_response(
         len(history),
         sum(len(json.dumps(item)) for item in history),
         len(llama_messages),
-        sum(len(m["content"]) for m in llama_messages),
+        sum(
+            len(m["content"])
+            if isinstance(m["content"], str)
+            else len(json.dumps(m["content"]))
+            for m in llama_messages
+        ),
     )
     logger.debug(
         "responses prompt: %s",
-        " | ".join(f"{m['role']}:{m['content'][:80]}" for m in llama_messages),
+        " | ".join(
+            f"{m['role']}:{m['content'][:80] if isinstance(m['content'], str) else '<parts>'}"
+            for m in llama_messages
+        ),
     )
 
     response_id = new_id("resp")
@@ -680,7 +782,7 @@ async def create_response(
             response_id=response_id,
             output_items=[i.model_dump(exclude_none=True) for i in result.output],
             status=result.status,
-            usage=result.usage.model_dump() if result.usage else None,
+            usage=result.usage.model_dump(exclude_none=True) if result.usage else None,
             error=result.error,
             incomplete_reason=(
                 result.incomplete_details.reason if result.incomplete_details else None
@@ -693,3 +795,123 @@ async def create_response(
         logger.info("responses %s: not stored (store=false)", response_id)
 
     return result
+
+
+# ============================================================================
+# Compaction endpoint (spec 2026-04-24)
+# ============================================================================
+
+
+@router.post("/responses/compact", response_model=None)
+async def compact_response(
+    request: CompactRequestBody,
+    db: Session = Depends(get_db),
+) -> CompactResource | JSONResponse:
+    """Compact a conversation into a portable compaction item.
+
+    Runs a real summarization pass through the same llama.cpp proxy the
+    Responses API uses; the summary becomes the compaction item's
+    encrypted_content (opaque to clients, round-trippable as input).
+    Stateless: results are not persisted; chain from them by passing the
+    compacted output as input on a fresh response.
+    """
+    try:
+        # Resolve server exactly like POST /responses (alias auto-start
+        # or model name/id fallback).
+        instance = await find_alias_instance(request.model)
+        server = None
+        if instance is not None:
+            server = await ensure_server_ready(instance)
+        else:
+            model = _resolve_model(db, request.model)
+            from app.api.routes.v1.v1_chat_completions import _get_or_create_server
+
+            server = await _get_or_create_server(model, None)
+            server = await ensure_server_ready(server)
+    except ServerStartupError as e:
+        return _error_response(
+            503, "too_many_requests", "no_agent_available", f"Server not available: {e}"
+        )
+    except HTTPException as e:
+        return _error_response(
+            e.status_code or 500,
+            "not_found" if e.status_code == 404 else "server_error",
+            "model_not_found" if e.status_code == 404 else "server_error",
+            str(e.detail),
+        )
+
+    history: list[dict[str, Any]] = []
+    try:
+        previous = _load_previous(db, request.previous_response_id)
+    except HTTPException as e:
+        return _error_response(
+            404, "not_found", "previous_response_not_found", str(e.detail)
+        )
+    if previous is not None:
+        history = _build_chain_history(db, previous)
+
+    try:
+        messages = input_items_to_llama_messages(request, history)
+    except TranslationError as e:
+        return _error_response(400, "invalid_request", "invalid_input", str(e))
+
+    # Summarization prompt: a real sampling pass, not a passthrough.
+    compact_system = (
+        request.instructions
+        or "Compress this conversation into a concise but complete summary "
+        "preserving all key facts, decisions, and unresolved questions. "
+        "Output only the compressed summary."
+    )
+    llama_payload: dict[str, Any] = {
+        "messages": [
+            {"role": "system", "content": compact_system},
+            *messages,
+        ],
+        "temperature": 0.3,
+        "stream": False,
+    }
+
+    agent = await agent_manager.get_agent(str(server.agent_id))
+    if not agent:
+        return _error_response(
+            503, "server_error", "no_agent_available", "Agent not found"
+        )
+
+    try:
+        response = await agent_manager.send_to_agent(
+            str(server.agent_id),
+            "POST",
+            f"/proxy/{server.id}/v1/chat/completions",
+            llama_payload,
+            timeout=300.0,
+        )
+        choice = (response.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        summary_text = message.get("content") or ""
+        usage_data = response.get("usage") or {}
+    except Exception as e:
+        logger.error(f"Compaction sampling error: {e}")
+        return _error_response(500, "model_error", "model_error", str(e))
+
+    prompt_tokens = int(usage_data.get("prompt_tokens") or 0)
+    completion_tokens = int(usage_data.get("completion_tokens") or 0)
+
+    item = CompactionItem(
+        encrypted_content=summary_text,
+    )
+    resource = CompactResource(
+        output=[item],
+        created_at=int(time.time()),
+        usage=Usage(
+            input_tokens=prompt_tokens,
+            output_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+        ),
+    )
+    logger.info(
+        "responses compact: model=%s input_chars=%d summary_chars=%d",
+        request.model,
+        sum(len(json.dumps(m)) for m in messages),
+        len(summary_text),
+    )
+    return resource

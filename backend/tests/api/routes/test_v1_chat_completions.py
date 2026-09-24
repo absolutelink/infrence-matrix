@@ -1,6 +1,5 @@
 """Tests for V1 Chat Completions API endpoint."""
 
-
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
@@ -10,7 +9,9 @@ from app.models import Model
 class TestCreateChatCompletion:
     """Test POST /v1/chat/completions endpoint."""
 
-    def test_chat_completion_non_streaming(self, client: TestClient, db: Session) -> None:
+    def test_chat_completion_non_streaming(
+        self, client: TestClient, db: Session
+    ) -> None:
         """Test non-streaming chat completion."""
         model = Model(
             name="test-model.Q4_K_M.gguf",
@@ -31,7 +32,7 @@ class TestCreateChatCompletion:
             "model": "test-model.Q4_K_M.gguf",
             "messages": [
                 {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": "Hello!"}
+                {"role": "user", "content": "Hello!"},
             ],
             "stream": False,
             "temperature": 0.7,
@@ -70,9 +71,7 @@ class TestCreateChatCompletion:
 
         payload = {
             "model": "test-model.Q4_K_M.gguf",
-            "messages": [
-                {"role": "user", "content": "Hello!"}
-            ],
+            "messages": [{"role": "user", "content": "Hello!"}],
             "stream": True,
             "temperature": 0.7,
         }
@@ -82,7 +81,9 @@ class TestCreateChatCompletion:
         assert response.status_code in [200, 503]
 
         if response.status_code == 200:
-            assert response.headers["content-type"] == "text/event-stream; charset=utf-8"
+            assert (
+                response.headers["content-type"] == "text/event-stream; charset=utf-8"
+            )
 
             content = response.text
             lines = content.strip().split("\n\n")
@@ -100,20 +101,22 @@ class TestCreateChatCompletion:
 
             assert has_done, "Streaming response should end with [DONE]"
 
-    def test_chat_completion_model_not_found(self, client: TestClient, db: Session) -> None:
+    def test_chat_completion_model_not_found(
+        self, client: TestClient, db: Session
+    ) -> None:
         """Test chat completion with non-existent model."""
         payload = {
             "model": "nonexistent-model.gguf",
-            "messages": [
-                {"role": "user", "content": "Hello!"}
-            ],
+            "messages": [{"role": "user", "content": "Hello!"}],
             "stream": False,
         }
 
         response = client.post("/v1/chat/completions", json=payload)
         assert response.status_code == 404
 
-    def test_chat_completion_with_parameters(self, client: TestClient, db: Session) -> None:
+    def test_chat_completion_with_parameters(
+        self, client: TestClient, db: Session
+    ) -> None:
         """Test chat completion with various parameters."""
         model = Model(
             name="test-model.Q4_K_M.gguf",
@@ -134,7 +137,7 @@ class TestCreateChatCompletion:
             "model": "test-model.Q4_K_M.gguf",
             "messages": [
                 {"role": "system", "content": "You are helpful."},
-                {"role": "user", "content": "Hi there!"}
+                {"role": "user", "content": "Hi there!"},
             ],
             "stream": False,
             "temperature": 0.5,
@@ -149,7 +152,9 @@ class TestCreateChatCompletion:
 
         assert response.status_code in [200, 503]
 
-    def test_chat_completion_multiple_messages(self, client: TestClient, db: Session) -> None:
+    def test_chat_completion_multiple_messages(
+        self, client: TestClient, db: Session
+    ) -> None:
         """Test chat completion with conversation history."""
         model = Model(
             name="test-model.Q4_K_M.gguf",
@@ -172,7 +177,7 @@ class TestCreateChatCompletion:
                 {"role": "system", "content": "You are helpful."},
                 {"role": "user", "content": "Hello!"},
                 {"role": "assistant", "content": "Hi! How can I help?"},
-                {"role": "user", "content": "Tell me a joke."}
+                {"role": "user", "content": "Tell me a joke."},
             ],
             "stream": False,
         }

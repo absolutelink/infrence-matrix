@@ -18,6 +18,18 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
 
 
+def serialize(model: BaseModel, **kwargs: Any) -> dict[str, Any]:
+    """Spec-serialization: omit None-valued optional fields and use aliases.
+
+    The Open Responses conformance schemas mark several fields strictly
+    non-nullable (temperature, top_p, parallel_tool_calls, ...) and use
+    optional() (key absent, not null) for optional keys like phase,
+    logprobs, encrypted_content. The `schema` key on json_schema formats
+    is a serialized alias, so dumps must use by_alias.
+    """
+    return model.model_dump(exclude_none=True, by_alias=True, **kwargs)
+
+
 # ============================================================================
 # Enums
 # ============================================================================
@@ -183,6 +195,26 @@ class CompactionSummaryItemParam(BaseModel):
     type: Literal["compaction"] = "compaction"
     id: str
     encrypted_content: str
+
+
+class CompactRequestBody(BaseModel):
+    """POST /v1/responses/compact request body (spec 2026-04-24)."""
+
+    model: str
+    input: str | list[InputItem]
+    previous_response_id: str | None = None
+    instructions: str | None = None
+    prompt_cache_key: str | None = None
+
+
+class CompactResource(BaseModel):
+    """Response of the compaction endpoint."""
+
+    id: str = Field(default_factory=lambda: new_id("cmp"))
+    object: Literal["response.compaction"] = "response.compaction"
+    output: list[CompactionItem] = Field(default_factory=list)
+    created_at: int
+    usage: Usage
 
 
 InputItem = Annotated[

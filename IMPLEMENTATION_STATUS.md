@@ -140,24 +140,31 @@ Last Updated: September 23, 2026
 - [ ] Batch job management
 - [ ] Audio transcription UI
 
-#### OpenResponses API (`/v1/responses`) — ✅ implemented (core scope)
-Target: [Open Responses spec v2026-04-24](https://www.openresponses.org/specification) (full core scope; WebSocket transport + `/responses/compact` deferred).
+#### OpenResponses API (`/v1/responses`) — ✅ implemented (core scope + conformance)
+Target: [Open Responses spec v2026-04-24](https://www.openresponses.org/specification) (full core scope incl. WebSocket transport + `/responses/compact`; `service_tier` accepted, maps to default).
 
-- [x] **Schemas module** (`backend/app/api/routes/v1/responses/schemas.py`): content parts (input_text/image/file/video, output_text, refusal, reasoning_text, summary_text), item params (user/system/developer/assistant messages, function_call, function_call_output, reasoning, item_reference, compaction), FunctionToolParam, tool_choice union incl. `allowed_tools`, text.format (text/json_object/json_schema), ReasoningParam, TextParam, StreamOptionsParam, Usage (+details), CreateResponseBody, ResponseResource
-- [x] **Streaming events** (`events.py`): all ~24 spec events (response.created/queued/in_progress/completed/failed/incomplete, output_item.added/done, content_part.added/done, output_text.delta/done, refusal.*, reasoning.*, reasoning_summary_*, function_call_arguments.delta/done, error) with monotonic `sequence_number`, `event:`/`data:` SSE framing, terminal `[DONE]`
+- [x] **Schemas module** (`backend/app/api/routes/v1/responses/schemas.py`): content parts (input_text/image/file/video, output_text, refusal, reasoning_text, summary_text), item params (user/system/developer/assistant messages, function_call, function_call_output, reasoning, item_reference, compaction), FunctionToolParam, tool_choice union incl. `allowed_tools`, text.format (text/json_object/json_schema), ReasoningParam, TextParam, StreamOptionsParam, Usage (+details), CreateResponseBody, ResponseResource, CompactRequestBody/CompactResource
+- [x] **Spec serialization** (`serialize()` helper): `exclude_none=True, by_alias=True` at every emission point — conformance harness's Zod schemas mark temperature/top_p/penalties/top_logprobs/parallel_tool_calls strictly non-nullable and use optional() (key-absent, not null) for phase/logprobs/encrypted_content; text.format echo matches the TextFormat union (`type:"text"` → `{type}` only, `json_schema` → real `schema` key via alias + `strict` defaulting `true`, `verbosity` omitted when unset); tools echo carries `strict:true` default
+- [x] **Streaming events** (`events.py`): all ~24 spec events (response.created/queued/in_progress/completed/failed/incomplete, output_item.added/done, content_part.added/done, output_text.delta/done, refusal.*, reasoning.* + reasoning_text.* (dual-name: spec conformance schemas + OpenWebUI), reasoning_summary_*, function_call_arguments.delta/done, error) with monotonic `sequence_number`, `event:`/`data:` SSE framing, terminal `[DONE]`
 - [x] **Persistence**: new `responses` table mirroring ResponseResource 1:1 (replaces `conversations` table, migration `b1f8c2a47d90`); `previous_response_id` chaining = previous.input + previous.output + new input; `store=false` → no persistence, `previous_response_not_found` error on missing chain
 - [x] **Translator** (`translator.py`, Responses items ↔ llama.cpp chat messages/chunks): input items → messages (instructions → system, function_call/output replay as text, reasoning skipped); llama.cpp tool_calls + reasoning_content → function_call/reasoning items; `allowed_tools` → backend enforcement (violating calls suppressed into a note message)
 - [x] **POST /v1/responses**: alias resolution (incl. stopped/errored auto-start) + name/id fallback, non-streaming + SSE, spec error envelopes (previous_response_not_found, model_not_found); `background=true` → 400; no GET retrieval endpoint (spec doesn't document one)
 - [x] **Agent `--jinja` always-on**: llama.cpp tool calling requires `--jinja`; agent starts every llama-server with it (behavior change: templates drive formatting/parsing for chat/completions too)
-- [x] **Reasoning**: map llama.cpp `reasoning_content` deltas → reasoning items + response.reasoning.delta/done events (thinking models)
-- [x] **Tests**: `tests/api/routes/test_responses_unit.py` (schemas/translator/StreamState/SSE framing), `tests/api/routes/test_v1_responses.py` (routes), regenerated frontend client
+- [x] **Reasoning**: map llama.cpp `reasoning_content` deltas → reasoning items + dual-name events (`response.reasoning.delta/done` for spec conformance + `response.reasoning_text.delta/done` for OpenWebUI, identical payloads); reasoning item closed (`output_item.done`, completed) as soon as content/tool-call deltas start — llama.cpp sends no explicit end-of-reasoning marker mid-stream, and OpenWebUI only closes the thinking block on `output_item.done`
+- [x] **Assistant phase passthrough** (spec 2026-04-24): `commentary`/`final_answer` accepted on assistant input items (replayed as bracketed cue), last assistant phase echoed on output message items
+- [x] **Multimodal (real)**: `input_image` parts → llama.cpp multimodal `image_url` message parts (base64 data URLs/remote URLs); mmproj plumbing end-to-end — backend matches same-repo registered mmproj model at server start, agent downloads the projector on demand and spawns llama-server with `--mmproj` (servers without a projector get llama.cpp's clean error, surfaced as model_error)
+- [x] **POST /v1/responses/compact** (spec 2026-04-24): real compaction — model-summarization sampling pass through the same llama.cpp proxy, returns `response.compaction` (compaction item `encrypted_content` = summary, `created_at`, `usage`), stateless (no DB write); spec error envelopes for missing model / not-found chain
+- [x] **WebSocket transport** (`ws.py`, spec 2026-04-24): `POST /v1/responses` also served over WS — `{"type":"response.create"}` turns, same streaming events as SSE, spec error envelope, sequential processing (one in-flight response), transport-specific fields (`stream`/`stream_options`/`background`) rejected, 60-min connection limit (`websocket_connection_limit_reached`); connection-local cache enables `store=false` chaining via `previous_response_id` with `previous_response_not_found` on miss and cache eviction on failed turns; mounted directly in main.py (FastAPI 1.3 `_IncludedRouter` breaks WS handshakes through the v1 include)
+- [x] **Tests**: `tests/api/routes/test_responses_unit.py` (schemas/translator/StreamState/SSE framing + `TestConformanceSchemaRules`/`TestConformanceStreamingEvents` mirroring the harness's Zod rules), `tests/api/routes/test_v1_responses.py` (routes), regenerated frontend client
 - [x] **UI test page** (`/responses`): dedicated playground — server selector, spec SSE parsing (`event:`+`data:` frames), rendered items (text, Thinking, tool-call chips), **raw streaming-event inspector** (sequence_number + collapsible JSON payloads), `store` toggle with `previous_response_id` chaining ("New conversation" resets), temperature/max_tokens sliders, non-streaming mode rendering the full ResponseResource; added Switch component (`radix-ui`); sidebar entry "Responses API" after Chat
-- [ ] Deferred: WebSocket transport, `/responses/compact`, service_tier behavior (accepted, maps to default)
+- [ ] Deferred: WebSocket compaction tests (CLI-only), service_tier behavior (accepted, maps to default)
 
 Key llama.cpp facts (researched):
 - Tool calling on `/v1/chat/completions` only works with `--jinja` (template autoparser builds PEG grammar; parses model output into structured tool_calls; grammar-constrains arguments from tool JSON schemas)
 - Wire shapes: request `tools:[{type:"function",function:{name,description,parameters}}]`, `tool_choice:"auto"|"none"|"required"|{type:"function",function:{name}}`; non-streaming result `message.tool_calls[]` + `finish_reason:"tool_calls"`; streaming via `delta.tool_calls[]` fragments
 - We translate flat Responses `FunctionToolParam` ↔ llama's nested `function:{...}` shape; `allowed_tools` is ours to enforce (llama.cpp unaware)
+- Images: llama.cpp accepts `{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}` content parts; without an mmproj projector the server 500s ("image input is not supported") — we surface it as a model_error
+- Conformance harness quirks (openresponses repo, `src/lib/sse-parser.ts`): its generated schemas validate reasoning deltas as `response.reasoning.delta/done` while its own reference/spec text and OpenWebUI use `reasoning_text.*` — hence dual-name emission
 
 #### Dashboard Improvements
 - [ ] System metrics dashboard
@@ -339,7 +346,7 @@ API_URL=https://matrix.thelink.family
 
 ## 🎯 Next Steps
 
-1. ~~OpenResponses API~~ ✅ implemented (see Inference Features section)
+1. ~~OpenResponses API~~ ✅ implemented + conformance pass (see Inference Features section)
 2. **Server health monitoring** - periodic health checks; auto-mark instances unhealthy/stopped
 3. **Dashboard Metrics** - Add charts and statistics (gpu.usage events already streaming)
 4. ~~Schedule cleanup loop~~ - run cleanup_offline_agents periodically on startup ✅
@@ -349,10 +356,25 @@ API_URL=https://matrix.thelink.family
 
 ## 📝 Recent Changes
 
+### September 23, 2026 (Open Responses conformance pass)
+- ✅ Ran the openresponses.org conformance suite (cloned spec repo, validated against its generated Zod schemas); fixed all reported schema failures
+- ✅ Spec serialization: `serialize()` helper (`exclude_none`, `by_alias`) — unset temperature/top_p/penalties/top_logprobs/parallel_tool_calls omitted (were `null`, which fails the harness's non-nullable fields); optional() keys (phase/logprobs/encrypted_content) absent, not null; text.format echo matches the TextFormat union (`schema` alias + `strict:true` default); tools echo `strict:true`
+- ✅ Reasoning dual-name emission: `response.reasoning.delta/done` (spec conformance schemas) + `response.reasoning_text.delta/done` (OpenWebUI) with identical payloads
+- ✅ Assistant phase (`commentary`/`final_answer`) full passthrough; output message echo
+- ✅ Real multimodal: `input_image` → llama.cpp `image_url` parts; mmproj end-to-end (repo-matched projector auto-attached at server start, agent downloads + `--mmproj` flag)
+- ✅ `POST /v1/responses/compact`: real model-summarization pass, spec `response.compaction` shape, stateless
+- ✅ WebSocket transport at `/v1/responses`: `response.create` turns, sequential, spec error envelope, 60-min limit, connection-local `store:false` cache with eviction-on-failure (spec reconnect-recovery semantics); mounted directly — FastAPI 1.3 `_IncludedRouter` breaks WS handshakes
+- ✅ Conformance tests added mirroring harness Zod rules (65 backend tests green); client regenerated, frontend build green
+
+### September 23, 2026 (reasoning passthrough fixes)
+- ✅ `/v1/chat/completions` dropped llama.cpp's `delta.reasoning_content` before re-emitting chunks — thinking tokens never reached clients (Matrix Chat page or OpenWebUI); now forwarded in stream deltas and non-streaming `message.reasoning_content`
+- ✅ Responses API emitted reasoning as custom `response.reasoning.*` events — OpenWebUI ignores those (expects spec `response.reasoning_text.delta/done`); renamed, UI listener + generated client updated
+- ✅ Translator never closed the reasoning item mid-stream (llama.cpp has no end-of-reasoning marker; the `finish_reason == "reasoning_content"` legacy signal never fires) → OpenWebUI kept thinking blocks open until `response.completed`; now closed on first content/tool-call delta
+
 ### September 23, 2026 (Responses API test page)
 - ✅ New UI page `/responses` ("Responses API" in sidebar after Chat): playground for the OpenResponses endpoint
 - ✅ Spec-framed SSE parsing (`event:` + `data:` blocks, `[DONE]` terminator — richer than the chat page's data-line-only parser)
-- ✅ Rendered output items: text bubbles, Thinking disclosures (response.reasoning.delta), tool-call chips (function_call items)
+- ✅ Rendered output items: text bubbles, Thinking disclosures (response.reasoning_text.delta), tool-call chips (function_call items)
 - ✅ Raw streaming-event inspector panel: every event with sequence_number, type color coding, collapsible JSON payload
 - ✅ Test affordances: `store` toggle with `previous_response_id` chaining (New-conversation button resets), temperature / max_output_tokens sliders, non-streaming mode via generated client
 - ✅ Added missing `switch.tsx` Shadcn component (unified `radix-ui` package); empty `Sparkles` cleanup
@@ -374,12 +396,12 @@ API_URL=https://matrix.thelink.family
 ## 📊 Statistics
 
 - **Frontend Routes**: 9 (dashboard, models, agents, server-instances, chat, responses, completions, embeddings, audio)
-- **API Endpoints**: 30+ implemented (incl. server-instances start/stop/restart, `/v1/responses`, models status)
+- **API Endpoints**: 30+ implemented (incl. server-instances start/stop/restart, `/v1/responses` + `/responses/compact` + WS transport, models status)
 - **UI Components**: 50+ Shadcn components (incl. new Switch)
 - **Database Models**: 8 SQLModel classes (ResponseRecord replaced Conversation)
 - **Docker Layers**: 2-stage build
 - **Entrypoint Scripts**: 3 modular scripts
-- **Event Types**: 8 agent events + 24 OpenResponses streaming events
+- **Event Types**: 8 agent events + 26 OpenResponses streaming events (incl. dual-name reasoning)
 - **Agent Recipes**: 1 (vulkan on AMD Strix Halo)
 
 ---

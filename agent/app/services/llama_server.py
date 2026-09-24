@@ -28,6 +28,8 @@ class ServerConfig:
     # Always-on: enables Jinja chat templates (required for tool calling,
     # used by chat/completions and OpenResponses alike)
     jinja: bool = True
+    # Multimodal projector path (vision GGUF); None omits the flag
+    mmproj_path: str | None = None
 
 
 class LlamaServerManager:
@@ -102,6 +104,9 @@ class LlamaServerManager:
 
         if config.jinja:
             cmd.append("--jinja")
+
+        if config.mmproj_path:
+            cmd.extend(["--mmproj", config.mmproj_path])
 
         logger.info(
             f"Starting llama.cpp server {server_id} with command: {' '.join(cmd)}"

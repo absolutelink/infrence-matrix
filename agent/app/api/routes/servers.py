@@ -32,6 +32,8 @@ class ServerSpec(BaseModel):
     flash_attn: bool | None = True
     # Jinja chat templates (required for tool calling); default on
     jinja: bool = True
+    # Multimodal projector (vision GGUF); resolved like model_path
+    mmproj_path: str | None = None
 
 
 class ServerStartRequest(BaseModel):
@@ -39,6 +41,8 @@ class ServerStartRequest(BaseModel):
     # If provided and the model file is missing locally, the agent downloads
     # the file from the source repo before starting the server.
     source: dict[str, str] | None = None
+    # Same shape as source, for the mmproj projector (downloaded on demand)
+    mmproj_source: dict[str, str] | None = None
 
 
 class ServerStopRequest(BaseModel):
@@ -133,6 +137,12 @@ async def start_server(request: ServerStartRequest) -> dict:
     try:
         model_path = await _ensure_model(request.config.model_path, request.source)
 
+        mmproj_path: str | None = None
+        if request.config.mmproj_path:
+            mmproj_path = await _ensure_model(
+                request.config.mmproj_path, request.mmproj_source or request.source
+            )
+
         # The agent owns port allocation: pick a free random port unless the
         # caller pinned one explicitly.
         port = request.config.port or _allocate_port()
@@ -146,6 +156,7 @@ async def start_server(request: ServerStartRequest) -> dict:
             cache_prompt=request.config.cache_prompt,
             flash_attn=request.config.flash_attn,
             jinja=request.config.jinja,
+            mmproj_path=mmproj_path,
         )
 
         success = await llama_server_manager.start_server(request.config.id, config)

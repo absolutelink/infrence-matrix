@@ -149,23 +149,28 @@ class TestTranslation:
         msgs = input_items_to_llama_messages(self._request(), history)
         assert msgs[0]["content"] == "[Tool result (c1)]: 42"
 
-    def test_image_input_rejected(self) -> None:
-        with pytest.raises(TranslationError):
-            input_items_to_llama_messages(
-                CreateResponseBody(
-                    model="m",
-                    input=[
-                        {
-                            "type": "message",
-                            "role": "user",
-                            "content": [
-                                {"type": "input_image", "image_url": "https://x"}
-                            ],
-                        }
-                    ],
-                ),
-                [],
-            )
+    def test_image_input_translated(self) -> None:
+        messages = input_items_to_llama_messages(
+            CreateResponseBody(
+                model="m",
+                input=[
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "What is this:"},
+                            {"type": "input_image", "image_url": "https://x"},
+                        ],
+                    }
+                ],
+            ),
+            [],
+        )
+        assert messages[0]["role"] == "user"
+        content = messages[0]["content"]
+        assert isinstance(content, list)
+        assert content[0] == {"type": "text", "text": "What is this:"}
+        assert content[1] == {"type": "image_url", "image_url": {"url": "https://x"}}
 
     def test_item_reference_rejected(self) -> None:
         with pytest.raises(TranslationError):
@@ -509,3 +514,187 @@ class TestChainDepth:
         helper._record(db, "resp_d2", "resp_d1")
         r3 = helper._record(db, "resp_d3", "resp_d2")
         assert _chain_depth(db, r3) == 3
+
+
+class TestConformanceSchemaRules:
+    """Mirror the openresponses conformance harness's Zod validation rules.
+
+    responseResourceSchema marks temperature/top_p/presence_penalty/
+    frequency_penalty/top_logprobs/parallel_tool_calls strictly non-nullable
+    and text.verbosity optional() — None values fail the schema.
+    """
+
+    def _serialize(self, request: CreateResponseBody) -> dict:
+        from app.api.routes.v1.responses.schemas import serialize
+
+        return serialize(build_response_resource(request, "resp_x", 1))
+
+    def test_unset_params_omitted_not_null(self) -> None:
+        req = CreateResponseBody(model="m", input="hi")
+        data = self._serialize(req)
+        for key in (
+            "parallel_tool_calls",
+            "temperature",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_logprobs",
+            "reasoning",
+            "completed_at",
+        ):
+            assert key not in data, f"{key} must be omitted, not null"
+
+    def test_set_params_echoed(self) -> None:
+        req = CreateResponseBody.model_validate(
+            {
+                "model": "m",
+                "input": "hi",
+                "temperature": 0.5,
+                "top_p": 0.9,
+                "parallel_tool_calls": True,
+                "top_logprobs": 3,
+                "presence_penalty": 0.1,
+                "frequency_penalty": 0.2,
+                "text": {"verbosity": "low"},
+            }
+        )
+        data = self._serialize(req)
+        assert data["temperature"] == 0.5
+        assert data["top_p"] == 0.9
+        assert data["parallel_tool_calls"] is True
+        assert data["top_logprobs"] == 3
+        assert data["presence_penalty"] == 0.1
+        assert data["frequency_penalty"] == 0.2
+        assert data["text"]["verbosity"] == "low"
+
+    def test_text_format_echo_shape(self) -> None:
+        """format.type 'text' echoes only {type}; json_schema echoes the
+        real schema under the aliased 'schema' key with strict defaulting."""
+        req = CreateResponseBody.model_validate(
+            {"model": "m", "input": "hi", "text": {"format": {"type": "text"}}}
+        )
+        data = self._serialize(req)
+        assert data["text"]["format"] == {"type": "text"}
+
+        req2 = CreateResponseBody.model_validate(
+            {
+                "model": "m",
+                "input": "hi",
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "x",
+                        "schema": {"type": "object"},
+                    }
+                },
+            }
+        )
+        data2 = self._serialize(req2)
+        fmt = data2["text"]["format"]
+        assert fmt["type"] == "json_schema"
+        assert fmt["schema"] == {"type": "object"}
+        assert fmt["strict"] is True
+        assert "schema_" not in fmt
+        assert "description" not in fmt
+
+    def test_tools_echo_strict_defaults_true(self) -> None:
+        req = CreateResponseBody.model_validate(
+            {
+                "model": "m",
+                "input": "hi",
+                "tools": [{"type": "function", "name": "f"}],
+            }
+        )
+        data = self._serialize(req)
+        tool = data["tools"][0]
+        assert tool["strict"] is True
+        assert "description" not in tool
+
+    def test_output_items_omit_null_optionals(self) -> None:
+        """phase/logprobs/encrypted_content serialize as None and would fail
+        the harness's optional() (key-absent) semantics."""
+        from app.api.routes.v1.responses.router import _coerced_output_items
+        from app.api.routes.v1.responses.schemas import serialize
+
+        seq = ev.SSEmitter()
+        state = StreamState(seq, "m")
+        state.assistant_phase = "final_answer"
+        state.add_reasoning_delta("thinking")
+        state.add_text_delta("answer")
+        state.finish_calls()
+        state.finish_reasoning()
+        state.finish_message()
+
+        items = [serialize(i) for i in _coerced_output_items(state.output_items)]
+        reasoning = next(i for i in items if i["type"] == "reasoning")
+        assert "encrypted_content" not in reasoning
+        message = next(i for i in items if i["type"] == "message")
+        assert message["phase"] == "final_answer"
+        part = message["content"][0]
+        assert "logprobs" not in part
+        assert part["annotations"] == []
+
+
+class TestConformanceStreamingEvents:
+    def test_reasoning_events_emitted_under_both_names(self) -> None:
+        """Spec conformance validates response.reasoning.delta/done; OpenWebUI
+        renders response.reasoning_text.delta — both must reach the wire."""
+        seq = ev.SSEmitter()
+        state = StreamState(seq, "m")
+        state.add_reasoning_delta("hmm")
+        state.finish_reasoning()
+
+        frames = seq.drain_frames()
+        types = [f.split("\n")[0][7:] for f in frames]
+        assert "response.reasoning.delta" in types
+        assert "response.reasoning_text.delta" in types
+        assert "response.reasoning.done" in types
+        assert "response.reasoning_text.done" in types
+        # Both payloads carry identical fields
+        payloads = {}
+        for f in frames:
+            payload = json.loads(f.split("data: ", 1)[1])
+            if payload["type"].startswith("response.reasoning"):
+                payloads[payload["type"]] = payload
+        for shared in ("item_id", "output_index", "content_index"):
+            assert (
+                payloads["response.reasoning.delta"][shared]
+                == (payloads["response.reasoning_text.delta"][shared])
+            )
+
+    def test_phase_passthrough_replayed_with_cue(self) -> None:
+        messages = input_items_to_llama_messages(
+            CreateResponseBody(
+                model="m",
+                input=[
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "phase": "commentary",
+                        "content": "thinking out loud",
+                    },
+                    {"type": "message", "role": "user", "content": "go on"},
+                ],
+            ),
+            [],
+        )
+        assert "[assistant phase: commentary]" in messages[0]["content"]
+
+    def test_last_assistant_phase_echoed_on_output(self) -> None:
+        from app.api.routes.v1.responses.router import _last_assistant_phase
+
+        req = CreateResponseBody.model_validate(
+            {
+                "model": "m",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "phase": "final_answer",
+                        "content": "The number is four.",
+                    },
+                    {"type": "message", "role": "user", "content": "repeat"},
+                ],
+            }
+        )
+        assert _last_assistant_phase(req) == "final_answer"

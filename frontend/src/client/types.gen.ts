@@ -372,6 +372,46 @@ export type ChatMessage = {
 };
 
 /**
+ * CompactRequestBody
+ *
+ * POST /v1/responses/compact request body (spec 2026-04-24).
+ */
+export type CompactRequestBody = {
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Input
+     */
+    input: string | Array<({
+        type: 'message';
+    } & UserMessageItemParam) | ({
+        type: 'reasoning';
+    } & ReasoningItemParam) | ({
+        type: 'function_call';
+    } & FunctionCallItemParam) | ({
+        type: 'function_call_output';
+    } & FunctionCallOutputItemParam) | ({
+        type: 'item_reference';
+    } & ItemReferenceParam) | ({
+        type: 'compaction';
+    } & CompactionSummaryItemParam)>;
+    /**
+     * Previous Response Id
+     */
+    previous_response_id?: string | null;
+    /**
+     * Instructions
+     */
+    instructions?: string | null;
+    /**
+     * Prompt Cache Key
+     */
+    prompt_cache_key?: string | null;
+};
+
+/**
  * CompactionSummaryItemParam
  */
 export type CompactionSummaryItemParam = {
@@ -2599,6 +2639,29 @@ export type v1ResponsesCreateResponseErrors = {
 export type v1ResponsesCreateResponseError = v1ResponsesCreateResponseErrors[keyof v1ResponsesCreateResponseErrors];
 
 export type v1ResponsesCreateResponseResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type v1ResponsesCompactResponseData = {
+    body: CompactRequestBody;
+    path?: never;
+    query?: never;
+    url: '/v1/responses/compact';
+};
+
+export type v1ResponsesCompactResponseErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type v1ResponsesCompactResponseError = v1ResponsesCompactResponseErrors[keyof v1ResponsesCompactResponseErrors];
+
+export type v1ResponsesCompactResponseResponses = {
     /**
      * Successful Response
      */

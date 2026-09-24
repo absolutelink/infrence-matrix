@@ -16,6 +16,7 @@ from app.api.routes.v1 import (
     files_router,
     models_router,
     responses_router,
+    responses_ws_router,
 )
 from app.api.routes.websocket import router as agent_ws_router
 from app.core.config import settings
@@ -66,6 +67,9 @@ app.include_router(chat_completions_router, prefix="/v1", tags=["v1/chat"])
 app.include_router(completions_router, prefix="/v1", tags=["v1/completions"])
 app.include_router(embeddings_router, prefix="/v1", tags=["v1/embeddings"])
 app.include_router(responses_router, prefix="/v1", tags=["v1/responses"])
+# Responses API WebSocket (spec transport): mounted at /v1 directly so the
+# handshake is not wrapped by the APIRouter include indirection.
+app.include_router(responses_ws_router, prefix="/v1", tags=["v1/responses-ws"])
 app.include_router(files_router, prefix="/v1", tags=["v1/files"])
 app.include_router(batches_router, prefix="/v1", tags=["v1/batches"])
 app.include_router(audio_router, prefix="/v1", tags=["v1/audio"])

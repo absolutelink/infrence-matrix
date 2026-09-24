@@ -20,9 +20,9 @@ import uuid as uuid_module
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
-from sqlmodel import col
+from sqlmodel import Session, col, select
 
+from app.core.db import engine
 from app.db.session import AsyncSessionMaker
 from app.models import Agent, Model, ServerInstance
 from app.services.agent_manager import agent_manager
@@ -42,9 +42,12 @@ def build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any
     """Build the agent /servers/start payload from instance + model.
 
     The agent allocates the port (random free one) when none is sent.
+    A vision-capable model with a registered mmproj sibling gets the
+    projector attached so llama-server loads it (--mmproj).
     """
     filename = model.source_file or model.path.rsplit("/", 1)[-1]
-    return {
+    mmproj = _find_mmproj(model)
+    payload: dict[str, Any] = {
         "config": {
             "id": str(instance.id),
             "model_path": model.path,
@@ -64,6 +67,39 @@ def build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any
         if model.source_repo_id
         else None,
     }
+    if mmproj is not None:
+        mmproj_model, mmproj_filename = mmproj
+        payload["config"]["mmproj_path"] = mmproj_model.path
+        # Download the projector alongside the main model when missing.
+        if mmproj_model.source_repo_id and not mmproj_model.path.startswith("/"):
+            payload["mmproj_source"] = {
+                "source": mmproj_model.source,
+                "repo_id": mmproj_model.source_repo_id,
+                "filename": mmproj_filename,
+                "job_id": f"server-{instance.id}-mmproj",
+            }
+    return payload
+
+
+def _find_mmproj(model: Model) -> tuple[Model, str] | None:
+    """Registered mmproj model for a vision model, else None.
+
+    Matched by source repo: the projector must come from the same
+    HuggingFace repo as the base model (standard vision GGUF layout).
+    """
+    if not model.source_repo_id:
+        return None
+    with Session(engine) as session:
+        mmproj_model = session.exec(
+            select(Model).where(
+                Model.source_repo_id == model.source_repo_id,
+                Model.model_type == "mmproj",
+            )
+        ).first()
+    if not mmproj_model:
+        return None
+    filename = mmproj_model.source_file or mmproj_model.path.rsplit("/", 1)[-1]
+    return mmproj_model, filename
 
 
 async def dispatch_start(
