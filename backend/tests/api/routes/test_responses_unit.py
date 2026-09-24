@@ -191,6 +191,20 @@ class TestTranslation:
         # reasoning item dropped, user messages preserved in order
         assert [m["content"] for m in msgs] == ["go", "hi"]
 
+    def test_compaction_item_replayed_as_context(self) -> None:
+        """Compaction items round-trip: our compact endpoint stores the
+        summary text as encrypted_content; chains continue from it."""
+        history = [
+            {"type": "compaction", "id": "cmp_1", "encrypted_content": "summary"},
+            {"type": "message", "role": "user", "content": "continue"},
+        ]
+        msgs = input_items_to_llama_messages(self._request(), history)
+        assert msgs == [
+            {"role": "assistant", "content": "summary"},
+            {"role": "user", "content": "continue"},
+            {"role": "user", "content": "hi"},
+        ]
+
     def test_tools_flat_to_nested(self) -> None:
         req = self._request(
             tools=[
@@ -689,6 +703,36 @@ class TestConformanceStreamingEvents:
         assert "response.reasoning.delta" in types
         assert "response.reasoning.done" in types
         assert not any("reasoning_text" in t for t in types)
+
+    def test_ws_transport_sends_raw_json_per_message(self) -> None:
+        """WebSocket transport must carry one raw JSON object per WS message —
+        SSE-style event:/data: frames fail the harness's JSON.parse."""
+        seq = ev.SSEmitter()
+        state = StreamState(seq, "m")
+        state.add_text_delta("hi")
+        state.finish_message()
+        events = seq.drain_events()
+        for event in events:
+            parsed = json.loads(json.dumps(event))
+            assert "type" in parsed
+            assert "sequence_number" in parsed
+        # no SSE framing markers anywhere in the serialized payloads
+        for event in events:
+            assert "\n" not in json.dumps(event)
+
+    def test_ws_error_event_shape(self) -> None:
+        """webSocketErrorEventSchema: {type: error, status, error{code,message}}."""
+        from app.api.routes.v1.responses.ws import _error_event
+
+        payload = json.loads(
+            _error_event(
+                404, "previous_response_not_found", "gone", "previous_response_id"
+            )
+        )
+        assert payload["type"] == "error"
+        assert payload["status"] == 404
+        assert payload["error"]["code"] == "previous_response_not_found"
+        assert payload["error"]["param"] == "previous_response_id"
 
     def test_phase_passthrough_replayed_with_cue(self) -> None:
         messages = input_items_to_llama_messages(

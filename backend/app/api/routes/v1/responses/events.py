@@ -92,6 +92,12 @@ class SSEmitter:
         self._pending.clear()
         return frames
 
+    def drain_events(self) -> list[dict[str, Any]]:
+        """Raw event dicts (WebSocket transport: one JSON object per message)."""
+        events = list(self._pending)
+        self._pending.clear()
+        return events
+
     async def stream(self, events: AsyncIterator[dict[str, Any]]) -> AsyncIterator[str]:
         """Wrap an event iterator, framing each event and ending with [DONE]."""
         async for event in events:

@@ -64,6 +64,12 @@ def _error_event(status: int, code: str, message: str, param: str | None) -> str
     )
 
 
+async def _send_events(websocket: WebSocket, events: list[dict[str, Any]]) -> None:
+    """One raw JSON object per WebSocket message (no SSE framing)."""
+    for event in events:
+        await websocket.send_text(json.dumps(event, ensure_ascii=False))
+
+
 async def _stream_to_ws(
     websocket: WebSocket, request: CreateResponseBody
 ) -> dict[str, Any] | None:
@@ -94,8 +100,7 @@ async def _stream_to_ws(
         )
         ev.response_created(seq, resource)
         ev.response_in_progress(seq, resource)
-        for frame in seq.drain_frames():
-            await websocket.send_text(frame)
+        await _send_events(websocket, seq.drain_events())
 
         state = StreamState(seq, request.model)
         state.assistant_phase = _last_assistant_phase(request)
@@ -145,14 +150,12 @@ async def _stream_to_ws(
                         state.add_text_delta(content_delta)
                     for tc in delta.get("tool_calls") or []:
                         state.add_tool_call_delta(tc.get("index", 0), tc)
-                    for frame in seq.drain_frames():
-                        await websocket.send_text(frame)
+                    await _send_events(websocket, seq.drain_events())
 
         state.finish_reasoning()
         state.finish_calls()
         state.finish_message()
-        for frame in seq.drain_frames():
-            await websocket.send_text(frame)
+        await _send_events(websocket, seq.drain_events())
 
         usage = _build_usage(final_usage, fallback_chars, state.reasoning_tokens)
         if finish_reason == "length":
@@ -167,8 +170,7 @@ async def _stream_to_ws(
             ev.response_incomplete(seq, resource)
         else:
             ev.response_completed(seq, resource)
-        for frame in seq.drain_frames():
-            await websocket.send_text(frame)
+        await _send_events(websocket, seq.drain_events())
 
         return serialize_spec(resource)
     except TargetError as e:
@@ -185,8 +187,7 @@ async def _stream_to_ws(
         failed.status = "failed"
         failed.error = Error(code="server_error", message=str(e))
         ev.response_failed(seq, failed)
-        for frame in seq.drain_frames():
-            await websocket.send_text(frame)
+        await _send_events(websocket, seq.drain_events())
         return None
 
 

@@ -187,9 +187,16 @@ def input_items_to_llama_messages(
                 "item_reference is not supported (no stored item registry)"
             )
         if itype == "compaction":
-            raise TranslationError(
-                "compaction items are not supported in this implementation"
+            # Compacted summary (our compact endpoint stores the summary text
+            # as encrypted_content): replay as assistant context so chains can
+            # continue from a compaction item (spec recovery flow).
+            content = (
+                item.get("encrypted_content")
+                if isinstance(item, dict)
+                else item.encrypted_content
             )
+            messages.append({"role": "assistant", "content": content or ""})
+            continue
         if itype == "reasoning":
             continue  # reasoning items are model-internal; not replayed
         if itype == "function_call":
