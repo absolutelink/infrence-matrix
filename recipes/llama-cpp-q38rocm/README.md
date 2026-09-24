@@ -34,12 +34,16 @@ docker run --rm \
   --group-add video \
   --group-add render \
   -e AGENT_ID=agent-q38rocm \
+  -e AGENT_PORT=8080 \
   -e FRONTEND_URL=http://host.docker.internal:8000 \
   -v ./models:/models \
   -v ./cache:/cache \
   -p 8080:8080 \
   inference-matrix-agent:q38rocm
 ```
+
+Set `AGENT_PORT` and publish the same host/container port when using a
+non-default port, for example `-e AGENT_PORT=8090 -p 8090:8090`.
 
 Models can be downloaded through the UI. The agent stores them under
 `/models`; no model needs to be baked into the image.

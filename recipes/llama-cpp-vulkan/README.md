@@ -24,6 +24,7 @@ To build this recipe, you need:
 ```bash
 docker run --gpus all \
   -e AGENT_ID=agent-1 \
+  -e AGENT_PORT=8080 \
   -e FRONTEND_URL=http://host.docker.internal:8000 \
   -v ./models:/models \
   -v ./cache:/cache \
@@ -38,8 +39,12 @@ docker run --gpus all \
 | `AGENT_ID` | Unique agent identifier | *(required)* |
 | `AGENT_NAME` | Human-readable name | `inference-agent` |
 | `FRONTEND_URL` | Frontend Service URL | *(required)* |
+| `AGENT_PORT` | Port for the agent HTTP server | `8080` |
 | `DEFAULT_GPU_LAYERS` | Default GPU layers | `35` |
 | `GPU_BACKEND` | Set to `vulkan` | `vulkan` |
+
+Set `AGENT_PORT` and publish the same host/container port when using a
+non-default port, for example `-e AGENT_PORT=8090 -p 8090:8090`.
 
 ## GPU Support
 

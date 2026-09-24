@@ -36,4 +36,4 @@ ENV LLAMA_SERVER_PATH=/app/engine/bin/llama-server \
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "$AGENT_PORT", "--log-level", "info"]
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port \"${AGENT_PORT:-8080}\" --log-level info"]
