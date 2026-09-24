@@ -29,6 +29,14 @@ export type AgentRegisterRequest = {
      */
     name: string;
     /**
+     * Platform
+     */
+    platform?: string;
+    /**
+     * Type
+     */
+    type?: string;
+    /**
      * Host
      */
     host: string;

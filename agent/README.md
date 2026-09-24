@@ -14,6 +14,8 @@ This is the agent service for Inference Matrix, responsible for managing local i
 
 - `AGENT_ID` - Unique identifier for this agent
 - `AGENT_NAME` - Human-readable name for the agent (default: "inference-agent")
+- `AGENT_PLATFORM` - Inference platform reported to the backend (default: "llamacpp")
+- `AGENT_TYPE` - Platform variant reported to the backend (default: "generic")
 - `FRONTEND_URL` - URL of the main Inference Matrix frontend
 - `LLAMA_SERVER_PATH` - Path to llama-server binary (default: "/usr/local/bin/llama-server")
 - `MODELS_PATH` - Path to download and store models (default: "/models")

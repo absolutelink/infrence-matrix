@@ -36,6 +36,8 @@ class Agent(SQLModel, table=True):
     )
 
     name: str = Field(max_length=255, unique=True, index=True)
+    platform: str = "llamacpp"
+    type: str = "generic"
     host: str
     port: int
 

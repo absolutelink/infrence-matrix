@@ -18,6 +18,8 @@ import {
 type Agent = {
   id: string
   name: string
+  platform: string
+  type: string
   host: string
   port: number
   status: "online" | "offline" | "unreachable"
@@ -44,6 +46,9 @@ export const columns: ColumnDef<Agent>[] = [
               Connected
             </Badge>
           )}
+          <div className="text-xs text-muted-foreground">
+            {agent.platform} | {agent.type}
+          </div>
         </div>
       )
     },

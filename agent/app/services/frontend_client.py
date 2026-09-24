@@ -33,6 +33,8 @@ class FrontendClient:
         registration_data = {
             "agent_id": settings.AGENT_ID,
             "name": settings.AGENT_NAME,
+            "platform": settings.AGENT_PLATFORM,
+            "type": settings.AGENT_TYPE,
             "host": settings.AGENT_HOST or socket.gethostname(),
             "port": settings.AGENT_PORT,
             "gpu_info": await self._get_gpu_info(),

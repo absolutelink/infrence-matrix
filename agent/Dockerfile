@@ -32,6 +32,9 @@ COPY docker/entrypoint.sh /usr/local/bin/
 
 # USER appuser
 
+ENV AGENT_PLATFORM=llamacpp \
+    AGENT_TYPE=generic
+
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

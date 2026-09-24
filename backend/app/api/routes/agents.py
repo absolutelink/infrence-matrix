@@ -13,6 +13,8 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 class AgentRegisterRequest(BaseModel):
     agent_id: str
     name: str
+    platform: str = "llamacpp"
+    type: str = "generic"
     host: str
     port: int
     gpu_info: dict | None = None
@@ -64,6 +66,8 @@ async def get_agent(agent_id: str) -> dict:
     return {
         "id": str(agent.id),
         "name": agent.name,
+        "platform": agent.platform,
+        "type": agent.type,
         "host": agent.host,
         "port": agent.port,
         "status": agent.status,

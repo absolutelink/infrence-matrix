@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     # Agent identity
     AGENT_ID: str
     AGENT_NAME: str = "inference-agent"
+    AGENT_PLATFORM: str = "llamacpp"
+    AGENT_TYPE: str = "generic"
 
     # Address the main app should use to reach this agent. If unset, the
     # container hostname is advertised (only useful when the main app shares
