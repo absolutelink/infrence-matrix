@@ -509,7 +509,7 @@ async def _get_or_create_server(
             "config": {
                 "id": server_id,
                 "gpu_layers": 35,
-                "context_size": model.context_length or 4096,
+                "context_size": 4096,
                 "batch_size": 512,
                 "cache_prompt": True,
                 "jinja": True,
@@ -539,7 +539,7 @@ async def _get_or_create_server(
             model_id=model.id,
             agent_id=agent.id,
             gpu_layers=35,
-            context_size=model.context_length or 4096,
+            context_size=4096,
             flash_attn=True,
             config={"port": str(allocated_port)} if allocated_port else {},
             proxy_url=start_response.get("proxy_url"),

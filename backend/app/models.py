@@ -86,7 +86,6 @@ class Model(SQLModel, table=True):
 
     supports_embeddings: bool = False
     supports_vision: bool = False
-    context_length: int
 
     license: str | None = None
     tags: list[str] = Field(default_factory=list, sa_column=Column(JSON))
@@ -129,7 +128,6 @@ class ModelCreate(SQLModel):
     quantization: str
     supports_embeddings: bool = False
     supports_vision: bool = False
-    context_length: int
     license: str | None = None
     tags: list[str] = Field(default_factory=list)
     description: str | None = None
@@ -151,7 +149,6 @@ class ModelUpdate(SQLModel):
     quantization: str | None = None
     supports_embeddings: bool | None = None
     supports_vision: bool | None = None
-    context_length: int | None = None
     license: str | None = None
     tags: list[str] | None = None
     description: str | None = None

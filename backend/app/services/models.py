@@ -157,7 +157,6 @@ class ModelManager:
                 "model_type": "llm",
                 "parameter_count": None,
                 "quantization": "unknown",
-                "context_length": 4096,
                 "supports_embeddings": False,
                 "supports_vision": False,
             }
@@ -248,7 +247,6 @@ class ModelManager:
             quantization=metadata["quantization"],
             supports_embeddings=metadata["supports_embeddings"],
             supports_vision=metadata["supports_vision"],
-            context_length=metadata["context_length"],
             source=source,
             source_repo_id=source_repo_id,
             source_url=None,

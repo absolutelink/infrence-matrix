@@ -70,7 +70,6 @@ def upgrade() -> None:
     sa.Column('quantization', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('supports_embeddings', sa.Boolean(), nullable=False),
     sa.Column('supports_vision', sa.Boolean(), nullable=False),
-    sa.Column('context_length', sa.Integer(), nullable=False),
     sa.Column('license', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('tags', postgresql.JSON(astext_type=Text()), nullable=True),
     sa.Column('description', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
