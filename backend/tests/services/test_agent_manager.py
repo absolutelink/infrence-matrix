@@ -107,16 +107,11 @@ class TestAgentManagerRegistration:
 
 
 class TestAgentManagerRestoreOnRegister:
-    """A restarted agent holds no server definitions: instances still
-    marked stopped for it are re-dispatched (downloads included) when it
-    registers again."""
+    """Agent registration must not start stopped server instances."""
 
     @pytest.mark.asyncio
-    @patch("app.services.server_startup.dispatch_start", new_callable=AsyncMock)
     @patch("app.services.agent_manager.AsyncSessionMaker")
-    async def test_stopped_instances_redispatched(
-        self, mock_session_maker, mock_dispatch
-    ):
+    async def test_stopped_instances_are_not_redispatched(self, mock_session_maker):
         from unittest.mock import MagicMock
 
         from app.models import Model
@@ -172,10 +167,7 @@ class TestAgentManagerRestoreOnRegister:
             }
         )
 
-        mock_dispatch.assert_called_once()
-        args = mock_dispatch.call_args[0]
-        assert args[1] == str(stopped_instance.id)
-        assert stopped_instance.status == "starting"
+        assert stopped_instance.status == "stopped"
 
     @pytest.mark.asyncio
     @patch("app.services.server_startup.dispatch_start", new_callable=AsyncMock)
@@ -195,17 +187,13 @@ class TestAgentManagerRestoreOnRegister:
 
         lookup_result = MagicMock()
         lookup_result.scalar_one_or_none.return_value = agent
-        restore_result = MagicMock()
-        restore_result.scalars.return_value.all.return_value = []
         stale_result = MagicMock()
         stale_result.rowcount = 0
 
         session = AsyncMock()
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
-        session.execute = AsyncMock(
-            side_effect=[lookup_result, stale_result, restore_result]
-        )
+        session.execute = AsyncMock(side_effect=[lookup_result, stale_result])
         session.add = Mock()
         session.commit = AsyncMock()
         session.refresh = AsyncMock()
@@ -327,8 +315,8 @@ class TestAgentManagerStartingPromotion:
             }
         )
 
-        # Only lookup + stale + restore queries ran — no promotion update
-        assert session.execute.await_count == 3
+        # Only lookup + stale queries ran — no promotion or start update.
+        assert session.execute.await_count == 2
 
 
 class TestAgentManagerList:
