@@ -127,10 +127,16 @@ class AgentManager:
             # but are now stopped get (re)dispatched here so a restarted
             # agent restores its servers — downloads included.
             await session.commit()
+            
+            # Only restore servers that are marked as auto-start aliases.
+            # This prevents automatically restarting servers that were explicitly
+            # stopped by users or system, but still allows auto-start aliases to
+            # be restored.
             restore_result = await session.execute(
                 select(ServerInstance).where(
                     col(ServerInstance.agent_id) == agent.id,
                     col(ServerInstance.status) == "stopped",
+                    col(ServerInstance.alias).is_not(None),  # Only restore servers with aliases
                 )
             )
             to_restore = list(restore_result.scalars().all())
