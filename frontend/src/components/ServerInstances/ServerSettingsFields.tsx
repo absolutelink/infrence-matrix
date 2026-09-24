@@ -1,6 +1,13 @@
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 
 export type ServerOptions = {
   threads?: number
@@ -61,12 +68,52 @@ export function ServerSettingsFields({ options, onChange }: Props) {
         </p>
       </div>
       <div className="grid grid-cols-2 gap-4">
+        <div>
+          <Label>Batch size</Label>
+          <Select
+            value={options.batch_size?.toString() ?? "none"}
+            onValueChange={(value) =>
+              set("batch_size", value === "none" ? "" : value)
+            }
+          >
+            <SelectTrigger className="mt-1">
+              <SelectValue placeholder="Use llama.cpp default" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="none">Use llama.cpp default</SelectItem>
+              {[256, 512, 1024, 2048, 4096, 8192].map((value) => (
+                <SelectItem key={value} value={value.toString()}>
+                  {value}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div>
+          <Label>Ubatch size</Label>
+          <Select
+            value={options.ubatch_size?.toString() ?? "none"}
+            onValueChange={(value) =>
+              set("ubatch_size", value === "none" ? "" : value)
+            }
+          >
+            <SelectTrigger className="mt-1">
+              <SelectValue placeholder="Use llama.cpp default" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="none">Use llama.cpp default</SelectItem>
+              {[128, 256, 512, 1024, 2048].map((value) => (
+                <SelectItem key={value} value={value.toString()}>
+                  {value}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
         {(
           [
             ["threads", "Generation threads"],
             ["threads_batch", "Batch threads"],
-            ["batch_size", "Batch size"],
-            ["ubatch_size", "Ubatch size"],
             ["parallel", "Parallel slots"],
           ] as const
         ).map(([key, label]) => (
