@@ -28,6 +28,7 @@ ENV LLAMA_SERVER_PATH=/app/engine/bin/llama-server \
     LLAMA_BENCH_PATH=/app/engine/bin/llama-bench \
     AGENT_PLATFORM=llamacpp \
     AGENT_TYPE=ROCmFP4_FAST \
+    AGENT_PORT=8080 \
     GPU_BACKEND=rocm \
     MODELS_PATH=/models \
     CACHE_PATH=/cache
@@ -35,4 +36,4 @@ ENV LLAMA_SERVER_PATH=/app/engine/bin/llama-server \
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--log-level", "info"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "$AGENT_PORT", "--log-level", "info"]
