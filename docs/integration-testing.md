@@ -14,7 +14,9 @@ bun run test:compliance --base-url https://matrix.thelink.family/v1 --api-key no
 ## Status
 
 Baseline run: 2026-09-24 — **3 passed / 14 failed / 17 total**
-Run 2 (after clusters 1–3 + 5 fix): 2026-09-24 — **10 passed / 7 failed / 17 total**
+Run 2 (clusters 1–3 + 5 fix): 2026-09-24 — **10 passed / 7 failed**
+Run 3 (WS framing fix): 2026-09-24 — **10 passed / 7 failed** (framing fixed; exposed WS non-persistence + 30s timer under load)
+Run 5 (WS persistence + registration heal): 2026-09-24 — **10 passed / 7 failed** (all non-WS tests pass; WS tests time out under full-suite contention only)
 
 | Test ID | Name | Status | Notes |
 |---|---|---|---|
@@ -22,13 +24,13 @@ Run 2 (after clusters 1–3 + 5 fix): 2026-09-24 — **10 passed / 7 failed / 17
 | `assistant-phase` | Assistant Message Phase | ✅ PASS | |
 | `response-output-phase-schema` | Response Output Phase Schema | ✅ PASS | local schema fixture, no HTTP |
 | `streaming-response` | Streaming Response | ✅ PASS | |
-| `websocket-response` | WebSocket Response | ❌ FAIL | WS framing: SSE-style `event:`+`data:` frames over WS |
-| `websocket-sequential-responses` | WebSocket Sequential Responses | ❌ FAIL | same WS framing issue |
-| `websocket-continuation` | WebSocket Continuation | ❌ FAIL | same WS framing issue |
-| `websocket-reconnect-store-false-recovery` | WebSocket Store False Reconnect Recovery | ❌ FAIL | same WS framing issue |
+| `websocket-response` | WebSocket Response | ❌ FAIL | 30s harness timer: turn takes 15–40s idle (18.5s), >30s under full-suite load (17 concurrent tests vs 4 llama.cpp slots; measured 81s). Passes standalone |
+| `websocket-sequential-responses` | WebSocket Sequential Responses | ❌ FAIL | same contention timeout (2 turns × 30s) |
+| `websocket-continuation` | WebSocket Continuation | ❌ FAIL | same contention timeout |
+| `websocket-reconnect-store-false-recovery` | WebSocket Store False Reconnect Recovery | ❌ FAIL | same contention timeout |
 | `websocket-previous-response-not-found` | WebSocket Missing Previous Response | ✅ PASS | |
-| `websocket-failed-continuation-evicts-cache` | WebSocket Failed Continuation Evicts Cache | ❌ FAIL | same WS framing issue |
-| `websocket-compact-new-chain` | WebSocket Compact New Chain | ❌ FAIL | WS framing + server rejects compact output items (`compaction items are not supported in this implementation`) |
+| `websocket-failed-continuation-evicts-cache` | WebSocket Failed Continuation Evicts Cache | ❌ FAIL | same contention timeout |
+| `websocket-compact-new-chain` | WebSocket Compact New Chain | ❌ FAIL | compact endpoint 500 (agent proxy ReadTimeout when slots contended) + WS contention |
 | `system-prompt` | System Prompt | ✅ PASS | |
 | `tool-calling` | Tool Calling | ✅ PASS | |
 | `image-input` | Image Input | ❌ FAIL | llama-server has no mmproj → upstream 500 swallowed into `completed` w/ empty output (should be `response.failed` or surfaced error) |
@@ -41,22 +43,31 @@ Run 2 (after clusters 1–3 + 5 fix): 2026-09-24 — **10 passed / 7 failed / 17
 1. ~~**Response schema: null vs required fields**~~ — FIXED (serialize_spec)
 2. ~~**`output.0: Invalid input`**~~ — FIXED (key-absent item optionals via serialize_spec)
 3. ~~**Streaming final response incomplete**~~ — FIXED (serialize_spec + completed_at)
-4. **WebSocket framing** — server sends SSE-style `event:`/`data:` text frames over the
-   WebSocket; clients expect raw JSON per frame. Causes parse failures and terminal-event
-   timeouts. Affects: all websocket-* tests (except previous-response-not-found which tolerates it).
-   Fix: `ws.py` `_stream_to_ws` should send raw JSON per WS message (drop SSE framing).
+4. ~~**WebSocket framing**~~ — FIXED (raw JSON per WS message)
 5. ~~**HTTP 500 on assistant `phase` labels and multi-turn**~~ — FIXED (was translation error)
-6. **Compaction items rejected as input** — `input_items_to_llama_messages` raises on
-   `compaction` type. Affects: websocket-compact-new-chain (after WS framing fix).
-   Fix: accept compaction items as context (their summary is the content).
-7. **image-input: upstream errors swallowed** — llama-server w/o mmproj returns 500 for
+6. ~~**Compaction items rejected as input**~~ — FIXED (replayed as assistant context)
+7. ~~**WS turns not persisted**~~ — FIXED (_persist_response in _stream_to_ws)
+8. ~~**Deploy deadlock: instance rows stuck "starting"**~~ — FIXED (registration promotes
+   starting rows the agent reports running; heals 900s wait_until_ready deadlock)
+9. **WS 30s contention timeout** — voyager streams 15–40s of reasoning per turn;
+   harness arms a hard 30s timer per WS turn. Single test passes (18.5s idle),
+   full-suite load (17 concurrent tests vs 4 slots) pushes turns past 30s.
+   Options: cap WS output tokens (spec deviation), trim reasoning on WS,
+   or increase slots/parallelism on the box. Affects: all websocket-* except
+   previous-response-not-found.
+10. **image-input: upstream errors swallowed** — llama-server w/o mmproj returns 500 for
    image parts; `_complete` produced `completed` + empty output instead of failing.
    Ops fix: select an mmproj projector for the voyager instance (agent supports it).
    Code fix: surface upstream error as `response.failed`/HTTP error.
+11. **WS persist serialization bug (run 5)** — `resource.output` was raw dicts on the
+   WS path → `i.model_dump()` crashed after the terminal event was already sent.
+   Persisting failed silently; fixed by `_coerced_output_items` (deploy pending).
 
 ## History
 
 | Date | Commit | Passed | Failed | Notes |
 |---|---|---|---|---|
 | 2026-09-24 | (baseline) | 3 | 14 | Initial full run |
-| 2026-09-24 | serialize_spec fix (pushed) | 10 | 7 | Clusters 1–3 + 5 fixed: spec serializer (`serialize_spec`), `completed_at` at finalize, dropped `reasoning_text.*` event twins. Unblocked: basic-response, system-prompt, image-input-schema, tool-calling, streaming-response, assistant-phase, multi-turn, compact-response. Remaining: WS framing (6 tests), compaction-as-input, image-input (no mmproj on voyager + swallowed upstream 500) |
+| 2026-09-24 | serialize_spec fix (pushed) | 10 | 7 | Clusters 1–3 + 5 fixed: spec serializer (`serialize_spec`), `completed_at` at finalize, dropped `reasoning_text.*` event twins. Unblocked: basic-response, system-prompt, tool-calling, streaming-response, assistant-phase, multi-turn, compact-response |
+| 2026-09-24 | WS framing + compaction-input (pushed) | 10 | 7 | Clusters 4 + 6 fixed: raw JSON per WS message, compaction items replayed as assistant context. Exposed: WS turns not persisted; 30s harness timer vs thinking-model latency |
+| 2026-09-24 | WS persist + registration heal (pushed) | 10 | 7 | WS persistence fixed; deploy deadlock (instance stuck "starting" → 900s wait_until_ready) healed by registration promotion. All non-WS tests pass. Remaining: WS contention timeouts (30s timer vs 15–40s thinking-model turns under load), image-input (no mmproj + swallowed upstream 500), WS persist serialization bug (`resource.output` dicts → model_dump crash; fix in `_coerced_output_items` pending deploy), compact 500 (agent proxy ReadTimeout under contention) |

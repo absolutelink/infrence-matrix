@@ -25,6 +25,7 @@ from app.api.routes.v1.responses import events as ev
 from app.api.routes.v1.responses.router import (
     TargetError,
     _build_usage,
+    _coerced_output_items,
     _last_assistant_phase,
     _llama_payload,
     _load_previous,
@@ -165,7 +166,9 @@ async def _stream_to_ws(
         else:
             resource.status = "completed"
         resource.completed_at = int(time.time())
-        resource.output = state.output_items
+        # Typed models (not dicts) so pydantic serializes without warnings —
+        # matches the HTTP streaming path (_coerced_output_items)
+        resource.output = _coerced_output_items(state.output_items)
         resource.usage = Usage.model_validate(usage)
         if resource.status == "incomplete":
             ev.response_incomplete(seq, resource)
