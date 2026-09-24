@@ -224,6 +224,113 @@ class TestAgentManagerRestoreOnRegister:
         mock_dispatch.assert_not_called()
 
 
+class TestAgentManagerStartingPromotion:
+    """Registration treats the agent's running_server_ids report as ground
+    truth: a stale "starting" row the agent reports as live must be promoted
+    to running. Regression: a backend restart loses dispatch_start's ack, so
+    the row stayed "starting" forever and every request waited in
+    wait_until_ready (900s) — a full deploy deadlock."""
+
+    @pytest.mark.asyncio
+    @patch("app.services.agent_manager.AsyncSessionMaker")
+    async def test_starting_row_promoted_when_agent_reports_running(
+        self, mock_session_maker
+    ):
+        from unittest.mock import MagicMock
+
+        from app.services.agent_manager import agent_manager
+
+        agent = Agent(
+            name="lfai-node-01",
+            host="localhost",
+            port=8080,
+            status="online",
+            last_seen=datetime.now(),
+        )
+        running_id = "5eb19624-0000-0000-0000-000000000001"
+
+        lookup_result = MagicMock()
+        lookup_result.scalar_one_or_none.return_value = agent
+        restore_result = MagicMock()
+        restore_result.scalars.return_value.all.return_value = []
+        confirmed_result = MagicMock()
+        confirmed_result.rowcount = 1
+        stale_result = MagicMock()
+        stale_result.rowcount = 0
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(
+            side_effect=[lookup_result, confirmed_result, stale_result, restore_result]
+        )
+        session.add = Mock()
+        session.commit = AsyncMock()
+        session.refresh = AsyncMock()
+
+        mock_session_maker.return_value = session
+
+        await agent_manager.register_agent(
+            {
+                "name": "lfai-node-01",
+                "host": "localhost",
+                "port": 8080,
+                "running_server_ids": [running_id],
+            }
+        )
+
+        # Second execute() call must be the promotion update
+        promote_call = session.execute.call_args_list[1]
+        assert promote_call is not None
+
+    @pytest.mark.asyncio
+    @patch("app.services.agent_manager.AsyncSessionMaker")
+    async def test_no_promotion_without_running_ids(self, mock_session_maker):
+        """Empty running_server_ids (agent down) must not promote anything."""
+        from unittest.mock import MagicMock
+
+        from app.services.agent_manager import agent_manager
+
+        agent = Agent(
+            name="empty-report-agent",
+            host="localhost",
+            port=8080,
+            status="online",
+            last_seen=datetime.now(),
+        )
+
+        lookup_result = MagicMock()
+        lookup_result.scalar_one_or_none.return_value = agent
+        restore_result = MagicMock()
+        restore_result.scalars.return_value.all.return_value = []
+        stale_result = MagicMock()
+        stale_result.rowcount = 0
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(
+            side_effect=[lookup_result, stale_result, restore_result]
+        )
+        session.add = Mock()
+        session.commit = AsyncMock()
+        session.refresh = AsyncMock()
+
+        mock_session_maker.return_value = session
+
+        await agent_manager.register_agent(
+            {
+                "name": "empty-report-agent",
+                "host": "localhost",
+                "port": 8080,
+                "running_server_ids": [],
+            }
+        )
+
+        # Only lookup + stale + restore queries ran — no promotion update
+        assert session.execute.await_count == 3
+
+
 class TestAgentManagerList:
     """Test agent listing functionality."""
 

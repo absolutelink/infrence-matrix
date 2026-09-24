@@ -85,7 +85,9 @@ class AgentManager:
             # The agent reports the server ids it currently has running. Any
             # instance still marked starting/running that is NOT in that set
             # is stale (e.g. agent restarted). Instances the agent confirms
-            # as running are left alone.
+            # as running are promoted to running — a stale "starting" row
+            # (e.g. backend restarted while dispatch_start's ack was lost)
+            # would otherwise block every request in wait_until_ready.
             running_ids = agent_data.get("running_server_ids") or []
             conditions = [
                 col(ServerInstance.agent_id) == agent.id,
@@ -93,6 +95,21 @@ class AgentManager:
             ]
             if running_ids:
                 conditions.append(col(ServerInstance.id).not_in(running_ids))
+                confirmed = await session.execute(
+                    update(ServerInstance)
+                    .where(
+                        col(ServerInstance.agent_id) == agent.id,
+                        col(ServerInstance.status) == "starting",
+                        col(ServerInstance.id).in_(running_ids),
+                    )
+                    .values(status="running", health_status="healthy")
+                )
+                confirmed_count = getattr(confirmed, "rowcount", 0)
+                if confirmed_count:
+                    logger.info(
+                        f"Marked {confirmed_count} starting server instance(s) "
+                        f"as running (agent {name} reports them live)"
+                    )
             stale = await session.execute(
                 update(ServerInstance)
                 .where(*conditions)
