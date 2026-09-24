@@ -39,7 +39,11 @@ def _definition_dict(
         "id": str(definition.id),
         "name": definition.name,
         "description": definition.description,
-        "source_server_instance_id": str(definition.source_server_instance_id),
+        "source_server_instance_id": (
+            str(definition.source_server_instance_id)
+            if definition.source_server_instance_id
+            else None
+        ),
         "config": definition.config,
         "created_at": definition.created_at.isoformat(),
         "updated_at": definition.updated_at.isoformat(),
@@ -154,12 +158,23 @@ async def _execute(run_id: str) -> None:
                         finished_at=datetime.now(UTC),
                     )
                     return
-                source = await session.get(
-                    ServerInstance, definition.source_server_instance_id
+                source = (
+                    await session.get(
+                        ServerInstance, definition.source_server_instance_id
+                    )
+                    if definition.source_server_instance_id
+                    else None
                 )
-                model = await session.get(Model, source.model_id) if source else None
-                agent = await session.get(Agent, source.agent_id) if source else None
-            if not source or not model or not agent:
+                config = definition.config or {}
+                model_id = config.get("model_id") or (
+                    source.model_id if source else None
+                )
+                agent_id = config.get("agent_id") or (
+                    source.agent_id if source else None
+                )
+                model = await session.get(Model, model_id) if model_id else None
+                agent = await session.get(Agent, agent_id) if agent_id else None
+            if not model or not agent:
                 raise RuntimeError("Benchmark source server, model, or agent not found")
 
             await _set_run(run_id, status="waiting_for_idle")
@@ -182,7 +197,6 @@ async def _execute(run_id: str) -> None:
                     if refreshed:
                         agent = refreshed
 
-            config = definition.config or {}
             request = {
                 "run_id": run_id,
                 "model_path": config.get("model_path", model.path),
@@ -201,8 +215,8 @@ async def _execute(run_id: str) -> None:
                 "batch_size": config.get("batch_size", 512),
                 "ubatch_size": config.get("ubatch_size"),
                 "context_size": config.get("context_size"),
-                "gpu_layers": config.get("gpu_layers", source.gpu_layers),
-                "flash_attn": config.get("flash_attn", source.flash_attn),
+                "gpu_layers": config.get("gpu_layers", 35),
+                "flash_attn": config.get("flash_attn", True),
             }
             response = await agent_manager.send_to_agent(
                 str(agent.id),
@@ -215,7 +229,7 @@ async def _execute(run_id: str) -> None:
                 run_id,
                 status="running",
                 agent_id=agent.id,
-                server_instance_id=source.id,
+                server_instance_id=source.id if source else None,
                 command=response.get("command", []),
                 started_at=datetime.now(UTC),
             )

@@ -13,7 +13,11 @@ import {
 } from "lucide-react"
 import { useState } from "react"
 import { toast } from "sonner"
-import { DefinitionDialog } from "@/components/Benchmarks/DefinitionDialog"
+import type { ServerInstanceResponse } from "@/client"
+import {
+  CopyServerDialog,
+  DefinitionDialog,
+} from "@/components/Benchmarks/DefinitionDialog"
 import { useLogPanel } from "@/components/ServerInstances/LogPanelContext"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -61,7 +65,9 @@ const statusVariant = (status: string) =>
 
 function Benchmarks() {
   const [dialogOpen, setDialogOpen] = useState(false)
+  const [copyDialogOpen, setCopyDialogOpen] = useState(false)
   const [editing, setEditing] = useState<BenchmarkDefinition>()
+  const [copyFrom, setCopyFrom] = useState<ServerInstanceResponse>()
   const definitions = useQuery({
     queryKey: ["benchmark-definitions"],
     queryFn: benchmarkApi.listDefinitions,
@@ -133,15 +139,21 @@ function Benchmarks() {
             Define repeatable workloads and inspect their performance results.
           </p>
         </div>
-        <Button
-          onClick={() => {
-            setEditing(undefined)
-            setDialogOpen(true)
-          }}
-        >
-          <Plus className="mr-2 h-4 w-4" />
-          New definition
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" onClick={() => setCopyDialogOpen(true)}>
+            Copy from server instances
+          </Button>
+          <Button
+            onClick={() => {
+              setEditing(undefined)
+              setCopyFrom(undefined)
+              setDialogOpen(true)
+            }}
+          >
+            <Plus className="mr-2 h-4 w-4" />
+            New definition
+          </Button>
+        </div>
       </div>
       <Tabs defaultValue="definitions">
         <TabsList>
@@ -308,7 +320,18 @@ function Benchmarks() {
       <DefinitionDialog
         open={dialogOpen}
         definition={editing}
+        copyFrom={copyFrom}
         onClose={() => setDialogOpen(false)}
+      />
+      <CopyServerDialog
+        open={copyDialogOpen}
+        onClose={() => setCopyDialogOpen(false)}
+        onSelect={(server) => {
+          setCopyFrom(server)
+          setEditing(undefined)
+          setCopyDialogOpen(false)
+          setDialogOpen(true)
+        }}
       />
     </div>
   )

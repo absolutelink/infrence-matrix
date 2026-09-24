@@ -30,7 +30,7 @@ export interface BenchmarkRun {
 export interface BenchmarkDefinitionInput {
   name: string
   description?: string
-  source_server_instance_id: string
+  source_server_instance_id?: string | null
   config?: Record<string, unknown>
 }
 

@@ -80,3 +80,24 @@ def test_run_requires_existing_definition(client: TestClient) -> None:
         json={"definition_id": "00000000-0000-0000-0000-000000000000"},
     )
     assert response.status_code == 404
+
+
+def test_definition_can_be_created_without_copying_server(
+    client: TestClient, db: Session
+) -> None:
+    server = _source(db)
+    response = client.post(
+        "/api/v1/benchmarks/definitions",
+        json={
+            "name": "Standalone",
+            "config": {
+                "model_id": str(server.model_id),
+                "agent_id": str(server.agent_id),
+                "gpu_layers": 20,
+            },
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["source_server_instance_id"] is None
+    assert data["config"]["gpu_layers"] == 20

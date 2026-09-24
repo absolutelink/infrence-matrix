@@ -32,15 +32,10 @@ class RunInput(BaseModel):
     definition_id: str
 
 
-def _source_id(request: BenchmarkDefinitionInput) -> uuid_module.UUID:
-    value = request.source_server_instance_id or request.config.get(
-        "server_instance_id"
-    )
+def _source_id(request: BenchmarkDefinitionInput) -> uuid_module.UUID | None:
+    value = request.source_server_instance_id
     if not value:
-        raise HTTPException(
-            status_code=422,
-            detail="source_server_instance_id is required",
-        )
+        return None
     try:
         return uuid_module.UUID(str(value))
     except ValueError as exc:
@@ -51,20 +46,29 @@ def _source_id(request: BenchmarkDefinitionInput) -> uuid_module.UUID:
 
 async def _snapshot(
     session: Any,
-    source: ServerInstance,
+    source: ServerInstance | None,
     config: dict[str, Any],
 ) -> dict[str, Any]:
-    model = await session.get(Model, source.model_id)
+    model_id = config.get("model_id") or (source.model_id if source else None)
+    agent_id = config.get("agent_id") or (source.agent_id if source else None)
+    if not model_id or not agent_id:
+        raise HTTPException(
+            status_code=422,
+            detail="Select a model and agent, or copy from a server instance",
+        )
+    model = await session.get(Model, uuid_module.UUID(str(model_id)))
     if not model:
         raise HTTPException(status_code=404, detail="Source model not found")
     snapshot = {
-        "server_instance_id": str(source.id),
+        "server_instance_id": str(source.id) if source else None,
         "model_id": str(model.id),
+        "agent_id": str(agent_id),
         "model_path": model.path,
-        "gpu_layers": source.gpu_layers,
-        "context_size": source.context_size,
-        "flash_attn": source.flash_attn,
-        "mtp_draft_max": source.mtp_draft_max,
+        "gpu_layers": source.gpu_layers if source else 35,
+        "context_size": source.context_size if source else 4096,
+        "flash_attn": source.flash_attn if source else True,
+        "mtp_draft_max": source.mtp_draft_max if source else None,
+        "mmproj_model_id": source.mmproj_model_id if source else None,
     }
     snapshot.update(config)
     return snapshot
@@ -79,8 +83,10 @@ async def list_definitions() -> list[dict[str, Any]]:
         definitions = list(result.scalars().all())
         output = []
         for definition in definitions:
-            source = await session.get(
-                ServerInstance, definition.source_server_instance_id
+            source = (
+                await session.get(ServerInstance, definition.source_server_instance_id)
+                if definition.source_server_instance_id
+                else None
             )
             output.append(_definition_dict(definition, source))
         return output
@@ -90,13 +96,13 @@ async def list_definitions() -> list[dict[str, Any]]:
 async def create_definition(request: BenchmarkDefinitionInput) -> dict[str, Any]:
     source_id = _source_id(request)
     async with AsyncSessionMaker() as session:
-        source = await session.get(ServerInstance, source_id)
-        if not source:
+        source = await session.get(ServerInstance, source_id) if source_id else None
+        if request.source_server_instance_id and not source:
             raise HTTPException(status_code=404, detail="Source server not found")
         definition = BenchmarkDefinition(
             name=request.name.strip(),
             description=request.description,
-            source_server_instance_id=source.id,
+            source_server_instance_id=source.id if source else None,
             config=await _snapshot(session, source, request.config),
         )
         session.add(definition)
@@ -116,12 +122,12 @@ async def update_definition(
                 status_code=404, detail="Benchmark definition not found"
             )
         source_id = _source_id(request)
-        source = await session.get(ServerInstance, source_id)
-        if not source:
+        source = await session.get(ServerInstance, source_id) if source_id else None
+        if request.source_server_instance_id and not source:
             raise HTTPException(status_code=404, detail="Source server not found")
         definition.name = request.name.strip()
         definition.description = request.description
-        definition.source_server_instance_id = source.id
+        definition.source_server_instance_id = source.id if source else None
         definition.config = await _snapshot(session, source, request.config)
         definition.updated_at = datetime.now(UTC)
         session.add(definition)
@@ -165,12 +171,18 @@ async def create_run(request: RunInput) -> dict[str, Any]:
             raise HTTPException(
                 status_code=404, detail="Benchmark definition not found"
             )
-        source = await session.get(ServerInstance, definition.source_server_instance_id)
-        if not source:
-            raise HTTPException(status_code=404, detail="Source server not found")
+        source = (
+            await session.get(ServerInstance, definition.source_server_instance_id)
+            if definition.source_server_instance_id
+            else None
+        )
+        agent_id = (definition.config or {}).get("agent_id")
         run = BenchmarkRun(
             definition_id=definition.id,
-            server_instance_id=source.id,
+            agent_id=uuid_module.UUID(str(agent_id))
+            if agent_id
+            else (source.agent_id if source else None),
+            server_instance_id=source.id if source else None,
             status="queued",
         )
         session.add(run)

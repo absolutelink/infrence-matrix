@@ -428,9 +428,10 @@ class BenchmarkDefinition(SQLModel, table=True):
     )
     name: str = Field(max_length=255)
     description: str | None = None
-    source_server_instance_id: uuid.UUID = Field(
+    source_server_instance_id: uuid.UUID | None = Field(
+        default=None,
         foreign_key="server_instances.id",
-        ondelete="CASCADE",
+        ondelete="SET NULL",
     )
     # Snapshot of the selected server definition and llama-bench options.
     config: dict = Field(default_factory=dict, sa_column=Column(JSON))
