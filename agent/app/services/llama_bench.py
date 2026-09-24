@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
+from app.core.logging import logger
 from app.services.event_bus import publish_event
 
 _NUMBER = re.compile(r"[-+]?\d+(?:\.\d+)?")
@@ -163,6 +164,8 @@ class LlamaBenchManager:
         async for raw_line in stream:
             line = raw_line.decode(errors="replace").rstrip("\r\n")
             run[name].append(line)
+            log_fn = logger.warning if name == "stderr" else logger.info
+            log_fn("llama-bench %s: %s", run["run_id"], line)
             publish_event(
                 "benchmark.log",
                 {"run_id": run["run_id"], "stream": name, "line": line},

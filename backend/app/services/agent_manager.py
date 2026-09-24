@@ -270,6 +270,18 @@ class AgentManager:
                         entry.get("line", ""),
                     )
             elif event_type.startswith("benchmark."):
+                if event_type == "benchmark.log":
+                    log_fn = (
+                        logger.warning
+                        if event_data.get("stream") == "stderr"
+                        else logger.info
+                    )
+                    log_fn(
+                        "llama-bench %s [%s]: %s",
+                        str(event_data.get("run_id", ""))[:8],
+                        event_data.get("stream", "stdout"),
+                        event_data.get("line", ""),
+                    )
                 await self._handle_benchmark_event(event_type, event_data)
         except Exception as e:
             # A bad event must not kill the agent WebSocket (an exception

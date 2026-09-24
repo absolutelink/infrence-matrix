@@ -8,6 +8,7 @@ import {
   Play,
   Plus,
   Square,
+  Terminal,
   Trash2,
   XCircle,
 } from "lucide-react"
@@ -306,6 +307,16 @@ function Benchmarks() {
             <CardContent>
               <RunsTable
                 runs={list}
+                onViewLogs={(run) => {
+                  if (!run.agent_id) return
+                  openLogs({
+                    id: run.id,
+                    kind: "benchmark",
+                    run_id: run.id,
+                    agent_id: run.agent_id,
+                    agent_name: run.agent_name,
+                  })
+                }}
                 onAction={(id, kind) =>
                   confirmAction(
                     `${kind === "force-stop" ? "Force stop" : kind[0].toUpperCase() + kind.slice(1)} this run?`,
@@ -339,9 +350,11 @@ function Benchmarks() {
 
 function RunsTable({
   runs,
+  onViewLogs,
   onAction,
 }: {
   runs: BenchmarkRun[]
+  onViewLogs: (run: BenchmarkRun) => void
   onAction: (id: string, kind: "cancel" | "abort" | "force-stop") => void
 }) {
   const [result, setResult] = useState<{ id: string; value: unknown }>()
@@ -384,6 +397,16 @@ function RunsTable({
             <TableCell>{date(run.finished_at)}</TableCell>
             <TableCell>
               <div className="flex justify-end gap-1">
+                {run.agent_id && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    title="View logs"
+                    onClick={() => onViewLogs(run)}
+                  >
+                    <Terminal className="h-4 w-4" />
+                  </Button>
+                )}
                 {run.results != null && (
                   <Button
                     variant="ghost"
