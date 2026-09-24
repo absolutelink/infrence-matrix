@@ -71,7 +71,12 @@ def build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any
         mmproj_model, mmproj_filename = mmproj
         payload["config"]["mmproj_path"] = mmproj_model.path
         # Download the projector alongside the main model when missing.
-        if mmproj_model.source_repo_id and not mmproj_model.path.startswith("/"):
+        # Send the source whenever the projector has a repo — even for
+        # repo-style "/models/{repo}/{file}" paths: without it the agent
+        # falls back to the main model's source and "downloads" the main
+        # GGUF as the projector (llama-server then fails to load it as a
+        # CLIP model).
+        if mmproj_model.source_repo_id:
             payload["mmproj_source"] = {
                 "source": mmproj_model.source,
                 "repo_id": mmproj_model.source_repo_id,

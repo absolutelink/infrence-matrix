@@ -175,14 +175,22 @@ async def start_server(request: ServerStartRequest) -> dict:
                 "already_running": True,
             }
 
-        model_path = await _ensure_model(
-            request.config.model_path, request.source
-        )
+        model_path = await _ensure_model(request.config.model_path, request.source)
 
         mmproj_path: str | None = None
         if request.config.mmproj_path:
+            # The projector's source must describe the projector file itself.
+            # A missing mmproj_source means the backend payload is stale —
+            # resolving via the main model's source would return the main
+            # GGUF as "projector" (llama-server fails to load it as CLIP).
+            if not request.mmproj_source:
+                raise HTTPException(
+                    status_code=422,
+                    detail="mmproj_path set but mmproj_source missing — "
+                    "cannot resolve the projector file safely",
+                )
             mmproj_path = await _ensure_model(
-                request.config.mmproj_path, request.mmproj_source or request.source
+                request.config.mmproj_path, request.mmproj_source
             )
 
         # The agent owns port allocation: pick a free random port unless the
