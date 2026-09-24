@@ -54,15 +54,6 @@ export const columns: ColumnDef<Model>[] = [
     },
   },
   {
-    accessorKey: "context_length",
-    header: "Context Length",
-    cell: ({ row }) => {
-      const length = row.getValue("context_length") as number | null
-      if (!length) return "-"
-      return <div className="font-mono text-xs">{length.toLocaleString()}</div>
-    },
-  },
-  {
     accessorKey: "source",
     header: "Source",
     cell: ({ row }) => (

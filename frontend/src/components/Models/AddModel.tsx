@@ -42,9 +42,6 @@ const formSchema = z.object({
   quantization: z.string().min(1, { message: "Quantization is required" }),
   supports_embeddings: z.boolean().default(false),
   supports_vision: z.boolean().default(false),
-  context_length: z.coerce
-    .number()
-    .min(1, { message: "Context length is required" }),
   license: z.string().optional(),
   tags: z.array(z.string()).default([]),
   description: z.string().optional(),
@@ -78,7 +75,6 @@ export const AddModel = ({ isOpen, onClose }: AddModelProps) => {
       quantization: "",
       supports_embeddings: false,
       supports_vision: false,
-      context_length: 4096,
       license: "",
       tags: [],
       description: "",
@@ -220,27 +216,6 @@ export const AddModel = ({ isOpen, onClose }: AddModelProps) => {
                       <Input
                         type="number"
                         placeholder="7000000000"
-                        {...field}
-                        value={
-                          typeof field.value === "number" ? field.value : ""
-                        }
-                        onChange={(e) => field.onChange(e.target.valueAsNumber)}
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-
-              <FormField
-                control={form.control}
-                name="context_length"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Context Length</FormLabel>
-                    <FormControl>
-                      <Input
-                        type="number"
                         {...field}
                         value={
                           typeof field.value === "number" ? field.value : ""

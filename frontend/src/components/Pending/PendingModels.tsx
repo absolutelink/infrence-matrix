@@ -17,7 +17,6 @@ const PendingModels = () => (
         <TableHead>Quantization</TableHead>
         <TableHead>Size</TableHead>
         <TableHead>Parameters</TableHead>
-        <TableHead>Context Length</TableHead>
         <TableHead>Source</TableHead>
         <TableHead>
           <span className="sr-only">Actions</span>
@@ -29,9 +28,6 @@ const PendingModels = () => (
         <TableRow key={index}>
           <TableCell>
             <Skeleton className="h-4 w-64 font-mono" />
-          </TableCell>
-          <TableCell>
-            <Skeleton className="h-4 w-20" />
           </TableCell>
           <TableCell>
             <Skeleton className="h-4 w-16" />

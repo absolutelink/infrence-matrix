@@ -221,7 +221,6 @@ export function AddModelFromHF({ model, onClose }: AddModelFromHFProps) {
             : "unknown",
       supports_embeddings: false,
       supports_vision: false,
-      context_length: 4096,
       tags: ["huggingface", model.modelId.split("/")[0]],
       source: "huggingface",
       source_repo_id: model.modelId,
