@@ -2,6 +2,8 @@ import { createContext, useContext, useMemo, useState } from "react"
 
 export interface LogInstance {
   id: string
+  kind?: "server" | "benchmark"
+  run_id?: string | null
   model_name?: string | null
   agent_id: string
   agent_name?: string | null
@@ -13,10 +15,12 @@ interface LogPanelContextValue {
   tabs: LogInstance[]
   activeTabId: string | null
   isOpen: boolean
+  height: number
   openLogs: (instance: LogInstance) => void
   closeLogs: (instanceId: string) => void
   setActiveTab: (instanceId: string) => void
   closePanel: () => void
+  setHeight: (height: number) => void
 }
 
 const LogPanelContext = createContext<LogPanelContextValue | null>(null)
@@ -25,12 +29,14 @@ export function LogPanelProvider({ children }: { children: React.ReactNode }) {
   const [tabs, setTabs] = useState<LogInstance[]>([])
   const [activeTabId, setActiveTabId] = useState<string | null>(null)
   const [isOpen, setIsOpen] = useState(false)
+  const [height, setHeight] = useState(320)
 
   const value = useMemo<LogPanelContextValue>(
     () => ({
       tabs,
       activeTabId,
       isOpen,
+      height,
       openLogs: (instance) => {
         setTabs((current) =>
           current.some((tab) => tab.id === instance.id)
@@ -55,8 +61,9 @@ export function LogPanelProvider({ children }: { children: React.ReactNode }) {
         setIsOpen(true)
       },
       closePanel: () => setIsOpen(false),
+      setHeight,
     }),
-    [activeTabId, isOpen, tabs],
+    [activeTabId, height, isOpen, tabs],
   )
 
   return (

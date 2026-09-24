@@ -44,7 +44,6 @@ export function useAgentEvents(agentId: string, enabled: boolean) {
 
       ws.onopen = () => {
         setConnected(true)
-        setEvents([])
       }
       ws.onmessage = (message) => {
         try {

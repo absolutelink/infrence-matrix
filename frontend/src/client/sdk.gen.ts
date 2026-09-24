@@ -2,7 +2,7 @@
 
 import { type Client, formDataBodySerializer, type Options as Options2, type TDataShape } from './client';
 import { client } from './client.gen';
-import type { agentsDeleteAgentData, agentsDeleteAgentErrors, agentsDeleteAgentResponses, agentsGetAgentData, agentsGetAgentErrors, agentsGetAgentResponses, agentsListAgentsData, agentsListAgentsResponses, agentsRegisterAgentData, agentsRegisterAgentErrors, agentsRegisterAgentResponses, agentsSendCommandData, agentsSendCommandErrors, agentsSendCommandResponses, agentsUpdateAgentData, agentsUpdateAgentErrors, agentsUpdateAgentResponses, huggingfaceGetModelInfoData, huggingfaceGetModelInfoErrors, huggingfaceGetModelInfoResponses, huggingfaceGetParameterCountData, huggingfaceGetParameterCountErrors, huggingfaceGetParameterCountResponses, huggingfaceListModelFilesData, huggingfaceListModelFilesErrors, huggingfaceListModelFilesResponses, huggingfaceSearchModelsData, huggingfaceSearchModelsErrors, huggingfaceSearchModelsResponses, metricsMetricsData, metricsMetricsResponses, modelsCreateModelData, modelsCreateModelErrors, modelsCreateModelResponses, modelsDeleteModelData, modelsDeleteModelErrors, modelsDeleteModelResponses, modelsReadModelData, modelsReadModelErrors, modelsReadModelResponses, modelsReadModelsData, modelsReadModelsErrors, modelsReadModelsResponses, modelsUpdateModelData, modelsUpdateModelErrors, modelsUpdateModelResponses, serverInstancesDeleteServerData, serverInstancesDeleteServerErrors, serverInstancesDeleteServerResponses, serverInstancesGetServerInstanceData, serverInstancesGetServerInstanceErrors, serverInstancesGetServerInstanceResponses, serverInstancesListServerInstancesData, serverInstancesListServerInstancesResponses, serverInstancesRestartServerData, serverInstancesRestartServerErrors, serverInstancesRestartServerResponses, serverInstancesStartServerData, serverInstancesStartServerErrors, serverInstancesStartServerResponses, serverInstancesStopServerData, serverInstancesStopServerErrors, serverInstancesStopServerResponses, serverInstancesUpdateServerData, serverInstancesUpdateServerErrors, serverInstancesUpdateServerResponses, utilsHealthCheckData, utilsHealthCheckResponses, v1AudioCreateSpeechData, v1AudioCreateSpeechErrors, v1AudioCreateSpeechResponses, v1AudioCreateTranscriptionData, v1AudioCreateTranscriptionErrors, v1AudioCreateTranscriptionResponses, v1AudioCreateTranslationData, v1AudioCreateTranslationErrors, v1AudioCreateTranslationResponses, v1BatchesCancelBatchData, v1BatchesCancelBatchErrors, v1BatchesCancelBatchResponses, v1BatchesCreateBatchData, v1BatchesCreateBatchErrors, v1BatchesCreateBatchResponses, v1BatchesListBatchesData, v1BatchesListBatchesErrors, v1BatchesListBatchesResponses, v1BatchesRetrieveBatchData, v1BatchesRetrieveBatchErrors, v1BatchesRetrieveBatchResponses, v1ChatCreateChatCompletionData, v1ChatCreateChatCompletionErrors, v1ChatCreateChatCompletionResponses, v1CompletionsCreateCompletionData, v1CompletionsCreateCompletionErrors, v1CompletionsCreateCompletionResponses, v1EmbeddingsCreateEmbeddingData, v1EmbeddingsCreateEmbeddingErrors, v1EmbeddingsCreateEmbeddingResponses, v1FilesDeleteFileData, v1FilesDeleteFileErrors, v1FilesDeleteFileResponses, v1FilesListFilesData, v1FilesListFilesErrors, v1FilesListFilesResponses, v1FilesRetrieveFileContentData, v1FilesRetrieveFileContentErrors, v1FilesRetrieveFileContentResponses, v1FilesRetrieveFileData, v1FilesRetrieveFileErrors, v1FilesRetrieveFileResponses, v1FilesUploadFileData, v1FilesUploadFileErrors, v1FilesUploadFileResponses, v1ModelsListModelsData, v1ModelsListModelsResponses, v1ModelsRetrieveModelData, v1ModelsRetrieveModelErrors, v1ModelsRetrieveModelResponses, v1ResponsesCompactResponseData, v1ResponsesCompactResponseErrors, v1ResponsesCompactResponseResponses, v1ResponsesCreateResponseData, v1ResponsesCreateResponseErrors, v1ResponsesCreateResponseResponses } from './types.gen';
+import type { agentsDeleteAgentData, agentsDeleteAgentErrors, agentsDeleteAgentResponses, agentsGetAgentData, agentsGetAgentErrors, agentsGetAgentResponses, agentsListAgentsData, agentsListAgentsResponses, agentsRegisterAgentData, agentsRegisterAgentErrors, agentsRegisterAgentResponses, agentsSendCommandData, agentsSendCommandErrors, agentsSendCommandResponses, agentsUpdateAgentData, agentsUpdateAgentErrors, agentsUpdateAgentResponses, benchmarksAbortRunData, benchmarksAbortRunErrors, benchmarksAbortRunResponses, benchmarksCancelRunData, benchmarksCancelRunErrors, benchmarksCancelRunResponses, benchmarksCreateDefinitionData, benchmarksCreateDefinitionErrors, benchmarksCreateDefinitionResponses, benchmarksCreateRunData, benchmarksCreateRunErrors, benchmarksCreateRunResponses, benchmarksDeleteDefinitionData, benchmarksDeleteDefinitionErrors, benchmarksDeleteDefinitionResponses, benchmarksForceStopRunData, benchmarksForceStopRunErrors, benchmarksForceStopRunResponses, benchmarksGetResultsData, benchmarksGetResultsErrors, benchmarksGetResultsResponses, benchmarksListDefinitionsData, benchmarksListDefinitionsResponses, benchmarksListRunsData, benchmarksListRunsResponses, benchmarksUpdateDefinitionData, benchmarksUpdateDefinitionErrors, benchmarksUpdateDefinitionResponses, huggingfaceGetModelInfoData, huggingfaceGetModelInfoErrors, huggingfaceGetModelInfoResponses, huggingfaceGetParameterCountData, huggingfaceGetParameterCountErrors, huggingfaceGetParameterCountResponses, huggingfaceListModelFilesData, huggingfaceListModelFilesErrors, huggingfaceListModelFilesResponses, huggingfaceSearchModelsData, huggingfaceSearchModelsErrors, huggingfaceSearchModelsResponses, metricsMetricsData, metricsMetricsResponses, modelsCreateModelData, modelsCreateModelErrors, modelsCreateModelResponses, modelsDeleteModelData, modelsDeleteModelErrors, modelsDeleteModelResponses, modelsReadModelData, modelsReadModelErrors, modelsReadModelResponses, modelsReadModelsData, modelsReadModelsErrors, modelsReadModelsResponses, modelsUpdateModelData, modelsUpdateModelErrors, modelsUpdateModelResponses, serverInstancesDeleteServerData, serverInstancesDeleteServerErrors, serverInstancesDeleteServerResponses, serverInstancesGetServerInstanceData, serverInstancesGetServerInstanceErrors, serverInstancesGetServerInstanceResponses, serverInstancesListServerInstancesData, serverInstancesListServerInstancesResponses, serverInstancesRestartServerData, serverInstancesRestartServerErrors, serverInstancesRestartServerResponses, serverInstancesStartServerData, serverInstancesStartServerErrors, serverInstancesStartServerResponses, serverInstancesStopServerData, serverInstancesStopServerErrors, serverInstancesStopServerResponses, serverInstancesUpdateServerData, serverInstancesUpdateServerErrors, serverInstancesUpdateServerResponses, utilsHealthCheckData, utilsHealthCheckResponses, v1AudioCreateSpeechData, v1AudioCreateSpeechErrors, v1AudioCreateSpeechResponses, v1AudioCreateTranscriptionData, v1AudioCreateTranscriptionErrors, v1AudioCreateTranscriptionResponses, v1AudioCreateTranslationData, v1AudioCreateTranslationErrors, v1AudioCreateTranslationResponses, v1BatchesCancelBatchData, v1BatchesCancelBatchErrors, v1BatchesCancelBatchResponses, v1BatchesCreateBatchData, v1BatchesCreateBatchErrors, v1BatchesCreateBatchResponses, v1BatchesListBatchesData, v1BatchesListBatchesErrors, v1BatchesListBatchesResponses, v1BatchesRetrieveBatchData, v1BatchesRetrieveBatchErrors, v1BatchesRetrieveBatchResponses, v1ChatCreateChatCompletionData, v1ChatCreateChatCompletionErrors, v1ChatCreateChatCompletionResponses, v1CompletionsCreateCompletionData, v1CompletionsCreateCompletionErrors, v1CompletionsCreateCompletionResponses, v1EmbeddingsCreateEmbeddingData, v1EmbeddingsCreateEmbeddingErrors, v1EmbeddingsCreateEmbeddingResponses, v1FilesDeleteFileData, v1FilesDeleteFileErrors, v1FilesDeleteFileResponses, v1FilesListFilesData, v1FilesListFilesErrors, v1FilesListFilesResponses, v1FilesRetrieveFileContentData, v1FilesRetrieveFileContentErrors, v1FilesRetrieveFileContentResponses, v1FilesRetrieveFileData, v1FilesRetrieveFileErrors, v1FilesRetrieveFileResponses, v1FilesUploadFileData, v1FilesUploadFileErrors, v1FilesUploadFileResponses, v1ModelsListModelsData, v1ModelsListModelsResponses, v1ModelsRetrieveModelData, v1ModelsRetrieveModelErrors, v1ModelsRetrieveModelResponses, v1ResponsesCompactResponseData, v1ResponsesCompactResponseErrors, v1ResponsesCompactResponseResponses, v1ResponsesCreateResponseData, v1ResponsesCreateResponseErrors, v1ResponsesCreateResponseResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -35,7 +35,7 @@ export class AgentsService {
             }
         });
     }
-    
+
     /**
      * Register Agent
      *
@@ -52,7 +52,7 @@ export class AgentsService {
             }
         });
     }
-    
+
     /**
      * List Agents
      *
@@ -65,7 +65,7 @@ export class AgentsService {
             ...options
         });
     }
-    
+
     /**
      * List Agents
      *
@@ -78,7 +78,7 @@ export class AgentsService {
             ...options
         });
     }
-    
+
     /**
      * Delete Agent
      *
@@ -91,7 +91,7 @@ export class AgentsService {
             ...options
         });
     }
-    
+
     /**
      * Delete Agent
      *
@@ -104,7 +104,7 @@ export class AgentsService {
             ...options
         });
     }
-    
+
     /**
      * Get Agent
      *
@@ -117,7 +117,7 @@ export class AgentsService {
             ...options
         });
     }
-    
+
     /**
      * Get Agent
      *
@@ -130,7 +130,7 @@ export class AgentsService {
             ...options
         });
     }
-    
+
     /**
      * Update Agent
      *
@@ -147,7 +147,7 @@ export class AgentsService {
             }
         });
     }
-    
+
     /**
      * Update Agent
      *
@@ -164,7 +164,7 @@ export class AgentsService {
             }
         });
     }
-    
+
     /**
      * Send Command
      *
@@ -181,7 +181,7 @@ export class AgentsService {
             }
         });
     }
-    
+
     /**
      * Send Command
      *
@@ -213,7 +213,7 @@ export class MetricsService {
             ...options
         });
     }
-    
+
     /**
      * Metrics
      *
@@ -241,7 +241,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-    
+
     /**
      * List Server Instances
      *
@@ -254,7 +254,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-    
+
     /**
      * Delete Server
      *
@@ -267,7 +267,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-    
+
     /**
      * Delete Server
      *
@@ -280,7 +280,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-    
+
     /**
      * Get Server Instance
      *
@@ -293,7 +293,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-    
+
     /**
      * Get Server Instance
      *
@@ -306,7 +306,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-    
+
     /**
      * Update Server
      *
@@ -323,7 +323,7 @@ export class ServerInstancesService {
             }
         });
     }
-    
+
     /**
      * Update Server
      *
@@ -340,7 +340,7 @@ export class ServerInstancesService {
             }
         });
     }
-    
+
     /**
      * Start Server
      *
@@ -357,7 +357,7 @@ export class ServerInstancesService {
             }
         });
     }
-    
+
     /**
      * Start Server
      *
@@ -374,7 +374,7 @@ export class ServerInstancesService {
             }
         });
     }
-    
+
     /**
      * Restart Server
      *
@@ -387,7 +387,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-    
+
     /**
      * Restart Server
      *
@@ -400,7 +400,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-    
+
     /**
      * Stop Server
      *
@@ -413,7 +413,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-    
+
     /**
      * Stop Server
      *
@@ -423,6 +423,244 @@ export class ServerInstancesService {
         return (options.client ?? client).post<serverInstancesStopServerResponses, serverInstancesStopServerErrors, ThrowOnError>({
             responseType: 'json',
             url: '/api/v1/server-instances/{server_id}/stop',
+            ...options
+        });
+    }
+}
+
+export class BenchmarksService {
+    /**
+     * List Definitions
+     */
+    public static listDefinitions<ThrowOnError extends boolean = true>(options?: Options<benchmarksListDefinitionsData, ThrowOnError>) {
+        return (options?.client ?? client).get<benchmarksListDefinitionsResponses, unknown, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/benchmarks/definitions',
+            ...options
+        });
+    }
+
+    /**
+     * List Definitions
+     */
+    public static listDefinitions2<ThrowOnError extends boolean = true>(options?: Options<benchmarksListDefinitionsData, ThrowOnError>) {
+        return (options?.client ?? client).get<benchmarksListDefinitionsResponses, unknown, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/benchmarks/definitions',
+            ...options
+        });
+    }
+
+    /**
+     * Create Definition
+     */
+    public static createDefinition<ThrowOnError extends boolean = true>(options: Options<benchmarksCreateDefinitionData, ThrowOnError>) {
+        return (options.client ?? client).post<benchmarksCreateDefinitionResponses, benchmarksCreateDefinitionErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/benchmarks/definitions',
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                ...options.headers
+            }
+        });
+    }
+
+    /**
+     * Create Definition
+     */
+    public static createDefinition2<ThrowOnError extends boolean = true>(options: Options<benchmarksCreateDefinitionData, ThrowOnError>) {
+        return (options.client ?? client).post<benchmarksCreateDefinitionResponses, benchmarksCreateDefinitionErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/benchmarks/definitions',
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                ...options.headers
+            }
+        });
+    }
+
+    /**
+     * Delete Definition
+     */
+    public static deleteDefinition<ThrowOnError extends boolean = true>(options: Options<benchmarksDeleteDefinitionData, ThrowOnError>) {
+        return (options.client ?? client).delete<benchmarksDeleteDefinitionResponses, benchmarksDeleteDefinitionErrors, ThrowOnError>({ url: '/api/v1/benchmarks/definitions/{definition_id}', ...options });
+    }
+
+    /**
+     * Delete Definition
+     */
+    public static deleteDefinition2<ThrowOnError extends boolean = true>(options: Options<benchmarksDeleteDefinitionData, ThrowOnError>) {
+        return (options.client ?? client).delete<benchmarksDeleteDefinitionResponses, benchmarksDeleteDefinitionErrors, ThrowOnError>({ url: '/api/v1/benchmarks/definitions/{definition_id}', ...options });
+    }
+
+    /**
+     * Update Definition
+     */
+    public static updateDefinition<ThrowOnError extends boolean = true>(options: Options<benchmarksUpdateDefinitionData, ThrowOnError>) {
+        return (options.client ?? client).patch<benchmarksUpdateDefinitionResponses, benchmarksUpdateDefinitionErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/benchmarks/definitions/{definition_id}',
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                ...options.headers
+            }
+        });
+    }
+
+    /**
+     * Update Definition
+     */
+    public static updateDefinition2<ThrowOnError extends boolean = true>(options: Options<benchmarksUpdateDefinitionData, ThrowOnError>) {
+        return (options.client ?? client).patch<benchmarksUpdateDefinitionResponses, benchmarksUpdateDefinitionErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/benchmarks/definitions/{definition_id}',
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                ...options.headers
+            }
+        });
+    }
+
+    /**
+     * List Runs
+     */
+    public static listRuns<ThrowOnError extends boolean = true>(options?: Options<benchmarksListRunsData, ThrowOnError>) {
+        return (options?.client ?? client).get<benchmarksListRunsResponses, unknown, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/benchmarks/runs',
+            ...options
+        });
+    }
+
+    /**
+     * List Runs
+     */
+    public static listRuns2<ThrowOnError extends boolean = true>(options?: Options<benchmarksListRunsData, ThrowOnError>) {
+        return (options?.client ?? client).get<benchmarksListRunsResponses, unknown, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/benchmarks/runs',
+            ...options
+        });
+    }
+
+    /**
+     * Create Run
+     */
+    public static createRun<ThrowOnError extends boolean = true>(options: Options<benchmarksCreateRunData, ThrowOnError>) {
+        return (options.client ?? client).post<benchmarksCreateRunResponses, benchmarksCreateRunErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/benchmarks/runs',
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                ...options.headers
+            }
+        });
+    }
+
+    /**
+     * Create Run
+     */
+    public static createRun2<ThrowOnError extends boolean = true>(options: Options<benchmarksCreateRunData, ThrowOnError>) {
+        return (options.client ?? client).post<benchmarksCreateRunResponses, benchmarksCreateRunErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/benchmarks/runs',
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                ...options.headers
+            }
+        });
+    }
+
+    /**
+     * Get Results
+     */
+    public static getResults<ThrowOnError extends boolean = true>(options: Options<benchmarksGetResultsData, ThrowOnError>) {
+        return (options.client ?? client).get<benchmarksGetResultsResponses, benchmarksGetResultsErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/benchmarks/runs/{run_id}/results',
+            ...options
+        });
+    }
+
+    /**
+     * Get Results
+     */
+    public static getResults2<ThrowOnError extends boolean = true>(options: Options<benchmarksGetResultsData, ThrowOnError>) {
+        return (options.client ?? client).get<benchmarksGetResultsResponses, benchmarksGetResultsErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/benchmarks/runs/{run_id}/results',
+            ...options
+        });
+    }
+
+    /**
+     * Cancel Run
+     */
+    public static cancelRun<ThrowOnError extends boolean = true>(options: Options<benchmarksCancelRunData, ThrowOnError>) {
+        return (options.client ?? client).post<benchmarksCancelRunResponses, benchmarksCancelRunErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/benchmarks/runs/{run_id}/cancel',
+            ...options
+        });
+    }
+
+    /**
+     * Cancel Run
+     */
+    public static cancelRun2<ThrowOnError extends boolean = true>(options: Options<benchmarksCancelRunData, ThrowOnError>) {
+        return (options.client ?? client).post<benchmarksCancelRunResponses, benchmarksCancelRunErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/benchmarks/runs/{run_id}/cancel',
+            ...options
+        });
+    }
+
+    /**
+     * Abort Run
+     */
+    public static abortRun<ThrowOnError extends boolean = true>(options: Options<benchmarksAbortRunData, ThrowOnError>) {
+        return (options.client ?? client).post<benchmarksAbortRunResponses, benchmarksAbortRunErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/benchmarks/runs/{run_id}/abort',
+            ...options
+        });
+    }
+
+    /**
+     * Abort Run
+     */
+    public static abortRun2<ThrowOnError extends boolean = true>(options: Options<benchmarksAbortRunData, ThrowOnError>) {
+        return (options.client ?? client).post<benchmarksAbortRunResponses, benchmarksAbortRunErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/benchmarks/runs/{run_id}/abort',
+            ...options
+        });
+    }
+
+    /**
+     * Force Stop Run
+     */
+    public static forceStopRun<ThrowOnError extends boolean = true>(options: Options<benchmarksForceStopRunData, ThrowOnError>) {
+        return (options.client ?? client).post<benchmarksForceStopRunResponses, benchmarksForceStopRunErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/benchmarks/runs/{run_id}/force-stop',
+            ...options
+        });
+    }
+
+    /**
+     * Force Stop Run
+     */
+    public static forceStopRun2<ThrowOnError extends boolean = true>(options: Options<benchmarksForceStopRunData, ThrowOnError>) {
+        return (options.client ?? client).post<benchmarksForceStopRunResponses, benchmarksForceStopRunErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/benchmarks/runs/{run_id}/force-stop',
             ...options
         });
     }
@@ -441,7 +679,7 @@ export class ModelsService {
             ...options
         });
     }
-    
+
     /**
      * Read Models
      *
@@ -454,7 +692,7 @@ export class ModelsService {
             ...options
         });
     }
-    
+
     /**
      * Create Model
      *
@@ -471,7 +709,7 @@ export class ModelsService {
             }
         });
     }
-    
+
     /**
      * Create Model
      *
@@ -488,7 +726,7 @@ export class ModelsService {
             }
         });
     }
-    
+
     /**
      * Delete Model
      *
@@ -501,7 +739,7 @@ export class ModelsService {
             ...options
         });
     }
-    
+
     /**
      * Delete Model
      *
@@ -514,7 +752,7 @@ export class ModelsService {
             ...options
         });
     }
-    
+
     /**
      * Read Model
      *
@@ -527,7 +765,7 @@ export class ModelsService {
             ...options
         });
     }
-    
+
     /**
      * Read Model
      *
@@ -540,7 +778,7 @@ export class ModelsService {
             ...options
         });
     }
-    
+
     /**
      * Update Model
      *
@@ -557,7 +795,7 @@ export class ModelsService {
             }
         });
     }
-    
+
     /**
      * Update Model
      *
@@ -589,7 +827,7 @@ export class HuggingfaceService {
             ...options
         });
     }
-    
+
     /**
      * Search Models
      *
@@ -602,7 +840,7 @@ export class HuggingfaceService {
             ...options
         });
     }
-    
+
     /**
      * List Model Files
      *
@@ -615,7 +853,7 @@ export class HuggingfaceService {
             ...options
         });
     }
-    
+
     /**
      * List Model Files
      *
@@ -628,7 +866,7 @@ export class HuggingfaceService {
             ...options
         });
     }
-    
+
     /**
      * Get Model Info
      *
@@ -641,7 +879,7 @@ export class HuggingfaceService {
             ...options
         });
     }
-    
+
     /**
      * Get Model Info
      *
@@ -654,7 +892,7 @@ export class HuggingfaceService {
             ...options
         });
     }
-    
+
     /**
      * Get Parameter Count
      *
@@ -668,7 +906,7 @@ export class HuggingfaceService {
             ...options
         });
     }
-    
+
     /**
      * Get Parameter Count
      *
@@ -695,7 +933,7 @@ export class UtilsService {
             ...options
         });
     }
-    
+
     /**
      * Health Check
      */
@@ -725,7 +963,7 @@ export class V1 {
             ...options
         });
     }
-    
+
     /**
      * Retrieve Model
      *
@@ -842,7 +1080,7 @@ export class V15 {
             }
         });
     }
-    
+
     /**
      * Compact Response
      *
@@ -887,7 +1125,7 @@ export class V16 {
             ...options
         });
     }
-    
+
     /**
      * Upload File
      *
@@ -909,7 +1147,7 @@ export class V16 {
             }
         });
     }
-    
+
     /**
      * Delete File
      *
@@ -925,7 +1163,7 @@ export class V16 {
             ...options
         });
     }
-    
+
     /**
      * Retrieve File
      *
@@ -941,7 +1179,7 @@ export class V16 {
             ...options
         });
     }
-    
+
     /**
      * Retrieve File Content
      *
@@ -979,7 +1217,7 @@ export class V17 {
             ...options
         });
     }
-    
+
     /**
      * Create Batch
      *
@@ -999,7 +1237,7 @@ export class V17 {
             }
         });
     }
-    
+
     /**
      * Retrieve Batch
      *
@@ -1015,7 +1253,7 @@ export class V17 {
             ...options
         });
     }
-    
+
     /**
      * Cancel Batch
      *
@@ -1063,7 +1301,7 @@ export class V18 {
             }
         });
     }
-    
+
     /**
      * Create Translation
      *
@@ -1088,7 +1326,7 @@ export class V18 {
             }
         });
     }
-    
+
     /**
      * Create Speech
      *

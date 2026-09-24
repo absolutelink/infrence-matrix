@@ -3,7 +3,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import gpu, models, proxy, servers, websocket
+from app.api.routes import benchmarks, gpu, models, proxy, servers, websocket
 from app.core.logging import logger
 from app.services.frontend_client import frontend_client
 from app.services.gpu_monitor import start_gpu_monitoring
@@ -27,6 +27,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(servers.router)
+    app.include_router(benchmarks.router)
     app.include_router(models.router)
     app.include_router(gpu.router)
     app.include_router(websocket.router)

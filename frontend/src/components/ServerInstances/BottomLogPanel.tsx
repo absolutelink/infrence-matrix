@@ -1,15 +1,35 @@
 import { ChevronDown, GripHorizontal, X } from "lucide-react"
-import { useState } from "react"
-
+import { BenchmarkLogs } from "@/components/ServerInstances/BenchmarkLogs"
 import { useLogPanel } from "@/components/ServerInstances/LogPanelContext"
 import { ServerLogsSheet } from "@/components/ServerInstances/ServerLogsSheet"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { useAgentEvents } from "@/hook/useAgentEvents"
+
+function LogConnectionIndicator({ agentId }: { agentId: string }) {
+  const { connected } = useAgentEvents(agentId, true)
+  return (
+    <span
+      role="img"
+      aria-label={
+        connected ? "Log stream connected" : "Log stream disconnected"
+      }
+      className={`h-2 w-2 shrink-0 rounded-full ${connected ? "bg-green-500" : "bg-red-500"}`}
+    />
+  )
+}
 
 export function BottomLogPanel() {
-  const { tabs, activeTabId, isOpen, closeLogs, closePanel, setActiveTab } =
-    useLogPanel()
-  const [height, setHeight] = useState(320)
+  const {
+    tabs,
+    activeTabId,
+    isOpen,
+    height,
+    setHeight,
+    closeLogs,
+    closePanel,
+    setActiveTab,
+  } = useLogPanel()
 
   if (!isOpen || !activeTabId || tabs.length === 0) return null
 
@@ -59,6 +79,7 @@ export function BottomLogPanel() {
                   value={tab.id}
                   className="h-10 max-w-56 shrink-0 rounded-none border-b-2 border-transparent px-3 data-[state=active]:border-primary data-[state=active]:bg-transparent"
                 >
+                  <LogConnectionIndicator agentId={tab.agent_id} />
                   <span className="truncate">{tab.model_name || tab.id}</span>
                 </TabsTrigger>
                 <button
@@ -84,7 +105,11 @@ export function BottomLogPanel() {
         </Button>
       </div>
       <div className="min-h-0 flex-1">
-        <ServerLogsSheet key={activeTab.id} isOpen instance={activeTab} />
+        {activeTab.kind === "benchmark" ? (
+          <BenchmarkLogs key={activeTab.id} isOpen instance={activeTab} />
+        ) : (
+          <ServerLogsSheet key={activeTab.id} isOpen instance={activeTab} />
+        )}
       </div>
     </section>
   )

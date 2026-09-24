@@ -89,6 +89,7 @@ export function ServerLogsSheet({ isOpen, instance }: ServerLogsSheetProps) {
     },
     enabled: isOpen && Boolean(instance.agent_id),
     refetchOnWindowFocus: false,
+    refetchInterval: 5000,
   })
 
   useEffect(() => {

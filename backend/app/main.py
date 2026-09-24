@@ -21,6 +21,10 @@ from app.api.routes.v1 import (
 from app.api.routes.websocket import router as agent_ws_router
 from app.core.config import settings
 from app.services.agent_manager import agent_manager
+from app.services.request_activity import (
+    request_finished,
+    request_started,
+)
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
 
@@ -44,6 +48,37 @@ app = FastAPI(
     generate_unique_id_function=custom_generate_unique_id,
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def track_inference_activity(request, call_next):
+    """Keep streaming inference requests active until their body completes."""
+    if not request.url.path.startswith("/v1/"):
+        return await call_next(request)
+    await request_started()
+    response = None
+    try:
+        response = await call_next(request)
+        body_iterator = getattr(response, "body_iterator", None)
+        if body_iterator is None:
+            await request_finished()
+            return response
+
+        original_iterator = body_iterator
+
+        async def tracked_iterator():
+            try:
+                async for chunk in original_iterator:
+                    yield chunk
+            finally:
+                await request_finished()
+
+        response.body_iterator = tracked_iterator()
+        return response
+    except Exception:
+        await request_finished()
+        raise
+
 
 app.add_middleware(
     CORSMiddleware,

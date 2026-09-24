@@ -3,6 +3,7 @@ import {
   Box,
   Braces,
   Cpu,
+  Gauge,
   Home,
   MessageSquare,
   MessagesSquare,
@@ -30,6 +31,7 @@ const baseItems: Item[] = [
   { icon: Type, title: "Text Completion", path: "/completions" },
   { icon: Braces, title: "Embeddings", path: "/embeddings" },
   { icon: AudioLines, title: "Transcriptions", path: "/audio" },
+  { icon: Gauge, title: "Benchmarks", path: "/benchmarks" },
 ]
 
 export function AppSidebar() {

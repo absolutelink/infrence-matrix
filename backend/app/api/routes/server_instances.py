@@ -14,6 +14,7 @@ from sqlmodel import col
 from app.db.session import AsyncSessionMaker
 from app.models import Agent, Model, ServerInstance
 from app.services.agent_manager import agent_manager
+from app.services.benchmark import is_benchmark_blocking
 from app.services.server_startup import (
     build_start_payload as _build_start_payload,
 )
@@ -200,6 +201,11 @@ async def get_server_instance(server_id: str) -> ServerInstanceResponse:
 @router.post("/start")
 async def start_server(request: StartServerRequest) -> dict[str, Any]:
     """Start a new server instance."""
+    if await is_benchmark_blocking():
+        raise HTTPException(
+            status_code=409,
+            detail="Servers cannot be started while a benchmark is running",
+        )
     async with AsyncSessionMaker() as session:
         model = await session.get(Model, uuid_module.UUID(request.model_id))
         if not model:
@@ -275,6 +281,11 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
 @router.put("/{server_id}")
 async def update_server(server_id: str, request: UpdateServerRequest) -> dict[str, Any]:
     """Update server settings; restart the server if it is running."""
+    if await is_benchmark_blocking():
+        raise HTTPException(
+            status_code=409,
+            detail="Server changes are disabled while a benchmark is running",
+        )
     async with AsyncSessionMaker() as session:
         instance = await session.get(ServerInstance, uuid_module.UUID(server_id))
         if not instance:
@@ -422,6 +433,11 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
 @router.post("/{server_id}/start")
 async def restart_server(server_id: str) -> dict[str, Any]:
     """Start an existing (stopped or errored) server instance."""
+    if await is_benchmark_blocking():
+        raise HTTPException(
+            status_code=409,
+            detail="Servers cannot be started while a benchmark is running",
+        )
     async with AsyncSessionMaker() as session:
         instance = await session.get(ServerInstance, uuid_module.UUID(server_id))
         if not instance:

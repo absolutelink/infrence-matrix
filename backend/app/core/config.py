@@ -78,6 +78,8 @@ class Settings(BaseSettings):
     DEFAULT_BATCH_SIZE: int = 512
     SERVER_INACTIVITY_TIMEOUT: int = 300
     MAX_SERVER_INSTANCES: int = 5
+    BENCHMARK_IDLE_TIMEOUT: int = 300
+    BENCHMARK_IDLE_POLL_INTERVAL: float = 2.0
 
     # Agent WebSocket
     WS_RECONNECT_INTERVAL: int = 5

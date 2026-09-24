@@ -269,6 +269,8 @@ class AgentManager:
                         agent_id,
                         entry.get("line", ""),
                     )
+            elif event_type.startswith("benchmark."):
+                await self._handle_benchmark_event(event_type, event_data)
         except Exception as e:
             # A bad event must not kill the agent WebSocket (an exception
             # here previously tore down the connection and triggered a
@@ -276,6 +278,45 @@ class AgentManager:
             logger.warning(
                 f"Failed handling {event_type} event from agent {agent_id}: {e}"
             )
+
+    async def _handle_benchmark_event(self, event_type: str, data: dict) -> None:
+        """Persist benchmark lifecycle events while UI subscribers receive them."""
+        run_id = data.get("run_id")
+        if not run_id:
+            return
+        from app.models import BenchmarkRun
+
+        terminal = {
+            "benchmark.completed": "completed",
+            "benchmark.failed": "failed",
+            "benchmark.error": "failed",
+            "benchmark.stopped": "stopped",
+        }
+        if event_type == "benchmark.started":
+            status = "running"
+        elif event_type in terminal:
+            status = terminal[event_type]
+        else:
+            return
+        async with AsyncSessionMaker() as session:
+            run = await session.get(BenchmarkRun, uuid_module.UUID(str(run_id)))
+            if not run:
+                return
+            run.status = status
+            if status in {"completed", "failed", "stopped"}:
+                run.finished_at = datetime.now(UTC)
+            if data.get("error"):
+                run.error = str(data["error"])
+            if data.get("summary") is not None or data.get("cases") is not None:
+                run.results = {
+                    "summary": data.get("summary", {}),
+                    "cases": data.get("cases", []),
+                    "return_code": data.get("return_code"),
+                }
+            if data.get("raw_output") is not None:
+                run.raw_output = str(data["raw_output"])
+            session.add(run)
+            await session.commit()
 
     async def _handle_server_error(self, agent_id: str, data: dict) -> None:
         """Handle server.error event."""

@@ -412,6 +412,73 @@ class ServerInstance(SQLModel, table=True):
 
 
 # ============================================================================
+# BenchmarkDefinition - Persisted llama-bench configuration
+# ============================================================================
+class BenchmarkDefinition(SQLModel, table=True):
+    __tablename__ = "benchmark_definitions"
+    __table_args__ = (
+        Index("idx_benchmark_definitions_name", "name"),
+        Index("idx_benchmark_definitions_source", "source_server_instance_id"),
+    )
+
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        primary_key=True,
+        sa_type=UUID(as_uuid=True),  # type: ignore[call-arg,arg-type]
+    )
+    name: str = Field(max_length=255)
+    description: str | None = None
+    source_server_instance_id: uuid.UUID = Field(
+        foreign_key="server_instances.id",
+        ondelete="CASCADE",
+    )
+    # Snapshot of the selected server definition and llama-bench options.
+    config: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=get_datetime_utc)
+    updated_at: datetime = Field(default_factory=get_datetime_utc)
+
+
+# ============================================================================
+# BenchmarkRun - A queued or completed llama-bench execution
+# ============================================================================
+class BenchmarkRun(SQLModel, table=True):
+    __tablename__ = "benchmark_runs"
+    __table_args__ = (
+        Index("idx_benchmark_runs_status", "status"),
+        Index("idx_benchmark_runs_definition", "definition_id"),
+        Index("idx_benchmark_runs_created_at", "created_at"),
+    )
+
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        primary_key=True,
+        sa_type=UUID(as_uuid=True),  # type: ignore[call-arg,arg-type]
+    )
+    definition_id: uuid.UUID = Field(
+        foreign_key="benchmark_definitions.id",
+        ondelete="CASCADE",
+    )
+    agent_id: uuid.UUID | None = Field(
+        default=None,
+        foreign_key="agents.id",
+        ondelete="SET NULL",
+    )
+    server_instance_id: uuid.UUID | None = Field(
+        default=None,
+        foreign_key="server_instances.id",
+        ondelete="SET NULL",
+    )
+    status: str = "queued"
+    error: str | None = None
+    command: list = Field(default_factory=list, sa_column=Column(JSON))
+    results: dict | None = Field(default=None, sa_column=Column(JSON))
+    raw_output: str | None = None
+    created_at: datetime = Field(default_factory=get_datetime_utc)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+# ============================================================================
 # AudioJob - Tracks audio processing jobs
 # ============================================================================
 class AudioJob(SQLModel, table=True):

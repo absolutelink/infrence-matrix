@@ -32,6 +32,8 @@ from app.models import (
     AudioJob,
     BatchJob,
     File,
+    BenchmarkDefinition,
+    BenchmarkRun,
 )
 
 target_metadata = SQLModel.metadata

@@ -203,6 +203,30 @@ export type BatchesList = {
 };
 
 /**
+ * BenchmarkDefinitionInput
+ */
+export type BenchmarkDefinitionInput = {
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Description
+     */
+    description?: string | null;
+    /**
+     * Source Server Instance Id
+     */
+    source_server_instance_id?: string | null;
+    /**
+     * Config
+     */
+    config?: {
+        [key: string]: unknown;
+    };
+};
+
+/**
  * Body_v1/audio-create_transcription
  */
 export type Body_v1_audio_create_transcription = {
@@ -1385,6 +1409,16 @@ export type RefusalContentParam = {
 };
 
 /**
+ * RunInput
+ */
+export type RunInput = {
+    /**
+     * Definition Id
+     */
+    definition_id: string;
+};
+
+/**
  * ServerInstanceListResponse
  */
 export type ServerInstanceListResponse = {
@@ -2195,6 +2229,304 @@ export type serverInstancesStopServerResponses = {
 };
 
 export type serverInstancesStopServerResponse = serverInstancesStopServerResponses[keyof serverInstancesStopServerResponses];
+
+export type benchmarksListDefinitionsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/benchmarks/definitions';
+};
+
+export type benchmarksListDefinitionsResponses = {
+    /**
+     * Response Benchmarks-List Definitions
+     *
+     * Successful Response
+     */
+    200: Array<{
+        [key: string]: unknown;
+    }>;
+};
+
+export type benchmarksListDefinitionsResponse = benchmarksListDefinitionsResponses[keyof benchmarksListDefinitionsResponses];
+
+export type benchmarksCreateDefinitionData = {
+    body: BenchmarkDefinitionInput;
+    path?: never;
+    query?: never;
+    url: '/api/v1/benchmarks/definitions';
+};
+
+export type benchmarksCreateDefinitionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type benchmarksCreateDefinitionError = benchmarksCreateDefinitionErrors[keyof benchmarksCreateDefinitionErrors];
+
+export type benchmarksCreateDefinitionResponses = {
+    /**
+     * Response Benchmarks-Create Definition
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type benchmarksCreateDefinitionResponse = benchmarksCreateDefinitionResponses[keyof benchmarksCreateDefinitionResponses];
+
+export type benchmarksDeleteDefinitionData = {
+    body?: never;
+    path: {
+        /**
+         * Definition Id
+         */
+        definition_id: string;
+    };
+    query?: never;
+    url: '/api/v1/benchmarks/definitions/{definition_id}';
+};
+
+export type benchmarksDeleteDefinitionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type benchmarksDeleteDefinitionError = benchmarksDeleteDefinitionErrors[keyof benchmarksDeleteDefinitionErrors];
+
+export type benchmarksDeleteDefinitionResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type benchmarksDeleteDefinitionResponse = benchmarksDeleteDefinitionResponses[keyof benchmarksDeleteDefinitionResponses];
+
+export type benchmarksUpdateDefinitionData = {
+    body: BenchmarkDefinitionInput;
+    path: {
+        /**
+         * Definition Id
+         */
+        definition_id: string;
+    };
+    query?: never;
+    url: '/api/v1/benchmarks/definitions/{definition_id}';
+};
+
+export type benchmarksUpdateDefinitionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type benchmarksUpdateDefinitionError = benchmarksUpdateDefinitionErrors[keyof benchmarksUpdateDefinitionErrors];
+
+export type benchmarksUpdateDefinitionResponses = {
+    /**
+     * Response Benchmarks-Update Definition
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type benchmarksUpdateDefinitionResponse = benchmarksUpdateDefinitionResponses[keyof benchmarksUpdateDefinitionResponses];
+
+export type benchmarksListRunsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/benchmarks/runs';
+};
+
+export type benchmarksListRunsResponses = {
+    /**
+     * Response Benchmarks-List Runs
+     *
+     * Successful Response
+     */
+    200: Array<{
+        [key: string]: unknown;
+    }>;
+};
+
+export type benchmarksListRunsResponse = benchmarksListRunsResponses[keyof benchmarksListRunsResponses];
+
+export type benchmarksCreateRunData = {
+    body: RunInput;
+    path?: never;
+    query?: never;
+    url: '/api/v1/benchmarks/runs';
+};
+
+export type benchmarksCreateRunErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type benchmarksCreateRunError = benchmarksCreateRunErrors[keyof benchmarksCreateRunErrors];
+
+export type benchmarksCreateRunResponses = {
+    /**
+     * Response Benchmarks-Create Run
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type benchmarksCreateRunResponse = benchmarksCreateRunResponses[keyof benchmarksCreateRunResponses];
+
+export type benchmarksGetResultsData = {
+    body?: never;
+    path: {
+        /**
+         * Run Id
+         */
+        run_id: string;
+    };
+    query?: never;
+    url: '/api/v1/benchmarks/runs/{run_id}/results';
+};
+
+export type benchmarksGetResultsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type benchmarksGetResultsError = benchmarksGetResultsErrors[keyof benchmarksGetResultsErrors];
+
+export type benchmarksGetResultsResponses = {
+    /**
+     * Response Benchmarks-Get Results
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    } | null;
+};
+
+export type benchmarksGetResultsResponse = benchmarksGetResultsResponses[keyof benchmarksGetResultsResponses];
+
+export type benchmarksCancelRunData = {
+    body?: never;
+    path: {
+        /**
+         * Run Id
+         */
+        run_id: string;
+    };
+    query?: never;
+    url: '/api/v1/benchmarks/runs/{run_id}/cancel';
+};
+
+export type benchmarksCancelRunErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type benchmarksCancelRunError = benchmarksCancelRunErrors[keyof benchmarksCancelRunErrors];
+
+export type benchmarksCancelRunResponses = {
+    /**
+     * Response Benchmarks-Cancel Run
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type benchmarksCancelRunResponse = benchmarksCancelRunResponses[keyof benchmarksCancelRunResponses];
+
+export type benchmarksAbortRunData = {
+    body?: never;
+    path: {
+        /**
+         * Run Id
+         */
+        run_id: string;
+    };
+    query?: never;
+    url: '/api/v1/benchmarks/runs/{run_id}/abort';
+};
+
+export type benchmarksAbortRunErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type benchmarksAbortRunError = benchmarksAbortRunErrors[keyof benchmarksAbortRunErrors];
+
+export type benchmarksAbortRunResponses = {
+    /**
+     * Response Benchmarks-Abort Run
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type benchmarksAbortRunResponse = benchmarksAbortRunResponses[keyof benchmarksAbortRunResponses];
+
+export type benchmarksForceStopRunData = {
+    body?: never;
+    path: {
+        /**
+         * Run Id
+         */
+        run_id: string;
+    };
+    query?: never;
+    url: '/api/v1/benchmarks/runs/{run_id}/force-stop';
+};
+
+export type benchmarksForceStopRunErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type benchmarksForceStopRunError = benchmarksForceStopRunErrors[keyof benchmarksForceStopRunErrors];
+
+export type benchmarksForceStopRunResponses = {
+    /**
+     * Response Benchmarks-Force Stop Run
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type benchmarksForceStopRunResponse = benchmarksForceStopRunResponses[keyof benchmarksForceStopRunResponses];
 
 export type modelsReadModelsData = {
     body?: never;

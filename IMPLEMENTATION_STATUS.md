@@ -1,6 +1,6 @@
 # Inference Matrix - Implementation Status
 
-Last Updated: September 23, 2026
+Last Updated: September 24, 2026
 
 ## ✅ Completed Features
 
@@ -175,6 +175,50 @@ Key llama.cpp facts (researched):
 
 ### 🔧 Medium Priority
 
+#### Benchmarking
+- [ ] **Benchmark definitions**
+  - Persist benchmark definitions with CRUD support
+  - Select an existing server definition and retain a configuration snapshot for reproducibility
+  - Reuse server definition add/edit/delete UI patterns
+  - Configure core `llama-bench` options, including prompt/context sizes, batch sizes, repetitions, GPU layers, and flash attention
+  - Soft-copy source settings while retaining the source definition reference
+- [ ] **Benchmark execution**
+  - Run `llama-bench` directly on the agent instead of starting a `llama-server`
+  - Configure the `llama-bench` executable path per agent, with a PATH-based default
+  - Queue runs until the selected agent and model are available
+  - Execute all selected prompt/context combinations in a run
+  - Parse and persist per-case results and aggregate summary metrics
+  - Persist run history, raw output, errors, timestamps, and status transitions until explicitly deleted
+- [ ] **Benchmark server isolation**
+  - Allow only one active benchmark globally and process queued runs FIFO
+  - Wait for all running servers to become idle before stopping them
+  - Prompt on idle timeout to abort or force-stop
+  - Force-stop terminates active requests before proceeding
+  - Keep all servers stopped while a benchmark is running
+  - Block server starts/restarts during benchmark execution
+  - Leave automatically stopped servers stopped after the run
+- [ ] **Benchmark UI and history**
+  - Add a dedicated Benchmarks page with definitions, queue, active runs, history, and result details
+  - Add benchmark actions and latest result summaries to server definitions
+  - Open a dedicated log tab automatically when a run starts
+  - Identify log tabs by benchmark run
+- [ ] **Benchmark tests**
+  - Definition CRUD, snapshots, deletion, and validation
+  - Queueing, idle detection, timeout prompts, force-stop, and cleanup
+  - Agent subprocess execution, command construction, output parsing, and failures
+  - Result persistence and frontend benchmark workflows
+
+#### Server and Log Panel Improvements
+- [ ] **Reliable log streaming**
+  - Preserve an explicit connected/disconnected/reconnecting state for every log stream
+  - Automatically reconnect after WebSocket failures without losing the visible tail
+  - Poll log history while disconnected and merge history/live output without duplicates
+  - Show a green connected or red disconnected indicator in every log tab title, including inactive tabs
+- [ ] **Log panel layout**
+  - Reserve main-content space for the open bottom log panel instead of overlaying page inputs
+  - Update reserved space while the panel is resized or collapsed
+  - Verify Responses API, Chat, and Completions forms remain fully accessible with logs open
+
 #### Prompts Library
 - [ ] Saved prompts
 - [ ] Prompt templates
@@ -185,7 +229,7 @@ Key llama.cpp facts (researched):
 - [x] Model download progress (download.progress events with speed_mbps)
 - [ ] Model validation checker
 - [ ] Model compatibility test
-- [ ] Model benchmarking
+- [ ] Model benchmarking (see the Benchmarking implementation plan above)
 
 ### 🌟 Low Priority (Nice to Have)
 

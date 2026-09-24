@@ -23,6 +23,8 @@ class Settings(BaseSettings):
 
     # llama.cpp
     LLAMA_SERVER_PATH: str = "/usr/local/bin/llama-server"
+    # ``llama-bench`` is normally installed on PATH in the llama.cpp image.
+    LLAMA_BENCH_PATH: str = "llama-bench"
     DEFAULT_GPU_LAYERS: int = 35
     DEFAULT_CONTEXT_SIZE: int = 4096
     DEFAULT_BATCH_SIZE: int = 512

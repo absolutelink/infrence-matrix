@@ -25,6 +25,7 @@ from sqlmodel import col, select
 from app.db.session import AsyncSessionMaker
 from app.models import Agent, Model, ServerInstance
 from app.services.agent_manager import agent_manager
+from app.services.benchmark import is_benchmark_blocking
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +201,8 @@ async def ensure_server_ready(
     Returns the (possibly refreshed) ServerInstance to use.
     Raises ServerStartupError with a user-presentable message on failure.
     """
+    if await is_benchmark_blocking():
+        raise ServerStartupError("Servers are unavailable while a benchmark is running")
     instance = await _reload_instance(str(server.id))
     if instance is None:
         raise ServerStartupError(f"Server {server.id} no longer exists")
