@@ -17,7 +17,7 @@ import { toast } from "sonner"
 
 import { AgentsService, ServerInstancesService } from "@/client"
 import { EditServerDialog } from "@/components/ServerInstances/EditServerDialog"
-import { ServerLogsSheet } from "@/components/ServerInstances/ServerLogsSheet"
+import { useLogPanel } from "@/components/ServerInstances/LogPanelContext"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -219,7 +219,7 @@ export const columns: ColumnDef<ServerInstance>[] = [
 
 function InstanceActions({ instance }: { instance: ServerInstance }) {
   const queryClient = useQueryClient()
-  const [logsOpen, setLogsOpen] = useState(false)
+  const { openLogs } = useLogPanel()
   const [editOpen, setEditOpen] = useState(false)
 
   const stopMutation = useMutation({
@@ -291,7 +291,7 @@ function InstanceActions({ instance }: { instance: ServerInstance }) {
         <DropdownMenuContent align="end">
           <DropdownMenuLabel>Actions</DropdownMenuLabel>
           <DropdownMenuSeparator />
-          <DropdownMenuItem onClick={() => setLogsOpen(true)}>
+          <DropdownMenuItem onClick={() => openLogs(instance)}>
             <Terminal className="mr-2 h-4 w-4" />
             View Logs
           </DropdownMenuItem>
@@ -341,12 +341,6 @@ function InstanceActions({ instance }: { instance: ServerInstance }) {
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
-
-      <ServerLogsSheet
-        isOpen={logsOpen}
-        onClose={() => setLogsOpen(false)}
-        instance={instance}
-      />
 
       <EditServerDialog
         isOpen={editOpen}
