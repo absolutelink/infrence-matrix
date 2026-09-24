@@ -28,6 +28,7 @@ from app.api.routes.v1.responses.router import (
     _last_assistant_phase,
     _llama_payload,
     _load_previous,
+    _persist_response,
     resolve_target,
 )
 from app.api.routes.v1.responses.schemas import (
@@ -79,7 +80,7 @@ async def _stream_to_ws(
     (after sending response.failed).
     """
     try:
-        server, _model = await resolve_target(request.model)
+        server, model = await resolve_target(request.model)
         agent = await agent_manager.get_agent(str(server.agent_id))
         if not agent:
             raise TargetError(503, "no_agent_available", "Agent not found")
@@ -172,7 +173,28 @@ async def _stream_to_ws(
             ev.response_completed(seq, resource)
         await _send_events(websocket, seq.drain_events())
 
-        return serialize_spec(resource)
+        serialized = serialize_spec(resource)
+        if request.store:
+            # Persist so store=true chaining (WS or HTTP) finds this turn.
+            _persist_response(
+                request=request,
+                model_id=model.id if model else None,
+                agent_id=server.agent_id,
+                response_id=response_id,
+                output_items=[i.model_dump(exclude_none=True) for i in resource.output],
+                status=resource.status,
+                usage=usage,
+                error=resource.error,
+                incomplete_reason=(
+                    resource.incomplete_details.reason
+                    if resource.incomplete_details
+                    else None
+                ),
+            )
+            logger.info(
+                "responses %s: stored (chain continues from this turn)", response_id
+            )
+        return serialized
     except TargetError as e:
         await websocket.send_text(
             _error_event(
