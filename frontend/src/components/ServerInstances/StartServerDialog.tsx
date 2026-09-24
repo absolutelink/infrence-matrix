@@ -3,6 +3,11 @@ import { useState } from "react"
 import { toast } from "sonner"
 import type { Model, StartServerRequest } from "@/client"
 import { AgentsService, ModelsService, ServerInstancesService } from "@/client"
+import {
+  type ServerOptions,
+  ServerSettingsFields,
+  validateServerOptions,
+} from "@/components/ServerInstances/ServerSettingsFields"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -37,6 +42,7 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
   const [contextSize, setContextSize] = useState("4096")
   const [mmprojModelId, setMmprojModelId] = useState<string>("none")
   const [mtpDraftMax, setMtpDraftMax] = useState("0")
+  const [serverOptions, setServerOptions] = useState<ServerOptions>({})
 
   const modelsQuery = useQuery({
     queryKey: ["models"],
@@ -64,6 +70,7 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
         gpu_layers: Number(gpuLayers) || 35,
         context_size: Number(contextSize) || 4096,
         mtp_draft_max: mtpDraftMax === "0" ? null : Number(mtpDraftMax),
+        server_options: serverOptions,
       }
       if (agentId && agentId !== "auto") {
         body.agent_id = agentId
@@ -74,12 +81,12 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
       return ServerInstancesService.instancesStartServer({ body })
     },
     onSuccess: () => {
-      toast.success("Server start request sent")
+      toast.success("Server created; model preparation requested")
       queryClient.invalidateQueries({ queryKey: ["server-instances"] })
       onClose()
     },
     onError: () => {
-      toast.error("Failed to start server")
+      toast.error("Failed to create server")
     },
   })
 
@@ -106,10 +113,10 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Start Server</DialogTitle>
+          <DialogTitle>Create Server</DialogTitle>
           <DialogDescription>
-            Start a llama.cpp server for a model. If the model file is not on
-            the agent yet, it will be downloaded from HuggingFace first.
+            Create a server configuration. The assigned agent will prepare the
+            model files, but the server remains stopped until you start it.
           </DialogDescription>
         </DialogHeader>
 
@@ -124,6 +131,10 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
               className="mt-1"
             />
           </div>
+          <ServerSettingsFields
+            options={serverOptions}
+            onChange={setServerOptions}
+          />
           <div>
             <Label>Model</Label>
             <Select value={modelId} onValueChange={setModelId}>
@@ -223,9 +234,13 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
           <LoadingButton
             onClick={() => startMutation.mutate()}
             loading={startMutation.isPending}
-            disabled={!modelId || !alias.trim()}
+            disabled={
+              !modelId ||
+              !alias.trim() ||
+              validateServerOptions(serverOptions) !== null
+            }
           >
-            Start Server
+            Create Server
           </LoadingButton>
         </DialogFooter>
       </DialogContent>

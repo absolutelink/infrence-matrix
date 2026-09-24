@@ -69,6 +69,7 @@ class TestBuildStartPayload:
         assert payload["config"]["id"] == str(instance.id)
         assert payload["config"]["model_path"] == model.path
         assert payload["config"]["context_size"] == 8192
+        assert payload["config"]["options"] == {}
         assert payload["source"]["repo_id"] == "test-org/test-repo"
         assert payload["source"]["filename"] == "startup-model.Q4_K_M.gguf"
 

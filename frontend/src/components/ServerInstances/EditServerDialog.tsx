@@ -3,6 +3,11 @@ import { useEffect, useState } from "react"
 import { toast } from "sonner"
 import type { Model } from "@/client"
 import { ModelsService, ServerInstancesService } from "@/client"
+import {
+  type ServerOptions,
+  ServerSettingsFields,
+  validateServerOptions,
+} from "@/components/ServerInstances/ServerSettingsFields"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
@@ -39,6 +44,7 @@ interface EditServerDialogProps {
     flash_attn: boolean
     mtp_draft_max?: number | null
     inactivity_timeout_seconds: number
+    server_options?: ServerOptions
   }
 }
 
@@ -56,6 +62,7 @@ export function EditServerDialog({
   const [inactivityTimeout, setInactivityTimeout] = useState("300")
   const [mmprojModelId, setMmprojModelId] = useState<string>("none")
   const [mtpDraftMax, setMtpDraftMax] = useState("0")
+  const [serverOptions, setServerOptions] = useState<ServerOptions>({})
 
   const modelsQuery = useQuery({
     queryKey: ["models"],
@@ -78,6 +85,7 @@ export function EditServerDialog({
       setMtpDraftMax(
         instance.mtp_draft_max ? String(instance.mtp_draft_max) : "0",
       )
+      setServerOptions(instance.server_options || {})
     }
   }, [isOpen, instance])
 
@@ -96,6 +104,7 @@ export function EditServerDialog({
           inactivity_timeout_seconds: Number(inactivityTimeout),
           mmproj_model_id: mmprojModelId === "none" ? "" : mmprojModelId,
           mtp_draft_max: mtpDraftMax === "0" ? null : Number(mtpDraftMax),
+          server_options: serverOptions,
         },
       })
     },
@@ -198,6 +207,12 @@ export function EditServerDialog({
               className="mt-1"
             />
           </div>
+          <div className="col-span-2">
+            <ServerSettingsFields
+              options={serverOptions}
+              onChange={setServerOptions}
+            />
+          </div>
           <div>
             <Label htmlFor="context-size">Context size</Label>
             <Input
@@ -260,6 +275,7 @@ export function EditServerDialog({
           <LoadingButton
             onClick={() => updateMutation.mutate()}
             loading={updateMutation.isPending}
+            disabled={validateServerOptions(serverOptions) !== null}
           >
             {wasRunning ? "Save & Restart" : "Save"}
           </LoadingButton>

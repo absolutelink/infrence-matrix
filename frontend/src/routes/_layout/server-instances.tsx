@@ -77,12 +77,12 @@ function ServerInstances() {
             Server Instances
           </h1>
           <p className="text-muted-foreground">
-            Manage running llama.cpp server instances
+            Manage llama.cpp server instances
           </p>
         </div>
         <Button onClick={() => setStartOpen(true)}>
           <Plus className="mr-2 h-4 w-4" />
-          Start Server
+          Create Server
         </Button>
       </div>
       <ServerInstancesTable />

@@ -18,6 +18,7 @@ import { toast } from "sonner"
 import { AgentsService, ServerInstancesService } from "@/client"
 import { EditServerDialog } from "@/components/ServerInstances/EditServerDialog"
 import { useLogPanel } from "@/components/ServerInstances/LogPanelContext"
+import type { ServerOptions } from "@/components/ServerInstances/ServerSettingsFields"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -50,6 +51,7 @@ type ServerInstance = {
   context_size: number
   flash_attn: boolean
   inactivity_timeout_seconds: number
+  server_options?: ServerOptions
 }
 
 export const columns: ColumnDef<ServerInstance>[] = [

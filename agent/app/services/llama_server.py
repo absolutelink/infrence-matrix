@@ -7,6 +7,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -32,6 +33,7 @@ class ServerConfig:
     jinja: bool = True
     # Multimodal projector path (vision GGUF); None omits the flag
     mmproj_path: str | None = None
+    options: dict[str, Any] | None = None
 
 
 class LlamaServerManager:
@@ -120,6 +122,9 @@ class LlamaServerManager:
 
     async def _start_server_locked(self, server_id: str, config: ServerConfig) -> bool:
         """Start the llama-server process (caller holds the start lock)."""
+        options = config.options or {}
+        gpu_layers = options.get("gpu_layers", config.gpu_layers)
+        batch_size = options.get("batch_size", config.batch_size)
         cmd = [
             settings.LLAMA_SERVER_PATH,
             "--model",
@@ -127,12 +132,58 @@ class LlamaServerManager:
             "--port",
             str(config.port),
             "--n-gpu-layers",
-            str(config.gpu_layers),
+            str(gpu_layers),
             "--ctx-size",
-            str(config.context_size),
+            str(options.get("context_size", config.context_size)),
             "--batch-size",
-            str(config.batch_size),
+            str(batch_size),
         ]
+
+        value_flags = {
+            "threads": "--threads",
+            "threads_batch": "--threads-batch",
+            "ubatch_size": "--ubatch-size",
+            "keep": "--keep",
+            "predict": "--predict",
+            "cache_type_k": "--cache-type-k",
+            "cache_type_v": "--cache-type-v",
+            "cache_reuse": "--cache-reuse",
+            "device": "--device",
+            "split_mode": "--split-mode",
+            "tensor_split": "--tensor-split",
+            "main_gpu": "--main-gpu",
+            "fit": "--fit",
+            "fit_target": "--fit-target",
+            "fit_ctx": "--fit-ctx",
+            "temperature": "--temperature",
+            "top_k": "--top-k",
+            "top_p": "--top-p",
+            "min_p": "--min-p",
+            "repeat_penalty": "--repeat-penalty",
+            "presence_penalty": "--presence-penalty",
+            "frequency_penalty": "--frequency-penalty",
+            "seed": "--seed",
+            "parallel": "--parallel",
+        }
+        for name, flag in value_flags.items():
+            if name in options and options[name] is not None:
+                cmd.extend([flag, str(options[name])])
+
+        boolean_flags = {
+            "swa_full": "--swa-full",
+            "kv_offload": ("--kv-offload", "--no-kv-offload"),
+            "cache_prompt": ("--cache-prompt", "--no-cache-prompt"),
+            "cont_batching": ("--cont-batching", "--no-cont-batching"),
+            "warmup": ("--warmup", "--no-warmup"),
+            "context_shift": ("--context-shift", "--no-context-shift"),
+        }
+        for name, flags in boolean_flags.items():
+            if name not in options or options[name] is None:
+                continue
+            if isinstance(flags, tuple):
+                cmd.append(flags[0] if options[name] else flags[1])
+            elif options[name]:
+                cmd.append(flags)
 
         if config.flash_attn is not None:
             cmd.extend(["--flash-attn", "on" if config.flash_attn else "off"])
@@ -147,7 +198,7 @@ class LlamaServerManager:
                 ]
             )
 
-        if config.jinja:
+        if options.get("jinja", config.jinja):
             cmd.append("--jinja")
 
         if config.mmproj_path:

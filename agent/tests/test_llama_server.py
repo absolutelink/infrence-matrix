@@ -81,6 +81,31 @@ class TestLlamaServerManager:
         mock_popen.assert_called_once()
         mock_wait.assert_called_once()
 
+    @pytest.mark.asyncio
+    @patch("app.services.llama_server.subprocess.Popen")
+    @patch("app.services.llama_server.LlamaServerManager._wait_for_server")
+    async def test_start_server_adds_configured_flags(self, mock_wait, mock_popen):
+        manager = LlamaServerManager()
+        await manager.start_server(
+            "configured-server",
+            ServerConfig(
+                model_path="/models/test.gguf",
+                port=8081,
+                options={
+                    "threads": 8,
+                    "ubatch_size": 256,
+                    "cache_prompt": False,
+                    "temperature": 0.7,
+                },
+            ),
+        )
+
+        command = mock_popen.call_args.args[0]
+        assert ["--threads", "8"] == command[command.index("--threads") : command.index("--threads") + 2]
+        assert ["--ubatch-size", "256"] == command[command.index("--ubatch-size") : command.index("--ubatch-size") + 2]
+        assert "--no-cache-prompt" in command
+        assert ["--temperature", "0.7"] == command[command.index("--temperature") : command.index("--temperature") + 2]
+
     def test_start_existing_server(self):
         """Test starting a server that already exists."""
         manager = LlamaServerManager()

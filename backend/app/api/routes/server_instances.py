@@ -15,9 +15,11 @@ from app.db.session import AsyncSessionMaker
 from app.models import Agent, Model, ServerInstance
 from app.services.agent_manager import agent_manager
 from app.services.benchmark import is_benchmark_blocking
+from app.services.server_options import ServerOptions, validate_server_options
 from app.services.server_startup import (
     build_start_payload as _build_start_payload,
 )
+from app.services.server_startup import dispatch_prepare as _dispatch_prepare
 from app.services.server_startup import (
     dispatch_start as _dispatch_start,
 )
@@ -67,6 +69,7 @@ class ServerInstanceResponse(BaseModel):
     flash_attn: bool = True
     mtp_draft_max: int | None = None
     inactivity_timeout_seconds: int = 300
+    server_options: dict = Field(default_factory=dict)
 
 
 class ServerInstanceListResponse(BaseModel):
@@ -82,6 +85,7 @@ class StartServerRequest(BaseModel):
     mmproj_model_id: str | None = None
     # MTP Draft N-Max value; when 0 no MTP flags are added, when > 0 add --spec-type draft-mtp --spec-draft-n-max <value>
     mtp_draft_max: int | None = None
+    server_options: ServerOptions = Field(default_factory=ServerOptions)
     # Public name clients use in OpenAI-compatible requests
     alias: str = Field(..., min_length=1, max_length=255)
 
@@ -99,6 +103,7 @@ class UpdateServerRequest(BaseModel):
     inactivity_timeout_seconds: int | None = Field(None, ge=0, le=86400)
     # Multimodal projector; None = no change, "" = clear selection
     mmproj_model_id: str | None = None
+    server_options: ServerOptions | None = None
     restart: bool = True  # restart immediately if the server is running
 
 
@@ -146,6 +151,7 @@ async def list_server_instances() -> ServerInstanceListResponse:
                     flash_attn=instance.flash_attn,
                     mtp_draft_max=instance.mtp_draft_max,
                     inactivity_timeout_seconds=instance.inactivity_timeout_seconds,
+                    server_options=instance.server_options or {},
                 )
             )
 
@@ -195,6 +201,7 @@ async def get_server_instance(server_id: str) -> ServerInstanceResponse:
             flash_attn=instance.flash_attn,
             mtp_draft_max=instance.mtp_draft_max,
             inactivity_timeout_seconds=instance.inactivity_timeout_seconds,
+            server_options=instance.server_options or {},
         )
 
 
@@ -242,6 +249,7 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
         # The agent allocates a random free port per start; the port is not
         # persisted. Create the instance row up front so the UI can track it.
         mmproj_model = await _resolve_mmproj_model(session, request.mmproj_model_id)
+        options = validate_server_options(request.server_options)
         server = ServerInstance(
             model_id=model.id,
             agent_id=agent.id,
@@ -252,7 +260,8 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
             flash_attn=True,
             mtp_draft_max=request.mtp_draft_max,
             mmproj_model_id=mmproj_model.id if mmproj_model else None,
-            status="starting",
+            server_options=options,
+            status="stopped",
             health_status="unknown",
             inactivity_timeout_seconds=300,
         )
@@ -267,14 +276,14 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
         # Dispatch to the agent in the background: the download can take a
         # long time and the HTTP request from the UI must not block on it.
         agent_id = str(agent.id)
-        asyncio.create_task(_dispatch_start(agent_id, server_id, payload))
+        asyncio.create_task(_dispatch_prepare(agent_id, server_id, payload))
 
         return {
-            "status": "starting",
+            "status": "stopped",
             "server_id": server_id,
             "model_id": request.model_id,
             "agent_id": agent_id,
-            "message": "Server start request sent to agent",
+            "message": "Server created; model preparation requested",
         }
 
 
@@ -340,6 +349,8 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
             instance.flash_attn = request.flash_attn
         if request.mtp_draft_max is not None:
             instance.mtp_draft_max = request.mtp_draft_max
+        if request.server_options is not None:
+            instance.server_options = validate_server_options(request.server_options)
         if request.inactivity_timeout_seconds is not None:
             instance.inactivity_timeout_seconds = request.inactivity_timeout_seconds
 

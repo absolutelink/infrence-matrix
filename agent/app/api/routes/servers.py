@@ -4,7 +4,7 @@ import socket
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.logging import logger
 from app.services.event_bus import publish_event
@@ -37,6 +37,7 @@ class ServerSpec(BaseModel):
     jinja: bool = True
     # Multimodal projector (vision GGUF); resolved like model_path
     mmproj_path: str | None = None
+    options: dict = Field(default_factory=dict)
 
 
 class ServerStartRequest(BaseModel):
@@ -46,6 +47,33 @@ class ServerStartRequest(BaseModel):
     source: dict[str, str] | None = None
     # Same shape as source, for the mmproj projector (downloaded on demand)
     mmproj_source: dict[str, str] | None = None
+
+
+@router.post("/prepare")
+async def prepare_server(request: ServerStartRequest) -> dict:
+    """Download the model and projector without starting llama-server."""
+    try:
+        model_path = await _ensure_model(request.config.model_path, request.source)
+        mmproj_path = None
+        if request.config.mmproj_path:
+            if not request.mmproj_source:
+                raise HTTPException(
+                    status_code=422,
+                    detail="mmproj_path set but mmproj_source missing",
+                )
+            mmproj_path = await _ensure_model(
+                request.config.mmproj_path, request.mmproj_source
+            )
+        return {
+            "status": "prepared",
+            "server_id": request.config.id,
+            "model_path": model_path,
+            "mmproj_path": mmproj_path,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 class ServerStopRequest(BaseModel):
@@ -210,6 +238,7 @@ async def start_server(request: ServerStartRequest) -> dict:
             mtp_draft_max=request.config.mtp_draft_max,
             jinja=request.config.jinja,
             mmproj_path=mmproj_path,
+            options=request.config.options,
         )
 
         success = await llama_server_manager.start_server(request.config.id, config)

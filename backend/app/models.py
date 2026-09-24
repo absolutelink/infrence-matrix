@@ -362,6 +362,9 @@ class ServerInstance(SQLModel, table=True):
     flash_attn: bool = True
     mtp_draft_max: int | None = None
 
+    # Typed llama-server settings selected in the create/edit UI.
+    server_options: dict = Field(default_factory=dict, sa_column=Column(JSON))
+
     config: dict[str, str] = Field(
         default_factory=dict,
         sa_column=Column(JSON),

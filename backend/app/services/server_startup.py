@@ -26,6 +26,7 @@ from app.db.session import AsyncSessionMaker
 from app.models import Agent, Model, ServerInstance
 from app.services.agent_manager import agent_manager
 from app.services.benchmark import is_benchmark_blocking
+from app.services.server_options import validate_server_options
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,7 @@ def build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any
             "cache_prompt": True,
             "flash_attn": instance.flash_attn,
             "mtp_draft_max": instance.mtp_draft_max,
+            "options": validate_server_options(instance.server_options or {}),
         },
         # The agent downloads the model file first if it is missing.
         "source": {
@@ -150,6 +152,23 @@ async def dispatch_start(
                 server.error_message = str(e)
                 session.add(server)
                 await session.commit()
+
+
+async def dispatch_prepare(
+    agent_id: str, server_id: str, payload: dict[str, Any]
+) -> None:
+    """Prepare model files without changing the stopped server state."""
+    try:
+        await agent_manager.send_to_agent(
+            agent_id,
+            "POST",
+            "/servers/prepare",
+            payload,
+            timeout=START_DISPATCH_TIMEOUT,
+        )
+        logger.info(f"Prepared files for server {server_id} on agent {agent_id}")
+    except Exception as e:
+        logger.warning(f"Failed to prepare files for server {server_id}: {e}")
 
 
 async def _reload_instance(server_id: str) -> ServerInstance | None:

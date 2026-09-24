@@ -1532,6 +1532,155 @@ export type ServerInstanceResponse = {
      * Inactivity Timeout Seconds
      */
     inactivity_timeout_seconds?: number;
+    /**
+     * Server Options
+     */
+    server_options?: {
+        [key: string]: unknown;
+    };
+};
+
+/**
+ * ServerOptions
+ *
+ * Core llama-server options exposed by the UI.
+ *
+ * None means that llama.cpp should use its own default and the agent omits
+ * the corresponding command-line flag.
+ */
+export type ServerOptions = {
+    /**
+     * Threads
+     */
+    threads?: number | null;
+    /**
+     * Threads Batch
+     */
+    threads_batch?: number | null;
+    /**
+     * Batch Size
+     */
+    batch_size?: number | null;
+    /**
+     * Ubatch Size
+     */
+    ubatch_size?: number | null;
+    /**
+     * Keep
+     */
+    keep?: number | null;
+    /**
+     * Predict
+     */
+    predict?: number | null;
+    /**
+     * Swa Full
+     */
+    swa_full?: boolean | null;
+    /**
+     * Cache Type K
+     */
+    cache_type_k?: 'f32' | 'f16' | 'bf16' | 'q8_0' | 'q4_0' | 'q4_1' | 'iq4_nl' | 'q5_0' | 'q5_1' | null;
+    /**
+     * Cache Type V
+     */
+    cache_type_v?: 'f32' | 'f16' | 'bf16' | 'q8_0' | 'q4_0' | 'q4_1' | 'iq4_nl' | 'q5_0' | 'q5_1' | null;
+    /**
+     * Kv Offload
+     */
+    kv_offload?: boolean | null;
+    /**
+     * Cache Prompt
+     */
+    cache_prompt?: boolean | null;
+    /**
+     * Cache Reuse
+     */
+    cache_reuse?: number | null;
+    /**
+     * Gpu Layers
+     */
+    gpu_layers?: number | string | null;
+    /**
+     * Device
+     */
+    device?: string | null;
+    /**
+     * Split Mode
+     */
+    split_mode?: 'none' | 'layer' | 'row' | 'tensor' | null;
+    /**
+     * Tensor Split
+     */
+    tensor_split?: string | null;
+    /**
+     * Main Gpu
+     */
+    main_gpu?: number | null;
+    /**
+     * Fit
+     */
+    fit?: 'on' | 'off' | null;
+    /**
+     * Fit Target
+     */
+    fit_target?: string | null;
+    /**
+     * Fit Ctx
+     */
+    fit_ctx?: number | null;
+    /**
+     * Temperature
+     */
+    temperature?: number | null;
+    /**
+     * Top K
+     */
+    top_k?: number | null;
+    /**
+     * Top P
+     */
+    top_p?: number | null;
+    /**
+     * Min P
+     */
+    min_p?: number | null;
+    /**
+     * Repeat Penalty
+     */
+    repeat_penalty?: number | null;
+    /**
+     * Presence Penalty
+     */
+    presence_penalty?: number | null;
+    /**
+     * Frequency Penalty
+     */
+    frequency_penalty?: number | null;
+    /**
+     * Seed
+     */
+    seed?: number | null;
+    /**
+     * Parallel
+     */
+    parallel?: number | null;
+    /**
+     * Cont Batching
+     */
+    cont_batching?: boolean | null;
+    /**
+     * Warmup
+     */
+    warmup?: boolean | null;
+    /**
+     * Context Shift
+     */
+    context_shift?: boolean | null;
+    /**
+     * Jinja
+     */
+    jinja?: boolean | null;
 };
 
 /**
@@ -1604,6 +1753,7 @@ export type StartServerRequest = {
      * Mtp Draft Max
      */
     mtp_draft_max?: number | null;
+    server_options?: ServerOptions;
     /**
      * Alias
      */
@@ -1759,6 +1909,7 @@ export type UpdateServerRequest = {
      * Mmproj Model Id
      */
     mmproj_model_id?: string | null;
+    server_options?: ServerOptions | null;
     /**
      * Restart
      */
