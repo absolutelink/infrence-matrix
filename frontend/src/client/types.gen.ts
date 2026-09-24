@@ -1055,10 +1055,6 @@ export type Model = {
      */
     supports_vision?: boolean;
     /**
-     * Context Length
-     */
-    context_length: number;
-    /**
      * License
      */
     license?: string | null;
@@ -1138,10 +1134,6 @@ export type ModelCreate = {
      * Supports Vision
      */
     supports_vision?: boolean;
-    /**
-     * Context Length
-     */
-    context_length: number;
     /**
      * License
      */
@@ -1238,10 +1230,6 @@ export type ModelUpdate = {
      * Supports Vision
      */
     supports_vision?: boolean | null;
-    /**
-     * Context Length
-     */
-    context_length?: number | null;
     /**
      * License
      */
@@ -1495,6 +1483,10 @@ export type ServerInstanceResponse = {
      */
     flash_attn?: boolean;
     /**
+     * Mtp Draft Max
+     */
+    mtp_draft_max?: number | null;
+    /**
      * Inactivity Timeout Seconds
      */
     inactivity_timeout_seconds?: number;
@@ -1566,6 +1558,10 @@ export type StartServerRequest = {
      * Mmproj Model Id
      */
     mmproj_model_id?: string | null;
+    /**
+     * Mtp Draft Max
+     */
+    mtp_draft_max?: number | null;
     /**
      * Alias
      */
@@ -1709,6 +1705,10 @@ export type UpdateServerRequest = {
      * Flash Attn
      */
     flash_attn?: boolean | null;
+    /**
+     * Mtp Draft Max
+     */
+    mtp_draft_max?: number | null;
     /**
      * Inactivity Timeout Seconds
      */

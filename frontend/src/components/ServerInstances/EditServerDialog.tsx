@@ -37,6 +37,7 @@ interface EditServerDialogProps {
     gpu_layers: number
     context_size: number
     flash_attn: boolean
+    mtp_draft_max?: number | null
     inactivity_timeout_seconds: number
   }
 }
