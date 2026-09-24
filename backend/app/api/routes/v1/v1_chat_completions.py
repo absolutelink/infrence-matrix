@@ -130,7 +130,7 @@ class StreamChoice(BaseModel):
     """Streaming choice."""
 
     index: int
-    delta: dict[str, str]
+    delta: dict[str, Any]
     finish_reason: str | None = None
 
 
@@ -197,6 +197,31 @@ def _extract_delta_content(chunk_data: dict) -> str:
         if "content" in choice:
             return choice.get("content") or ""
     return chunk_data.get("content", "") or ""
+
+
+def _extract_finish_reason(chunk_data: dict[str, Any]) -> str | None:
+    """finish_reason from an OpenAI-style chunk (top-level choice key).
+
+    llama.cpp native /completion streams put it inside the choice object;
+    the chat/completions OpenAI endpoint puts it on the choice too. Reading
+    it from the delta (previous bug) meant tool-call finishes were dropped.
+    """
+    choices = chunk_data.get("choices")
+    if choices and isinstance(choices, list):
+        reason: Any = choices[0].get("finish_reason")
+        return str(reason) if reason is not None else None
+    return None
+
+
+def _extract_tool_call_deltas(chunk_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Tool-call deltas from an OpenAI-format stream chunk (pass-through)."""
+    choices = chunk_data.get("choices")
+    if choices and isinstance(choices, list):
+        delta: Any = choices[0].get("delta") or {}
+        tcs: Any = delta.get("tool_calls") if isinstance(delta, dict) else None
+        if isinstance(tcs, list):
+            return tcs
+    return []
 
 
 def _extract_delta_reasoning(chunk_data: dict) -> str:
@@ -292,6 +317,9 @@ async def _stream_completion_via_agent(
             payload[key] = value
 
     payload.update(_build_tools_payload(request))
+    # Ask the upstream server for a final usage chunk; llama.cpp complies
+    # and sends it with empty choices.
+    payload["stream_options"] = {"include_usage": True}
 
     created = int(time.time())
     include_usage = not (
@@ -339,6 +367,17 @@ async def _stream_completion_via_agent(
                             delta_content = _extract_delta_content(chunk_data)
                             delta_reasoning = _extract_delta_reasoning(chunk_data)
                             fallback_completion_chars += len(delta_content)
+                            tool_call_deltas = _extract_tool_call_deltas(chunk_data)
+                            # OpenAI chunk shape: delta carries only the
+                            # fields present in this fragment (content is
+                            # omitted entirely on tool-call-only chunks).
+                            delta_out: dict[str, Any] = {}
+                            if delta_content or not tool_call_deltas:
+                                delta_out["content"] = delta_content
+                            if delta_reasoning:
+                                delta_out["reasoning_content"] = delta_reasoning
+                            if tool_call_deltas:
+                                delta_out["tool_calls"] = tool_call_deltas
 
                             stream_chunk = ChatCompletionChunk(
                                 id=request_id,
@@ -347,11 +386,10 @@ async def _stream_completion_via_agent(
                                 choices=[
                                     StreamChoice(
                                         index=0,
-                                        delta={
-                                            "content": delta_content,
-                                            "reasoning_content": delta_reasoning,
-                                        },
-                                        finish_reason=chunk_data.get("finish_reason"),
+                                        delta=delta_out,
+                                        finish_reason=_extract_finish_reason(
+                                            chunk_data
+                                        ),
                                     )
                                 ],
                                 usage=None,
@@ -620,8 +658,9 @@ async def create_chat_completion(
         # prompt tokens from message length and completion from content.
         usage_data = response.get("usage") or {}
         message = response["choices"][0]["message"]
-        content = message["content"]
+        content = message.get("content") or ""
         reasoning_content = message.get("reasoning_content") or None
+        tool_calls = message.get("tool_calls") or None
         prompt_tokens = (
             usage_data.get("prompt_tokens")
             or sum(len(m["content"]) for m in non_stream_payload["messages"]) // 4
@@ -642,6 +681,7 @@ async def create_chat_completion(
                         role="assistant",
                         content=content,
                         reasoning_content=reasoning_content,
+                        tool_calls=tool_calls,
                     ),
                     finish_reason=response["choices"][0].get("finish_reason"),
                 )
