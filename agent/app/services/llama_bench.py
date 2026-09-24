@@ -252,7 +252,6 @@ def build_command(request: Any, model_path: str) -> list[str]:
     for flag, value in (
         ("-r", request.repetitions),
         ("-b", request.batch_size),
-        ("-c", request.context_size),
     ):
         if value is not None:
             command.extend([flag, str(value)])

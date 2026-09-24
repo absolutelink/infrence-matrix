@@ -50,8 +50,6 @@ def test_build_command_uses_bench_options() -> None:
         "2",
         "-b",
         "256",
-        "-c",
-        "4096",
         "-ub",
         "128",
         "-ngl",
