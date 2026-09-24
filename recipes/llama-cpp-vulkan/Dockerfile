@@ -30,6 +30,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh \
 
 # Agent runtime configuration
 ENV LLAMA_SERVER_PATH=/app/llama-server \
+    LLAMA_BENCH_PATH=/app/llama-bench \
     GPU_BACKEND=vulkan \
     MODELS_PATH=/models \
     CACHE_PATH=/cache

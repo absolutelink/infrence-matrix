@@ -143,6 +143,37 @@ async def _set_server_stopped(server_id: str) -> None:
             await session.commit()
 
 
+async def _monitor_agent_run(run_id: str, agent_id: str) -> None:
+    """Reconcile terminal state even when the agent event socket drops."""
+    terminal = {"completed", "failed", "stopped"}
+    while True:
+        await asyncio.sleep(2)
+        try:
+            status = await agent_manager.send_to_agent(
+                agent_id,
+                "GET",
+                f"/benchmarks/status/{run_id}",
+                timeout=10,
+            )
+        except Exception:
+            continue
+        if status.get("status") not in terminal:
+            continue
+        await _set_run(
+            run_id,
+            status=status["status"],
+            error=status.get("error"),
+            results={
+                "summary": status.get("summary", {}),
+                "cases": status.get("cases", []),
+                "return_code": status.get("return_code"),
+            },
+            raw_output=status.get("raw_output"),
+            finished_at=datetime.now(UTC),
+        )
+        return
+
+
 async def _execute(run_id: str) -> None:
     async with _execution_lock:
         try:
@@ -234,6 +265,7 @@ async def _execute(run_id: str) -> None:
                 command=response.get("command", []),
                 started_at=datetime.now(UTC),
             )
+            await _monitor_agent_run(run_id, str(agent.id))
         except Exception as exc:  # noqa: BLE001 - persist worker failures
             logger.exception("Benchmark %s failed", run_id)
             await _set_run(

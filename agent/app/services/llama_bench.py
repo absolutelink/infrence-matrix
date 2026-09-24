@@ -4,6 +4,7 @@ import asyncio
 import csv
 import os
 import re
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -106,6 +107,17 @@ def _summary(cases: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def resolve_executable() -> str:
+    """Resolve llama-bench beside llama-server when it is not on PATH."""
+    configured = settings.LLAMA_BENCH_PATH
+    if os.path.isabs(configured) or shutil.which(configured):
+        return configured
+    sibling = Path(settings.LLAMA_SERVER_PATH).with_name(configured)
+    if sibling.exists():
+        return str(sibling)
+    return configured
+
+
 class LlamaBenchManager:
     """Own the single llama-bench process allowed on an agent."""
 
@@ -159,7 +171,7 @@ class LlamaBenchManager:
     async def _execute(self, run: dict[str, Any]) -> None:
         try:
             env = dict(os.environ)
-            executable = settings.LLAMA_BENCH_PATH
+            executable = run["command"][0]
             if "/" in executable:
                 env.setdefault("LD_LIBRARY_PATH", str(Path(executable).parent))
             self._process = await asyncio.create_subprocess_exec(
@@ -227,7 +239,7 @@ llama_bench_manager = LlamaBenchManager()
 
 def build_command(request: Any, model_path: str) -> list[str]:
     """Build llama-bench arguments from the API request."""
-    command = [settings.LLAMA_BENCH_PATH, "-m", model_path]
+    command = [resolve_executable(), "-m", model_path]
     for flag, values in (
         ("-p", request.prompt_sizes),
         ("-n", request.generation_sizes),
