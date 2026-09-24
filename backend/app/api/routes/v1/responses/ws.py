@@ -24,12 +24,14 @@ from sqlmodel import Session
 from app.api.routes.v1.responses import events as ev
 from app.api.routes.v1.responses.router import (
     TargetError,
+    _build_chain_history,
     _build_usage,
     _coerced_output_items,
     _last_assistant_phase,
     _llama_payload,
     _load_previous,
     _persist_response,
+    _stored_input_items,
     resolve_target,
 )
 from app.api.routes.v1.responses.schemas import (
@@ -95,7 +97,9 @@ def _capped_payload(
 
 
 async def _stream_to_ws(
-    websocket: WebSocket, request: CreateResponseBody
+    websocket: WebSocket,
+    request: CreateResponseBody,
+    history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """Run one response turn, pushing streaming event frames to the socket.
 
@@ -108,11 +112,12 @@ async def _stream_to_ws(
         if not agent:
             raise TargetError(503, "no_agent_available", "Agent not found")
 
-        history: list[dict[str, Any]] = []
+        history = list(history or [])
         if request.previous_response_id and request.store:
             # store=true: hydrate from DB like the HTTP path
             with Session(engine) as session:
-                _load_previous(session, request.previous_response_id)
+                previous = _load_previous(session, request.previous_response_id)
+                history = _build_chain_history(session, previous)
 
         seq = ev.SSEmitter()
         response_id = new_id("resp")
@@ -297,14 +302,19 @@ async def responses_websocket(websocket: WebSocket) -> None:
             # previous resolution: DB for store=true, cache for store=false
             if request.previous_response_id:
                 missing = False
+                continuation_history: list[dict[str, Any]] | None = None
                 if request.store:
                     try:
                         with Session(engine) as session:
                             _load_previous(session, request.previous_response_id)
                     except Exception:
                         missing = True
-                elif request.previous_response_id not in cache:
-                    missing = True
+                else:
+                    cached = cache.get(request.previous_response_id)
+                    if cached is None:
+                        missing = True
+                    else:
+                        continuation_history = cached["history"]
                 if missing:
                     await websocket.send_text(
                         _error_event(
@@ -322,13 +332,21 @@ async def responses_websocket(websocket: WebSocket) -> None:
                     )
                     continue
 
-            terminal = await _stream_to_ws(websocket, request)
+            terminal = await _stream_to_ws(websocket, request, continuation_history)
             failed = terminal is None or terminal.get("status") == "failed"
             if failed:
                 if request.previous_response_id:
                     cache.pop(request.previous_response_id, None)
             elif terminal is not None:
-                cache[str(terminal.get("id"))] = terminal
+                output_items = terminal.get("output") or []
+                cache[str(terminal.get("id"))] = {
+                    "response": terminal,
+                    "history": [
+                        *(continuation_history or []),
+                        *_stored_input_items(request),
+                        *output_items,
+                    ],
+                }
     except WebSocketDisconnect:
         pass
     except Exception as e:
