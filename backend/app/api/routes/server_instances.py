@@ -332,8 +332,10 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
         }
         await session.commit()
 
+        needs_start = model_changed or mmproj_changed
+
         # A running server must restart to load a different model file
-        if was_running and (request.restart or model_changed or mmproj_changed):
+        if was_running and (request.restart or needs_start):
             await session.refresh(instance)
             agent = await session.get(Agent, instance.agent_id)
             if not agent or agent.status != "online":
@@ -374,6 +376,29 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
                 "server_id": str(instance.id),
                 "message": "Settings saved — restarting server",
             }
+
+        # A stopped/errored server whose model or projector changed gets
+        # started right away (download included, status stays "starting"
+        # until the agent reports healthy).
+        if not was_running and needs_start:
+            agent = await session.get(Agent, instance.agent_id)
+            if agent and agent.status == "online":
+                model = await session.get(Model, instance.model_id)
+                if model:
+                    instance.status = "starting"
+                    instance.error_message = None
+                    await session.commit()
+
+                    payload = _build_start_payload(instance, model)
+                    agent_id = str(agent.id)
+                    server_id = str(instance.id)
+                    asyncio.create_task(_dispatch_start(agent_id, server_id, payload))
+
+                    return {
+                        "status": "starting",
+                        "server_id": server_id,
+                        "message": "Settings saved — starting server (downloads may take a while)",
+                    }
 
         return {
             "status": instance.status,

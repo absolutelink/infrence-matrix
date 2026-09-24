@@ -20,9 +20,8 @@ import uuid as uuid_module
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlmodel import Session, col, select
+from sqlmodel import col, select
 
-from app.core.db import engine
 from app.db.session import AsyncSessionMaker
 from app.models import Agent, Model, ServerInstance
 from app.services.agent_manager import agent_manager
@@ -87,21 +86,18 @@ def _find_mmproj(instance: ServerInstance, model: Model) -> tuple[Model, str] | 
 
     The instance row is the source of truth: whatever projector was
     selected in the UI (start/edit dialog) is used, None means no
-    --mmproj flag. Legacy rows without a selection fall back to
-    repo-matching a registered mmproj model.
+    --mmproj flag.
     """
     mmproj_model = instance.mmproj_model
-    if mmproj_model is None and instance.mmproj_model_id is None:
-        # Legacy rows predating the per-instance selection.
-        with Session(engine) as session:
-            if model.source_repo_id:
-                mmproj_model = session.exec(
-                    select(Model).where(
-                        Model.source_repo_id == model.source_repo_id,
-                        Model.model_type == "mmproj",
-                    )
-                ).first()
     if not mmproj_model:
+        return None
+    # Guard against a mis-registered projector that points at the main
+    # GGUF (llama-server fails to load it as a CLIP model).
+    if mmproj_model.path == model.path or mmproj_model.id == model.id:
+        logger.warning(
+            f"Server {instance.id}: mmproj selection {mmproj_model.name} "
+            "points at the main model file; ignoring it"
+        )
         return None
     filename = mmproj_model.source_file or mmproj_model.path.rsplit("/", 1)[-1]
     return mmproj_model, filename

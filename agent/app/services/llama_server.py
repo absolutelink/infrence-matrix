@@ -42,6 +42,9 @@ class LlamaServerManager:
         self.servers: dict[str, subprocess.Popen] = {}
         self.configs: dict[str, ServerConfig] = {}
         self.start_times: dict[str, float] = {}
+        # server_id -> lock serializing concurrent /servers/start calls for
+        # the same instance (e.g. re-registration during a long download)
+        self._start_locks: dict[str, asyncio.Lock] = {}
         # server_id -> list of (stream_key, raw_chunk) in order
         self._log_buffers: dict[str, list[tuple[str, str]]] = {}
         self._log_task: asyncio.Task | None = None
@@ -85,6 +88,26 @@ class LlamaServerManager:
         if server_id in self.servers:
             return False
 
+        # Serialize concurrent starts for the same instance: while one
+        # caller is downloading files, a second /servers/start for the same
+        # id (registration cycle) must not spawn a duplicate process. After
+        # the wait, re-check so the second caller sees the running server.
+        lock = self._start_locks.setdefault(server_id, asyncio.Lock())
+        if lock.locked():
+            async with lock:
+                if server_id in self.servers:
+                    return False
+                logger.warning(
+                    f"Server {server_id} start raced a pending start; proceeding"
+                )
+        async with lock:
+            try:
+                return await self._start_server_locked(server_id, config)
+            finally:
+                self._start_locks.pop(server_id, None)
+
+    async def _start_server_locked(self, server_id: str, config: ServerConfig) -> bool:
+        """Start the llama-server process (caller holds the start lock)."""
         cmd = [
             settings.LLAMA_SERVER_PATH,
             "--model",
@@ -174,6 +197,7 @@ class LlamaServerManager:
         self.servers.pop(server_id, None)
         self.configs.pop(server_id, None)
         self.start_times.pop(server_id, None)
+        self._start_locks.pop(server_id, None)
         self._log_buffers.pop(server_id, None)
 
         publish_event(

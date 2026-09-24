@@ -13,7 +13,7 @@ from websockets.client import WebSocketClientProtocol, connect
 from app.core.config import settings
 from app.core.logging import logger
 from app.db.session import AsyncSessionMaker
-from app.models import Agent
+from app.models import Agent, Model
 
 
 class AgentManager:
@@ -105,7 +105,19 @@ class AgentManager:
                     f"for restarted agent {name}"
                 )
 
+            # The agent holds no server definitions of its own: instances
+            # that should be up (auto-start aliases, previously running)
+            # but are now stopped get (re)dispatched here so a restarted
+            # agent restores its servers — downloads included.
             await session.commit()
+            restore_result = await session.execute(
+                select(ServerInstance).where(
+                    col(ServerInstance.agent_id) == agent.id,
+                    col(ServerInstance.status) == "stopped",
+                )
+            )
+            to_restore = list(restore_result.scalars().all())
+
             await session.refresh(agent)
 
             self.agents[str(agent.id)] = agent
@@ -114,6 +126,37 @@ class AgentManager:
 
             # Start WebSocket connection (skip if one is already live)
             asyncio.create_task(self.connect_websocket(agent))
+
+            for server in to_restore:
+                try:
+                    # Local import: server_startup imports agent_manager
+                    from app.services.server_startup import (
+                        build_start_payload,
+                        dispatch_start,
+                    )
+
+                    model_id = server.model_id
+                    server_id = str(server.id)
+                    agent_id = str(agent.id)
+                    model = await session.get(Model, model_id)
+                    if model is None:
+                        continue
+                    server.status = "starting"
+                    server.error_message = None
+                    session.add(server)
+                    payload = build_start_payload(server, model)
+                    asyncio.create_task(dispatch_start(agent_id, server_id, payload))
+                    logger.info(
+                        f"Re-dispatching start for server {server_id} "
+                        f"after agent {name} registered"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to re-dispatch server {server.id} on "
+                        f"agent registration: {e}"
+                    )
+            if to_restore:
+                await session.commit()
 
             return agent
 

@@ -21,10 +21,21 @@ class TestAgentManagerRegistration:
         mock_result = Mock()
         mock_result.scalar_one_or_none = Mock(return_value=None)
 
+        mock_scalars = Mock()
+        mock_scalars.all = Mock(return_value=[])
+        mock_restore_result = Mock()
+        mock_restore_result.scalars = Mock(return_value=mock_scalars)
+        mock_stale_result = Mock()
+        mock_stale_result.rowcount = 0
+
+        # First execute() = agent lookup, second = stale update,
+        # third = restore query
         mock_session = AsyncMock()
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_session.execute = AsyncMock(
+            side_effect=[mock_result, mock_stale_result, mock_restore_result]
+        )
         mock_session.add = Mock()
         mock_session.commit = AsyncMock()
         mock_session.refresh = AsyncMock()
@@ -62,10 +73,19 @@ class TestAgentManagerRegistration:
         mock_result = Mock()
         mock_result.scalar_one_or_none = Mock(return_value=existing_agent)
 
+        mock_scalars = Mock()
+        mock_scalars.all = Mock(return_value=[])
+        mock_restore_result = Mock()
+        mock_restore_result.scalars = Mock(return_value=mock_scalars)
+        mock_stale_result = Mock()
+        mock_stale_result.rowcount = 0
+
         mock_session = AsyncMock()
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_session.execute = AsyncMock(
+            side_effect=[mock_result, mock_stale_result, mock_restore_result]
+        )
         mock_session.add = Mock()
         mock_session.commit = AsyncMock()
         mock_session.refresh = AsyncMock()
@@ -84,6 +104,124 @@ class TestAgentManagerRegistration:
 
         assert agent.host == "new-host"
         assert agent.status == "online"
+
+
+class TestAgentManagerRestoreOnRegister:
+    """A restarted agent holds no server definitions: instances still
+    marked stopped for it are re-dispatched (downloads included) when it
+    registers again."""
+
+    @pytest.mark.asyncio
+    @patch("app.services.server_startup.dispatch_start", new_callable=AsyncMock)
+    @patch("app.services.agent_manager.AsyncSessionMaker")
+    async def test_stopped_instances_redispatched(
+        self, mock_session_maker, mock_dispatch
+    ):
+        from unittest.mock import MagicMock
+
+        from app.models import Model
+        from app.services.agent_manager import agent_manager
+
+        agent = Agent(
+            name="restart-agent",
+            host="localhost",
+            port=8080,
+            status="online",
+            last_seen=datetime.now(),
+        )
+        model = Model(
+            name="restore-model.gguf",
+            path="/models/restore-model.gguf",
+            size_bytes=123,
+            architecture="llama",
+            quantization="Q4_K_M",
+            context_length=4096,
+            source="huggingface",
+        )
+        stopped_instance = MagicMock()
+        stopped_instance.id = "6f1d2c3a-0000-0000-0000-000000000001"
+        stopped_instance.model_id = model.id
+        stopped_instance.status = "stopped"
+
+        lookup_result = MagicMock()
+        lookup_result.scalar_one_or_none.return_value = agent
+        restore_result = MagicMock()
+        restore_result.scalars.return_value.all.return_value = [stopped_instance]
+        stale_result = MagicMock()
+        stale_result.rowcount = 0
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(
+            side_effect=[lookup_result, stale_result, restore_result]
+        )
+        session.get = AsyncMock(return_value=model)
+        session.add = Mock()
+        session.commit = AsyncMock()
+        session.refresh = AsyncMock()
+
+        mock_session_maker.return_value = session
+
+        await agent_manager.register_agent(
+            {
+                "name": "restart-agent",
+                "host": "localhost",
+                "port": 8080,
+                "running_server_ids": [],
+            }
+        )
+
+        mock_dispatch.assert_called_once()
+        args = mock_dispatch.call_args[0]
+        assert args[1] == str(stopped_instance.id)
+        assert stopped_instance.status == "starting"
+
+    @pytest.mark.asyncio
+    @patch("app.services.server_startup.dispatch_start", new_callable=AsyncMock)
+    @patch("app.services.agent_manager.AsyncSessionMaker")
+    async def test_no_instances_no_dispatch(self, mock_session_maker, mock_dispatch):
+        from unittest.mock import MagicMock
+
+        from app.services.agent_manager import agent_manager
+
+        agent = Agent(
+            name="idle-agent",
+            host="localhost",
+            port=8080,
+            status="online",
+            last_seen=datetime.now(),
+        )
+
+        lookup_result = MagicMock()
+        lookup_result.scalar_one_or_none.return_value = agent
+        restore_result = MagicMock()
+        restore_result.scalars.return_value.all.return_value = []
+        stale_result = MagicMock()
+        stale_result.rowcount = 0
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(
+            side_effect=[lookup_result, stale_result, restore_result]
+        )
+        session.add = Mock()
+        session.commit = AsyncMock()
+        session.refresh = AsyncMock()
+
+        mock_session_maker.return_value = session
+
+        await agent_manager.register_agent(
+            {
+                "name": "idle-agent",
+                "host": "localhost",
+                "port": 8080,
+                "running_server_ids": [],
+            }
+        )
+
+        mock_dispatch.assert_not_called()
 
 
 class TestAgentManagerList:

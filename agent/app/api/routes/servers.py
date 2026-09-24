@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.core.logging import logger
+from app.services.event_bus import publish_event
 from app.services.llama_server import ServerConfig, llama_server_manager
 from app.services.model_manager import model_manager
 
@@ -104,7 +105,8 @@ async def _ensure_model(
 ) -> str:
     """Ensure the model file exists locally, downloading it if needed.
 
-    Returns the absolute path to the model file.
+    Returns the absolute path to the model file. Emits download.* events
+    so the backend/UI can follow the download phase of a server start.
     """
     path = _resolve_model_path(model_path)
     filename = path.rsplit("/", 1)[-1]
@@ -121,21 +123,61 @@ async def _ensure_model(
             detail=f"Model file {filename} not found on agent and no download source provided",
         )
 
+    job_id = source.get("job_id") or f"server-file-{filename}"
     logger.info(f"Model {filename} missing; downloading from {source['repo_id']}")
-    downloaded = await model_manager.download_model(
-        repo_id=source["repo_id"],
-        filename=source["filename"],
-        source=source.get("source", "huggingface"),
-        job_id=source.get("job_id"),
+    publish_event(
+        "download.started",
+        {
+            "job_id": job_id,
+            "filename": filename,
+            "repo_id": source["repo_id"],
+        },
     )
+    try:
+        downloaded = await model_manager.download_model(
+            repo_id=source["repo_id"],
+            filename=source["filename"],
+            source=source.get("source", "huggingface"),
+            job_id=job_id,
+        )
+    except Exception as e:
+        publish_event(
+            "download.failed",
+            {
+                "job_id": job_id,
+                "filename": filename,
+                "error": str(e),
+            },
+        )
+        raise
     return downloaded
 
 
 @router.post("/start")
 async def start_server(request: ServerStartRequest) -> dict:
-    """Start a llama.cpp server, auto-downloading the model if needed."""
+    """Start a llama.cpp server, auto-downloading the model if needed.
+
+    Downloads (main model + optional projector) happen before the
+    llama-server spawn; download.started/progress/completed events keep
+    the backend's instance row in "starting" for the whole phase.
+    """
     try:
-        model_path = await _ensure_model(request.config.model_path, request.source)
+        # Duplicate start for a running instance is a no-op success (the
+        # 60s registration cycle re-dispatches starts the agent already
+        # fulfilled — spawning a second process would be wrong).
+        if request.config.id in llama_server_manager.servers:
+            existing = llama_server_manager.configs[request.config.id]
+            return {
+                "status": "started",
+                "server_id": request.config.id,
+                "model_path": existing.model_path,
+                "port": existing.port,
+                "already_running": True,
+            }
+
+        model_path = await _ensure_model(
+            request.config.model_path, request.source
+        )
 
         mmproj_path: str | None = None
         if request.config.mmproj_path:
