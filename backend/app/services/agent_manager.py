@@ -281,6 +281,19 @@ class AgentManager:
                 await self._handle_gpu_usage(agent_id, event_data)
             elif event_type == "download.progress":
                 await self._handle_download_progress(agent_id, event_data)
+            elif event_type == "log.lines":
+                # llama-server stdout/stderr relayed by the agent; surface it
+                # in the backend log (stderr as warning for visibility).
+                for entry in event_data.get("lines") or []:
+                    is_stderr = entry.get("stream") == "stderr"
+                    log_fn = logger.warning if is_stderr else logger.info
+                    log_fn(
+                        "llama-server %s [%s] agent=%s: %s",
+                        str(event_data.get("server_id", ""))[:8],
+                        entry.get("stream"),
+                        agent_id,
+                        entry.get("line", ""),
+                    )
         except Exception as e:
             # A bad event must not kill the agent WebSocket (an exception
             # here previously tore down the connection and triggered a

@@ -73,6 +73,16 @@ class LlamaServerManager:
                 ] + [{"stream": "stderr", "line": line} for line in stderr_lines]
 
                 if lines:
+                    # Echo llama-server output into the agent log so a single
+                    # deployment log surface shows inference traffic.
+                    for entry in lines:
+                        (logger.error if entry["stream"] == "stderr" else logger.info)(
+                            "llama-server %s [%s]: %s",
+                            server_id[:8],
+                            entry["stream"],
+                            entry["line"],
+                        )
+
                     publish_event(
                         "log.lines",
                         {
