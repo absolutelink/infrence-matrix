@@ -569,6 +569,19 @@ async def create_chat_completion(
     request_id = f"chatcmpl-{uuid.uuid4()}"
     created = int(time.time())
 
+    # Debug visibility: what the client actually sent (tools present? which?)
+    logger.info(
+        "chat.completions: model=%s stream=%s messages=%d "
+        "tools=%s tool_choice=%s roles=%s",
+        request.model,
+        request.stream,
+        len(request.messages),
+        [t.function.name for t in request.tools] if request.tools else "none",
+        request.tool_choice,
+        [m.role for m in request.messages],
+    )
+    logger.debug("chat.completions request: %s", request.model_dump_json())
+
     # Resolve model field: a server alias (public name from /v1/models)
     # routes directly to that server (auto-starting stopped instances);
     # otherwise it is a model name/id and a server is found or started.

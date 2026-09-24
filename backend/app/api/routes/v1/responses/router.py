@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import TypeAdapter
+from pydantic import BaseModel, TypeAdapter
 from sqlmodel import Session, select
 
 from app.api.deps import get_db
@@ -69,6 +69,17 @@ def _error_response(
         error=ErrorBody(message=message, type=etype, param=param, code=code)
     )
     return JSONResponse(status_code=status, content=body.model_dump(exclude_none=True))
+
+
+def serialize_dict(obj: Any) -> Any:
+    """Pydantic-safe dump for logging request shapes (models or plain dicts)."""
+    if isinstance(obj, BaseModel):
+        return obj.model_dump(exclude_none=True)
+    if isinstance(obj, dict):
+        return {k: serialize_dict(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [serialize_dict(v) for v in obj]
+    return obj
 
 
 def _resolve_model(db: Session, name: str) -> Model:
@@ -710,10 +721,17 @@ async def create_response(
     except TranslationError as e:
         return _error_response(400, "invalid_request", "invalid_input", str(e))
     continuation = previous is not None
+    tool_names = [t.name for t in request.tools]
+    tool_choice_dump = (
+        request.tool_choice
+        if isinstance(request.tool_choice, str)
+        else serialize_dict(request.tool_choice)
+    )
     logger.info(
         "responses: %s model=%s server=%s stream=%s store=%s "
         "previous_response_id=%s chain_depth=%d history_items=%d "
-        "history_chars=%d llama_messages=%d prompt_chars=%d",
+        "history_chars=%d llama_messages=%d prompt_chars=%d "
+        "tools=%s tool_choice=%s parallel_tool_calls=%s",
         "continuation" if continuation else "new response",
         request.model,
         server.id,
@@ -730,13 +748,36 @@ async def create_response(
             else len(json.dumps(m["content"]))
             for m in llama_messages
         ),
+        tool_names or "none",
+        tool_choice_dump,
+        request.parallel_tool_calls,
     )
+    logger.info(
+        "responses input items: %s",
+        [
+            (
+                item.get("type", "message")
+                if isinstance(item, dict)
+                else getattr(item, "type", "unknown")
+            )
+            for item in (
+                request.input if isinstance(request.input, list) else [request.input]
+            )
+        ]
+        if request.input
+        else [],
+    )
+    logger.info("responses history item types: %s", [h.get("type") for h in history])
     logger.debug(
         "responses prompt: %s",
         " | ".join(
             f"{m['role']}:{m['content'][:80] if isinstance(m['content'], str) else '<parts>'}"
             for m in llama_messages
         ),
+    )
+    logger.debug(
+        "responses request: %s",
+        json.dumps(serialize_dict(request), ensure_ascii=False)[:4000],
     )
 
     response_id = new_id("resp")
