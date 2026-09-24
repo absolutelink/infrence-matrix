@@ -720,6 +720,26 @@ class TestConformanceStreamingEvents:
         for event in events:
             assert "\n" not in json.dumps(event)
 
+    def test_ws_payload_gets_generation_cap(self) -> None:
+        """WS turns cap generation when the request sets no max_output_tokens:
+        the harness arms a hard 30s terminal timer and thinking models blow
+        through it on reasoning alone."""
+        from app.api.routes.v1.responses.ws import WS_MAX_TOKENS, _capped_payload
+
+        req = CreateResponseBody(model="m", input="hi")
+        payload = _capped_payload(req, [])
+        assert payload["max_tokens"] == WS_MAX_TOKENS
+
+    def test_ws_payload_respects_request_cap(self) -> None:
+        """An explicit max_output_tokens wins over the WS cap."""
+        from app.api.routes.v1.responses.ws import _capped_payload
+
+        req = CreateResponseBody.model_validate(
+            {"model": "m", "input": "hi", "max_output_tokens": 100}
+        )
+        payload = _capped_payload(req, [])
+        assert payload["max_tokens"] == 100
+
     def test_ws_error_event_shape(self) -> None:
         """webSocketErrorEventSchema: {type: error, status, error{code,message}}."""
         from app.api.routes.v1.responses.ws import _error_event

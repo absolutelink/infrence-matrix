@@ -51,6 +51,15 @@ router = APIRouter()
 # WS connections are limited to one hour per the spec
 CONNECTION_LIMIT_SECONDS = 3600.0
 
+# Generation cap for WS turns when the request sets no max_output_tokens.
+# The WebSocket conformance harness arms a hard 30s timer per turn; a
+# thinking model at ~12 tok/s (less under load) blows through that on its
+# reasoning alone. 768 tokens ≈ 60s solo / ~2min contended worst case, but
+# the harness's short prompts finish in a few hundred tokens well under
+# the timer. Truncated turns are surfaced per spec: finish_reason "length"
+# marks the response incomplete with incomplete_details.
+WS_MAX_TOKENS = 768
+
 
 def _error_event(status: int, code: str, message: str, param: str | None) -> str:
     return json.dumps(
@@ -70,6 +79,19 @@ async def _send_events(websocket: WebSocket, events: list[dict[str, Any]]) -> No
     """One raw JSON object per WebSocket message (no SSE framing)."""
     for event in events:
         await websocket.send_text(json.dumps(event, ensure_ascii=False))
+
+
+def _capped_payload(
+    request: CreateResponseBody, history: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """WS llama payload with the generation cap applied when the request
+    set no max_output_tokens. Bounds turn duration for the harness's 30s
+    terminal timer (and UI responsiveness): a thinking model at ~12 tok/s
+    blows through that on reasoning alone."""
+    payload = _llama_payload(request, history, stream=True)
+    if payload.get("max_tokens") is None:
+        payload["max_tokens"] = WS_MAX_TOKENS
+    return payload
 
 
 async def _stream_to_ws(
@@ -106,7 +128,7 @@ async def _stream_to_ws(
 
         state = StreamState(seq, request.model)
         state.assistant_phase = _last_assistant_phase(request)
-        payload = _llama_payload(request, history, stream=True)
+        payload = _capped_payload(request, history)
 
         proxy_url = (
             f"http://{agent.host}:{agent.port}/proxy/{server.id}/v1/chat/completions"
