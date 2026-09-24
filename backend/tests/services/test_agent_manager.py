@@ -130,7 +130,6 @@ class TestAgentManagerRestoreOnRegister:
             size_bytes=123,
             architecture="llama",
             quantization="Q4_K_M",
-            context_length=4096,
             source="huggingface",
         )
         stopped_instance = MagicMock()

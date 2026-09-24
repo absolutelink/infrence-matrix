@@ -22,7 +22,6 @@ class TestCreateChatCompletion:
             quantization="Q4_K_M",
             supports_embeddings=False,
             supports_vision=False,
-            context_length=4096,
             source="huggingface",
         )
         db.add(model)
@@ -63,7 +62,6 @@ class TestCreateChatCompletion:
             quantization="Q4_K_M",
             supports_embeddings=False,
             supports_vision=False,
-            context_length=4096,
             source="huggingface",
         )
         db.add(model)
@@ -127,7 +125,6 @@ class TestCreateChatCompletion:
             quantization="Q4_K_M",
             supports_embeddings=False,
             supports_vision=False,
-            context_length=4096,
             source="huggingface",
         )
         db.add(model)
@@ -165,7 +162,6 @@ class TestCreateChatCompletion:
             quantization="Q4_K_M",
             supports_embeddings=False,
             supports_vision=False,
-            context_length=4096,
             source="huggingface",
         )
         db.add(model)

@@ -25,7 +25,6 @@ def _make_model(db, name: str = "startup-model.Q4_K_M.gguf") -> Model:
         quantization="Q4_K_M",
         supports_embeddings=False,
         supports_vision=False,
-        context_length=4096,
         source="huggingface",
     )
     db.add(model)
@@ -102,7 +101,6 @@ class TestBuildStartPayload:
             architecture="clip",
             model_type="mmproj",
             quantization="F16",
-            context_length=4096,
             source="huggingface",
             source_repo_id="test-org/vision-repo",
         )

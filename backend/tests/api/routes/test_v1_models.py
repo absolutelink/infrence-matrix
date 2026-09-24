@@ -20,7 +20,6 @@ def _make_model(db: Session, name: str) -> Model:
         quantization="Q4_K_M",
         supports_embeddings=False,
         supports_vision=False,
-        context_length=4096,
         source="huggingface",
         source_repo_id="test/repo",
     )

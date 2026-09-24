@@ -432,7 +432,6 @@ class TestChainHistory:
             size_bytes=1,
             architecture="llama",
             quantization="Q4_K_M",
-            context_length=4096,
             source="local",
         )
         db.add(agent)
