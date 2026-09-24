@@ -31,6 +31,8 @@ class ServerSpec(BaseModel):
     cache_prompt: bool = True
     # None lets llama.cpp decide; True/False maps to --flash-attn on/off
     flash_attn: bool | None = True
+    # MTP Draft N-Max; values greater than zero enable draft MTP flags
+    mtp_draft_max: int | None = None
     # Jinja chat templates (required for tool calling); default on
     jinja: bool = True
     # Multimodal projector (vision GGUF); resolved like model_path
@@ -205,6 +207,7 @@ async def start_server(request: ServerStartRequest) -> dict:
             batch_size=request.config.batch_size,
             cache_prompt=request.config.cache_prompt,
             flash_attn=request.config.flash_attn,
+            mtp_draft_max=request.config.mtp_draft_max,
             jinja=request.config.jinja,
             mmproj_path=mmproj_path,
         )
