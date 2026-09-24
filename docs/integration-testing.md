@@ -17,6 +17,7 @@ Baseline run: 2026-09-24 — **3 passed / 14 failed / 17 total**
 Run 2 (clusters 1–3 + 5 fix): 2026-09-24 — **10 passed / 7 failed**
 Run 3 (WS framing fix): 2026-09-24 — **10 passed / 7 failed** (framing fixed; exposed WS non-persistence + 30s timer under load)
 Run 5 (WS persistence + registration heal): 2026-09-24 — **10 passed / 7 failed** (all non-WS tests pass; WS tests time out under full-suite contention only)
+Run 6 (mmproj + error relay): 2026-09-24 — **11 passed / 6 failed** (image-input fixed; remaining 6 all WS contention timeouts)
 
 | Test ID | Name | Status | Notes |
 |---|---|---|---|
@@ -33,7 +34,7 @@ Run 5 (WS persistence + registration heal): 2026-09-24 — **10 passed / 7 faile
 | `websocket-compact-new-chain` | WebSocket Compact New Chain | ❌ FAIL | compact endpoint 500 (agent proxy ReadTimeout when slots contended) + WS contention |
 | `system-prompt` | System Prompt | ✅ PASS | |
 | `tool-calling` | Tool Calling | ✅ PASS | |
-| `image-input` | Image Input | ❌ FAIL | llama-server has no mmproj → upstream 500 swallowed into `completed` w/ empty output (should be `response.failed` or surfaced error) |
+| `image-input` | Image Input | ✅ PASS | mmproj-F16.gguf selected on voyager + downloaded/loaded; agent proxy now relays upstream errors |
 | `multi-turn` | Multi-turn Conversation | ✅ PASS | |
 | `compact-response` | Compaction Endpoint | ✅ PASS | |
 | `compact-missing-model` | Compaction Missing Required Model | ✅ PASS | |
@@ -55,13 +56,12 @@ Run 5 (WS persistence + registration heal): 2026-09-24 — **10 passed / 7 faile
    Options: cap WS output tokens (spec deviation), trim reasoning on WS,
    or increase slots/parallelism on the box. Affects: all websocket-* except
    previous-response-not-found.
-10. **image-input: upstream errors swallowed** — llama-server w/o mmproj returns 500 for
-   image parts; `_complete` produced `completed` + empty output instead of failing.
-   Ops fix: select an mmproj projector for the voyager instance (agent supports it).
-   Code fix: surface upstream error as `response.failed`/HTTP error.
-11. **WS persist serialization bug (run 5)** — `resource.output` was raw dicts on the
-   WS path → `i.model_dump()` crashed after the terminal event was already sent.
-   Persisting failed silently; fixed by `_coerced_output_items` (deploy pending).
+10. ~~**image-input: upstream errors swallowed**~~ — FIXED: mmproj-F16.gguf selected on
+    voyager (downloads/loads correctly after mmproj_source fixes); agent proxy relays
+    upstream error status+body instead of 200-with-error-envelope.
+11. ~~**WS persist serialization bug (run 5)**~~ — FIXED (`_coerced_output_items`, verified
+    end-to-end: WS store=true turn persisted + HTTP continuation resolved with correct
+    history answer).
 
 ## History
 
@@ -71,3 +71,4 @@ Run 5 (WS persistence + registration heal): 2026-09-24 — **10 passed / 7 faile
 | 2026-09-24 | serialize_spec fix (pushed) | 10 | 7 | Clusters 1–3 + 5 fixed: spec serializer (`serialize_spec`), `completed_at` at finalize, dropped `reasoning_text.*` event twins. Unblocked: basic-response, system-prompt, tool-calling, streaming-response, assistant-phase, multi-turn, compact-response |
 | 2026-09-24 | WS framing + compaction-input (pushed) | 10 | 7 | Clusters 4 + 6 fixed: raw JSON per WS message, compaction items replayed as assistant context. Exposed: WS turns not persisted; 30s harness timer vs thinking-model latency |
 | 2026-09-24 | WS persist + registration heal (pushed) | 10 | 7 | WS persistence fixed; deploy deadlock (instance stuck "starting" → 900s wait_until_ready) healed by registration promotion. All non-WS tests pass. Remaining: WS contention timeouts (30s timer vs 15–40s thinking-model turns under load), image-input (no mmproj + swallowed upstream 500), WS persist serialization bug (`resource.output` dicts → model_dump crash; fix in `_coerced_output_items` pending deploy), compact 500 (agent proxy ReadTimeout under contention) |
+| 2026-09-24 | mmproj resolve + error relay (pushed) | 11 | 6 | image-input FIXED: mmproj-F16.gguf downloaded+loaded (`--mmproj` correct after mmproj_source always sent); agent proxy relays upstream 500s (was 200+empty output). WS persist serialization verified end-to-end. Regression sweep (basic-response, compact-response, websocket-response standalone) all pass. Remaining 6: WS contention timeouts only |
