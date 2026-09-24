@@ -25,7 +25,7 @@ class ServerConfig:
     cache_prompt: bool = True
     # None lets llama.cpp decide; True/False maps to --flash-attn on/off
     flash_attn: bool | None = None
-    # MTP Draft N-Max value; when 0 no MTP flags are added, when > 0 add --spec-type draft-mtp --spec-draft-max <value>
+    # MTP Draft N-Max value; when 0 no MTP flags are added, when > 0 add --spec-type draft-mtp --spec-draft-n-max <value>
     mtp_draft_max: int | None = None
     # Always-on: enables Jinja chat templates (required for tool calling,
     # used by chat/completions and OpenResponses alike)
@@ -138,7 +138,14 @@ class LlamaServerManager:
             cmd.extend(["--flash-attn", "on" if config.flash_attn else "off"])
 
         if config.mtp_draft_max is not None and config.mtp_draft_max > 0:
-            cmd.extend(["--spec-type", "draft-mtp", "--spec-draft-max", str(config.mtp_draft_max)])
+            cmd.extend(
+                [
+                    "--spec-type",
+                    "draft-mtp",
+                    "--spec-draft-n-max",
+                    str(config.mtp_draft_max),
+                ]
+            )
 
         if config.jinja:
             cmd.append("--jinja")

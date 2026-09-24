@@ -79,7 +79,7 @@ class StartServerRequest(BaseModel):
     context_size: int = 4096
     # Optional multimodal projector; omitted from server flags when None
     mmproj_model_id: str | None = None
-    # MTP Draft N-Max value; when 0 no MTP flags are added, when > 0 add --spec-type draft-mtp --spec-draft-max <value>
+    # MTP Draft N-Max value; when 0 no MTP flags are added, when > 0 add --spec-type draft-mtp --spec-draft-n-max <value>
     mtp_draft_max: int | None = None
     # Public name clients use in OpenAI-compatible requests
     alias: str = Field(..., min_length=1, max_length=255)
