@@ -369,3 +369,23 @@ class TestLlamaServerManager:
                 "exit_code": 137,
             },
         )
+
+    @pytest.mark.asyncio
+    async def test_wait_for_server_fails_immediately_when_process_exits(self):
+        manager = LlamaServerManager()
+        manager.servers["test-server"] = Mock(poll=Mock(return_value=1))
+        manager._log_buffers["test-server"] = [("stderr", "fatal startup error\n")]
+
+        with pytest.raises(RuntimeError, match="exited with code 1"):
+            await manager._wait_for_server("test-server", 8081, timeout=60)
+
+    def test_failed_server_logs_remain_available(self):
+        manager = LlamaServerManager()
+        manager._log_buffers["test-server"] = [
+            ("stderr", "fatal startup error\n"),
+        ]
+
+        logs = manager.get_server_logs("test-server")
+
+        assert logs["status"] == "error"
+        assert logs["stderr"] == ["fatal startup error"]

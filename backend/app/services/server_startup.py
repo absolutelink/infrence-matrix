@@ -94,6 +94,18 @@ def build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any
     if dflash is not None:
         dflash_model, dflash_filename = dflash
         payload["config"]["draft_model_path"] = dflash_model.path
+        if payload["config"]["options"].get("strict_mtp_qwen"):
+            # Strict Qwen MTP is only valid with draft-MTP. A dflash model
+            # selects draft-dflash below, so forwarding both flags makes
+            # llama-server reject the model during startup.
+            logger.warning(
+                "Server %s: disabling strict_mtp_qwen for draft-dflash configuration",
+                instance.id,
+            )
+            payload["config"]["options"] = {
+                **payload["config"]["options"],
+                "strict_mtp_qwen": False,
+            }
         if dflash_model.source_repo_id:
             payload["draft_source"] = {
                 "source": dflash_model.source,

@@ -91,7 +91,7 @@ class LlamaServerManager:
         exit_code = process.poll()
         if exit_code is not None:
             error = f"llama-server exited with code {exit_code}"
-            self._remove_server_state(server_id)
+            self._remove_server_state(server_id, preserve_logs=True)
             publish_event(
                 "server.error",
                 {"server_id": server_id, "error": error, "exit_code": exit_code},
@@ -143,7 +143,7 @@ class LlamaServerManager:
             },
         )
 
-    def _remove_server_state(self, server_id: str) -> None:
+    def _remove_server_state(self, server_id: str, preserve_logs: bool = False) -> None:
         """Remove a dead server without emitting a normal stopped event."""
         self.servers.pop(server_id, None)
         self.configs.pop(server_id, None)
@@ -153,7 +153,8 @@ class LlamaServerManager:
         self._health_successes.pop(server_id, None)
         self._health_errors.pop(server_id, None)
         self.start_times.pop(server_id, None)
-        self._log_buffers.pop(server_id, None)
+        if not preserve_logs:
+            self._log_buffers.pop(server_id, None)
 
     async def stop_health_monitoring(self) -> None:
         """Stop periodic health checks."""
@@ -447,6 +448,17 @@ class LlamaServerManager:
         start = time.time()
 
         while time.time() - start < timeout:
+            process = self.servers.get(server_id)
+            if process is not None:
+                exit_code = process.poll()
+                if exit_code is not None:
+                    self._drain_pipes(server_id)
+                    _, stderr_lines, _, _ = self._collect_logs(server_id)
+                    detail = "\n".join(stderr_lines[-5:])
+                    message = f"Server {server_id} exited with code {exit_code}"
+                    if detail:
+                        message = f"{message}: {detail}"
+                    raise RuntimeError(message)
             try:
                 async with httpx.AsyncClient() as client:
                     response = await client.get(f"http://localhost:{port}/health")
@@ -551,7 +563,7 @@ class LlamaServerManager:
 
     def get_server_logs(self, server_id: str, lines: int = 100) -> dict:
         """Get recent stdout/stderr output from a llama.cpp server."""
-        if server_id not in self.servers:
+        if server_id not in self.servers and server_id not in self._log_buffers:
             return {
                 "server_id": server_id,
                 "status": "stopped",
@@ -563,7 +575,7 @@ class LlamaServerManager:
 
         return {
             "server_id": server_id,
-            "status": "running",
+            "status": "running" if server_id in self.servers else "error",
             "stdout": stdout_lines[-lines:],
             "stderr": stderr_lines[-lines:],
         }

@@ -1485,6 +1485,10 @@ export type ServerInstanceResponse = {
      */
     health_status: string;
     /**
+     * Error Message
+     */
+    error_message?: string | null;
+    /**
      * Agent Id
      */
     agent_id: string;

@@ -37,6 +37,7 @@ type ServerInstance = {
   alias: string
   status: string
   health_status: string
+  error_message: string | null
   agent_id: string
   agent_name: string | null
   agent_host: string | null
@@ -121,6 +122,14 @@ export const columns: ColumnDef<ServerInstance>[] = [
               title="Last health check"
             >
               {new Date(instance.last_health_check).toLocaleTimeString()}
+            </span>
+          )}
+          {instance.error_message && (
+            <span
+              className="max-w-64 truncate text-xs text-destructive"
+              title={instance.error_message}
+            >
+              {instance.error_message}
             </span>
           )}
         </div>

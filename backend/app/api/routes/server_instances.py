@@ -70,6 +70,7 @@ class ServerInstanceResponse(BaseModel):
     alias: str
     status: str
     health_status: str
+    error_message: str | None = None
     agent_id: str
     agent_name: str | None = None
     agent_host: str | None = None
@@ -160,6 +161,7 @@ async def list_server_instances() -> ServerInstanceListResponse:
                     alias=instance.alias,
                     status=instance.status,
                     health_status=instance.health_status,
+                    error_message=instance.error_message,
                     agent_id=str(instance.agent_id),
                     agent_name=instance.agent.name if instance.agent else None,
                     agent_host=instance.agent.host if instance.agent else None,
@@ -221,6 +223,7 @@ async def get_server_instance(server_id: str) -> ServerInstanceResponse:
             alias=instance.alias,
             status=instance.status,
             health_status=instance.health_status,
+            error_message=instance.error_message,
             agent_id=str(instance.agent_id),
             agent_name=instance.agent.name if instance.agent else None,
             agent_host=instance.agent.host if instance.agent else None,
