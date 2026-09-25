@@ -192,7 +192,10 @@ async def _stream_to_ws(
                         continue
                     usage_data = chunk.get("usage")
                     if isinstance(usage_data, dict) and usage_data:
-                        final_usage = usage_data
+                        final_usage = {
+                            **usage_data,
+                            "timings": chunk.get("timings") or {},
+                        }
                     if "tokens_evaluated" in chunk or "tokens_predicted" in chunk:
                         final_usage = {
                             "prompt_tokens": chunk.get("tokens_evaluated", 0),

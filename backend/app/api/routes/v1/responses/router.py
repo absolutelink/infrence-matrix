@@ -188,6 +188,8 @@ def _llama_payload(
         "messages": messages,
         "stream": stream,
     }
+    if stream:
+        payload["stream_options"] = {"include_usage": True}
     if request.temperature is not None:
         payload["temperature"] = request.temperature
     if request.top_p is not None:
@@ -252,8 +254,9 @@ def _build_usage(
     completion_tokens = int(usage_data.get("completion_tokens") or 0)
     if not prompt_tokens and not completion_tokens:
         completion_tokens = fallback_chars // 4
+    cached_tokens = int((usage_data.get("timings") or {}).get("cache_n") or 0)
     return ev.usage_from_llama(
-        prompt_tokens, completion_tokens, reasoning_tokens
+        prompt_tokens, completion_tokens, reasoning_tokens, cached_tokens
     ).model_dump(exclude_none=True)
 
 
@@ -282,7 +285,10 @@ async def _complete(
     choice = (response.get("choices") or [{}])[0]
     message = choice.get("message") or {}
     finish_reason = choice.get("finish_reason")
-    usage_data = response.get("usage") or {}
+    usage_data = {
+        **(response.get("usage") or {}),
+        "timings": response.get("timings") or {},
+    }
 
     seq = ev.SSEmitter()
     state = StreamState(seq, request.model)
@@ -481,7 +487,10 @@ async def _stream_events(
 
                     usage_data = chunk.get("usage")
                     if isinstance(usage_data, dict) and usage_data:
-                        final_usage_data = usage_data
+                        final_usage_data = {
+                            **usage_data,
+                            "timings": chunk.get("timings") or {},
+                        }
                     if "tokens_evaluated" in chunk or "tokens_predicted" in chunk:
                         final_usage_data = {
                             "prompt_tokens": chunk.get("tokens_evaluated", 0),

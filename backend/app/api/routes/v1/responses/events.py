@@ -365,13 +365,16 @@ def failed_response(
 
 
 def usage_from_llama(
-    prompt_tokens: int, completion_tokens: int, reasoning_tokens: int = 0
+    prompt_tokens: int,
+    completion_tokens: int,
+    reasoning_tokens: int = 0,
+    cached_tokens: int = 0,
 ) -> Usage:
     return Usage(
         input_tokens=prompt_tokens,
         output_tokens=completion_tokens,
         total_tokens=prompt_tokens + completion_tokens,
-        input_tokens_details={"cached_tokens": 0},
+        input_tokens_details={"cached_tokens": cached_tokens},
         output_tokens_details={"reasoning_tokens": reasoning_tokens},
     )
 

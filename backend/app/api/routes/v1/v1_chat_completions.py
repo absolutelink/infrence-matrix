@@ -278,8 +278,10 @@ def _extract_usage(chunk_data: dict) -> UsageInfo | None:
         int(total) if total is not None else prompt_tokens + completion_tokens
     )
 
+    timings = chunk_data.get("timings") or {}
+    cached_tokens = int(timings.get("cache_n") or 0)
     prompt_details = usage.get("prompt_tokens_details") or {
-        "cached_tokens": 0,
+        "cached_tokens": cached_tokens,
         "audio_tokens": 0,
     }
     completion_details = usage.get("completion_tokens_details") or {
@@ -727,6 +729,7 @@ async def create_chat_completion(
         total_tokens = usage_data.get("total_tokens") or (
             prompt_tokens + completion_tokens
         )
+        cached_tokens = int((response.get("timings") or {}).get("cache_n") or 0)
 
         return ChatCompletionResponse(
             id=request_id,
@@ -749,6 +752,10 @@ async def create_chat_completion(
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "total_tokens": total_tokens,
+                    "prompt_tokens_details": {
+                        "cached_tokens": cached_tokens,
+                        "audio_tokens": 0,
+                    },
                 }
             ),
         )
