@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 LEASE_TIMEOUT_SECONDS = 30 * 60
 SCHEDULER_POLL_SECONDS = 1.0
 TELEMETRY_TIMEOUT_SECONDS = 5.0
+DEFAULT_PARALLEL_SLOTS = 4
 
 
 @dataclass(frozen=True)
@@ -31,17 +32,19 @@ class SlotTelemetry:
     known: bool = True
 
 
-def normalize_slot_telemetry(payload: Any) -> SlotTelemetry:
+def normalize_slot_telemetry(
+    payload: Any, capacity: int = DEFAULT_PARALLEL_SLOTS
+) -> SlotTelemetry:
     """Normalize the several llama.cpp `/slots` response shapes.
 
     Older llama.cpp builds expose a list directly, while newer builds wrap it
-    in ``slots``. Unknown or malformed data is deliberately represented as a
-    single available slot so a healthy server remains usable.
+    in ``slots``. The endpoint reports active slots, not configured capacity,
+    so capacity comes from the server's configured parallel count.
     """
+    capacity = max(int(capacity), 1)
     slots: Any = payload.get("slots") if isinstance(payload, dict) else payload
     if not isinstance(slots, list):
-        return SlotTelemetry(1, 0, 1, known=False)
-    capacity = len(slots)
+        return SlotTelemetry(capacity, 0, capacity, known=False)
     active = 0
     for slot in slots:
         if not isinstance(slot, dict):
@@ -51,27 +54,35 @@ def normalize_slot_telemetry(payload: Any) -> SlotTelemetry:
         busy = busy or state in {1, "processing", "busy", "generating"}
         if busy:
             active += 1
-    if capacity == 0:
-        return SlotTelemetry(1, 0, 1, known=False)
     return SlotTelemetry(capacity, active, max(capacity - active, 0))
 
 
 async def get_slot_telemetry(server: ServerInstance) -> SlotTelemetry:
     """Read a server's llama.cpp slots without making telemetry mandatory."""
+    configured_parallel = (server.server_options or {}).get("parallel")
+    try:
+        capacity = (
+            int(configured_parallel)
+            if configured_parallel is not None
+            else DEFAULT_PARALLEL_SLOTS
+        )
+    except TypeError, ValueError:
+        capacity = DEFAULT_PARALLEL_SLOTS
+    capacity = max(capacity, 1)
     try:
         agent = await agent_manager.get_agent(str(server.agent_id))
         if agent is None or agent.status != "online" or not agent.websocket_connected:
-            return SlotTelemetry(1, 0, 1, known=False)
+            return SlotTelemetry(capacity, 0, capacity, known=False)
         payload = await agent_manager.send_to_agent(
             str(server.agent_id),
             "GET",
             f"/proxy/{server.id}/slots",
             timeout=TELEMETRY_TIMEOUT_SECONDS,
         )
-        return normalize_slot_telemetry(payload)
+        return normalize_slot_telemetry(payload, capacity)
     except Exception as exc:
         logger.debug("Slot telemetry unavailable for %s: %s", server.id, exc)
-        return SlotTelemetry(1, 0, 1, known=False)
+        return SlotTelemetry(capacity, 0, capacity, known=False)
 
 
 @dataclass

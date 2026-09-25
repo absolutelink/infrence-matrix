@@ -23,6 +23,27 @@ type LogLine = { stream: "stdout" | "stderr"; line: string }
 
 const MAX_TAIL_LINES = 500
 
+function mergeHistory(existing: LogLine[], history: LogLine[]): LogLine[] {
+  if (existing.length === 0) return history
+
+  const maxOverlap = Math.min(existing.length, history.length)
+  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+    const historySuffix = history.slice(-overlap)
+    const existingPrefix = existing.slice(0, overlap)
+    if (
+      historySuffix.every(
+        (line, index) =>
+          line.stream === existingPrefix[index].stream &&
+          line.line === existingPrefix[index].line,
+      )
+    ) {
+      return [...history, ...existing.slice(overlap)]
+    }
+  }
+
+  return [...history, ...existing]
+}
+
 export function ServerLogsSheet({ isOpen, instance }: ServerLogsSheetProps) {
   const logRef = useRef<HTMLDivElement>(null)
   const [autoScroll, setAutoScroll] = useState(true)
@@ -33,12 +54,14 @@ export function ServerLogsSheet({ isOpen, instance }: ServerLogsSheetProps) {
   // Marks which historical lines are already seeded from the poll so live
   // lines are only appended once.
   const [seeded, setSeeded] = useState(false)
+  const historyKeyRef = useRef("")
   // Highest event seq already merged into the tail (events is cumulative)
   const processedSeqRef = useRef(-1)
 
   useEffect(() => {
     setTail([])
     setSeeded(false)
+    historyKeyRef.current = ""
     processedSeqRef.current = -1
   }, [])
 
@@ -96,9 +119,6 @@ export function ServerLogsSheet({ isOpen, instance }: ServerLogsSheetProps) {
     if (!historyQuery.data || !connected) {
       return
     }
-    if (seeded) {
-      return
-    }
     const history: LogLine[] = [
       ...(historyQuery.data.stdout ?? []).map((line) => ({
         stream: "stdout" as const,
@@ -109,22 +129,21 @@ export function ServerLogsSheet({ isOpen, instance }: ServerLogsSheetProps) {
         line,
       })),
     ]
-    if (history.length > 0) {
-      setTail((prev) => {
-        const merged = [...history, ...prev]
-        return merged.length > MAX_TAIL_LINES
-          ? merged.slice(-MAX_TAIL_LINES)
-          : merged
-      })
+    const historyKey = history
+      .map((entry) => `${entry.stream}\u0000${entry.line}`)
+      .join("\u0001")
+    if (historyKey === historyKeyRef.current) {
+      return
     }
+    historyKeyRef.current = historyKey
+    setTail((prev) => {
+      const merged = mergeHistory(prev, history)
+      return merged.length > MAX_TAIL_LINES
+        ? merged.slice(-MAX_TAIL_LINES)
+        : merged
+    })
     setSeeded(true)
-  }, [historyQuery.data, connected, seeded])
-
-  useEffect(() => {
-    if (logRef.current && autoScroll) {
-      logRef.current.scrollTop = logRef.current.scrollHeight
-    }
-  }, [autoScroll])
+  }, [historyQuery.data, connected])
 
   const fallbackLines: LogLine[] = connected
     ? []
@@ -140,6 +159,12 @@ export function ServerLogsSheet({ isOpen, instance }: ServerLogsSheetProps) {
       ]
 
   const displayLines = connected ? tail : fallbackLines
+
+  useEffect(() => {
+    if (logRef.current && autoScroll && displayLines.length > 0) {
+      logRef.current.scrollTop = logRef.current.scrollHeight
+    }
+  }, [autoScroll, displayLines.length])
 
   return (
     <div className="flex h-full min-h-0 flex-col p-3">
