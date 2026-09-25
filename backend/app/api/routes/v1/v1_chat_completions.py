@@ -17,6 +17,10 @@ from app.api.deps import get_db
 from app.core.db import engine
 from app.models import Model, ServerInstance
 from app.services.agent_manager import agent_manager
+from app.services.inference_scheduler import (
+    InferenceLeaseHandle,
+    inference_scheduler,
+)
 from app.services.server_startup import (
     START_DISPATCH_TIMEOUT,
     ServerStartupError,
@@ -299,6 +303,7 @@ async def _stream_completion_via_agent(
     server: ServerInstance,
     request: ChatCompletionRequest,
     request_id: str,
+    lease: InferenceLeaseHandle,
 ) -> AsyncGenerator[str]:
     """Stream completion via Agent proxy."""
     messages = _convert_messages_to_llama_format(request.messages)
@@ -427,6 +432,8 @@ async def _stream_completion_via_agent(
         logger.error(f"Streaming error: {e}")
         error_chunk = {"error": {"message": str(e), "type": "server_error"}}
         yield f"data: {json.dumps(error_chunk)}\n\n"
+    finally:
+        await lease.release()
 
 
 def _find_existing_server(
@@ -611,10 +618,29 @@ async def create_chat_completion(
         if not model:
             raise HTTPException(404, f"Model {request.model} not found")
 
-        # Get or create server
+        # Prefer an already-running instance so model-name requests can be
+        # load-balanced. Cold-start only when no compatible instance exists.
         try:
-            server = await _get_or_create_server(model, request.agent_id)
-            server = await ensure_server_ready(server)
+            candidates = await inference_scheduler._candidates(model.id)
+            if request.agent_id:
+                candidates = [
+                    candidate
+                    for candidate in candidates
+                    if str(candidate.agent_id) == request.agent_id
+                ]
+            if candidates:
+                lease = await inference_scheduler.acquire(
+                    model.id,
+                    request_id,
+                    preferred_server_id=candidates[0].id if request.agent_id else None,
+                )
+                server = lease.server
+            else:
+                server = await _get_or_create_server(model, request.agent_id)
+                server = await ensure_server_ready(server)
+                lease = await inference_scheduler.acquire(
+                    model.id, request_id, preferred_server_id=server.id
+                )
         except HTTPException:
             raise
         except ServerStartupError as e:
@@ -622,6 +648,16 @@ async def create_chat_completion(
         except Exception as e:
             logger.error(f"Server creation failed: {e}")
             raise HTTPException(503, f"Failed to start server: {e}")
+
+    if server is None:
+        raise HTTPException(503, "No inference server available")
+
+    # Alias requests and model-name requests both hold a lease for the whole
+    # upstream call; the streaming generator releases it on disconnect/end.
+    if instance is not None:
+        lease = await inference_scheduler.acquire(
+            model.id, request_id, preferred_server_id=server.id
+        )
 
     if request.stream:
         # Stream response. The generator awaits readiness itself, so the
@@ -632,6 +668,7 @@ async def create_chat_completion(
                 server,
                 request,
                 request_id,
+                lease,
             ),
             media_type="text/event-stream",
             headers={
@@ -711,3 +748,5 @@ async def create_chat_completion(
     except Exception as e:
         logger.error(f"Completion error: {e}")
         raise HTTPException(500, f"Inference failed: {e}")
+    finally:
+        await lease.release()

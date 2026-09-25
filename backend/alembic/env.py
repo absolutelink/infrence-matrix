@@ -34,6 +34,7 @@ from app.models import (
     File,
     BenchmarkDefinition,
     BenchmarkRun,
+    InferenceLease,
 )
 
 target_metadata = SQLModel.metadata

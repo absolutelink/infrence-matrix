@@ -49,6 +49,8 @@ from app.api.routes.v1.responses.translator import (
 )
 from app.core.db import engine
 from app.services.agent_manager import agent_manager
+from app.services.inference_scheduler import inference_scheduler
+from app.services.server_startup import find_alias_instance
 
 logger = logging.getLogger(__name__)
 
@@ -130,8 +132,17 @@ async def _stream_to_ws(
     Returns the serialized terminal ResponseResource, or None on failure
     (after sending response.failed).
     """
+    lease = None
+    seq = ev.SSEmitter()
     try:
         server, model = await resolve_target(request.model)
+        alias = await find_alias_instance(request.model)
+        lease = await inference_scheduler.acquire(
+            model.id if model else server.model_id,
+            new_id("resp"),
+            preferred_server_id=server.id if alias is not None else None,
+        )
+        server = lease.server
         agent = await agent_manager.get_agent(str(server.agent_id))
         if not agent:
             raise TargetError(503, "no_agent_available", "Agent not found")
@@ -266,6 +277,9 @@ async def _stream_to_ws(
         ev.response_failed(seq, failed)
         await _send_events(websocket, seq.drain_events())
         return None
+    finally:
+        if lease is not None:
+            await lease.release()
 
 
 @router.websocket("/responses")

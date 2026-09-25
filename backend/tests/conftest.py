@@ -13,6 +13,7 @@ from app.models import (
     BenchmarkDefinition,
     BenchmarkRun,
     File,
+    InferenceLease,
     Model,
     PromptCache,
     ResponseRecord,
@@ -32,6 +33,7 @@ def _clean_db() -> None:
     with Session(engine) as session:
         for model in (
             PromptCache,
+            InferenceLease,
             AudioJob,
             BatchJob,
             BenchmarkRun,

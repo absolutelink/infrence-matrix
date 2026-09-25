@@ -47,6 +47,10 @@ from app.api.routes.v1.responses.translator import (
 from app.core.db import engine
 from app.models import Model, ResponseRecord, ServerInstance
 from app.services.agent_manager import agent_manager
+from app.services.inference_scheduler import (
+    InferenceLeaseHandle,
+    inference_scheduler,
+)
 from app.services.server_startup import (
     ServerStartupError,
     ensure_server_ready,
@@ -421,6 +425,7 @@ async def _stream_events(
     model_id: Any | None = None,
     instance_agent_id: Any | None = None,
     persist: bool = False,
+    lease: InferenceLeaseHandle | None = None,
 ) -> AsyncIterator[str]:
     seq = ev.SSEmitter()
     response = build_response_resource(
@@ -594,6 +599,10 @@ async def _stream_events(
                 incomplete_reason=None,
             )
 
+    finally:
+        if lease is not None:
+            await lease.release()
+
     yield "data: [DONE]\n\n"
 
 
@@ -708,6 +717,7 @@ async def create_response(
     # started for it.
     server = None
     model: Model | None = None
+    lease_preference = None
     instance = await find_alias_instance(request.model)
     if instance is not None:
         try:
@@ -728,6 +738,7 @@ async def create_response(
                 f"Model for server alias {request.model} not found",
                 param="model",
             )
+        lease_preference = server.id
     else:
         try:
             model = _resolve_model(db, request.model)
@@ -740,8 +751,14 @@ async def create_response(
                 param="model",
             )
         try:
-            server = await _get_or_create_server(model, None)
-            server = await ensure_server_ready(server)
+            candidates = await inference_scheduler._candidates(model.id)
+            if candidates:
+                # The scheduler performs the actual load-balanced claim below.
+                server = candidates[0]
+            else:
+                server = await _get_or_create_server(model, None)
+                server = await ensure_server_ready(server)
+                lease_preference = server.id
         except HTTPException as e:
             return _error_response(
                 e.status_code or 503,
@@ -830,6 +847,16 @@ async def create_response(
     response_id = new_id("resp")
     created_at = int(time.time())
 
+    try:
+        lease = await inference_scheduler.acquire(
+            model.id,
+            response_id,
+            preferred_server_id=lease_preference,
+        )
+        server = lease.server
+    except TimeoutError as e:
+        return _error_response(503, "too_many_requests", "no_slot", str(e))
+
     if request.stream:
         return StreamingResponse(
             _stream_events(
@@ -842,6 +869,7 @@ async def create_response(
                 model_id=model.id,
                 instance_agent_id=server.agent_id,
                 persist=request.store,
+                lease=lease,
             ),
             media_type="text/event-stream",
             headers=SSE_HEADERS,
@@ -861,6 +889,8 @@ async def create_response(
     except Exception as e:
         logger.error(f"Responses completion error: {e}")
         return _error_response(500, "model_error", "model_error", str(e))
+    finally:
+        await lease.release()
 
     if request.store:
         _persist_response(

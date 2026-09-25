@@ -1,7 +1,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import BigInteger, Index
+from sqlalchemy import BigInteger, DateTime, Index
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlmodel import Column, Field, Relationship, SQLModel
 
@@ -427,6 +427,40 @@ class ServerInstance(SQLModel, table=True):
             "foreign_keys": "[ServerInstance.dflash_model_id]",
         }
     )
+
+
+# ============================================================================
+# InferenceLease - Main-app scheduling lease for one inference request
+# ============================================================================
+class InferenceLease(SQLModel, table=True):
+    __tablename__ = "inference_leases"
+    __table_args__ = (
+        Index("idx_inference_leases_status", "status"),
+        Index("idx_inference_leases_server_status", "server_instance_id", "status"),
+        Index("idx_inference_leases_expires_at", "lease_expires_at"),
+    )
+
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        primary_key=True,
+        sa_type=UUID(as_uuid=True),  # type: ignore[call-arg,arg-type]
+    )
+    request_id: str = Field(max_length=255, unique=True, index=True)
+    model_id: uuid.UUID = Field(foreign_key="models.id", ondelete="CASCADE")
+    server_instance_id: uuid.UUID | None = Field(
+        default=None,
+        foreign_key="server_instances.id",
+        ondelete="SET NULL",
+    )
+    status: str = "queued"
+    queued_at: datetime = Field(
+        default_factory=get_datetime_utc, sa_type=DateTime(timezone=True)
+    )
+    started_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
+    lease_expires_at: datetime | None = Field(
+        default=None, sa_type=DateTime(timezone=True)
+    )
+    released_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
 
 
 # ============================================================================
