@@ -167,6 +167,7 @@ def input_items_to_llama_messages(
     multimodal parts (text + image_url entries).
     """
     messages: list[dict[str, Any]] = []
+    function_call_ids: set[str] = set()
     if request.instructions:
         messages.append({"role": "system", "content": request.instructions})
 
@@ -203,10 +204,13 @@ def input_items_to_llama_messages(
             # Assistant tool call: describe it in text (llama.cpp receives
             # tool calls through the template; replaying as text keeps the
             # exchange visible for templates without native tool replay).
+            call_id = item.get("call_id") if isinstance(item, dict) else item.call_id
             name = item.get("name") if isinstance(item, dict) else item.name
             arguments = (
                 item.get("arguments") if isinstance(item, dict) else item.arguments
             )
+            if call_id:
+                function_call_ids.add(call_id)
             messages.append(
                 {
                     "role": "assistant",
@@ -215,6 +219,10 @@ def input_items_to_llama_messages(
             )
         elif itype == "function_call_output":
             call_id = item.get("call_id") if isinstance(item, dict) else item.call_id
+            if call_id not in function_call_ids:
+                raise TranslationError(
+                    f"No matching tool call exists for call_id '{call_id}'"
+                )
             output = item.get("output") if isinstance(item, dict) else item.output
             text = _content_to_llama(output)
             if not isinstance(text, str):

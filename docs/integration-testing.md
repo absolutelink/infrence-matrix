@@ -30,9 +30,9 @@ Run 8 (WS continuation verification): 2026-09-25 — **1 passed / 0 failed** (`w
 | `websocket-response` | WebSocket Response | ❌ FAIL | 30s harness timer: turn takes 15–40s idle (18.5s), >30s under full-suite load (17 concurrent tests vs 4 llama.cpp slots; measured 81s). Passes standalone |
 | `websocket-sequential-responses` | WebSocket Sequential Responses | ❌ FAIL | same contention timeout (2 turns × 30s) |
 | `websocket-continuation` | WebSocket Continuation | ✅ PASS | WS cache history hydration verified after deploy |
-| `websocket-reconnect-store-false-recovery` | WebSocket Store False Reconnect Recovery | ❌ FAIL | same contention timeout |
+| `websocket-reconnect-store-false-recovery` | WebSocket Store False Reconnect Recovery | ✅ PASS | verified after WS continuation history fix |
 | `websocket-previous-response-not-found` | WebSocket Missing Previous Response | ✅ PASS | |
-| `websocket-failed-continuation-evicts-cache` | WebSocket Failed Continuation Evicts Cache | ❌ FAIL | same contention timeout |
+| `websocket-failed-continuation-evicts-cache` | WebSocket Failed Continuation Evicts Cache | ❌ FAIL | fixed locally: unmatched `function_call_output` now fails and evicts the connection cache; pending deploy |
 | `websocket-compact-new-chain` | WebSocket Compact New Chain | ❌ FAIL | compact endpoint 500 (agent proxy ReadTimeout when slots contended) + WS contention |
 | `system-prompt` | System Prompt | ✅ PASS | |
 | `tool-calling` | Tool Calling | ✅ PASS | |
@@ -69,12 +69,17 @@ Run 8 (WS continuation verification): 2026-09-25 — **1 passed / 0 failed** (`w
      history answer).
 12. ~~**WS continuation history hydration**~~ — FIXED: WS turns pass connection-local cached
     history for `store=false` and the full DB chain for `store=true`; verified after deploy.
+13. **Invalid WebSocket tool result cache eviction** — FIXED locally: unmatched
+    `function_call_output.call_id` now raises a translation error, producing a failed turn
+    and evicting the referenced cached response; pending deploy verification.
 
 ## History
 
 | Date | Commit | Passed | Failed | Notes |
 |---|---|---|---|---|
 | 2026-09-25 | WS continuation history fix (deployed) | 1 | 0 | `websocket-continuation` passes after WS cache/DB history hydration fix |
+| 2026-09-25 | WS reconnect recovery verification | 1 | 0 | `websocket-reconnect-store-false-recovery` passes after WS cache/DB history hydration fix |
+| 2026-09-25 | WS failed continuation verification | 0 | 1 | Isolated unmatched `function_call_output`: invalid continuation incorrectly completed and retained cache; added call-ID validation. Pending commit/deploy verification |
 | 2026-09-24 | (baseline) | 3 | 14 | Initial full run |
 | 2026-09-24 | serialize_spec fix (pushed) | 10 | 7 | Clusters 1–3 + 5 fixed: spec serializer (`serialize_spec`), `completed_at` at finalize, dropped `reasoning_text.*` event twins. Unblocked: basic-response, system-prompt, tool-calling, streaming-response, assistant-phase, multi-turn, compact-response |
 | 2026-09-24 | WS framing + compaction-input (pushed) | 10 | 7 | Clusters 4 + 6 fixed: raw JSON per WS message, compaction items replayed as assistant context. Exposed: WS turns not persisted; 30s harness timer vs thinking-model latency |
