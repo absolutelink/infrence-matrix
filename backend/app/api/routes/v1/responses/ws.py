@@ -300,9 +300,9 @@ async def responses_websocket(websocket: WebSocket) -> None:
                 continue
 
             # previous resolution: DB for store=true, cache for store=false
+            continuation_history: list[dict[str, Any]] | None = None
             if request.previous_response_id:
                 missing = False
-                continuation_history: list[dict[str, Any]] | None = None
                 if request.store:
                     try:
                         with Session(engine) as session:
