@@ -123,6 +123,10 @@ class LlamaServerManager:
     async def _start_server_locked(self, server_id: str, config: ServerConfig) -> bool:
         """Start the llama-server process (caller holds the start lock)."""
         options = config.options or {}
+        # Strict Qwen MTP relies on a single sequence. Do not allow a stale or
+        # incompatible parallel setting to make llama-server reject the model.
+        if options.get("strict_mtp_qwen"):
+            options = {**options, "parallel": 1}
         gpu_layers = options.get("gpu_layers", config.gpu_layers)
         batch_size = options.get("batch_size", config.batch_size)
         cmd = [

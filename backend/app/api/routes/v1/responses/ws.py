@@ -91,7 +91,7 @@ def _capped_payload(
     terminal timer (and UI responsiveness): a thinking model at ~12 tok/s
     blows through that on reasoning alone."""
     payload = _llama_payload(request, history, stream=True)
-    if payload.get("max_tokens") is None:
+    if request.max_output_tokens is None:
         payload["max_tokens"] = WS_MAX_TOKENS
     return payload
 

@@ -54,6 +54,10 @@ from app.services.server_startup import (
 
 logger = logging.getLogger(__name__)
 
+# A missing output limit is otherwise forwarded as unlimited generation. This
+# is especially costly for Responses requests carrying large tool definitions.
+DEFAULT_MAX_OUTPUT_TOKENS = 1024
+
 router = APIRouter()
 
 SSE_HEADERS = {
@@ -182,8 +186,11 @@ def _llama_payload(
         payload["presence_penalty"] = request.presence_penalty
     if request.frequency_penalty is not None:
         payload["frequency_penalty"] = request.frequency_penalty
-    if request.max_output_tokens is not None:
-        payload["max_tokens"] = request.max_output_tokens
+    payload["max_tokens"] = (
+        request.max_output_tokens
+        if request.max_output_tokens is not None
+        else DEFAULT_MAX_OUTPUT_TOKENS
+    )
     if request.text and request.text.format and request.text.format.type != "text":
         fmt = request.text.format
         if fmt.type == "json_schema" and getattr(fmt, "schema_", None):

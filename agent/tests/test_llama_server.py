@@ -1,10 +1,10 @@
 """Tests for llama_server module."""
 
-import pytest
 import asyncio
-import subprocess
-from unittest.mock import Mock, patch, MagicMock
 import os
+from unittest.mock import Mock, patch
+
+import pytest
 
 # Set required environment variables before importing settings
 os.environ["AGENT_ID"] = "test-agent"
@@ -109,18 +109,56 @@ class TestLlamaServerManager:
         )
 
         command = mock_popen.call_args.args[0]
-        assert ["--threads", "8"] == command[command.index("--threads") : command.index("--threads") + 2]
-        assert ["--ubatch-size", "256"] == command[command.index("--ubatch-size") : command.index("--ubatch-size") + 2]
+        assert ["--threads", "8"] == command[
+            command.index("--threads") : command.index("--threads") + 2
+        ]
+        assert ["--ubatch-size", "256"] == command[
+            command.index("--ubatch-size") : command.index("--ubatch-size") + 2
+        ]
         assert "--no-cache-prompt" in command
-        assert ["--temperature", "0.7"] == command[command.index("--temperature") : command.index("--temperature") + 2]
-        assert ["--device", "ROCm0"] == command[command.index("--device") : command.index("--device") + 2]
-        assert ["--cache-type-k", "q8_0"] == command[command.index("--cache-type-k") : command.index("--cache-type-k") + 2]
-        assert ["--cache-type-v", "turbo4"] == command[command.index("--cache-type-v") : command.index("--cache-type-v") + 2]
+        assert ["--temperature", "0.7"] == command[
+            command.index("--temperature") : command.index("--temperature") + 2
+        ]
+        assert ["--device", "ROCm0"] == command[
+            command.index("--device") : command.index("--device") + 2
+        ]
+        assert ["--cache-type-k", "q8_0"] == command[
+            command.index("--cache-type-k") : command.index("--cache-type-k") + 2
+        ]
+        assert ["--cache-type-v", "turbo4"] == command[
+            command.index("--cache-type-v") : command.index("--cache-type-v") + 2
+        ]
         assert "--kv-unified" in command
-        assert ["--spec-draft-n-max", "4"] == command[command.index("--spec-draft-n-max") : command.index("--spec-draft-n-max") + 2]
-        assert ["--spec-draft-p-min", "0.0"] == command[command.index("--spec-draft-p-min") : command.index("--spec-draft-p-min") + 2]
+        assert ["--spec-draft-n-max", "4"] == command[
+            command.index("--spec-draft-n-max") : command.index("--spec-draft-n-max")
+            + 2
+        ]
+        assert ["--spec-draft-p-min", "0.0"] == command[
+            command.index("--spec-draft-p-min") : command.index("--spec-draft-p-min")
+            + 2
+        ]
         assert "--spec-mtp-strict-qwen" in command
-        assert ["--reasoning", "off"] == command[command.index("--reasoning") : command.index("--reasoning") + 2]
+        assert ["--reasoning", "off"] == command[
+            command.index("--reasoning") : command.index("--reasoning") + 2
+        ]
+
+    @pytest.mark.asyncio
+    @patch("app.services.llama_server.subprocess.Popen")
+    async def test_strict_qwen_mtp_forces_single_sequence(self, mock_popen):
+        manager = LlamaServerManager()
+        await manager.start_server(
+            "strict-server",
+            ServerConfig(
+                model_path="/models/test.gguf",
+                port=8081,
+                options={"strict_mtp_qwen": True, "parallel": 4},
+            ),
+        )
+
+        command = mock_popen.call_args.args[0]
+        assert ["--parallel", "1"] == command[
+            command.index("--parallel") : command.index("--parallel") + 2
+        ]
 
     def test_start_existing_server(self):
         """Test starting a server that already exists."""
