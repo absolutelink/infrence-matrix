@@ -47,5 +47,5 @@ engine port is never exposed to the host.
 The agent downloads the complete `peonist-ai/halogen-qwen3.8-27b` repository
 on first use into `/models/peonist-ai/halogen-qwen3.8-27b` and starts Halogen
 with the checkpoint and tokenizer paths from that repository. The agent
-creates an isolated `/cache/<server_uuid>` directory for every server and
-removes it when that server is deleted.
+requires outbound Hugging Face access for the initial download; subsequent
+starts reuse the files under `/models`.

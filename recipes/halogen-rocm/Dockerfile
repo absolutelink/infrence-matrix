@@ -26,6 +26,7 @@ ENV PATH="/agent/.venv/bin:${PATH}" \
     GPU_BACKEND=rocm \
     MODELS_PATH=/models \
     CACHE_PATH=/cache \
+    HF_HUB_OFFLINE=0 \
     HALOGEN_ENTRYPOINT=/usr/local/bin/entrypoint.sh \
     HALOGEN_MAX_INSTANCES=2
 
