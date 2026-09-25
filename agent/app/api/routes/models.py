@@ -1,7 +1,5 @@
 """Model file management endpoints."""
 
-import os
-
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -21,13 +19,22 @@ class DownloadModelRequest(BaseModel):
 @router.post("/download")
 async def download_model(request: DownloadModelRequest) -> dict:
     """Download a model from HuggingFace or ModelScope."""
-    dest_path = os.path.join(settings.MODELS_PATH, request.filename)
+    dest_path = model_manager.storage_path(request.repo_id, request.filename)
 
-    if model_manager.model_exists(request.filename):
-        return {"status": "already_exists", "path": dest_path, "job_id": request.job_id}
+    relative_path = str(dest_path.relative_to(settings.MODELS_PATH))
+    if model_manager.model_exists(relative_path):
+        return {
+            "status": "already_exists",
+            "path": str(dest_path),
+            "job_id": request.job_id,
+        }
 
-    if model_manager.is_downloading(request.filename):
-        return {"status": "in_progress", "path": dest_path, "job_id": request.job_id}
+    if model_manager.is_downloading(f"{request.repo_id}/{request.filename}"):
+        return {
+            "status": "in_progress",
+            "path": str(dest_path),
+            "job_id": request.job_id,
+        }
 
     try:
         downloaded_path = await model_manager.download_model(

@@ -133,6 +133,19 @@ class ModelManager:
         """Get the in-flight download task for a filename, if any."""
         return self._download_tasks.get(filename)
 
+    def storage_path(self, repo_id: str, filename: str) -> Path:
+        """Return the local path mirroring the repository file layout."""
+        repo_path = Path(repo_id)
+        relative_file = Path(filename)
+        if (
+            repo_path.is_absolute()
+            or ".." in repo_path.parts
+            or relative_file.is_absolute()
+            or ".." in relative_file.parts
+        ):
+            raise ValueError("Model filename must be relative to its repository")
+        return self.models_path / repo_id / relative_file
+
     async def download_model(
         self,
         repo_id: str,
@@ -152,22 +165,23 @@ class ModelManager:
             )
             raise NotImplementedError(f"Source not implemented: {source}")
 
-        existing = self.models_path / filename
+        existing = self.storage_path(repo_id, filename)
         if existing.exists():
             return str(existing)
 
-        in_flight = self._download_tasks.get(filename)
+        download_key = f"{repo_id}/{filename}"
+        in_flight = self._download_tasks.get(download_key)
         if in_flight is not None:
             return await in_flight
 
         task = asyncio.create_task(
             self._download_to_disk(repo_id, filename, source, job_id)
         )
-        self._download_tasks[filename] = task
+        self._download_tasks[download_key] = task
         try:
             return await task
         finally:
-            self._download_tasks.pop(filename, None)
+            self._download_tasks.pop(download_key, None)
 
     async def _download_to_disk(
         self,
@@ -196,7 +210,7 @@ class ModelManager:
                 lambda: hf_hub_download(
                     repo_id=repo_id,
                     filename=filename,
-                    local_dir=str(self.models_path),
+                    local_dir=str(self.models_path / Path(repo_id)),
                     tqdm_class=tqdm_class,
                 ),
             )
@@ -238,7 +252,7 @@ class ModelManager:
         """List all model files."""
         models = []
 
-        for file in self.models_path.glob("*.gguf"):
+        for file in self.models_path.rglob("*.gguf"):
             models.append(
                 {
                     "filename": file.name,

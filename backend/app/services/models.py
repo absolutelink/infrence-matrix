@@ -40,6 +40,24 @@ class ModelManager:
         self.download_jobs: dict[str, DownloadJob] = {}
         self._download_tasks: dict[str, asyncio.Task[None]] = {}
 
+    @staticmethod
+    def _repository_path(repo_id: str, filename: str) -> Path:
+        """Return the local path that mirrors a repository's file layout."""
+        repo_path = Path(repo_id)
+        relative_file = Path(filename)
+        if (
+            repo_path.is_absolute()
+            or ".." in repo_path.parts
+            or relative_file.is_absolute()
+            or ".." in relative_file.parts
+        ):
+            raise ValueError("Model filename must be relative to its repository")
+        return Path(settings.MODELS_PATH) / repo_id / relative_file
+
+    @staticmethod
+    def _repository_root(repo_id: str) -> Path:
+        return ModelManager._repository_path(repo_id, "placeholder").parent
+
     async def download_from_huggingface(
         self,
         repo_id: str,
@@ -54,7 +72,7 @@ class ModelManager:
         download_job.started_at = datetime.now(UTC)
 
         try:
-            dest_dir = Path(settings.MODELS_PATH)
+            dest_dir = self._repository_root(repo_id)
             dest_dir.mkdir(parents=True, exist_ok=True)
 
             def _download() -> str:
@@ -102,7 +120,7 @@ class ModelManager:
         download_job.started_at = datetime.now(UTC)
 
         try:
-            dest_dir = Path(settings.MODELS_PATH)
+            dest_dir = self._repository_root(repo_id)
             dest_dir.mkdir(parents=True, exist_ok=True)
 
             def _download() -> str:
@@ -263,7 +281,7 @@ class ModelManager:
             return []
 
         models = []
-        for file in models_dir.glob("*.gguf"):
+        for file in models_dir.rglob("*.gguf"):
             try:
                 model = self.register_model(
                     name=file.name,
