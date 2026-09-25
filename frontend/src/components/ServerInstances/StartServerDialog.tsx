@@ -76,7 +76,7 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
         gpu_layers: Number(gpuLayers) || 35,
         context_size: Number(contextSize) || 4096,
         mtp_draft_max: mtpDraftMax === "0" ? null : Number(mtpDraftMax),
-        server_options: serverOptions,
+        server_options: engine === "llamacpp" ? serverOptions : {},
         engine,
         engine_options: engine === "halogen" ? engineOptions : {},
       }
@@ -99,8 +99,9 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
       queryClient.invalidateQueries({ queryKey: ["server-instances"] })
       onClose()
     },
-    onError: () => {
-      toast.error("Failed to create server")
+    onError: (error: unknown) => {
+      const detail = (error as { body?: { detail?: string } }).body?.detail
+      toast.error(detail || "Failed to create server")
     },
   })
 
@@ -152,6 +153,7 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
               onValueChange={(value) => {
                 setEngine(value as "llamacpp" | "halogen")
                 setAgentId("")
+                setServerOptions({})
               }}
             >
               <SelectTrigger className="mt-1">

@@ -110,17 +110,18 @@ def validate_server_options(options: dict | ServerOptions) -> dict:
 class HalogenServerOptions(BaseModel):
     """Startup settings supported by a Halogen server process."""
 
-    model_id: str | None = None
     drafter: Literal["serial", "mtp", "dflash2"] | None = None
     kv_slots: int | None = Field(default=None, ge=1, le=8)
     slot_ctx: int | None = Field(default=None, ge=256, le=1_048_576)
     cache_mb: int | None = Field(default=None, ge=0)
     cache_reserve_mb: int | None = Field(default=None, ge=0)
+    cache_align: int | None = Field(default=None, ge=1)
     max_tokens_cap: int | None = Field(default=None, ge=1)
     queue_timeout: int | None = Field(default=None, ge=1)
-    reasoning_effort: (
-        Literal["high", "low", "medium", "minimal", "none", "xhigh"] | None
-    ) = None
+    w4a4: int | None = Field(default=None, ge=0)
+    w4a4_excl: str | None = None
+    keepalive_timeout: int | None = Field(default=None, ge=0)
+    sse_keepalive_s: int | None = Field(default=None, ge=0)
 
     model_config = ConfigDict(extra="forbid")
 

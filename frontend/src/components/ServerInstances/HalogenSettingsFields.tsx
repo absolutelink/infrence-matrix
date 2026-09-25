@@ -14,9 +14,13 @@ export type HalogenOptions = {
   slot_ctx?: number
   cache_mb?: number
   cache_reserve_mb?: number
+  cache_align?: number
   max_tokens_cap?: number
   queue_timeout?: number
-  reasoning_effort?: "high" | "low" | "medium" | "minimal" | "none" | "xhigh"
+  w4a4?: number
+  w4a4_excl?: string
+  keepalive_timeout?: number
+  sse_keepalive_s?: number
 }
 
 type Props = {
@@ -38,7 +42,7 @@ export function HalogenSettingsFields({ options, onChange }: Props) {
         Halogen settings are applied when the server process starts. Each server
         runs its own Halogen process and cache directory.
       </p>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4">
         <div>
           <Label>Drafter</Label>
           <Select
@@ -61,35 +65,6 @@ export function HalogenSettingsFields({ options, onChange }: Props) {
               <SelectItem value="serial">Serial</SelectItem>
               <SelectItem value="mtp">MTP</SelectItem>
               <SelectItem value="dflash2">DFlash2</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        <div>
-          <Label>Reasoning effort</Label>
-          <Select
-            value={options.reasoning_effort ?? "default"}
-            onValueChange={(value) =>
-              onChange({
-                ...options,
-                reasoning_effort:
-                  value === "default"
-                    ? undefined
-                    : (value as HalogenOptions["reasoning_effort"]),
-              })
-            }
-          >
-            <SelectTrigger className="mt-1">
-              <SelectValue placeholder="Use model default" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="default">Use model default</SelectItem>
-              {(
-                ["none", "minimal", "low", "medium", "high", "xhigh"] as const
-              ).map((value) => (
-                <SelectItem key={value} value={value}>
-                  {value}
-                </SelectItem>
-              ))}
             </SelectContent>
           </Select>
         </div>

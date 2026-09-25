@@ -147,6 +147,7 @@ class HalogenServerManager:
                 "HALOGEN_API_PORT": str(config.api_port),
                 "HALOGEN_PORT": str(config.engine_port),
                 "HALOGEN_BIND": "127.0.0.1",
+                "HALOGEN_ENGINE": f"127.0.0.1:{config.engine_port}",
                 "HALOGEN_CHECKPOINT": HALOGEN_CHECKPOINT,
                 "HALOGEN_TOKENIZER": HALOGEN_TOKENIZER,
                 "HALOGEN_CACHE_DIR": str(cache_dir),
@@ -156,12 +157,17 @@ class HalogenServerManager:
         options = config.options
         mappings = {
             "drafter": "HALOGEN_DRAFTER",
+            "cache_align": "HALOGEN_CACHE_ALIGN",
             "kv_slots": "HALOGEN_KV_SLOTS",
             "slot_ctx": "HALOGEN_SLOT_CTX",
             "cache_mb": "HALOGEN_CACHE_MB",
             "cache_reserve_mb": "HALOGEN_CACHE_RESERVE_MB",
             "max_tokens_cap": "HALOGEN_MAX_TOKENS_CAP",
             "queue_timeout": "HALOGEN_QUEUE_TIMEOUT",
+            "w4a4": "HALOGEN_W4A4",
+            "w4a4_excl": "HALOGEN_W4A4_EXCL",
+            "keepalive_timeout": "HALOGEN_KEEPALIVE_TIMEOUT",
+            "sse_keepalive_s": "HALOGEN_SSE_KEEPALIVE_S",
         }
         for key, variable in mappings.items():
             if key in options and options[key] is not None:
