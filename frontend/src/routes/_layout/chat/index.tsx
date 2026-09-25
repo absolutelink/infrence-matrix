@@ -251,7 +251,7 @@ function Chat() {
   }
 
   return (
-    <div className="flex flex-col h-[calc(100vh-8rem)]">
+    <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center justify-between mb-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Chat</h1>

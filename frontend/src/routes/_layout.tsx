@@ -37,10 +37,10 @@ function LayoutContent() {
           <QueueStatusBar />
         </header>
         <main
-          className="flex-1 p-6 md:p-8"
+          className="min-h-0 flex-1 overflow-y-auto p-6 md:p-8"
           style={{ paddingBottom: isOpen ? height + 24 : undefined }}
         >
-          <div className="mx-auto max-w-7xl">
+          <div className="mx-auto h-full max-w-7xl">
             <Outlet />
           </div>
         </main>
