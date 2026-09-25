@@ -12,7 +12,7 @@ COPY --from=agent /app/uv.lock /agent/uv.lock
 COPY --from=agent /app/app /agent/app
 COPY recipes/halogen-rocm/docker/matrix-entrypoint.sh /usr/local/bin/matrix-entrypoint.sh
 
-RUN pip3 install --no-cache-dir --break-system-packages uv \
+RUN pip3 install --no-cache-dir --break-system-packages uv hf_xet \
     && chmod +x /usr/local/bin/matrix-entrypoint.sh \
     && mkdir -p /agent /models /cache
 
@@ -27,7 +27,7 @@ ENV VIRTUAL_ENV=/agent/.venv \
     MODELS_PATH=/models \
     CACHE_PATH=/cache \
     HF_HUB_OFFLINE=0 \
-    HF_HUB_DISABLE_XET=1 \
+    HF_HUB_DISABLE_XET=0 \
     HALOGEN_ENTRYPOINT=/usr/local/bin/entrypoint.sh \
     HALOGEN_MAX_INSTANCES=1
 

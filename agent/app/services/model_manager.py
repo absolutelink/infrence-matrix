@@ -55,6 +55,12 @@ class _EventPublishingTqdm:
     def set_transfer_postfix_str(self, *args: Any, **kwargs: Any) -> None:
         pass
 
+    def set_description_str(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def set_description(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
     @property
     def format_dict(self) -> dict:
         return {"n": self.n, "total": self.total, "rate": 0}
