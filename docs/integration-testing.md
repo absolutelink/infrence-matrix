@@ -19,7 +19,7 @@ Run 3 (WS framing fix): 2026-09-24 — **10 passed / 7 failed** (framing fixed; 
 Run 5 (WS persistence + registration heal): 2026-09-24 — **10 passed / 7 failed** (all non-WS tests pass; WS tests time out under full-suite contention only)
 Run 6 (mmproj + error relay): 2026-09-24 — **11 passed / 6 failed** (image-input fixed; remaining 6 all WS contention timeouts)
 Run 7 (WS generation cap): 2026-09-24 — **11 passed / 6 failed** (cap bounds generation; WS turns still queue behind 4 busy slots — HTTP image turn held a slot 124s. Accepted as environment-bound: every test passes standalone.)
-Run 8 (WS continuation verification): 2026-09-24 — **0 passed / 1 failed** (`websocket-continuation`; first turn completes, second turn emits `null` because WS cache history was not passed to llama.cpp)
+Run 8 (WS continuation verification): 2026-09-25 — **1 passed / 0 failed** (`websocket-continuation`; WS cache history hydration verified after deploy)
 
 | Test ID | Name | Status | Notes |
 |---|---|---|---|
@@ -29,7 +29,7 @@ Run 8 (WS continuation verification): 2026-09-24 — **0 passed / 1 failed** (`w
 | `streaming-response` | Streaming Response | ✅ PASS | |
 | `websocket-response` | WebSocket Response | ❌ FAIL | 30s harness timer: turn takes 15–40s idle (18.5s), >30s under full-suite load (17 concurrent tests vs 4 llama.cpp slots; measured 81s). Passes standalone |
 | `websocket-sequential-responses` | WebSocket Sequential Responses | ❌ FAIL | same contention timeout (2 turns × 30s) |
-| `websocket-continuation` | WebSocket Continuation | ❌ FAIL | fixed locally: WS cache/DB continuation history was validated but not passed to llama.cpp; pending deploy |
+| `websocket-continuation` | WebSocket Continuation | ✅ PASS | WS cache history hydration verified after deploy |
 | `websocket-reconnect-store-false-recovery` | WebSocket Store False Reconnect Recovery | ❌ FAIL | same contention timeout |
 | `websocket-previous-response-not-found` | WebSocket Missing Previous Response | ✅ PASS | |
 | `websocket-failed-continuation-evicts-cache` | WebSocket Failed Continuation Evicts Cache | ❌ FAIL | same contention timeout |
@@ -67,15 +67,14 @@ Run 8 (WS continuation verification): 2026-09-24 — **0 passed / 1 failed** (`w
 11. ~~**WS persist serialization bug (run 5)**~~ — FIXED (`_coerced_output_items`, verified
      end-to-end: WS store=true turn persisted + HTTP continuation resolved with correct
      history answer).
-12. **WS continuation history hydration** — FIXED locally: WS turns now pass connection-local
-    cached history for `store=false` and the full DB chain for `store=true`; pending deploy
-    verification.
+12. ~~**WS continuation history hydration**~~ — FIXED: WS turns pass connection-local cached
+    history for `store=false` and the full DB chain for `store=true`; verified after deploy.
 
 ## History
 
 | Date | Commit | Passed | Failed | Notes |
 |---|---|---|---|---|
-| 2026-09-24 | WS continuation history fix (local) | 0 | 1 | Isolated `websocket-continuation`: first response completed, second response was `null`; patched WS cache/DB history hydration. Pending commit/deploy verification |
+| 2026-09-25 | WS continuation history fix (deployed) | 1 | 0 | `websocket-continuation` passes after WS cache/DB history hydration fix |
 | 2026-09-24 | (baseline) | 3 | 14 | Initial full run |
 | 2026-09-24 | serialize_spec fix (pushed) | 10 | 7 | Clusters 1–3 + 5 fixed: spec serializer (`serialize_spec`), `completed_at` at finalize, dropped `reasoning_text.*` event twins. Unblocked: basic-response, system-prompt, tool-calling, streaming-response, assistant-phase, multi-turn, compact-response |
 | 2026-09-24 | WS framing + compaction-input (pushed) | 10 | 7 | Clusters 4 + 6 fixed: raw JSON per WS message, compaction items replayed as assistant context. Exposed: WS turns not persisted; 30s harness timer vs thinking-model latency |
