@@ -54,6 +54,10 @@ export type AgentRegisterRequest = {
      * Running Server Ids
      */
     running_server_ids?: Array<string> | null;
+    /**
+     * Healthy Server Ids
+     */
+    healthy_server_ids?: Array<string> | null;
 };
 
 /**
@@ -1504,6 +1508,10 @@ export type ServerInstanceResponse = {
      * Started At
      */
     started_at?: string | null;
+    /**
+     * Last Health Check
+     */
+    last_health_check?: string | null;
     /**
      * Total Requests
      */

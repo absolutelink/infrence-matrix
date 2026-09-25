@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from app.models import Agent
+from app.models import Agent, ServerInstance
 from app.services.agent_manager import AgentManager
 
 
@@ -435,6 +435,77 @@ class TestAgentManagerList:
         assert len(agents) == 1
         assert agents[0]["name"] == "Test Agent"
         assert agents[0]["status"] == "online"
+
+
+class TestAgentManagerServerHealth:
+    """Test persistence of agent-reported server health transitions."""
+
+    @pytest.mark.asyncio
+    @patch("app.services.agent_manager.AsyncSessionMaker")
+    async def test_server_health_event_updates_instance(self, mock_session_maker):
+        server = ServerInstance(
+            model_id="11111111-1111-1111-1111-111111111111",
+            agent_id="22222222-2222-2222-2222-222222222222",
+            alias="health-test",
+            process_command="llama-server",
+            status="running",
+            health_status="healthy",
+        )
+        result = Mock()
+        result.scalar_one_or_none.return_value = server
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(return_value=result)
+        session.add = Mock()
+        session.commit = AsyncMock()
+        mock_session_maker.return_value = session
+
+        manager = AgentManager()
+        await manager._handle_server_health(
+            "agent-1",
+            {
+                "server_id": str(server.id),
+                "status": "unhealthy",
+                "error": "health endpoint returned HTTP 503",
+            },
+        )
+
+        assert server.health_status == "unhealthy"
+        assert server.error_message == "health endpoint returned HTTP 503"
+        assert server.last_health_check is not None
+        session.add.assert_called_once_with(server)
+        session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("app.services.agent_manager.AsyncSessionMaker")
+    async def test_healthy_event_clears_previous_error(self, mock_session_maker):
+        server = ServerInstance(
+            model_id="11111111-1111-1111-1111-111111111111",
+            agent_id="22222222-2222-2222-2222-222222222222",
+            alias="health-recovery",
+            process_command="llama-server",
+            status="running",
+            health_status="unhealthy",
+            error_message="connection refused",
+        )
+        result = Mock()
+        result.scalar_one_or_none.return_value = server
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(return_value=result)
+        session.add = Mock()
+        session.commit = AsyncMock()
+        mock_session_maker.return_value = session
+
+        manager = AgentManager()
+        await manager._handle_server_health(
+            "agent-1", {"server_id": str(server.id), "status": "healthy"}
+        )
+
+        assert server.health_status == "healthy"
+        assert server.error_message is None
 
 
 class TestAgentManagerSend:

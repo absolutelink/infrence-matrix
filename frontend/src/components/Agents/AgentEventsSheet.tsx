@@ -22,6 +22,7 @@ const eventColors: Record<
   "server.started": "default",
   "server.stopped": "secondary",
   "server.error": "destructive",
+  "server.health": "outline",
   "download.completed": "default",
   "download.failed": "destructive",
   "download.started": "default",
@@ -41,6 +42,8 @@ function formatEvent(e: {
       return `Server ${d.server_id} stopped`
     case "server.error":
       return `Server ${d.server_id} error: ${d.error}`
+    case "server.health":
+      return `Server ${d.server_id} is ${d.status}${d.error ? `: ${d.error}` : ""}`
     case "download.started":
       return `Download started: ${d.filename} (${d.repo_id})`
     case "download.progress":

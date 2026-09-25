@@ -63,10 +63,17 @@ def create_app() -> FastAPI:
         except Exception as e:  # noqa: BLE001 - startup must not crash on optional services
             logger.error(f"Failed to start log forwarding: {e}")
 
+        try:
+            llama_server_manager.start_health_monitoring()
+            logger.info("Started server health monitoring")
+        except Exception as e:  # noqa: BLE001 - startup must not crash on optional services
+            logger.error(f"Failed to start server health monitoring: {e}")
+
     @app.on_event("shutdown")
     async def shutdown_event():
         """Shutdown event to cleanup services."""
         logger.info("Shutting down Inference Matrix Agent services...")
+        await llama_server_manager.stop_health_monitoring()
         await frontend_client.close()
         logger.info("Agent shutdown complete")
 

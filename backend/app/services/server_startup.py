@@ -36,6 +36,9 @@ START_DISPATCH_TIMEOUT = 900.0
 # How long we wait for an in-flight (or newly dispatched) start to become
 # healthy before giving up on the request.
 READY_TIMEOUT = 900.0
+# A process that was healthy and became unhealthy should get a short recovery
+# window, but must not hold an inference request for the full cold-start budget.
+UNHEALTHY_RECOVERY_TIMEOUT = 30.0
 READY_POLL_INTERVAL = 1.0
 
 
@@ -261,7 +264,11 @@ async def ensure_server_ready(
         try:
             return await wait_until_ready(
                 str(instance.id),
-                timeout=start_timeout,
+                timeout=(
+                    UNHEALTHY_RECOVERY_TIMEOUT
+                    if instance.health_status == "unhealthy"
+                    else start_timeout
+                ),
                 poll_interval=poll_interval,
             )
         except RuntimeError as e:

@@ -43,6 +43,7 @@ type ServerInstance = {
   agent_port: number | null
   proxy_url: string | null
   started_at: string | null
+  last_health_check: string | null
   total_requests: number
   cpu_usage_percent: number | null
   ram_usage_bytes: number | null
@@ -105,7 +106,8 @@ export const columns: ColumnDef<ServerInstance>[] = [
 
       const statusVariant = statusColors[instance.status] || "outline"
       const healthVariant = statusColors[instance.health_status] || "outline"
-      const statusLabel = instance.status === "starting" ? "booting" : instance.status
+      const statusLabel =
+        instance.status === "starting" ? "booting" : instance.status
 
       return (
         <div className="flex gap-2">
@@ -113,6 +115,14 @@ export const columns: ColumnDef<ServerInstance>[] = [
           <Badge variant={healthVariant} className="text-xs">
             {instance.health_status}
           </Badge>
+          {instance.last_health_check && (
+            <span
+              className="text-xs text-muted-foreground"
+              title="Last health check"
+            >
+              {new Date(instance.last_health_check).toLocaleTimeString()}
+            </span>
+          )}
         </div>
       )
     },

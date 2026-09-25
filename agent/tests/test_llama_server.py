@@ -2,7 +2,7 @@
 
 import asyncio
 import os
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -289,3 +289,83 @@ class TestLlamaServerManager:
         servers = manager.list_servers()
 
         assert servers == []
+
+    @pytest.mark.asyncio
+    @patch("app.services.llama_server.publish_event")
+    async def test_health_failure_threshold_emits_transition(self, mock_publish):
+        manager = LlamaServerManager()
+        manager.servers["test-server"] = Mock(poll=Mock(return_value=None))
+        manager.configs["test-server"] = ServerConfig(
+            model_path="/models/test.gguf", port=8081
+        )
+        manager.server_health["test-server"] = "healthy"
+        manager._check_health = AsyncMock(return_value=(False, "connection refused"))
+
+        for _ in range(manager.HEALTH_FAILURE_THRESHOLD - 1):
+            await manager._monitor_server_health("test-server")
+
+        mock_publish.assert_not_called()
+        await manager._monitor_server_health("test-server")
+
+        mock_publish.assert_called_once_with(
+            "server.health",
+            {
+                "server_id": "test-server",
+                "status": "unhealthy",
+                "previous_status": "healthy",
+                "consecutive_failures": manager.HEALTH_FAILURE_THRESHOLD,
+                "error": "connection refused",
+            },
+        )
+        assert manager.healthy_servers == set()
+
+    @pytest.mark.asyncio
+    @patch("app.services.llama_server.publish_event")
+    async def test_health_recovery_requires_two_successes(self, mock_publish):
+        manager = LlamaServerManager()
+        manager.servers["test-server"] = Mock(poll=Mock(return_value=None))
+        manager.configs["test-server"] = ServerConfig(
+            model_path="/models/test.gguf", port=8081
+        )
+        manager.server_health["test-server"] = "unhealthy"
+        manager._health_failures["test-server"] = 3
+        manager._check_health = AsyncMock(return_value=(True, None))
+
+        await manager._monitor_server_health("test-server")
+        mock_publish.assert_not_called()
+        await manager._monitor_server_health("test-server")
+
+        mock_publish.assert_called_once_with(
+            "server.health",
+            {
+                "server_id": "test-server",
+                "status": "healthy",
+                "previous_status": "unhealthy",
+                "consecutive_failures": 0,
+                "error": None,
+            },
+        )
+        assert manager.healthy_servers == {"test-server"}
+
+    @pytest.mark.asyncio
+    @patch("app.services.llama_server.publish_event")
+    async def test_process_exit_emits_error_and_removes_server(self, mock_publish):
+        manager = LlamaServerManager()
+        manager.servers["test-server"] = Mock(poll=Mock(return_value=137))
+        manager.configs["test-server"] = ServerConfig(
+            model_path="/models/test.gguf", port=8081
+        )
+        manager.healthy_servers.add("test-server")
+
+        await manager._monitor_server_health("test-server")
+
+        assert "test-server" not in manager.servers
+        assert "test-server" not in manager.healthy_servers
+        mock_publish.assert_called_once_with(
+            "server.error",
+            {
+                "server_id": "test-server",
+                "error": "llama-server exited with code 137",
+                "exit_code": 137,
+            },
+        )

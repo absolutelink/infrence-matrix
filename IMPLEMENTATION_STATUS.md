@@ -119,7 +119,7 @@ Last Updated: September 24, 2026
 - [x] Live llama-server log streaming (log.lines events) with 100-line history seeding + polling fallback
 - [x] Per-server llama.cpp logs sheet in UI (live tail, auto-scroll, stderr highlight)
 - [x] Stale instance cleanup: agents report running_server_ids on registration; backend marks unreported instances stopped
-- [ ] Server health monitoring (periodic health checks)
+- [x] Server health monitoring (periodic health checks, transition events, crash detection)
 - [ ] Server configuration editing (in-place)
 - [ ] Connection testing
 
@@ -399,6 +399,14 @@ API_URL=https://matrix.thelink.family
 ---
 
 ## 📝 Recent Changes
+
+### September 25, 2026 (server health monitoring)
+- ✅ Agent-side health monitor checks active llama-server processes every 10s with failure/recovery thresholds
+- ✅ Unexpected llama-server exits emit `server.error` and are removed from the agent's active registry
+- ✅ `server.health` transition events persist health state and last-check timestamps in the backend
+- ✅ Unhealthy inference instances get a short recovery window instead of the full cold-start timeout
+- ✅ Server instance UI shows the last health-check time and agent event feed includes health transitions
+- ✅ Added agent and backend regression tests for health thresholds, recovery, crashes, and persistence
 
 ### September 23, 2026 (Open Responses conformance pass)
 - ✅ Ran the openresponses.org conformance suite (cloned spec repo, validated against its generated Zod schemas); fixed all reported schema failures

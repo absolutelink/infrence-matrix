@@ -42,11 +42,19 @@ class LlamaServerManager:
 
     # Number of raw log chunks (per stream) kept in memory per server
     LOG_BUFFER_CHUNKS: int = 64
+    HEALTH_CHECK_INTERVAL: float = 10.0
+    HEALTH_CHECK_TIMEOUT: float = 5.0
+    HEALTH_FAILURE_THRESHOLD: int = 3
+    HEALTH_RECOVERY_THRESHOLD: int = 2
 
     def __init__(self) -> None:
         self.servers: dict[str, subprocess.Popen] = {}
         self.configs: dict[str, ServerConfig] = {}
         self.healthy_servers: set[str] = set()
+        self.server_health: dict[str, str] = {}
+        self._health_failures: dict[str, int] = {}
+        self._health_successes: dict[str, int] = {}
+        self._health_errors: dict[str, str | None] = {}
         self.start_times: dict[str, float] = {}
         # server_id -> lock serializing concurrent /servers/start calls for
         # the same instance (e.g. re-registration during a long download)
@@ -54,6 +62,109 @@ class LlamaServerManager:
         # server_id -> list of (stream_key, raw_chunk) in order
         self._log_buffers: dict[str, list[tuple[str, str]]] = {}
         self._log_task: asyncio.Task | None = None
+        self._health_task: asyncio.Task | None = None
+
+    def start_health_monitoring(self) -> None:
+        """Start periodic health checks for active llama-server processes."""
+        if self._health_task is None or self._health_task.done():
+            self._health_task = asyncio.create_task(self._health_monitor_loop())
+
+    async def _health_monitor_loop(self) -> None:
+        """Detect health transitions and unexpected process exits."""
+        while True:
+            await asyncio.sleep(self.HEALTH_CHECK_INTERVAL)
+            for server_id in list(self.servers):
+                try:
+                    await self._monitor_server_health(server_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("Health check failed for server %s", server_id)
+
+    async def _monitor_server_health(self, server_id: str) -> None:
+        """Check one server and publish only meaningful state transitions."""
+        process = self.servers.get(server_id)
+        config = self.configs.get(server_id)
+        if process is None or config is None:
+            return
+
+        exit_code = process.poll()
+        if exit_code is not None:
+            error = f"llama-server exited with code {exit_code}"
+            self._remove_server_state(server_id)
+            publish_event(
+                "server.error",
+                {"server_id": server_id, "error": error, "exit_code": exit_code},
+            )
+            return
+
+        healthy, error = await self._check_health(config.port)
+        previous = self.server_health.get(server_id, "healthy")
+        if healthy:
+            self._health_failures[server_id] = 0
+            self._health_successes[server_id] = (
+                self._health_successes.get(server_id, 0) + 1
+            )
+            if previous == "unhealthy":
+                if self._health_successes[server_id] < self.HEALTH_RECOVERY_THRESHOLD:
+                    return
+                self.server_health[server_id] = "healthy"
+                self.healthy_servers.add(server_id)
+                self._publish_health_event(server_id, previous, "healthy", None)
+            return
+
+        self._health_successes[server_id] = 0
+        self._health_failures[server_id] = self._health_failures.get(server_id, 0) + 1
+        self._health_errors[server_id] = error
+        if previous == "unhealthy":
+            return
+        if self._health_failures[server_id] < self.HEALTH_FAILURE_THRESHOLD:
+            return
+        self.server_health[server_id] = "unhealthy"
+        self.healthy_servers.discard(server_id)
+        self._publish_health_event(server_id, previous, "unhealthy", error)
+
+    def _publish_health_event(
+        self,
+        server_id: str,
+        previous: str,
+        status: str,
+        error: str | None,
+    ) -> None:
+        """Publish a transition event for backend persistence and the UI."""
+        publish_event(
+            "server.health",
+            {
+                "server_id": server_id,
+                "status": status,
+                "previous_status": previous,
+                "consecutive_failures": self._health_failures.get(server_id, 0),
+                "error": error,
+            },
+        )
+
+    def _remove_server_state(self, server_id: str) -> None:
+        """Remove a dead server without emitting a normal stopped event."""
+        self.servers.pop(server_id, None)
+        self.configs.pop(server_id, None)
+        self.healthy_servers.discard(server_id)
+        self.server_health.pop(server_id, None)
+        self._health_failures.pop(server_id, None)
+        self._health_successes.pop(server_id, None)
+        self._health_errors.pop(server_id, None)
+        self.start_times.pop(server_id, None)
+        self._log_buffers.pop(server_id, None)
+
+    async def stop_health_monitoring(self) -> None:
+        """Stop periodic health checks."""
+        if self._health_task is None:
+            return
+        self._health_task.cancel()
+        try:
+            await self._health_task
+        except asyncio.CancelledError:
+            pass
+        self._health_task = None
 
     def start_log_forwarding(self) -> None:
         """Start the background loop emitting log.lines events."""
@@ -252,6 +363,10 @@ class LlamaServerManager:
 
             await self._wait_for_server(server_id, config.port)
             self.healthy_servers.add(server_id)
+            self.server_health[server_id] = "healthy"
+            self._health_failures[server_id] = 0
+            self._health_successes[server_id] = 0
+            self._health_errors[server_id] = None
 
             publish_event(
                 "server.started",
@@ -267,6 +382,10 @@ class LlamaServerManager:
         except Exception as e:
             logger.error(f"Failed to start server {server_id}: {e}")
             self.healthy_servers.discard(server_id)
+            self.server_health.pop(server_id, None)
+            self._health_failures.pop(server_id, None)
+            self._health_successes.pop(server_id, None)
+            self._health_errors.pop(server_id, None)
             proc = self.servers.pop(server_id, None)
             self.configs.pop(server_id, None)
             self.start_times.pop(server_id, None)
@@ -303,6 +422,10 @@ class LlamaServerManager:
         self.servers.pop(server_id, None)
         self.configs.pop(server_id, None)
         self.healthy_servers.discard(server_id)
+        self.server_health.pop(server_id, None)
+        self._health_failures.pop(server_id, None)
+        self._health_successes.pop(server_id, None)
+        self._health_errors.pop(server_id, None)
         self.start_times.pop(server_id, None)
         self._start_locks.pop(server_id, None)
         self._log_buffers.pop(server_id, None)
@@ -336,6 +459,20 @@ class LlamaServerManager:
             await asyncio.sleep(1)
 
         raise TimeoutError(f"Server {server_id} failed to start")
+
+    async def _check_health(self, port: int) -> tuple[bool, str | None]:
+        """Check llama-server health and retain a useful failure reason."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"http://localhost:{port}/health",
+                    timeout=self.HEALTH_CHECK_TIMEOUT,
+                )
+            if response.status_code == 200:
+                return True, None
+            return False, f"health endpoint returned HTTP {response.status_code}"
+        except Exception as error:
+            return False, str(error)
 
     def get_server_uptime(self, server_id: str) -> float:
         """Get server uptime in seconds."""
@@ -443,6 +580,7 @@ class LlamaServerManager:
                     "model_path": config.model_path,
                     "port": config.port,
                     "status": "running",
+                    "health_status": self.server_health.get(server_id, "unknown"),
                     "uptime_seconds": self.get_server_uptime(server_id),
                 }
             )
@@ -459,6 +597,7 @@ class LlamaServerManager:
             "server_id": server_id,
             "model_path": self.configs[server_id].model_path,
             "port": self.configs[server_id].port,
+            "health_status": self.server_health.get(server_id, "unknown"),
             "uptime_seconds": self.get_server_uptime(server_id),
         }
 

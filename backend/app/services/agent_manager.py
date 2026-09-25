@@ -271,6 +271,8 @@ class AgentManager:
                 await self._handle_server_stopped(agent_id, event_data)
             elif event_type == "server.error":
                 await self._handle_server_error(agent_id, event_data)
+            elif event_type == "server.health":
+                await self._handle_server_health(agent_id, event_data)
             elif event_type == "gpu.usage":
                 await self._handle_gpu_usage(agent_id, event_data)
             elif event_type == "download.progress":
@@ -372,6 +374,42 @@ class AgentManager:
                 session.add(server)
                 await session.commit()
                 logger.warning(f"Server {server_id} error: {data.get('error')}")
+
+    async def _handle_server_health(self, agent_id: str, data: dict) -> None:
+        """Persist an agent-reported llama-server health transition."""
+        server_id = data.get("server_id")
+        health_status = data.get("status")
+        if not server_id or health_status not in {"healthy", "unhealthy"}:
+            return
+
+        async with AsyncSessionMaker() as session:
+            from sqlalchemy import select
+
+            from app.models import ServerInstance
+
+            result = await session.execute(
+                select(ServerInstance).where(ServerInstance.id == server_id)
+            )
+            server = result.scalar_one_or_none()
+            if not server:
+                return
+
+            server.health_status = health_status
+            server.last_health_check = datetime.now(UTC)
+            if health_status == "healthy":
+                server.error_message = None
+                if server.status == "starting":
+                    server.status = "running"
+            elif data.get("error"):
+                server.error_message = str(data["error"])
+            session.add(server)
+            await session.commit()
+            logger.info(
+                "Server %s health changed to %s (agent=%s)",
+                server_id,
+                health_status,
+                agent_id,
+            )
 
     async def _handle_server_started(self, agent_id: str, data: dict) -> None:
         """Handle server.started event."""

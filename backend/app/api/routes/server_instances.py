@@ -76,6 +76,7 @@ class ServerInstanceResponse(BaseModel):
     agent_port: int | None = None
     proxy_url: str | None = None
     started_at: str | None = None
+    last_health_check: str | None = None
     total_requests: int
     cpu_usage_percent: float | None = None
     ram_usage_bytes: int | None = None
@@ -167,6 +168,9 @@ async def list_server_instances() -> ServerInstanceListResponse:
                     started_at=instance.started_at.isoformat()
                     if instance.started_at
                     else None,
+                    last_health_check=instance.last_health_check.isoformat()
+                    if instance.last_health_check
+                    else None,
                     total_requests=instance.total_requests,
                     cpu_usage_percent=instance.cpu_usage_percent,
                     ram_usage_bytes=instance.ram_usage_bytes,
@@ -223,6 +227,11 @@ async def get_server_instance(server_id: str) -> ServerInstanceResponse:
             agent_port=instance.agent.port if instance.agent else None,
             proxy_url=instance.proxy_url,
             started_at=instance.started_at.isoformat() if instance.started_at else None,
+            last_health_check=(
+                instance.last_health_check.isoformat()
+                if instance.last_health_check
+                else None
+            ),
             total_requests=instance.total_requests,
             cpu_usage_percent=instance.cpu_usage_percent,
             ram_usage_bytes=instance.ram_usage_bytes,
