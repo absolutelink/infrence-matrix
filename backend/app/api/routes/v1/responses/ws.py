@@ -42,7 +42,11 @@ from app.api.routes.v1.responses.schemas import (
     new_id,
     serialize_spec,
 )
-from app.api.routes.v1.responses.translator import StreamState, build_response_resource
+from app.api.routes.v1.responses.translator import (
+    StreamState,
+    TranslationError,
+    build_response_resource,
+)
 from app.core.db import engine
 from app.services.agent_manager import agent_manager
 
@@ -96,6 +100,26 @@ def _capped_payload(
     return payload
 
 
+def _validate_tool_outputs(
+    request: CreateResponseBody, history: list[dict[str, Any]]
+) -> None:
+    """Reject tool results that do not correspond to a prior tool call."""
+    call_ids: set[str] = set()
+    items = [*history, *_stored_input_items(request)]
+    for item in items:
+        item_type = item.get("type")
+        if item_type == "function_call":
+            call_id = item.get("call_id")
+            if call_id:
+                call_ids.add(call_id)
+        elif (
+            item_type == "function_call_output" and item.get("call_id") not in call_ids
+        ):
+            raise TranslationError(
+                f"No matching tool call exists for call_id '{item.get('call_id')}'"
+            )
+
+
 async def _stream_to_ws(
     websocket: WebSocket,
     request: CreateResponseBody,
@@ -118,6 +142,7 @@ async def _stream_to_ws(
             with Session(engine) as session:
                 previous = _load_previous(session, request.previous_response_id)
                 history = _build_chain_history(session, previous)
+        _validate_tool_outputs(request, history)
 
         seq = ev.SSEmitter()
         response_id = new_id("resp")
