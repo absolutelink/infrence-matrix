@@ -288,24 +288,52 @@ async def ensure_server_ready(
 
     # stopped or errored: (re)start it and wait for health.
     async with AsyncSessionMaker() as session:
-        fresh = await session.get(ServerInstance, instance.id)
+        fresh = (
+            await session.execute(
+                select(ServerInstance)
+                .where(ServerInstance.id == instance.id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if fresh is None:
+            raise ServerStartupError("Server instance no longer exists")
+
+        # Another request may have won the startup race while this request
+        # was loading the row. Join that startup instead of dispatching twice.
+        if fresh.status in {"starting", "running"}:
+            server_id = str(fresh.id)
+            should_start = False
+        else:
+            should_start = True
         agent = await session.get(Agent, fresh.agent_id) if fresh else None
         model = await session.get(Model, fresh.model_id) if fresh else None
         if fresh is None or agent is None or model is None:
             raise ServerStartupError(
                 "Server instance, agent, or model no longer exists"
             )
-        if agent.status != "online":
+        if not should_start:
+            payload = None
+        elif agent.status != "online":
             raise ServerStartupError(f"Agent {agent.name} is {agent.status}")
 
-        fresh.status = "starting"
-        fresh.error_message = None
-        session.add(fresh)
-        await session.commit()
+        if should_start:
+            fresh.status = "starting"
+            fresh.health_status = "unknown"
+            fresh.error_message = None
+            session.add(fresh)
+            await session.commit()
 
-        payload = build_start_payload(fresh, model)
-        agent_id = str(agent.id)
-        server_id = str(fresh.id)
+            payload = build_start_payload(fresh, model)
+            agent_id = str(agent.id)
+            server_id = str(fresh.id)
+
+    if not should_start:
+        try:
+            return await wait_until_ready(
+                server_id, timeout=start_timeout, poll_interval=poll_interval
+            )
+        except RuntimeError as e:
+            raise ServerStartupError(str(e)) from e
 
     logger.info(f"Auto-starting server {server_id} (was {instance.status})")
     asyncio.create_task(dispatch_start(agent_id, server_id, payload))
