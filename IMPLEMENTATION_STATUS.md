@@ -391,10 +391,11 @@ API_URL=https://matrix.thelink.family
 ## 🎯 Next Steps
 
 1. ~~OpenResponses API~~ ✅ implemented + conformance pass (see Inference Features section)
-2. **Server health monitoring** - periodic health checks; auto-mark instances unhealthy/stopped
-3. **Dashboard Metrics** - Add charts and statistics (gpu.usage events already streaming)
-4. ~~Schedule cleanup loop~~ - run cleanup_offline_agents periodically on startup ✅
-5. **Inference UI** - embeddings, audio transcription pages (text completion done)
+2. **Dashboard Metrics** - Add charts and statistics using the existing `gpu.usage` events
+3. **Server management polish** - in-place configuration editing and connection testing
+4. **Inference UI** - embeddings, audio transcription, and file-processing workflows
+5. **Benchmarking** - definitions, execution queue, isolation, results, and history
+6. **Reliable log streaming** - reconnect state, inactive-tab indicators, and panel layout/accessibility
 
 ---
 
@@ -407,6 +408,11 @@ API_URL=https://matrix.thelink.family
 - ✅ Unhealthy inference instances get a short recovery window instead of the full cold-start timeout
 - ✅ Server instance UI shows the last health-check time and agent event feed includes health transitions
 - ✅ Added agent and backend regression tests for health thresholds, recovery, crashes, and persistence
+- ✅ Failed server stderr remains available in the logs panel after the process exits
+- ✅ Startup failures fail fast on process exit and display the persisted error message in the server row
+- ✅ DFlash startup no longer forwards the incompatible `strict_mtp_qwen` flag
+- ✅ Queue capacity defaults to 4 slots, or uses the configured `parallel` setting; `/slots` is active-count telemetry only
+- ✅ Logs opened before startup now merge history discovered during later polling with live output
 
 ### September 23, 2026 (Open Responses conformance pass)
 - ✅ Ran the openresponses.org conformance suite (cloned spec repo, validated against its generated Zod schemas); fixed all reported schema failures

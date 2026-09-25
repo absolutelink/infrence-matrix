@@ -46,7 +46,10 @@ export function QueueStatusBar() {
             <p className="text-xs text-muted-foreground">No running servers</p>
           ) : (
             status.servers.map((server) => (
-              <div key={server.id} className="rounded-md bg-muted/60 px-2.5 py-2">
+              <div
+                key={server.id}
+                className="rounded-md bg-muted/60 px-2.5 py-2"
+              >
                 <div className="flex items-center justify-between text-xs">
                   <span className="truncate font-medium">
                     {server.alias || server.model_id.slice(0, 8)}
@@ -61,15 +64,17 @@ export function QueueStatusBar() {
                   {server.state === "booting"
                     ? "Waiting for llama.cpp health"
                     : server.telemetry_known
-                    ? `${server.available} slots available`
-                    : "Using health status; telemetry unavailable"}
+                      ? `${server.available} slots available`
+                      : "Using health status; telemetry unavailable"}
                 </div>
               </div>
             ))
           )}
         </div>
         {!connected && (
-          <p className="mt-3 text-[11px] text-amber-600">Scheduler connection interrupted</p>
+          <p className="mt-3 text-[11px] text-amber-600">
+            Scheduler connection interrupted
+          </p>
         )}
       </div>
     </details>

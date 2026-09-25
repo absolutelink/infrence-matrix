@@ -10,6 +10,7 @@ from websockets.client import connect
 from app.core.config import settings
 from app.core.logging import logger
 from app.services.event_bus import publish_event
+from app.services.gpu_monitor import _sample_gpu
 
 
 class FrontendClient:
@@ -42,6 +43,24 @@ class FrontendClient:
             # to only clear instances that are no longer actually running.
             "running_server_ids": list(llama_server_manager.servers.keys()),
             "healthy_server_ids": list(llama_server_manager.healthy_servers),
+            "server_statuses": [
+                {
+                    "id": server_id,
+                    "status": (
+                        "running"
+                        if server_id in llama_server_manager.healthy_servers
+                        else "starting"
+                    ),
+                    "health_status": (
+                        "healthy"
+                        if server_id in llama_server_manager.healthy_servers
+                        else "unknown"
+                    ),
+                    "port": config.port,
+                }
+                for server_id, config in llama_server_manager.configs.items()
+                if server_id in llama_server_manager.servers
+            ],
         }
 
         url = f"{settings.FRONTEND_URL}/api/v1/agents/register"
@@ -86,6 +105,10 @@ class FrontendClient:
                 gpu_info["backend"] = "cuda"
         except Exception:
             pass
+
+        sample = _sample_gpu()
+        if sample and sample["gpus"]:
+            gpu_info.update(sample["gpus"][0])
 
         return gpu_info
 

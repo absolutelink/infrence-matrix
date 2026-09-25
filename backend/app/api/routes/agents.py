@@ -20,6 +20,7 @@ class AgentRegisterRequest(BaseModel):
     gpu_info: dict | None = None
     running_server_ids: list[str] | None = None
     healthy_server_ids: list[str] | None = None
+    server_statuses: list[dict] | None = None
 
 
 class AgentRegisterResponse(BaseModel):

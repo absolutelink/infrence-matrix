@@ -35,7 +35,7 @@ export class AgentsService {
             }
         });
     }
-
+    
     /**
      * Register Agent
      *
@@ -52,7 +52,7 @@ export class AgentsService {
             }
         });
     }
-
+    
     /**
      * List Agents
      *
@@ -65,7 +65,7 @@ export class AgentsService {
             ...options
         });
     }
-
+    
     /**
      * List Agents
      *
@@ -78,7 +78,7 @@ export class AgentsService {
             ...options
         });
     }
-
+    
     /**
      * Delete Agent
      *
@@ -91,7 +91,7 @@ export class AgentsService {
             ...options
         });
     }
-
+    
     /**
      * Delete Agent
      *
@@ -104,7 +104,7 @@ export class AgentsService {
             ...options
         });
     }
-
+    
     /**
      * Get Agent
      *
@@ -117,7 +117,7 @@ export class AgentsService {
             ...options
         });
     }
-
+    
     /**
      * Get Agent
      *
@@ -130,7 +130,7 @@ export class AgentsService {
             ...options
         });
     }
-
+    
     /**
      * Update Agent
      *
@@ -147,7 +147,7 @@ export class AgentsService {
             }
         });
     }
-
+    
     /**
      * Update Agent
      *
@@ -164,7 +164,7 @@ export class AgentsService {
             }
         });
     }
-
+    
     /**
      * Send Command
      *
@@ -181,7 +181,7 @@ export class AgentsService {
             }
         });
     }
-
+    
     /**
      * Send Command
      *
@@ -213,7 +213,7 @@ export class MetricsService {
             ...options
         });
     }
-
+    
     /**
      * Metrics
      *
@@ -241,7 +241,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-
+    
     /**
      * List Server Instances
      *
@@ -254,7 +254,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-
+    
     /**
      * Delete Server
      *
@@ -267,7 +267,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-
+    
     /**
      * Delete Server
      *
@@ -280,7 +280,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-
+    
     /**
      * Get Server Instance
      *
@@ -293,7 +293,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-
+    
     /**
      * Get Server Instance
      *
@@ -306,7 +306,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-
+    
     /**
      * Update Server
      *
@@ -323,7 +323,7 @@ export class ServerInstancesService {
             }
         });
     }
-
+    
     /**
      * Update Server
      *
@@ -340,7 +340,7 @@ export class ServerInstancesService {
             }
         });
     }
-
+    
     /**
      * Start Server
      *
@@ -357,7 +357,7 @@ export class ServerInstancesService {
             }
         });
     }
-
+    
     /**
      * Start Server
      *
@@ -374,7 +374,7 @@ export class ServerInstancesService {
             }
         });
     }
-
+    
     /**
      * Restart Server
      *
@@ -387,7 +387,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-
+    
     /**
      * Restart Server
      *
@@ -400,7 +400,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-
+    
     /**
      * Stop Server
      *
@@ -413,7 +413,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-
+    
     /**
      * Stop Server
      *
@@ -439,7 +439,7 @@ export class BenchmarksService {
             ...options
         });
     }
-
+    
     /**
      * List Definitions
      */
@@ -450,7 +450,7 @@ export class BenchmarksService {
             ...options
         });
     }
-
+    
     /**
      * Create Definition
      */
@@ -465,7 +465,7 @@ export class BenchmarksService {
             }
         });
     }
-
+    
     /**
      * Create Definition
      */
@@ -480,21 +480,21 @@ export class BenchmarksService {
             }
         });
     }
-
+    
     /**
      * Delete Definition
      */
     public static deleteDefinition<ThrowOnError extends boolean = true>(options: Options<benchmarksDeleteDefinitionData, ThrowOnError>) {
         return (options.client ?? client).delete<benchmarksDeleteDefinitionResponses, benchmarksDeleteDefinitionErrors, ThrowOnError>({ url: '/api/v1/benchmarks/definitions/{definition_id}', ...options });
     }
-
+    
     /**
      * Delete Definition
      */
     public static deleteDefinition2<ThrowOnError extends boolean = true>(options: Options<benchmarksDeleteDefinitionData, ThrowOnError>) {
         return (options.client ?? client).delete<benchmarksDeleteDefinitionResponses, benchmarksDeleteDefinitionErrors, ThrowOnError>({ url: '/api/v1/benchmarks/definitions/{definition_id}', ...options });
     }
-
+    
     /**
      * Update Definition
      */
@@ -509,7 +509,7 @@ export class BenchmarksService {
             }
         });
     }
-
+    
     /**
      * Update Definition
      */
@@ -524,7 +524,7 @@ export class BenchmarksService {
             }
         });
     }
-
+    
     /**
      * List Runs
      */
@@ -535,7 +535,7 @@ export class BenchmarksService {
             ...options
         });
     }
-
+    
     /**
      * List Runs
      */
@@ -546,7 +546,7 @@ export class BenchmarksService {
             ...options
         });
     }
-
+    
     /**
      * Create Run
      */
@@ -561,7 +561,7 @@ export class BenchmarksService {
             }
         });
     }
-
+    
     /**
      * Create Run
      */
@@ -576,7 +576,7 @@ export class BenchmarksService {
             }
         });
     }
-
+    
     /**
      * Get Results
      */
@@ -587,7 +587,7 @@ export class BenchmarksService {
             ...options
         });
     }
-
+    
     /**
      * Get Results
      */
@@ -598,7 +598,7 @@ export class BenchmarksService {
             ...options
         });
     }
-
+    
     /**
      * Cancel Run
      */
@@ -609,7 +609,7 @@ export class BenchmarksService {
             ...options
         });
     }
-
+    
     /**
      * Cancel Run
      */
@@ -620,7 +620,7 @@ export class BenchmarksService {
             ...options
         });
     }
-
+    
     /**
      * Abort Run
      */
@@ -631,7 +631,7 @@ export class BenchmarksService {
             ...options
         });
     }
-
+    
     /**
      * Abort Run
      */
@@ -642,7 +642,7 @@ export class BenchmarksService {
             ...options
         });
     }
-
+    
     /**
      * Force Stop Run
      */
@@ -653,7 +653,7 @@ export class BenchmarksService {
             ...options
         });
     }
-
+    
     /**
      * Force Stop Run
      */
@@ -679,7 +679,7 @@ export class ModelsService {
             ...options
         });
     }
-
+    
     /**
      * Read Models
      *
@@ -692,7 +692,7 @@ export class ModelsService {
             ...options
         });
     }
-
+    
     /**
      * Create Model
      *
@@ -709,7 +709,7 @@ export class ModelsService {
             }
         });
     }
-
+    
     /**
      * Create Model
      *
@@ -726,7 +726,7 @@ export class ModelsService {
             }
         });
     }
-
+    
     /**
      * Delete Model
      *
@@ -739,7 +739,7 @@ export class ModelsService {
             ...options
         });
     }
-
+    
     /**
      * Delete Model
      *
@@ -752,7 +752,7 @@ export class ModelsService {
             ...options
         });
     }
-
+    
     /**
      * Read Model
      *
@@ -765,7 +765,7 @@ export class ModelsService {
             ...options
         });
     }
-
+    
     /**
      * Read Model
      *
@@ -778,7 +778,7 @@ export class ModelsService {
             ...options
         });
     }
-
+    
     /**
      * Update Model
      *
@@ -795,7 +795,7 @@ export class ModelsService {
             }
         });
     }
-
+    
     /**
      * Update Model
      *
@@ -827,7 +827,7 @@ export class HuggingfaceService {
             ...options
         });
     }
-
+    
     /**
      * Search Models
      *
@@ -840,7 +840,7 @@ export class HuggingfaceService {
             ...options
         });
     }
-
+    
     /**
      * List Model Files
      *
@@ -853,7 +853,7 @@ export class HuggingfaceService {
             ...options
         });
     }
-
+    
     /**
      * List Model Files
      *
@@ -866,7 +866,7 @@ export class HuggingfaceService {
             ...options
         });
     }
-
+    
     /**
      * Get Model Info
      *
@@ -879,7 +879,7 @@ export class HuggingfaceService {
             ...options
         });
     }
-
+    
     /**
      * Get Model Info
      *
@@ -892,7 +892,7 @@ export class HuggingfaceService {
             ...options
         });
     }
-
+    
     /**
      * Get Parameter Count
      *
@@ -906,7 +906,7 @@ export class HuggingfaceService {
             ...options
         });
     }
-
+    
     /**
      * Get Parameter Count
      *
@@ -933,7 +933,7 @@ export class UtilsService {
             ...options
         });
     }
-
+    
     /**
      * Health Check
      */
@@ -963,7 +963,7 @@ export class V1 {
             ...options
         });
     }
-
+    
     /**
      * Retrieve Model
      *
@@ -1080,7 +1080,7 @@ export class V15 {
             }
         });
     }
-
+    
     /**
      * Compact Response
      *
@@ -1125,7 +1125,7 @@ export class V16 {
             ...options
         });
     }
-
+    
     /**
      * Upload File
      *
@@ -1147,7 +1147,7 @@ export class V16 {
             }
         });
     }
-
+    
     /**
      * Delete File
      *
@@ -1163,7 +1163,7 @@ export class V16 {
             ...options
         });
     }
-
+    
     /**
      * Retrieve File
      *
@@ -1179,7 +1179,7 @@ export class V16 {
             ...options
         });
     }
-
+    
     /**
      * Retrieve File Content
      *
@@ -1217,7 +1217,7 @@ export class V17 {
             ...options
         });
     }
-
+    
     /**
      * Create Batch
      *
@@ -1237,7 +1237,7 @@ export class V17 {
             }
         });
     }
-
+    
     /**
      * Retrieve Batch
      *
@@ -1253,7 +1253,7 @@ export class V17 {
             ...options
         });
     }
-
+    
     /**
      * Cancel Batch
      *
@@ -1301,7 +1301,7 @@ export class V18 {
             }
         });
     }
-
+    
     /**
      * Create Translation
      *
@@ -1326,7 +1326,7 @@ export class V18 {
             }
         });
     }
-
+    
     /**
      * Create Speech
      *

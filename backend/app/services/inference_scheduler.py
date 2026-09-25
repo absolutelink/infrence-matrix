@@ -135,7 +135,11 @@ class InferenceScheduler:
                     .with_for_update()
                 )
             ).scalar_one_or_none()
-            if locked is None or locked.status != "running":
+            if (
+                locked is None
+                or locked.status != "running"
+                or locked.health_status != "healthy"
+            ):
                 return None
             active = (
                 await session.execute(

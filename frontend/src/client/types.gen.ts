@@ -58,6 +58,12 @@ export type AgentRegisterRequest = {
      * Healthy Server Ids
      */
     healthy_server_ids?: Array<string> | null;
+    /**
+     * Server Statuses
+     */
+    server_statuses?: Array<{
+        [key: string]: unknown;
+    }> | null;
 };
 
 /**

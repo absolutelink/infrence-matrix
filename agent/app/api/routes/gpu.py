@@ -2,6 +2,8 @@
 
 from fastapi import APIRouter
 
+from app.services.gpu_monitor import _sample_gpu
+
 router = APIRouter(prefix="/gpu", tags=["gpu"])
 
 
@@ -39,6 +41,10 @@ async def get_gpu_info() -> dict:
                 gpu_info["backend"] = "cuda"
     except Exception:
         pass
+
+    sample = _sample_gpu()
+    if sample and sample["gpus"]:
+        gpu_info.update(sample["gpus"][0])
 
     try:
         result = subprocess.run(
@@ -86,5 +92,14 @@ async def get_gpu_usage() -> dict:
             usage["temperature"] = float(parts[2])
     except Exception:
         pass
+
+    sample = _sample_gpu()
+    if sample and sample["gpus"]:
+        gpu = sample["gpus"][0]
+        usage["gpu_percent"] = gpu["utilization"]
+        usage["memory_percent"] = (
+            gpu["vram_used"] / gpu["vram_total"] * 100 if gpu["vram_total"] else 0.0
+        )
+        usage["temperature"] = gpu["temperature"]
 
     return usage

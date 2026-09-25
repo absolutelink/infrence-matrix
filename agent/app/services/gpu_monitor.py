@@ -2,6 +2,7 @@
 
 import asyncio
 import subprocess
+from pathlib import Path
 
 from app.core.config import settings
 from app.core.logging import logger
@@ -26,13 +27,17 @@ def _query_nvidia_smi(query: str) -> str | None:
 
 
 def _sample_gpu() -> dict | None:
-    """Sample GPU metrics via nvidia-smi. Returns None if unavailable."""
+    """Sample GPU metrics from NVIDIA or AMD device telemetry."""
     output = _query_nvidia_smi(
         "index,name,memory.total,memory.used,utilization.gpu,temperature.gpu"
     )
-    if not output:
-        return None
+    if output:
+        return _parse_nvidia_output(output)
+    return _sample_amd_sysfs()
 
+
+def _parse_nvidia_output(output: str) -> dict | None:
+    """Parse nvidia-smi CSV output."""
     gpus = []
     for line in output.splitlines():
         parts = [p.strip() for p in line.split(",")]
@@ -58,6 +63,51 @@ def _sample_gpu() -> dict | None:
     return {"gpus": gpus} if gpus else None
 
 
+def _read_int(path: Path) -> int | None:
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _sample_amd_sysfs() -> dict | None:
+    """Read AMDGPU shared-memory metrics exposed by the kernel driver."""
+    for device in sorted(Path("/sys/class/drm").glob("card*/device")):
+        try:
+            if device.joinpath("vendor").read_text().strip().lower() != "0x1002":
+                continue
+        except OSError:
+            continue
+
+        vram_total = _read_int(device / "mem_info_vram_total") or 0
+        vram_used = _read_int(device / "mem_info_vram_used") or 0
+        gtt_total = _read_int(device / "mem_info_gtt_total") or 0
+        gtt_used = _read_int(device / "mem_info_gtt_used") or 0
+        shared_memory = gtt_total > vram_total * 2
+        total = gtt_total if shared_memory else vram_total
+        used = gtt_used if shared_memory else vram_used
+        if total <= 0:
+            continue
+
+        busy = _read_int(device / "gpu_busy_percent") or 0
+        return {
+            "gpus": [
+                {
+                    "id": 0,
+                    "name": "AMD GPU",
+                    "vram_total": total,
+                    "vram_used": used,
+                    "vram_free": max(total - used, 0),
+                    "utilization": float(busy),
+                    "temperature": None,
+                    "backend": settings.GPU_BACKEND,
+                    "memory_type": "shared" if shared_memory else "dedicated",
+                }
+            ]
+        }
+    return None
+
+
 class GPUMonitor:
     """Monitors GPU usage and health."""
 
@@ -70,7 +120,7 @@ class GPUMonitor:
         if info:
             return info
 
-        logger.debug("No NVIDIA GPU detected via nvidia-smi")
+        logger.debug("No supported GPU telemetry source detected")
         return {"gpus": []}
 
     async def get_vram_usage(self) -> int:

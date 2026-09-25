@@ -346,19 +346,19 @@ function Chat() {
             <div className="flex justify-start">
               <div className="max-w-[80%] rounded-lg px-4 py-2 bg-muted">
                 <div className="font-semibold text-sm mb-1">Assistant</div>
-                  <div className="flex items-center gap-2">
-                    {waitingForCapacity ? (
-                      <span className="text-xs text-muted-foreground">
-                        Waiting for an available slot...
-                      </span>
-                    ) : (
-                      <>
-                        <div className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce" />
-                        <div className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce [animation-delay:0.2s]" />
-                        <div className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce [animation-delay:0.4s]" />
-                      </>
-                    )}
-                  </div>
+                <div className="flex items-center gap-2">
+                  {waitingForCapacity ? (
+                    <span className="text-xs text-muted-foreground">
+                      Waiting for an available slot...
+                    </span>
+                  ) : (
+                    <>
+                      <div className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce" />
+                      <div className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce [animation-delay:0.2s]" />
+                      <div className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce [animation-delay:0.4s]" />
+                    </>
+                  )}
+                </div>
               </div>
             </div>
           )}

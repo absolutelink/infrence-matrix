@@ -141,6 +141,26 @@ class AgentManager:
                     f"for restarted agent {name}"
                 )
 
+            # Reconcile the complete in-memory state reported by newer agents.
+            # This preserves booting state across backend restarts instead of
+            # inferring it from the running/healthy ID lists alone.
+            for reported in agent_data.get("server_statuses") or []:
+                server_id = reported.get("id")
+                if not server_id:
+                    continue
+                status = reported.get("status", "starting")
+                health_status = reported.get("health_status", "unknown")
+                if status not in {"starting", "running"}:
+                    continue
+                await session.execute(
+                    update(ServerInstance)
+                    .where(
+                        col(ServerInstance.agent_id) == agent.id,
+                        col(ServerInstance.id) == server_id,
+                    )
+                    .values(status=status, health_status=health_status)
+                )
+
             await session.commit()
 
             await session.refresh(agent)
