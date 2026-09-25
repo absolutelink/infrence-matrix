@@ -4,6 +4,8 @@ Non-streaming JSON and SSE streaming, previous_response_id chaining,
 function tools via llama.cpp native tool calling, reasoning passthrough.
 """
 
+import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -57,6 +59,10 @@ logger = logging.getLogger(__name__)
 # A missing output limit is otherwise forwarded as unlimited generation. This
 # is especially costly for Responses requests carrying large tool definitions.
 DEFAULT_MAX_OUTPUT_TOKENS = 1024
+
+# Keep intermediaries from treating a slow prompt prefill as a dead SSE
+# connection. This is a transport comment, not an OpenResponses event.
+SSE_KEEPALIVE_INTERVAL_SECONDS = 15.0
 
 router = APIRouter()
 
@@ -377,6 +383,34 @@ def _persist_response(
 # ============================================================================
 
 
+async def _upstream_lines_with_keepalive(
+    upstream: httpx.Response,
+) -> AsyncIterator[str | None]:
+    """Read upstream SSE lines while emitting comments during idle periods."""
+    lines = upstream.aiter_lines()
+    pending = asyncio.create_task(anext(lines))
+    try:
+        while True:
+            done, _ = await asyncio.wait(
+                (pending,), timeout=SSE_KEEPALIVE_INTERVAL_SECONDS
+            )
+            if not done:
+                yield None
+                continue
+
+            try:
+                line = pending.result()
+            except StopAsyncIteration:
+                return
+            pending = asyncio.create_task(anext(lines))
+            yield line
+    finally:
+        if not pending.done():
+            pending.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pending
+
+
 async def _stream_events(
     request: CreateResponseBody,
     server_id: str,
@@ -426,7 +460,10 @@ async def _stream_events(
         async with httpx.AsyncClient(timeout=300.0) as client:
             async with client.stream("POST", proxy_url, json=payload) as upstream:
                 upstream.raise_for_status()
-                async for line in upstream.aiter_lines():
+                async for line in _upstream_lines_with_keepalive(upstream):
+                    if line is None:
+                        yield ": keep-alive\n\n"
+                        continue
                     if not line.startswith("data: "):
                         continue
                     data = line[6:]

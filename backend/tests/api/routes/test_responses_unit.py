@@ -1,5 +1,6 @@
 """Unit tests for OpenResponses schemas, events, and translator."""
 
+import asyncio
 import json
 import uuid
 
@@ -373,6 +374,28 @@ class TestSSEFraming:
         assert seqs == list(range(1, len(frames) + 1))
         # Draining again yields nothing
         assert seq.drain_frames() == []
+
+
+class TestTransportKeepalives:
+    @pytest.mark.asyncio
+    async def test_sse_keepalive_is_emitted_for_idle_upstream(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.api.routes.v1.responses import router
+
+        class SlowLines:
+            async def __anext__(self) -> str:
+                await asyncio.Event().wait()
+                return ""
+
+        class Response:
+            def aiter_lines(self) -> SlowLines:
+                return SlowLines()
+
+        monkeypatch.setattr(router, "SSE_KEEPALIVE_INTERVAL_SECONDS", 0.001)
+        stream = router._upstream_lines_with_keepalive(Response())
+        assert await anext(stream) is None
+        await stream.aclose()
 
 
 class TestResponseResourceEcho:
