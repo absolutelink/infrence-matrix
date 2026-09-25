@@ -46,6 +46,7 @@ class LlamaServerManager:
     def __init__(self) -> None:
         self.servers: dict[str, subprocess.Popen] = {}
         self.configs: dict[str, ServerConfig] = {}
+        self.healthy_servers: set[str] = set()
         self.start_times: dict[str, float] = {}
         # server_id -> lock serializing concurrent /servers/start calls for
         # the same instance (e.g. re-registration during a long download)
@@ -250,6 +251,7 @@ class LlamaServerManager:
             self.start_times[server_id] = time.time()
 
             await self._wait_for_server(server_id, config.port)
+            self.healthy_servers.add(server_id)
 
             publish_event(
                 "server.started",
@@ -264,6 +266,13 @@ class LlamaServerManager:
             return True
         except Exception as e:
             logger.error(f"Failed to start server {server_id}: {e}")
+            self.healthy_servers.discard(server_id)
+            proc = self.servers.pop(server_id, None)
+            self.configs.pop(server_id, None)
+            self.start_times.pop(server_id, None)
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+                proc.wait()
             publish_event(
                 "server.error",
                 {
@@ -293,6 +302,7 @@ class LlamaServerManager:
 
         self.servers.pop(server_id, None)
         self.configs.pop(server_id, None)
+        self.healthy_servers.discard(server_id)
         self.start_times.pop(server_id, None)
         self._start_locks.pop(server_id, None)
         self._log_buffers.pop(server_id, None)

@@ -214,7 +214,7 @@ async def wait_until_ready(
         instance = await _reload_instance(server_id)
         if instance is None:
             raise RuntimeError(f"Server instance {server_id} no longer exists")
-        if instance.status == "running":
+        if instance.status == "running" and instance.health_status == "healthy":
             return instance
         if instance.status == "error":
             raise RuntimeError(
@@ -248,11 +248,12 @@ async def ensure_server_ready(
     if instance is None:
         raise ServerStartupError(f"Server {server.id} no longer exists")
 
-    if instance.status == "running":
-        return instance
+        if instance.status == "running" and instance.health_status == "healthy":
+            return instance
 
-    if instance.status == "starting":
-        # Someone else's startup is in flight; wait for it.
+    if instance.status in {"starting", "running"}:
+        # A process may exist before its health check completes; wait for it
+        # instead of dispatching a duplicate start.
         try:
             return await wait_until_ready(
                 str(instance.id),

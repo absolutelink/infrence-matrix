@@ -169,6 +169,9 @@ class TestEnsureServerReady:
     async def test_running_returns_immediately(self, db) -> None:
         model = _make_model(db, "running-model.gguf")
         instance = self._instance(db, model, "running")
+        instance.health_status = "healthy"
+        db.add(instance)
+        db.commit()
 
         result = await ensure_server_ready_by_id(str(instance.id))
         assert result.status == "running"
@@ -181,6 +184,7 @@ class TestEnsureServerReady:
 
         async def flip_to_running():
             instance.status = "running"
+            instance.health_status = "healthy"
             db.add(instance)
             db.commit()
 

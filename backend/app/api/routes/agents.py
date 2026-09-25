@@ -19,6 +19,7 @@ class AgentRegisterRequest(BaseModel):
     port: int
     gpu_info: dict | None = None
     running_server_ids: list[str] | None = None
+    healthy_server_ids: list[str] | None = None
 
 
 class AgentRegisterResponse(BaseModel):

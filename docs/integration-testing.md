@@ -21,6 +21,8 @@ Run 6 (mmproj + error relay): 2026-09-24 — **11 passed / 6 failed** (image-inp
 Run 7 (WS generation cap): 2026-09-24 — **11 passed / 6 failed** (cap bounds generation; WS turns still queue behind 4 busy slots — HTTP image turn held a slot 124s. Accepted as environment-bound: every test passes standalone.)
 Run 8 (WS continuation verification): 2026-09-25 — **1 passed / 0 failed** (`websocket-continuation`; WS cache history hydration verified after deploy)
 Run 9 (full-suite regression sweep): 2026-09-25 — **15 passed / 2 failed** (only `websocket-continuation` and `websocket-reconnect-store-false-recovery` timed out under full-suite contention; both pass individually)
+Run 10 (full-suite regression sweep): 2026-09-25 — **10 passed / 7 failed** (HTTP/model-backed tests returned 500s during agent/server restart; WebSocket tests passed)
+Run 11 (full-suite regression sweep): 2026-09-25 — **17 passed / 0 failed**
 
 | Test ID | Name | Status | Notes |
 |---|---|---|---|
@@ -28,16 +30,16 @@ Run 9 (full-suite regression sweep): 2026-09-25 — **15 passed / 2 failed** (on
 | `assistant-phase` | Assistant Message Phase | ✅ PASS | |
 | `response-output-phase-schema` | Response Output Phase Schema | ✅ PASS | local schema fixture, no HTTP |
 | `streaming-response` | Streaming Response | ✅ PASS | |
-| `websocket-response` | WebSocket Response | ❌ FAIL | 30s harness timer: turn takes 15–40s idle (18.5s), >30s under full-suite load (17 concurrent tests vs 4 llama.cpp slots; measured 81s). Passes standalone |
-| `websocket-sequential-responses` | WebSocket Sequential Responses | ❌ FAIL | same contention timeout (2 turns × 30s) |
-| `websocket-continuation` | WebSocket Continuation | ❌ FAIL | full-suite contention timeout; passes individually in 5.9s |
-| `websocket-reconnect-store-false-recovery` | WebSocket Store False Reconnect Recovery | ❌ FAIL | full-suite contention timeout; passes individually in 5.0s |
+| `websocket-response` | WebSocket Response | ✅ PASS | |
+| `websocket-sequential-responses` | WebSocket Sequential Responses | ✅ PASS | |
+| `websocket-continuation` | WebSocket Continuation | ✅ PASS | |
+| `websocket-reconnect-store-false-recovery` | WebSocket Store False Reconnect Recovery | ✅ PASS | |
 | `websocket-previous-response-not-found` | WebSocket Missing Previous Response | ✅ PASS | |
 | `websocket-failed-continuation-evicts-cache` | WebSocket Failed Continuation Evicts Cache | ✅ PASS | passes full suite and individually after call-ID validation |
-| `websocket-compact-new-chain` | WebSocket Compact New Chain | ✅ PASS | passes full suite in 45.2s |
+| `websocket-compact-new-chain` | WebSocket Compact New Chain | ✅ PASS | |
 | `system-prompt` | System Prompt | ✅ PASS | |
 | `tool-calling` | Tool Calling | ✅ PASS | |
-| `image-input` | Image Input | ✅ PASS | mmproj-F16.gguf selected on voyager + downloaded/loaded; agent proxy now relays upstream errors |
+| `image-input` | Image Input | ✅ PASS | |
 | `multi-turn` | Multi-turn Conversation | ✅ PASS | |
 | `compact-response` | Compaction Endpoint | ✅ PASS | |
 | `compact-missing-model` | Compaction Missing Required Model | ✅ PASS | |
@@ -83,6 +85,8 @@ Run 9 (full-suite regression sweep): 2026-09-25 — **15 passed / 2 failed** (on
 | 2026-09-25 | WS reconnect recovery verification | 1 | 0 | `websocket-reconnect-store-false-recovery` passes after WS cache/DB history hydration fix |
 | 2026-09-25 | WS failed continuation verification | 0 | 1 | Isolated unmatched `function_call_output`: invalid continuation incorrectly completed and retained cache; added call-ID validation |
 | 2026-09-25 | Full-suite regression sweep | 15 | 2 | `websocket-continuation` and `websocket-reconnect-store-false-recovery` timed out under concurrent load; both passed individually. `websocket-failed-continuation-evicts-cache` and `websocket-compact-new-chain` passed |
+| 2026-09-25 | Full-suite regression sweep after restart | 10 | 7 | HTTP/model-backed tests returned 500s while the agent/server was restarting; one compaction request exposed an upstream 503. All WebSocket tests passed |
+| 2026-09-25 | Full-suite regression sweep | 17 | 0 | All compliance tests passed |
 | 2026-09-24 | (baseline) | 3 | 14 | Initial full run |
 | 2026-09-24 | serialize_spec fix (pushed) | 10 | 7 | Clusters 1–3 + 5 fixed: spec serializer (`serialize_spec`), `completed_at` at finalize, dropped `reasoning_text.*` event twins. Unblocked: basic-response, system-prompt, tool-calling, streaming-response, assistant-phase, multi-turn, compact-response |
 | 2026-09-24 | WS framing + compaction-input (pushed) | 10 | 7 | Clusters 4 + 6 fixed: raw JSON per WS message, compaction items replayed as assistant context. Exposed: WS turns not persisted; 30s harness timer vs thinking-model latency |

@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func
-from sqlmodel import col, select
+from sqlmodel import select
 
 from app.db.session import AsyncSessionMaker
 from app.models import InferenceLease, ServerInstance
@@ -101,7 +101,7 @@ class InferenceScheduler:
                 .where(
                     ServerInstance.model_id == model_id,
                     ServerInstance.status == "running",
-                    col(ServerInstance.health_status).in_(["healthy", "unknown"]),
+                    ServerInstance.health_status == "healthy",
                 )
                 .order_by(ServerInstance.last_request_at, ServerInstance.id)
             )

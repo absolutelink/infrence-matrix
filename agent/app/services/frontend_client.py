@@ -41,6 +41,7 @@ class FrontendClient:
             # Server ids live in the agent's memory; the backend uses this
             # to only clear instances that are no longer actually running.
             "running_server_ids": list(llama_server_manager.servers.keys()),
+            "healthy_server_ids": list(llama_server_manager.healthy_servers),
         }
 
         url = f"{settings.FRONTEND_URL}/api/v1/agents/register"

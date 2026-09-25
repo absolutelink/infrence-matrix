@@ -93,6 +93,10 @@ class AgentManager:
             # (e.g. backend restarted while dispatch_start's ack was lost)
             # would otherwise block every request in wait_until_ready.
             running_ids = agent_data.get("running_server_ids") or []
+            healthy_ids = agent_data.get("healthy_server_ids")
+            if healthy_ids is None:
+                # Older agents did not distinguish spawned from healthy.
+                healthy_ids = running_ids
             conditions = [
                 col(ServerInstance.agent_id) == agent.id,
                 col(ServerInstance.status).in_(["starting", "running"]),
@@ -104,7 +108,7 @@ class AgentManager:
                     .where(
                         col(ServerInstance.agent_id) == agent.id,
                         col(ServerInstance.status) == "starting",
-                        col(ServerInstance.id).in_(running_ids),
+                        col(ServerInstance.id).in_(healthy_ids),
                     )
                     .values(status="running", health_status="healthy")
                 )

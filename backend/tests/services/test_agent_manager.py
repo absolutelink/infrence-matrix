@@ -317,6 +317,58 @@ class TestAgentManagerStartingPromotion:
         # Only lookup + stale queries ran — no promotion or start update.
         assert session.execute.await_count == 2
 
+    @pytest.mark.asyncio
+    @patch("app.services.agent_manager.AsyncSessionMaker")
+    async def test_spawned_but_unhealthy_server_is_not_promoted(
+        self, mock_session_maker
+    ):
+        """A spawned llama process is not healthy until its /health check passes."""
+        from unittest.mock import MagicMock
+
+        from app.services.agent_manager import agent_manager
+
+        agent = Agent(
+            name="starting-agent",
+            host="localhost",
+            port=8080,
+            status="online",
+            last_seen=datetime.now(),
+        )
+        running_id = "5eb19624-0000-0000-0000-000000000002"
+
+        lookup_result = MagicMock()
+        lookup_result.scalar_one_or_none.return_value = agent
+        restore_result = MagicMock()
+        restore_result.scalars.return_value.all.return_value = []
+        stale_result = MagicMock()
+        stale_result.rowcount = 0
+        confirmed_result = MagicMock()
+        confirmed_result.rowcount = 0
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(
+            side_effect=[lookup_result, confirmed_result, stale_result, restore_result]
+        )
+        session.add = Mock()
+        session.commit = AsyncMock()
+        session.refresh = AsyncMock()
+        mock_session_maker.return_value = session
+
+        await agent_manager.register_agent(
+            {
+                "name": "starting-agent",
+                "host": "localhost",
+                "port": 8080,
+                "running_server_ids": [running_id],
+                "healthy_server_ids": [],
+            }
+        )
+
+        promote_call = session.execute.call_args_list[1]
+        assert running_id not in str(promote_call)
+
 
 class TestAgentManagerList:
     """Test agent listing functionality."""
