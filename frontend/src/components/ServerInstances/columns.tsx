@@ -35,7 +35,7 @@ type ServerInstance = {
   model_id: string
   model_name: string | null
   alias: string
-  engine?: "llamacpp" | "halogen"
+  engine?: "llamacpp" | "halogen" | "halogen-flash"
   engine_options?: HalogenOptions
   status: string
   health_status: string
@@ -67,8 +67,11 @@ export const columns: ColumnDef<ServerInstance>[] = [
         <div>
           <div className="font-medium">{instance.alias || "—"}</div>
           <div className="text-xs text-muted-foreground">
-            {instance.engine === "halogen"
-              ? "Halogen"
+            {instance.engine === "halogen" ||
+            instance.engine === "halogen-flash"
+              ? instance.engine === "halogen-flash"
+                ? "Halogen Flash"
+                : "Halogen"
               : instance.model_name || "Unknown"}
           </div>
         </div>

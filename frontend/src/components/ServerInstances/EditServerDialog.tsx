@@ -4,6 +4,10 @@ import { toast } from "sonner"
 import type { Model } from "@/client"
 import { ModelsService, ServerInstancesService } from "@/client"
 import {
+  type HalogenFlashOptions,
+  HalogenFlashSettingsFields,
+} from "@/components/ServerInstances/HalogenFlashSettingsFields"
+import {
   type HalogenOptions,
   HalogenSettingsFields,
 } from "@/components/ServerInstances/HalogenSettingsFields"
@@ -40,8 +44,8 @@ interface EditServerDialogProps {
     id: string
     model_id: string
     model_name: string | null
-    engine?: "llamacpp" | "halogen"
-    engine_options?: HalogenOptions
+    engine?: "llamacpp" | "halogen" | "halogen-flash"
+    engine_options?: HalogenOptions | HalogenFlashOptions
     mmproj_model_id?: string | null
     dflash_model_id?: string | null
     status: string
@@ -71,7 +75,9 @@ export function EditServerDialog({
   const [dflashModelId, setDflashModelId] = useState<string>("none")
   const [mtpDraftMax, setMtpDraftMax] = useState("0")
   const [serverOptions, setServerOptions] = useState<ServerOptions>({})
-  const [engineOptions, setEngineOptions] = useState<HalogenOptions>({})
+  const [engineOptions, setEngineOptions] = useState<
+    HalogenOptions | HalogenFlashOptions
+  >({})
 
   const modelsQuery = useQuery({
     queryKey: ["models"],
@@ -108,7 +114,7 @@ export function EditServerDialog({
         path: { server_id: instance.id },
         body: {
           alias: alias.trim() || instance.alias,
-          model_id: instance.engine === "halogen" ? undefined : modelId,
+          model_id: instance.engine !== "llamacpp" ? undefined : modelId,
           gpu_layers: Number(gpuLayers),
           context_size: Number(contextSize),
           flash_attn: flashAttn,
@@ -116,8 +122,8 @@ export function EditServerDialog({
           mmproj_model_id: mmprojModelId === "none" ? "" : mmprojModelId,
           dflash_model_id: dflashModelId === "none" ? "" : dflashModelId,
           mtp_draft_max: mtpDraftMax === "0" ? null : Number(mtpDraftMax),
-          server_options: instance.engine === "halogen" ? {} : serverOptions,
-          engine_options: instance.engine === "halogen" ? engineOptions : {},
+          server_options: instance.engine !== "llamacpp" ? {} : serverOptions,
+          engine_options: instance.engine !== "llamacpp" ? engineOptions : {},
         },
       })
     },
@@ -174,6 +180,13 @@ export function EditServerDialog({
                 onChange={setEngineOptions}
               />
             </div>
+          ) : instance.engine === "halogen-flash" ? (
+            <div className="col-span-2">
+              <HalogenFlashSettingsFields
+                options={engineOptions as HalogenFlashOptions}
+                onChange={setEngineOptions}
+              />
+            </div>
           ) : (
             <div className="col-span-2">
               <Label>dflash draft model</Label>
@@ -197,7 +210,7 @@ export function EditServerDialog({
               </Select>
             </div>
           )}
-          {instance.engine !== "halogen" && (
+          {instance.engine === "llamacpp" && (
             <div className="col-span-2">
               <Label>Model</Label>
               <Select value={modelId} onValueChange={setModelId}>
@@ -219,7 +232,7 @@ export function EditServerDialog({
               </Select>
             </div>
           )}
-          {instance.engine !== "halogen" && (
+          {instance.engine === "llamacpp" && (
             <div className="col-span-2">
               <Label>mmproj (vision projector)</Label>
               <Select value={mmprojModelId} onValueChange={setMmprojModelId}>
@@ -242,7 +255,7 @@ export function EditServerDialog({
               </Select>
             </div>
           )}
-          {instance.engine !== "halogen" && (
+          {instance.engine === "llamacpp" && (
             <div>
               <Label htmlFor="gpu-layers">GPU layers</Label>
               <Input
@@ -256,7 +269,7 @@ export function EditServerDialog({
               />
             </div>
           )}
-          {instance.engine !== "halogen" && (
+          {instance.engine === "llamacpp" && (
             <div className="col-span-2">
               <ServerSettingsFields
                 options={serverOptions}
@@ -266,7 +279,7 @@ export function EditServerDialog({
               />
             </div>
           )}
-          {instance.engine !== "halogen" && (
+          {instance.engine === "llamacpp" && (
             <div>
               <Label htmlFor="context-size">Context size</Label>
               <Input
@@ -281,7 +294,7 @@ export function EditServerDialog({
               />
             </div>
           )}
-          {instance.engine !== "halogen" && (
+          {instance.engine === "llamacpp" && (
             <div>
               <Label htmlFor="inactivity-timeout">
                 Inactivity timeout (seconds)
@@ -297,7 +310,7 @@ export function EditServerDialog({
               />
             </div>
           )}
-          {instance.engine !== "halogen" && (
+          {instance.engine === "llamacpp" && (
             <div className="flex items-end pb-2">
               <Label
                 htmlFor="flash-attn"
@@ -322,7 +335,7 @@ export function EditServerDialog({
             onClick={() => updateMutation.mutate()}
             loading={updateMutation.isPending}
             disabled={
-              instance.engine !== "halogen" &&
+              instance.engine === "llamacpp" &&
               validateServerOptions(serverOptions) !== null
             }
           >

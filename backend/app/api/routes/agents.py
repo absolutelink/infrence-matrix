@@ -1,7 +1,7 @@
 """Agent management endpoints."""
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.db.session import AsyncSessionMaker
 from app.models import Agent
@@ -13,7 +13,9 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 class AgentRegisterRequest(BaseModel):
     agent_id: str
     name: str
-    platform: str = "llamacpp"
+    platform: str = Field(
+        default="llamacpp", pattern=r"^(llamacpp|halogen|halogen-flash)$"
+    )
     type: str = "generic"
     host: str
     port: int

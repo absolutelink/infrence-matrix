@@ -4,6 +4,10 @@ import { toast } from "sonner"
 import type { Model, StartServerRequest } from "@/client"
 import { AgentsService, ModelsService, ServerInstancesService } from "@/client"
 import {
+  type HalogenFlashOptions,
+  HalogenFlashSettingsFields,
+} from "@/components/ServerInstances/HalogenFlashSettingsFields"
+import {
   type HalogenOptions,
   HalogenSettingsFields,
 } from "@/components/ServerInstances/HalogenSettingsFields"
@@ -48,8 +52,12 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
   const [dflashModelId, setDflashModelId] = useState<string>("none")
   const [mtpDraftMax, setMtpDraftMax] = useState("0")
   const [serverOptions, setServerOptions] = useState<ServerOptions>({})
-  const [engine, setEngine] = useState<"llamacpp" | "halogen">("llamacpp")
-  const [engineOptions, setEngineOptions] = useState<HalogenOptions>({})
+  const [engine, setEngine] = useState<
+    "llamacpp" | "halogen" | "halogen-flash"
+  >("llamacpp")
+  const [engineOptions, setEngineOptions] = useState<
+    HalogenOptions | HalogenFlashOptions
+  >({})
 
   const modelsQuery = useQuery({
     queryKey: ["models"],
@@ -78,7 +86,7 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
         mtp_draft_max: mtpDraftMax === "0" ? null : Number(mtpDraftMax),
         server_options: engine === "llamacpp" ? serverOptions : {},
         engine,
-        engine_options: engine === "halogen" ? engineOptions : {},
+        engine_options: engine !== "llamacpp" ? engineOptions : {},
       }
       if (engine === "llamacpp") {
         body.model_id = modelId
@@ -122,8 +130,8 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
     type?: string
   }>
   const compatibleAgents = agents.filter((agent) =>
-    engine === "halogen"
-      ? agent.platform === "halogen" && agent.type === "rocm"
+    engine === "halogen" || engine === "halogen-flash"
+      ? agent.platform === engine && agent.type === "rocm"
       : agent.platform !== "halogen",
   )
 
@@ -151,7 +159,7 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
             <Select
               value={engine}
               onValueChange={(value) => {
-                setEngine(value as "llamacpp" | "halogen")
+                setEngine(value as "llamacpp" | "halogen" | "halogen-flash")
                 setAgentId("")
                 setServerOptions({})
               }}
@@ -162,6 +170,7 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
               <SelectContent>
                 <SelectItem value="llamacpp">llama.cpp</SelectItem>
                 <SelectItem value="halogen">Halogen</SelectItem>
+                <SelectItem value="halogen-flash">Halogen Flash</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -178,6 +187,11 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
           {engine === "halogen" ? (
             <HalogenSettingsFields
               options={engineOptions}
+              onChange={setEngineOptions}
+            />
+          ) : engine === "halogen-flash" ? (
+            <HalogenFlashSettingsFields
+              options={engineOptions as HalogenFlashOptions}
               onChange={setEngineOptions}
             />
           ) : (

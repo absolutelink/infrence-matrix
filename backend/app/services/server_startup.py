@@ -74,7 +74,7 @@ def build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any
             "filename": filename,
             "job_id": f"server-{instance.id}",
         }
-        if instance.engine != "halogen" and model.source_repo_id
+        if instance.engine not in ("halogen", "halogen-flash") and model.source_repo_id
         else None,
     }
     if mmproj is not None:

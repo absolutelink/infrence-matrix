@@ -6,8 +6,15 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.core.config import settings
 from app.core.logging import logger
 from app.services.event_bus import publish_event
+from app.services.halogen_flash_server import (
+    HALOGEN_FLASH_CHECKPOINT,
+    HALOGEN_FLASH_REPO_ID,
+    HALOGEN_FLASH_TOKENIZER,
+    HalogenFlashServerConfig,
+)
 from app.services.halogen_server import (
     HALOGEN_CHECKPOINT,
     HALOGEN_REPO_ID,
@@ -59,10 +66,26 @@ class ServerStartRequest(BaseModel):
     draft_source: dict[str, str] | None = None
 
 
+def _validate_engine_platform(engine: str) -> None:
+    """Reject engine requests that do not match this agent image."""
+    platform = settings.AGENT_PLATFORM
+    if platform in ("halogen", "halogen-flash") and engine != platform:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Agent platform={platform} only supports engine={platform}",
+        )
+    if platform not in ("halogen", "halogen-flash") and engine != "llamacpp":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Agent platform={platform} only supports engine=llamacpp",
+        )
+
+
 @router.post("/prepare")
 async def prepare_server(request: ServerStartRequest) -> dict:
     """Download the model and projector without starting llama-server."""
     try:
+        _validate_engine_platform(request.config.engine)
         if request.config.engine == "halogen":
             await model_manager.download_repository(
                 HALOGEN_REPO_ID, job_id=f"halogen-{request.config.id}"
@@ -72,6 +95,16 @@ async def prepare_server(request: ServerStartRequest) -> dict:
                 "server_id": request.config.id,
                 "model_path": HALOGEN_CHECKPOINT,
                 "tokenizer_path": HALOGEN_TOKENIZER,
+            }
+        if request.config.engine == "halogen-flash":
+            await model_manager.download_repository(
+                HALOGEN_FLASH_REPO_ID, job_id=f"halogen-flash-{request.config.id}"
+            )
+            return {
+                "status": "prepared",
+                "server_id": request.config.id,
+                "model_path": HALOGEN_FLASH_CHECKPOINT,
+                "tokenizer_path": HALOGEN_FLASH_TOKENIZER,
             }
         model_path = await _ensure_model(request.config.model_path, request.source)
         mmproj_path = None
@@ -222,6 +255,7 @@ async def start_server(request: ServerStartRequest) -> dict:
     the backend's instance row in "starting" for the whole phase.
     """
     try:
+        _validate_engine_platform(request.config.engine)
         # Duplicate start for a running instance is a no-op success (the
         # 60s registration cycle re-dispatches starts the agent already
         # fulfilled — spawning a second process would be wrong).
@@ -240,6 +274,11 @@ async def start_server(request: ServerStartRequest) -> dict:
                 HALOGEN_REPO_ID, job_id=f"halogen-{request.config.id}"
             )
             model_path = HALOGEN_CHECKPOINT
+        elif request.config.engine == "halogen-flash":
+            await model_manager.download_repository(
+                HALOGEN_FLASH_REPO_ID, job_id=f"halogen-flash-{request.config.id}"
+            )
+            model_path = HALOGEN_FLASH_CHECKPOINT
         else:
             model_path = await _ensure_model(request.config.model_path, request.source)
 
@@ -274,6 +313,14 @@ async def start_server(request: ServerStartRequest) -> dict:
 
             config = HalogenServerConfig(
                 model_path=HALOGEN_CHECKPOINT,
+                port=port,
+                api_port=port,
+                engine_port=_allocate_port(),
+                options=request.config.engine_options,
+            )
+        elif request.config.engine == "halogen-flash":
+            config = HalogenFlashServerConfig(
+                model_path=HALOGEN_FLASH_CHECKPOINT,
                 port=port,
                 api_port=port,
                 engine_port=_allocate_port(),

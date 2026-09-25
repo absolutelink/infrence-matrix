@@ -17,6 +17,7 @@ from app.services.agent_manager import agent_manager
 from app.services.benchmark import is_benchmark_blocking
 from app.services.server_options import (
     ServerOptions,
+    validate_halogen_flash_options,
     validate_halogen_options,
     validate_server_options,
 )
@@ -34,6 +35,10 @@ router = APIRouter(prefix="/server-instances", tags=["server-instances"])
 
 HALOGEN_MODEL_NAME = "halogen-qwen3.8-27b"
 HALOGEN_MODEL_PATH = "/models/peonist-ai/halogen-qwen3.8-27b/qwen3.8-27b-p1w4d-d2.hgn"
+HALOGEN_FLASH_MODEL_NAME = "halogen-qwen3.8-flash-next"
+HALOGEN_FLASH_MODEL_PATH = (
+    "/models/peonist-ai/halogen-qwen3.8-flash-next/qwen38-flash-next-w4b.hgn"
+)
 
 
 async def _resolve_mmproj_model(
@@ -75,7 +80,7 @@ class ServerInstanceResponse(BaseModel):
     dflash_model_id: str | None = None
     dflash_model_name: str | None = None
     alias: str
-    engine: Literal["llamacpp", "halogen"] = "llamacpp"
+    engine: Literal["llamacpp", "halogen", "halogen-flash"] = "llamacpp"
     engine_options: dict = Field(default_factory=dict)
     status: str
     health_status: str
@@ -116,7 +121,7 @@ class StartServerRequest(BaseModel):
     server_options: ServerOptions = Field(default_factory=ServerOptions)
     # Public name clients use in OpenAI-compatible requests
     alias: str = Field(..., min_length=1, max_length=255)
-    engine: Literal["llamacpp", "halogen"] = "llamacpp"
+    engine: Literal["llamacpp", "halogen", "halogen-flash"] = "llamacpp"
     engine_options: dict = Field(default_factory=dict)
 
 
@@ -124,7 +129,7 @@ class UpdateServerRequest(BaseModel):
     """Editable server settings. All fields optional."""
 
     alias: str | None = Field(None, min_length=1, max_length=255)
-    engine: Literal["llamacpp", "halogen"] | None = None
+    engine: Literal["llamacpp", "halogen", "halogen-flash"] | None = None
     engine_options: dict | None = None
     # Swap the model this server serves (requires stop + restart when running)
     model_id: str | None = None
@@ -274,28 +279,48 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
             detail="Servers cannot be started while a benchmark is running",
         )
     async with AsyncSessionMaker() as session:
-        if request.engine == "halogen":
+        if request.engine in ("halogen", "halogen-flash"):
             if request.model_id is not None:
                 raise HTTPException(
                     status_code=400,
-                    detail="Halogen model selection is managed by the agent",
+                    detail="Managed Halogen model selection is controlled by the agent",
                 )
             model_result = await session.execute(
-                select(Model).where(col(Model.name) == HALOGEN_MODEL_NAME)
+                select(Model).where(
+                    col(Model.name)
+                    == (
+                        HALOGEN_MODEL_NAME
+                        if request.engine == "halogen"
+                        else HALOGEN_FLASH_MODEL_NAME
+                    )
+                )
             )
             model = model_result.scalar_one_or_none()
             if model is None:
+                flash = request.engine == "halogen-flash"
                 model = Model(
-                    name=HALOGEN_MODEL_NAME,
-                    path=HALOGEN_MODEL_PATH,
+                    name=HALOGEN_FLASH_MODEL_NAME if flash else HALOGEN_MODEL_NAME,
+                    path=HALOGEN_FLASH_MODEL_PATH if flash else HALOGEN_MODEL_PATH,
                     size_bytes=0,
                     architecture="qwen3.8",
                     model_type="llm",
                     quantization="hgn",
                     source="huggingface",
-                    source_repo_id="peonist-ai/halogen-qwen3.8-27b",
-                    source_file="qwen3.8-27b-p1w4d-d2.hgn",
-                    description="Agent-managed Halogen checkpoint",
+                    source_repo_id=(
+                        "peonist-ai/halogen-qwen3.8-flash-next"
+                        if flash
+                        else "peonist-ai/halogen-qwen3.8-27b"
+                    ),
+                    source_file=(
+                        "qwen38-flash-next-w4b.hgn"
+                        if flash
+                        else "qwen3.8-27b-p1w4d-d2.hgn"
+                    ),
+                    description=(
+                        "Agent-managed Halogen Flash checkpoint"
+                        if flash
+                        else "Agent-managed Halogen checkpoint"
+                    ),
                 )
                 session.add(model)
                 await session.flush()
@@ -313,8 +338,11 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
                 raise HTTPException(status_code=404, detail="Agent not found")
         else:
             agent_query = select(Agent).where(col(Agent.status) == "online")
-            if request.engine == "halogen":
-                agent_query = agent_query.where(col(Agent.platform) == "halogen")
+            if request.engine in ("halogen", "halogen-flash"):
+                agent_query = agent_query.where(
+                    col(Agent.platform)
+                    == ("halogen" if request.engine == "halogen" else "halogen-flash")
+                )
             result = await session.execute(agent_query.limit(1))
             agent = result.scalar_one_or_none()
 
@@ -323,22 +351,30 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
                 status_code=503, detail="No online agent available to start server"
             )
 
-        if request.engine == "halogen":
-            if agent.platform != "halogen" or agent.type != "rocm":
+        if request.engine in ("halogen", "halogen-flash"):
+            expected_platform = request.engine
+            if agent.platform != expected_platform or agent.type != "rocm":
                 raise HTTPException(
                     status_code=400,
-                    detail="Halogen servers require an agent with platform=halogen and type=rocm",
+                    detail=(
+                        f"{request.engine} servers require an agent with "
+                        f"platform={expected_platform} and type=rocm"
+                    ),
                 )
             if request.server_options.model_dump(exclude_none=True):
                 raise HTTPException(
                     status_code=400,
                     detail="llama.cpp server_options are not valid for Halogen",
                 )
-            engine_options = validate_halogen_options(request.engine_options)
+            engine_options = (
+                validate_halogen_options(request.engine_options)
+                if request.engine == "halogen"
+                else validate_halogen_flash_options(request.engine_options)
+            )
         else:
             # Preserve compatibility with existing custom llama.cpp platform
             # labels; only Halogen is a distinct engine contract.
-            if agent.platform == "halogen":
+            if agent.platform in ("halogen", "halogen-flash"):
                 raise HTTPException(
                     status_code=400,
                     detail="Halogen agents require engine=halogen",
@@ -359,7 +395,7 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
 
         # The agent allocates a random free port per start; the port is not
         # persisted. Create the instance row up front so the UI can track it.
-        if request.engine == "halogen" and (
+        if request.engine in ("halogen", "halogen-flash") and (
             request.mmproj_model_id or request.dflash_model_id
         ):
             raise HTTPException(
@@ -455,6 +491,8 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
             instance.engine_options = (
                 validate_halogen_options(request.engine_options)
                 if instance.engine == "halogen"
+                else validate_halogen_flash_options(request.engine_options)
+                if instance.engine == "halogen-flash"
                 else {}
             )
 
@@ -676,13 +714,13 @@ async def delete_server(server_id: str) -> dict[str, str]:
 
         # Stop the llama-server on the agent first (best effort) so the
         # process does not outlive its row.
-        if was_active or instance.engine == "halogen":
+        if was_active or instance.engine in ("halogen", "halogen-flash"):
             try:
                 await agent_manager.send_to_agent(
                     agent_id,
                     "POST",
                     "/servers/delete"
-                    if instance.engine == "halogen"
+                    if instance.engine in ("halogen", "halogen-flash")
                     else "/servers/stop",
                     {"server_id": instance_id},
                     timeout=60.0,

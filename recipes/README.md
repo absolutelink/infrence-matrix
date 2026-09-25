@@ -56,6 +56,12 @@ Agent image for Halogen on AMD Strix Halo. The published image is
 `agent-halogen-rocm` and runs one isolated Halogen process per server instance.
 See the recipe README for device, security, model, and cache requirements.
 
+### 5. Halogen Flash (`recipes/halogen-flash/`)
+
+Agent image for `halogen-flash-server:0.13.8` on AMD Strix Halo. The published
+image is `agent-halogen-flash`; see the recipe README for device and memory
+requirements.
+
 ### llama.cpp CUDA (`recipes/llama-cpp-cuda/`)
 - NVIDIA GPU support via CUDA
 - Best performance for NVIDIA GPUs

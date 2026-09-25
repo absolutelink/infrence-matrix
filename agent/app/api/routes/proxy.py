@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app.api.routes.servers import server_manager
+from app.core.config import settings
 from app.services.proxy import ServerProxy
 
 router = APIRouter(prefix="/proxy", tags=["proxy"])
@@ -13,6 +14,17 @@ router = APIRouter(prefix="/proxy", tags=["proxy"])
 # them with the upstream status so clients can distinguish failures instead
 # of parsing an error object as a completion (which yields empty output).
 STATUS_ERRORS = (httpx.HTTPStatusError,)
+HALOGEN_FLASH_PATHS = {
+    "health",
+    "cache",
+    "v1/models",
+    "v1/completions",
+    "v1/chat/completions",
+}
+
+
+def _is_supported_halogen_flash_path(path: str) -> bool:
+    return path in HALOGEN_FLASH_PATHS
 
 
 @router.api_route(
@@ -26,6 +38,13 @@ async def proxy_request(
     """Proxy request to llama.cpp server."""
     if server_id not in server_manager.servers:
         raise HTTPException(404, "Server not found")
+
+    if settings.AGENT_PLATFORM == "halogen-flash":
+        if not _is_supported_halogen_flash_path(path):
+            raise HTTPException(
+                404,
+                "Endpoint is not supported by halogen-flash-server",
+            )
 
     proxy = ServerProxy(server_manager)
 

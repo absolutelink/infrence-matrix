@@ -254,7 +254,12 @@ def _build_usage(
     completion_tokens = int(usage_data.get("completion_tokens") or 0)
     if not prompt_tokens and not completion_tokens:
         completion_tokens = fallback_chars // 4
-    cached_tokens = int((usage_data.get("timings") or {}).get("cache_n") or 0)
+    prompt_details = usage_data.get("prompt_tokens_details") or {}
+    cached_tokens = int(
+        prompt_details.get("cached_tokens")
+        or (usage_data.get("timings") or {}).get("cache_n")
+        or 0
+    )
     return ev.usage_from_llama(
         prompt_tokens, completion_tokens, reasoning_tokens, cached_tokens
     ).model_dump(exclude_none=True)

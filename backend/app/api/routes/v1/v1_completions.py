@@ -139,9 +139,11 @@ def _build_payload(request: CompletionRequest, stream: bool) -> dict:
     payload: dict = {
         "prompt": _convert_prompt_to_llama_format(request.prompt),
         "temperature": request.temperature,
-        "max_tokens": request.max_tokens,
         "stream": stream,
     }
+
+    if request.max_tokens is not None:
+        payload["max_tokens"] = request.max_tokens
 
     for key in ["top_p", "frequency_penalty", "presence_penalty", "stop"]:
         value = getattr(request, key)
@@ -271,12 +273,22 @@ def _extract_completion_usage(chunk_data: dict) -> UsageInfo | None:
         int(total) if total is not None else prompt_tokens + completion_tokens
     )
 
+    timings = chunk_data.get("timings") or {}
+    prompt_details = {
+        **(usage.get("prompt_tokens_details") or {}),
+        "cached_tokens": int(
+            (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+            or timings.get("cache_n")
+            or 0
+        ),
+    }
+    prompt_details.setdefault("audio_tokens", 0)
+
     return UsageInfo(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
-        prompt_tokens_details=usage.get("prompt_tokens_details")
-        or {"cached_tokens": 0, "audio_tokens": 0},
+        prompt_tokens_details=prompt_details,
         completion_tokens_details=usage.get("completion_tokens_details")
         or {
             "reasoning_tokens": 0,
@@ -390,6 +402,22 @@ async def create_completion(
             prompt_tokens = response.get("tokens_evaluated", 0)
             completion_tokens = response.get("tokens_predicted", 0)
 
+        normalized_usage = UsageInfo.build(prompt_tokens, completion_tokens)
+        usage_data = response.get("usage") or {}
+        prompt_details = usage_data.get("prompt_tokens_details") or {}
+        normalized_usage = normalized_usage.model_copy(
+            update={
+                "prompt_tokens_details": {
+                    "cached_tokens": int(
+                        prompt_details.get("cached_tokens")
+                        or (response.get("timings") or {}).get("cache_n")
+                        or 0
+                    ),
+                    "audio_tokens": 0,
+                }
+            }
+        )
+
         return CompletionResponse(
             id=request_id,
             created=created,
@@ -401,7 +429,7 @@ async def create_completion(
                     finish_reason=finish_reason,
                 )
             ],
-            usage=UsageInfo.build(prompt_tokens, completion_tokens),
+            usage=normalized_usage,
         )
 
     except Exception as e:

@@ -32,6 +32,8 @@ class HalogenServerConfig:
 class HalogenServerManager:
     """Run one independently configured Halogen process per server ID."""
 
+    PROCESS_LABEL = "halogen"
+
     HEALTH_CHECK_INTERVAL = 10.0
     HEALTH_CHECK_TIMEOUT = 5.0
 
@@ -72,7 +74,7 @@ class HalogenServerManager:
                 "server.error",
                 {
                     "server_id": server_id,
-                    "error": f"halogen exited with code {exit_code}",
+                    "error": f"{self.PROCESS_LABEL} exited with code {exit_code}",
                 },
             )
             return
@@ -117,7 +119,7 @@ class HalogenServerManager:
                     text = line.rstrip()
                     self._logs.setdefault(server_id, []).append(text)
                     self._logs[server_id] = self._logs[server_id][-64:]
-                    logger.info("halogen %s: %s", server_id[:8], text)
+                    logger.info("%s %s: %s", self.PROCESS_LABEL, server_id[:8], text)
                     publish_event(
                         "log.lines",
                         {
@@ -243,7 +245,12 @@ class HalogenServerManager:
         try:
             await asyncio.to_thread(process.wait, 30)
         except subprocess.TimeoutExpired:
-            process.kill()
+            # The entrypoint can spawn the engine and API as children; kill the
+            # process group so no child survives a failed stop.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             await asyncio.to_thread(process.wait)
         self._remove(server_id)
         publish_event("server.stopped", {"server_id": server_id, "status": "stopped"})

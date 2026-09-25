@@ -131,3 +131,47 @@ def validate_halogen_options(options: dict | HalogenServerOptions) -> dict:
     if isinstance(options, HalogenServerOptions):
         return options.model_dump(exclude_none=True)
     return HalogenServerOptions.model_validate(options).model_dump(exclude_none=True)
+
+
+class HalogenFlashServerOptions(BaseModel):
+    """Startup settings supported by halogen-flash-server."""
+
+    kv_slots: int | None = Field(default=None, ge=1, le=64)
+    kv_pool_positions: int | None = Field(default=None, ge=1, le=1_048_576)
+    kv_pool_fit: int | None = Field(default=None, ge=0, le=1)
+    host_reserve_gib: int | None = Field(default=None, ge=0)
+    ctx: int | None = Field(default=None, ge=256, le=1_048_576)
+    max_tok: int | None = Field(default=None, ge=1)
+    max_tokens_cap: int | None = Field(default=None, ge=1)
+    max_tokens_default: int | None = Field(default=None, ge=1)
+    queue_timeout: int | None = Field(default=None, ge=1)
+    keepalive_timeout: int | None = Field(default=None, ge=0)
+    sse_keepalive_s: int | None = Field(default=None, ge=0)
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    top_p: float | None = Field(default=None, ge=0, le=1)
+    top_k: int | None = Field(default=None, ge=0)
+    min_p: float | None = Field(default=None, ge=0, le=1)
+    presence_penalty: float | None = Field(default=None, ge=-2, le=2)
+    frequency_penalty: float | None = Field(default=None, ge=-2, le=2)
+    reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] | None = None
+    enable_thinking: int | None = Field(default=None, ge=0, le=1)
+    max_thinking_tokens: int | None = Field(default=None, ge=0)
+    drafter_default: int | None = Field(default=None, ge=0, le=1)
+    prompt_cache: int | None = Field(default=None, ge=0, le=2)
+    cache_entries: int | None = Field(default=None, ge=1)
+    cache_branches: int | None = Field(default=None, ge=1)
+    cache_snap3: int | None = Field(default=None, ge=0, le=1)
+    cache_full: int | None = Field(default=None, ge=0, le=1)
+    grammar: int | None = Field(default=None, ge=0, le=1)
+    vision_tower: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+def validate_halogen_flash_options(options: dict | HalogenFlashServerOptions) -> dict:
+    """Validate and normalize Flash startup settings."""
+    if isinstance(options, HalogenFlashServerOptions):
+        return options.model_dump(exclude_none=True)
+    return HalogenFlashServerOptions.model_validate(options).model_dump(
+        exclude_none=True
+    )
