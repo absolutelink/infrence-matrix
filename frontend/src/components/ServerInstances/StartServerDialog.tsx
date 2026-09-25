@@ -72,7 +72,6 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
   const startMutation = useMutation({
     mutationFn: async () => {
       const body: StartServerRequest = {
-        model_id: modelId,
         alias: alias.trim(),
         gpu_layers: Number(gpuLayers) || 35,
         context_size: Number(contextSize) || 4096,
@@ -81,13 +80,16 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
         engine,
         engine_options: engine === "halogen" ? engineOptions : {},
       }
+      if (engine === "llamacpp") {
+        body.model_id = modelId
+      }
       if (agentId && agentId !== "auto") {
         body.agent_id = agentId
       }
-      if (mmprojModelId && mmprojModelId !== "none") {
+      if (engine === "llamacpp" && mmprojModelId && mmprojModelId !== "none") {
         body.mmproj_model_id = mmprojModelId
       }
-      if (dflashModelId !== "none") {
+      if (engine === "llamacpp" && dflashModelId !== "none") {
         body.dflash_model_id = dflashModelId
       }
       return ServerInstancesService.instancesStartServer({ body })
@@ -202,21 +204,23 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
               </Select>
             </div>
           )}
-          <div>
-            <Label>Model</Label>
-            <Select value={modelId} onValueChange={setModelId}>
-              <SelectTrigger className="mt-1">
-                <SelectValue placeholder="Select a model" />
-              </SelectTrigger>
-              <SelectContent>
-                {models.map((model) => (
-                  <SelectItem key={model.id} value={model.id as string}>
-                    {model.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+          {engine === "llamacpp" && (
+            <div>
+              <Label>Model</Label>
+              <Select value={modelId} onValueChange={setModelId}>
+                <SelectTrigger className="mt-1">
+                  <SelectValue placeholder="Select a model" />
+                </SelectTrigger>
+                <SelectContent>
+                  {models.map((model) => (
+                    <SelectItem key={model.id} value={model.id as string}>
+                      {model.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
 
           <div>
             <Label>Agent</Label>
@@ -293,7 +297,7 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
             onClick={() => startMutation.mutate()}
             loading={startMutation.isPending}
             disabled={
-              !modelId ||
+              (engine === "llamacpp" && !modelId) ||
               !alias.trim() ||
               (engine === "llamacpp" &&
                 validateServerOptions(serverOptions) !== null)

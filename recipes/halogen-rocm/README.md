@@ -44,7 +44,8 @@ The Matrix agent allocates private Halogen API and engine ports for each
 server. Only the Matrix agent port is published. The unauthenticated Halogen
 engine port is never exposed to the host.
 
-The selected checkpoint and tokenizer are configured through the server
-settings and must be available under `/models`. The agent creates an isolated
-`/cache/<server_uuid>` directory for every server and removes it when that
-server is deleted.
+The agent downloads the complete `peonist-ai/halogen-qwen3.8-27b` repository
+on first use into `/models/peonist-ai/halogen-qwen3.8-27b` and starts Halogen
+with the checkpoint and tokenizer paths from that repository. The agent
+creates an isolated `/cache/<server_uuid>` directory for every server and
+removes it when that server is deleted.

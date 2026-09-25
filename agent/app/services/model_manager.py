@@ -183,6 +183,73 @@ class ModelManager:
         finally:
             self._download_tasks.pop(download_key, None)
 
+    async def download_repository(self, repo_id: str, job_id: str | None = None) -> str:
+        """Download an entire Hugging Face repository into MODELS_PATH."""
+        local_dir = self.models_path / repo_id
+        checkpoint = local_dir / "qwen3.8-27b-p1w4d-d2.hgn"
+        tokenizer = local_dir / "tokenizer"
+        if checkpoint.exists() and tokenizer.exists():
+            return str(local_dir)
+
+        download_key = f"repo:{repo_id}"
+        in_flight = self._download_tasks.get(download_key)
+        if in_flight is not None:
+            return await in_flight
+
+        task = asyncio.create_task(self._download_repository_to_disk(repo_id, job_id))
+        self._download_tasks[download_key] = task
+        try:
+            return await task
+        finally:
+            self._download_tasks.pop(download_key, None)
+
+    async def _download_repository_to_disk(
+        self, repo_id: str, job_id: str | None
+    ) -> str:
+        """Run ``hf download REPO --local-dir`` without a subprocess."""
+        from huggingface_hub import snapshot_download
+
+        effective_job_id = job_id or f"repo-{repo_id}"
+        publish_event(
+            "download.started",
+            {
+                "job_id": effective_job_id,
+                "filename": "*",
+                "repo_id": repo_id,
+            },
+        )
+        local_dir = self.models_path / repo_id
+        try:
+            await asyncio.to_thread(
+                lambda: snapshot_download(
+                    repo_id=repo_id,
+                    local_dir=str(local_dir),
+                    tqdm_class=_make_tqdm_class(effective_job_id, "*"),
+                )
+            )
+        except Exception as error:
+            publish_event(
+                "download.failed",
+                {
+                    "job_id": effective_job_id,
+                    "filename": "*",
+                    "repo_id": repo_id,
+                    "error": str(error),
+                },
+            )
+            raise
+
+        publish_event(
+            "download.completed",
+            {
+                "job_id": effective_job_id,
+                "filename": "*",
+                "repo_id": repo_id,
+                "path": str(local_dir),
+            },
+        )
+        return str(local_dir)
+
     async def _download_to_disk(
         self,
         repo_id: str,

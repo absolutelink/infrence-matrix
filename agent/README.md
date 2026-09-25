@@ -35,7 +35,10 @@ This is the agent service for Inference Matrix, responsible for managing local i
 When `AGENT_PLATFORM=halogen`, each server runs its own Halogen process with
 private API and engine ports. The agent proxies Chat Completions, legacy
 Completions, Responses, health, model, cache, and metrics requests while
-keeping the Halogen engine port private.
+keeping the Halogen engine port private. The fixed
+`peonist-ai/halogen-qwen3.8-27b` repository is downloaded into
+`/models/peonist-ai/halogen-qwen3.8-27b`; model selection is not exposed in
+the server creation UI.
 
 ### Model Management
 - `POST /models/download` - Download a model from HuggingFace

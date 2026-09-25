@@ -9,7 +9,6 @@ import {
 } from "@/components/ui/select"
 
 export type HalogenOptions = {
-  model_id?: string
   drafter?: "serial" | "mtp" | "dflash2"
   kv_slots?: number
   slot_ctx?: number

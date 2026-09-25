@@ -108,7 +108,7 @@ export function EditServerDialog({
         path: { server_id: instance.id },
         body: {
           alias: alias.trim() || instance.alias,
-          model_id: modelId,
+          model_id: instance.engine === "halogen" ? undefined : modelId,
           gpu_layers: Number(gpuLayers),
           context_size: Number(contextSize),
           flash_attn: flashAttn,
@@ -116,7 +116,7 @@ export function EditServerDialog({
           mmproj_model_id: mmprojModelId === "none" ? "" : mmprojModelId,
           dflash_model_id: dflashModelId === "none" ? "" : dflashModelId,
           mtp_draft_max: mtpDraftMax === "0" ? null : Number(mtpDraftMax),
-          server_options: serverOptions,
+          server_options: instance.engine === "halogen" ? {} : serverOptions,
           engine_options: instance.engine === "halogen" ? engineOptions : {},
         },
       })
@@ -157,18 +157,16 @@ export function EditServerDialog({
         </DialogHeader>
 
         <div className="grid grid-cols-2 gap-4 py-2">
-          {instance.engine !== "halogen" && (
-            <div className="col-span-2">
-              <Label htmlFor="alias">Alias</Label>
-              <Input
-                id="alias"
-                value={alias}
-                onChange={(e) => setAlias(e.target.value)}
-                placeholder="Public name clients use in requests"
-                className="mt-1"
-              />
-            </div>
-          )}
+          <div className="col-span-2">
+            <Label htmlFor="alias">Alias</Label>
+            <Input
+              id="alias"
+              value={alias}
+              onChange={(e) => setAlias(e.target.value)}
+              placeholder="Public name clients use in requests"
+              className="mt-1"
+            />
+          </div>
           {instance.engine === "halogen" ? (
             <div className="col-span-2">
               <HalogenSettingsFields
@@ -199,47 +197,51 @@ export function EditServerDialog({
               </Select>
             </div>
           )}
-          <div className="col-span-2">
-            <Label>Model</Label>
-            <Select value={modelId} onValueChange={setModelId}>
-              <SelectTrigger className="mt-1">
-                <SelectValue placeholder="Select a model" />
-              </SelectTrigger>
-              <SelectContent>
-                {((modelsQuery.data ?? []) as Model[])
-                  .filter((model) => model.model_type === "llm")
-                  .map((model) => (
-                    <SelectItem
-                      key={model.id ?? model.name}
-                      value={model.id ?? model.name}
-                    >
-                      {model.name}
-                    </SelectItem>
-                  ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="col-span-2">
-            <Label>mmproj (vision projector)</Label>
-            <Select value={mmprojModelId} onValueChange={setMmprojModelId}>
-              <SelectTrigger className="mt-1">
-                <SelectValue placeholder="None (no --mmproj flag)" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="none">None</SelectItem>
-                {((modelsQuery.data ?? []) as Model[])
-                  .filter((model) => model.model_type === "mmproj")
-                  .map((model) => (
-                    <SelectItem
-                      key={model.id ?? model.name}
-                      value={model.id ?? model.name}
-                    >
-                      {model.name}
-                    </SelectItem>
-                  ))}
-              </SelectContent>
-            </Select>
-          </div>
+          {instance.engine !== "halogen" && (
+            <div className="col-span-2">
+              <Label>Model</Label>
+              <Select value={modelId} onValueChange={setModelId}>
+                <SelectTrigger className="mt-1">
+                  <SelectValue placeholder="Select a model" />
+                </SelectTrigger>
+                <SelectContent>
+                  {((modelsQuery.data ?? []) as Model[])
+                    .filter((model) => model.model_type === "llm")
+                    .map((model) => (
+                      <SelectItem
+                        key={model.id ?? model.name}
+                        value={model.id ?? model.name}
+                      >
+                        {model.name}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+          {instance.engine !== "halogen" && (
+            <div className="col-span-2">
+              <Label>mmproj (vision projector)</Label>
+              <Select value={mmprojModelId} onValueChange={setMmprojModelId}>
+                <SelectTrigger className="mt-1">
+                  <SelectValue placeholder="None (no --mmproj flag)" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">None</SelectItem>
+                  {((modelsQuery.data ?? []) as Model[])
+                    .filter((model) => model.model_type === "mmproj")
+                    .map((model) => (
+                      <SelectItem
+                        key={model.id ?? model.name}
+                        value={model.id ?? model.name}
+                      >
+                        {model.name}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
           {instance.engine !== "halogen" && (
             <div>
               <Label htmlFor="gpu-layers">GPU layers</Label>
@@ -254,41 +256,47 @@ export function EditServerDialog({
               />
             </div>
           )}
-          <div className="col-span-2">
-            <ServerSettingsFields
-              options={serverOptions}
-              onChange={setServerOptions}
-              mtpDraftMax={mtpDraftMax}
-              onMtpDraftMaxChange={setMtpDraftMax}
-            />
-          </div>
-          <div>
-            <Label htmlFor="context-size">Context size</Label>
-            <Input
-              id="context-size"
-              type="number"
-              min={256}
-              max={1048576}
-              step={256}
-              value={contextSize}
-              onChange={(e) => setContextSize(e.target.value)}
-              className="mt-1"
-            />
-          </div>
-          <div>
-            <Label htmlFor="inactivity-timeout">
-              Inactivity timeout (seconds)
-            </Label>
-            <Input
-              id="inactivity-timeout"
-              type="number"
-              min={0}
-              max={86400}
-              value={inactivityTimeout}
-              onChange={(e) => setInactivityTimeout(e.target.value)}
-              className="mt-1"
-            />
-          </div>
+          {instance.engine !== "halogen" && (
+            <div className="col-span-2">
+              <ServerSettingsFields
+                options={serverOptions}
+                onChange={setServerOptions}
+                mtpDraftMax={mtpDraftMax}
+                onMtpDraftMaxChange={setMtpDraftMax}
+              />
+            </div>
+          )}
+          {instance.engine !== "halogen" && (
+            <div>
+              <Label htmlFor="context-size">Context size</Label>
+              <Input
+                id="context-size"
+                type="number"
+                min={256}
+                max={1048576}
+                step={256}
+                value={contextSize}
+                onChange={(e) => setContextSize(e.target.value)}
+                className="mt-1"
+              />
+            </div>
+          )}
+          {instance.engine !== "halogen" && (
+            <div>
+              <Label htmlFor="inactivity-timeout">
+                Inactivity timeout (seconds)
+              </Label>
+              <Input
+                id="inactivity-timeout"
+                type="number"
+                min={0}
+                max={86400}
+                value={inactivityTimeout}
+                onChange={(e) => setInactivityTimeout(e.target.value)}
+                className="mt-1"
+              />
+            </div>
+          )}
           {instance.engine !== "halogen" && (
             <div className="flex items-end pb-2">
               <Label

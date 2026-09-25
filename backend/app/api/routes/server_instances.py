@@ -32,6 +32,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/server-instances", tags=["server-instances"])
 
+HALOGEN_MODEL_NAME = "halogen-qwen3.8-27b"
+HALOGEN_MODEL_PATH = "/models/peonist-ai/halogen-qwen3.8-27b/qwen3.8-27b-p1w4d-d2.hgn"
+
 
 async def _resolve_mmproj_model(
     session: AsyncSession, mmproj_model_id: str | None
@@ -101,7 +104,7 @@ class ServerInstanceListResponse(BaseModel):
 
 
 class StartServerRequest(BaseModel):
-    model_id: str
+    model_id: str | None = None
     agent_id: str | None = None
     gpu_layers: int = 35
     context_size: int = 4096
@@ -271,7 +274,35 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
             detail="Servers cannot be started while a benchmark is running",
         )
     async with AsyncSessionMaker() as session:
-        model = await session.get(Model, uuid_module.UUID(request.model_id))
+        if request.engine == "halogen":
+            if request.model_id is not None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Halogen model selection is managed by the agent",
+                )
+            model_result = await session.execute(
+                select(Model).where(col(Model.name) == HALOGEN_MODEL_NAME)
+            )
+            model = model_result.scalar_one_or_none()
+            if model is None:
+                model = Model(
+                    name=HALOGEN_MODEL_NAME,
+                    path=HALOGEN_MODEL_PATH,
+                    size_bytes=0,
+                    architecture="qwen3.8",
+                    model_type="llm",
+                    quantization="hgn",
+                    source="huggingface",
+                    source_repo_id="peonist-ai/halogen-qwen3.8-27b",
+                    source_file="qwen3.8-27b-p1w4d-d2.hgn",
+                    description="Agent-managed Halogen checkpoint",
+                )
+                session.add(model)
+                await session.flush()
+        elif request.model_id is None:
+            raise HTTPException(status_code=422, detail="model_id is required")
+        else:
+            model = await session.get(Model, uuid_module.UUID(request.model_id))
         if not model:
             raise HTTPException(status_code=404, detail="Model not found")
 
@@ -372,7 +403,7 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
         return {
             "status": "stopped",
             "server_id": server_id,
-            "model_id": request.model_id,
+            "model_id": str(model.id),
             "agent_id": agent_id,
             "message": "Server created; model preparation requested",
         }

@@ -9,6 +9,11 @@ from pydantic import BaseModel, Field
 from app.core.config import settings
 from app.core.logging import logger
 from app.services.event_bus import publish_event
+from app.services.halogen_server import (
+    HALOGEN_CHECKPOINT,
+    HALOGEN_REPO_ID,
+    HALOGEN_TOKENIZER,
+)
 from app.services.llama_server import ServerConfig
 from app.services.model_manager import model_manager
 from app.services.server_manager import server_manager
@@ -59,6 +64,16 @@ class ServerStartRequest(BaseModel):
 async def prepare_server(request: ServerStartRequest) -> dict:
     """Download the model and projector without starting llama-server."""
     try:
+        if request.config.engine == "halogen":
+            await model_manager.download_repository(
+                HALOGEN_REPO_ID, job_id=f"halogen-{request.config.id}"
+            )
+            return {
+                "status": "prepared",
+                "server_id": request.config.id,
+                "model_path": HALOGEN_CHECKPOINT,
+                "tokenizer_path": HALOGEN_TOKENIZER,
+            }
         model_path = await _ensure_model(request.config.model_path, request.source)
         mmproj_path = None
         if request.config.mmproj_path:
@@ -221,7 +236,13 @@ async def start_server(request: ServerStartRequest) -> dict:
                 "already_running": True,
             }
 
-        model_path = await _ensure_model(request.config.model_path, request.source)
+        if request.config.engine == "halogen":
+            await model_manager.download_repository(
+                HALOGEN_REPO_ID, job_id=f"halogen-{request.config.id}"
+            )
+            model_path = HALOGEN_CHECKPOINT
+        else:
+            model_path = await _ensure_model(request.config.model_path, request.source)
 
         mmproj_path: str | None = None
         if request.config.mmproj_path:
@@ -253,7 +274,7 @@ async def start_server(request: ServerStartRequest) -> dict:
             from app.services.halogen_server import HalogenServerConfig
 
             config = HalogenServerConfig(
-                model_path=model_path,
+                model_path=HALOGEN_CHECKPOINT,
                 port=port,
                 api_port=port,
                 engine_port=_allocate_port(),

@@ -15,6 +15,11 @@ import httpx
 from app.core.config import settings
 from app.core.logging import logger
 from app.services.event_bus import publish_event
+from app.services.model_manager import model_manager
+
+HALOGEN_REPO_ID = "peonist-ai/halogen-qwen3.8-27b"
+HALOGEN_CHECKPOINT = "/models/peonist-ai/halogen-qwen3.8-27b/qwen3.8-27b-p1w4d-d2.hgn"
+HALOGEN_TOKENIZER = "/models/peonist-ai/halogen-qwen3.8-27b/tokenizer"
 
 
 @dataclass
@@ -130,6 +135,10 @@ class HalogenServerManager:
         if len(self.servers) >= settings.HALOGEN_MAX_INSTANCES:
             raise RuntimeError("Halogen instance limit reached")
 
+        await model_manager.download_repository(
+            HALOGEN_REPO_ID, job_id=f"halogen-{server_id}"
+        )
+
         cache_dir = Path(config.cache_dir)
         cache_dir.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ)
@@ -138,7 +147,8 @@ class HalogenServerManager:
                 "HALOGEN_API_PORT": str(config.api_port),
                 "HALOGEN_PORT": str(config.engine_port),
                 "HALOGEN_BIND": "127.0.0.1",
-                "HALOGEN_CHECKPOINT": config.model_path,
+                "HALOGEN_CHECKPOINT": HALOGEN_CHECKPOINT,
+                "HALOGEN_TOKENIZER": HALOGEN_TOKENIZER,
                 "HALOGEN_CACHE_DIR": str(cache_dir),
                 "XDG_CACHE_HOME": str(cache_dir),
             }

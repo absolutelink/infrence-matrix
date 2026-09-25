@@ -1812,7 +1812,7 @@ export type StartServerRequest = {
     /**
      * Model Id
      */
-    model_id: string;
+    model_id?: string | null;
     /**
      * Agent Id
      */
