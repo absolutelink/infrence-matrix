@@ -137,6 +137,7 @@ class HalogenServerManager:
         )
 
         env = dict(os.environ)
+        env.pop("VIRTUAL_ENV", None)
         env["PATH"] = ":".join(
             path
             for path in env.get("PATH", "").split(":")
