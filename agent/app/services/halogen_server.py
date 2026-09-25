@@ -107,10 +107,10 @@ class HalogenServerManager:
         while True:
             await asyncio.sleep(settings.LOG_FORWARD_INTERVAL)
             for server_id, process in list(self.servers.items()):
-                if process.stderr is None:
+                if process.stdout is None:
                     continue
                 try:
-                    line = await asyncio.to_thread(process.stderr.readline)
+                    line = await asyncio.to_thread(process.stdout.readline)
                 except Exception:
                     continue
                 if line:
@@ -122,7 +122,7 @@ class HalogenServerManager:
                         "log.lines",
                         {
                             "server_id": server_id,
-                            "lines": [{"stream": "stderr", "line": text}],
+                            "lines": [{"stream": "stdout", "line": text}],
                         },
                     )
 
@@ -171,9 +171,10 @@ class HalogenServerManager:
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             env=env,
+            start_new_session=True,
         )
         self.servers[server_id] = process
         self.configs[server_id] = config
@@ -224,7 +225,10 @@ class HalogenServerManager:
         process = self.servers.get(server_id)
         if process is None:
             return False
-        process.kill() if force else process.send_signal(signal.SIGTERM)
+        try:
+            os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
+        except ProcessLookupError:
+            pass
         try:
             await asyncio.to_thread(process.wait, 30)
         except subprocess.TimeoutExpired:
