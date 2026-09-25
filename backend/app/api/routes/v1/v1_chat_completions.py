@@ -310,10 +310,12 @@ async def _stream_completion_via_agent(
 
     payload = {
         "messages": messages,
-        "temperature": request.temperature,
-        "max_tokens": request.max_tokens,
         "stream": True,
     }
+    if request.temperature is not None:
+        payload["temperature"] = request.temperature
+    if request.max_tokens is not None:
+        payload["max_tokens"] = request.max_tokens
 
     # Add optional parameters
     for key in ["top_p", "frequency_penalty", "presence_penalty", "stop"]:
@@ -690,10 +692,12 @@ async def create_chat_completion(
 
         non_stream_payload: dict[str, Any] = {
             "messages": _convert_messages_to_llama_format(request.messages),
-            "temperature": request.temperature,
-            "max_tokens": request.max_tokens,
             "stream": False,
         }
+        if request.temperature is not None:
+            non_stream_payload["temperature"] = request.temperature
+        if request.max_tokens is not None:
+            non_stream_payload["max_tokens"] = request.max_tokens
         for key in ["top_p", "frequency_penalty", "presence_penalty", "stop"]:
             value = getattr(request, key)
             if value is not None:
