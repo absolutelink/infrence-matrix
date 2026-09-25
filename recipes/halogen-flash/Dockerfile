@@ -34,4 +34,4 @@ ENV VIRTUAL_ENV=/agent/.venv \
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/matrix-entrypoint.sh"]
-CMD ["sh", "-c", "exec python -m uvicorn app.main:app --host 0.0.0.0 --port \"${AGENT_PORT:-8080}\" --log-level info"]
+CMD ["sh", "-c", ". ${VIRTUAL_ENV:-/agent/.venv}/bin/activate && exec python -m uvicorn app.main:app --host 0.0.0.0 --port \"${AGENT_PORT:-8080}\" --log-level info"]
