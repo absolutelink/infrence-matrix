@@ -137,6 +137,11 @@ class HalogenServerManager:
         )
 
         env = dict(os.environ)
+        env["PATH"] = ":".join(
+            path
+            for path in env.get("PATH", "").split(":")
+            if path != "/agent/.venv/bin"
+        )
         env.update(
             {
                 "HALOGEN_API_PORT": str(config.api_port),

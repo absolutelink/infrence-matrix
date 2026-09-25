@@ -19,7 +19,7 @@ RUN pip3 install --no-cache-dir --break-system-packages uv \
 WORKDIR /agent
 RUN uv sync --frozen --no-dev
 
-ENV PATH="/agent/.venv/bin:${PATH}" \
+ENV VIRTUAL_ENV=/agent/.venv \
     AGENT_PLATFORM=halogen \
     AGENT_TYPE=rocm \
     AGENT_PORT=8080 \
@@ -34,4 +34,4 @@ ENV PATH="/agent/.venv/bin:${PATH}" \
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/matrix-entrypoint.sh"]
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port \"${AGENT_PORT:-8080}\" --log-level info"]
+CMD ["sh", "-c", "source ${VIRTUAL_ENV:-/agent/.venv}/bin/activate && /bin/python -m uvicorn app.main:app --host 0.0.0.0 --port \"${AGENT_PORT:-8080}\" --log-level info"]
