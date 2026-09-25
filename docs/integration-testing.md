@@ -20,6 +20,7 @@ Run 5 (WS persistence + registration heal): 2026-09-24 — **10 passed / 7 faile
 Run 6 (mmproj + error relay): 2026-09-24 — **11 passed / 6 failed** (image-input fixed; remaining 6 all WS contention timeouts)
 Run 7 (WS generation cap): 2026-09-24 — **11 passed / 6 failed** (cap bounds generation; WS turns still queue behind 4 busy slots — HTTP image turn held a slot 124s. Accepted as environment-bound: every test passes standalone.)
 Run 8 (WS continuation verification): 2026-09-25 — **1 passed / 0 failed** (`websocket-continuation`; WS cache history hydration verified after deploy)
+Run 9 (full-suite regression sweep): 2026-09-25 — **15 passed / 2 failed** (only `websocket-continuation` and `websocket-reconnect-store-false-recovery` timed out under full-suite contention; both pass individually)
 
 | Test ID | Name | Status | Notes |
 |---|---|---|---|
@@ -29,11 +30,11 @@ Run 8 (WS continuation verification): 2026-09-25 — **1 passed / 0 failed** (`w
 | `streaming-response` | Streaming Response | ✅ PASS | |
 | `websocket-response` | WebSocket Response | ❌ FAIL | 30s harness timer: turn takes 15–40s idle (18.5s), >30s under full-suite load (17 concurrent tests vs 4 llama.cpp slots; measured 81s). Passes standalone |
 | `websocket-sequential-responses` | WebSocket Sequential Responses | ❌ FAIL | same contention timeout (2 turns × 30s) |
-| `websocket-continuation` | WebSocket Continuation | ✅ PASS | WS cache history hydration verified after deploy |
-| `websocket-reconnect-store-false-recovery` | WebSocket Store False Reconnect Recovery | ✅ PASS | verified after WS continuation history fix |
+| `websocket-continuation` | WebSocket Continuation | ❌ FAIL | full-suite contention timeout; passes individually in 5.9s |
+| `websocket-reconnect-store-false-recovery` | WebSocket Store False Reconnect Recovery | ❌ FAIL | full-suite contention timeout; passes individually in 5.0s |
 | `websocket-previous-response-not-found` | WebSocket Missing Previous Response | ✅ PASS | |
-| `websocket-failed-continuation-evicts-cache` | WebSocket Failed Continuation Evicts Cache | ❌ FAIL | fixed locally: unmatched `function_call_output` now fails and evicts the connection cache; pending deploy |
-| `websocket-compact-new-chain` | WebSocket Compact New Chain | ❌ FAIL | compact endpoint 500 (agent proxy ReadTimeout when slots contended) + WS contention |
+| `websocket-failed-continuation-evicts-cache` | WebSocket Failed Continuation Evicts Cache | ✅ PASS | passes full suite and individually after call-ID validation |
+| `websocket-compact-new-chain` | WebSocket Compact New Chain | ✅ PASS | passes full suite in 45.2s |
 | `system-prompt` | System Prompt | ✅ PASS | |
 | `tool-calling` | Tool Calling | ✅ PASS | |
 | `image-input` | Image Input | ✅ PASS | mmproj-F16.gguf selected on voyager + downloaded/loaded; agent proxy now relays upstream errors |
@@ -59,8 +60,9 @@ Run 8 (WS continuation verification): 2026-09-25 — **1 passed / 0 failed** (`w
    turns still queue behind busy slots — measured: an uncapped HTTP image turn held
    a slot for 124s. Every WS test passes standalone (18–22s). Future lever if
    revisited: add `--parallel N` to the agent's llama-server spawn (split
-   context_size across N slots) for more concurrent inference; or a faster box.
-   Affects: all websocket-* except previous-response-not-found.
+    context_size across N slots) for more concurrent inference; or a faster box.
+    Affects: websocket-response, websocket-sequential-responses, websocket-continuation,
+    and websocket-reconnect-store-false-recovery in the full suite.
 10. ~~**image-input: upstream errors swallowed**~~ — FIXED: mmproj-F16.gguf selected on
     voyager (downloads/loads correctly after mmproj_source fixes); agent proxy relays
     upstream error status+body instead of 200-with-error-envelope.
@@ -69,9 +71,9 @@ Run 8 (WS continuation verification): 2026-09-25 — **1 passed / 0 failed** (`w
      history answer).
 12. ~~**WS continuation history hydration**~~ — FIXED: WS turns pass connection-local cached
     history for `store=false` and the full DB chain for `store=true`; verified after deploy.
-13. **Invalid WebSocket tool result cache eviction** — FIXED locally: unmatched
-    `function_call_output.call_id` now raises a translation error, producing a failed turn
-    and evicting the referenced cached response; pending deploy verification.
+13. ~~**Invalid WebSocket tool result cache eviction**~~ — FIXED: unmatched
+     `function_call_output.call_id` now raises a translation error, producing a failed turn
+     and evicting the referenced cached response; verified in deployment.
 
 ## History
 
@@ -79,7 +81,8 @@ Run 8 (WS continuation verification): 2026-09-25 — **1 passed / 0 failed** (`w
 |---|---|---|---|---|
 | 2026-09-25 | WS continuation history fix (deployed) | 1 | 0 | `websocket-continuation` passes after WS cache/DB history hydration fix |
 | 2026-09-25 | WS reconnect recovery verification | 1 | 0 | `websocket-reconnect-store-false-recovery` passes after WS cache/DB history hydration fix |
-| 2026-09-25 | WS failed continuation verification | 0 | 1 | Isolated unmatched `function_call_output`: invalid continuation incorrectly completed and retained cache; added call-ID validation. Pending commit/deploy verification |
+| 2026-09-25 | WS failed continuation verification | 0 | 1 | Isolated unmatched `function_call_output`: invalid continuation incorrectly completed and retained cache; added call-ID validation |
+| 2026-09-25 | Full-suite regression sweep | 15 | 2 | `websocket-continuation` and `websocket-reconnect-store-false-recovery` timed out under concurrent load; both passed individually. `websocket-failed-continuation-evicts-cache` and `websocket-compact-new-chain` passed |
 | 2026-09-24 | (baseline) | 3 | 14 | Initial full run |
 | 2026-09-24 | serialize_spec fix (pushed) | 10 | 7 | Clusters 1–3 + 5 fixed: spec serializer (`serialize_spec`), `completed_at` at finalize, dropped `reasoning_text.*` event twins. Unblocked: basic-response, system-prompt, tool-calling, streaming-response, assistant-phase, multi-turn, compact-response |
 | 2026-09-24 | WS framing + compaction-input (pushed) | 10 | 7 | Clusters 4 + 6 fixed: raw JSON per WS message, compaction items replayed as assistant context. Exposed: WS turns not persisted; 30s harness timer vs thinking-model latency |

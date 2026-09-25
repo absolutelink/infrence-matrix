@@ -52,6 +52,7 @@ export function DefinitionDialog({
   const [modelId, setModelId] = useState("")
   const [agentId, setAgentId] = useState("")
   const [mmprojModelId, setMmprojModelId] = useState("none")
+  const [dflashModelId, setDflashModelId] = useState("none")
   const [gpuLayers, setGpuLayers] = useState("35")
   const [contextSize, setContextSize] = useState("4096")
   const [mtpDraftMax, setMtpDraftMax] = useState("0")
@@ -83,6 +84,9 @@ export function DefinitionDialog({
     setAgentId(String(config.agent_id ?? source?.agent_id ?? ""))
     setMmprojModelId(
       String(config.mmproj_model_id ?? source?.mmproj_model_id ?? "none"),
+    )
+    setDflashModelId(
+      String(config.dflash_model_id ?? source?.dflash_model_id ?? "none"),
     )
     setGpuLayers(String(config.gpu_layers ?? source?.gpu_layers ?? 35))
     setContextSize(String(config.context_size ?? source?.context_size ?? 4096))
@@ -117,6 +121,7 @@ export function DefinitionDialog({
           model_id: modelId,
           agent_id: agentId,
           mmproj_model_id: mmprojModelId === "none" ? null : mmprojModelId,
+          dflash_model_id: dflashModelId === "none" ? null : dflashModelId,
           gpu_layers: Number(gpuLayers),
           context_size: Number(contextSize),
           mtp_draft_max: mtpDraftMax === "0" ? null : Number(mtpDraftMax),
@@ -149,6 +154,9 @@ export function DefinitionDialog({
   const mmprojModels = ((modelsQuery.data ?? []) as Model[]).filter(
     (model) => model.model_type === "mmproj",
   )
+  const dflashModels = ((modelsQuery.data ?? []) as Model[]).filter(
+    (model) => model.model_type === "dflash",
+  )
   const agents = (agentsQuery.data ?? []) as Array<{
     id: string
     name: string
@@ -177,6 +185,22 @@ export function DefinitionDialog({
               value={name}
               onChange={(event) => setName(event.target.value)}
             />
+          </div>
+          <div className="col-span-2">
+            <Label>dflash draft model</Label>
+            <Select value={dflashModelId} onValueChange={setDflashModelId}>
+              <SelectTrigger className="mt-1">
+                <SelectValue placeholder="None (standard MTP)" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">None</SelectItem>
+                {dflashModels.map((model) => (
+                  <SelectItem key={model.id} value={model.id as string}>
+                    {model.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
           <div className="col-span-2">
             <Label htmlFor="benchmark-description">Description</Label>

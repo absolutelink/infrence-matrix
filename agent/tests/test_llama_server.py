@@ -160,6 +160,27 @@ class TestLlamaServerManager:
             command.index("--parallel") : command.index("--parallel") + 2
         ]
 
+    @pytest.mark.asyncio
+    @patch("app.services.llama_server.subprocess.Popen")
+    async def test_dflash_uses_dflash_spec_type_and_model(self, mock_popen):
+        manager = LlamaServerManager()
+        await manager.start_server(
+            "dflash-server",
+            ServerConfig(
+                model_path="/models/test.gguf",
+                port=8081,
+                draft_model_path="/models/draft.gguf",
+            ),
+        )
+
+        command = mock_popen.call_args.args[0]
+        assert ["--spec-type", "draft-dflash"] == command[
+            command.index("--spec-type") : command.index("--spec-type") + 2
+        ]
+        assert ["-md", "/models/draft.gguf"] == command[
+            command.index("-md") : command.index("-md") + 2
+        ]
+
     def test_start_existing_server(self):
         """Test starting a server that already exists."""
         manager = LlamaServerManager()

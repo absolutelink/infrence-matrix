@@ -59,6 +59,14 @@ async def _snapshot(
     model = await session.get(Model, uuid_module.UUID(str(model_id)))
     if not model:
         raise HTTPException(status_code=404, detail="Source model not found")
+    dflash_model_id = config.get("dflash_model_id") or (
+        source.dflash_model_id if source else None
+    )
+    dflash_model = None
+    if dflash_model_id:
+        dflash_model = await session.get(Model, uuid_module.UUID(str(dflash_model_id)))
+        if not dflash_model or dflash_model.model_type != "dflash":
+            raise HTTPException(status_code=400, detail="Selected model is not dflash")
     snapshot = {
         "server_instance_id": str(source.id) if source else None,
         "model_id": str(model.id),
@@ -69,6 +77,10 @@ async def _snapshot(
         "flash_attn": source.flash_attn if source else True,
         "mtp_draft_max": source.mtp_draft_max if source else None,
         "mmproj_model_id": source.mmproj_model_id if source else None,
+        "dflash_model_id": dflash_model.id
+        if dflash_model
+        else (source.dflash_model_id if source else None),
+        "draft_model_path": dflash_model.path if dflash_model else None,
     }
     snapshot.update(config)
     return snapshot

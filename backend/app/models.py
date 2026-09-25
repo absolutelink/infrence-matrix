@@ -348,6 +348,13 @@ class ServerInstance(SQLModel, table=True):
         ondelete="SET NULL",
     )
 
+    # Optional dflash draft model; None omits --spec-type draft-dflash/-md
+    dflash_model_id: uuid.UUID | None = Field(
+        default=None,
+        foreign_key="models.id",
+        ondelete="SET NULL",
+    )
+
     # Public name clients use in OpenAI-compatible requests (/v1/models,
     # model field of chat/completions). Unique across all instances.
     alias: str = Field(unique=True, index=True, max_length=255)
@@ -413,6 +420,12 @@ class ServerInstance(SQLModel, table=True):
             "lazy": "selectin",
             "foreign_keys": "[ServerInstance.mmproj_model_id]",
         },
+    )
+    dflash_model: Model | None = Relationship(
+        sa_relationship_kwargs={
+            "lazy": "selectin",
+            "foreign_keys": "[ServerInstance.dflash_model_id]",
+        }
     )
 
 

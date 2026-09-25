@@ -37,6 +37,7 @@ class ServerSpec(BaseModel):
     jinja: bool = True
     # Multimodal projector (vision GGUF); resolved like model_path
     mmproj_path: str | None = None
+    draft_model_path: str | None = None
     options: dict = Field(default_factory=dict)
 
 
@@ -47,6 +48,8 @@ class ServerStartRequest(BaseModel):
     source: dict[str, str] | None = None
     # Same shape as source, for the mmproj projector (downloaded on demand)
     mmproj_source: dict[str, str] | None = None
+    # Same shape as source, for the dflash draft model
+    draft_source: dict[str, str] | None = None
 
 
 @router.post("/prepare")
@@ -64,11 +67,17 @@ async def prepare_server(request: ServerStartRequest) -> dict:
             mmproj_path = await _ensure_model(
                 request.config.mmproj_path, request.mmproj_source
             )
+        draft_model_path = None
+        if request.config.draft_model_path:
+            draft_model_path = await _ensure_model(
+                request.config.draft_model_path, request.draft_source
+            )
         return {
             "status": "prepared",
             "server_id": request.config.id,
             "model_path": model_path,
             "mmproj_path": mmproj_path,
+            "draft_model_path": draft_model_path,
         }
     except HTTPException:
         raise
@@ -223,6 +232,12 @@ async def start_server(request: ServerStartRequest) -> dict:
                 request.config.mmproj_path, request.mmproj_source
             )
 
+        draft_model_path: str | None = None
+        if request.config.draft_model_path:
+            draft_model_path = await _ensure_model(
+                request.config.draft_model_path, request.draft_source
+            )
+
         # The agent owns port allocation: pick a free random port unless the
         # caller pinned one explicitly.
         port = request.config.port or _allocate_port()
@@ -238,6 +253,7 @@ async def start_server(request: ServerStartRequest) -> dict:
             mtp_draft_max=request.config.mtp_draft_max,
             jinja=request.config.jinja,
             mmproj_path=mmproj_path,
+            draft_model_path=draft_model_path,
             options=request.config.options,
         )
 

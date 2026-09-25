@@ -240,7 +240,9 @@ class LlamaBenchManager:
 llama_bench_manager = LlamaBenchManager()
 
 
-def build_command(request: Any, model_path: str) -> list[str]:
+def build_command(
+    request: Any, model_path: str, draft_model_path: str | None = None
+) -> list[str]:
     """Build llama-bench arguments from the API request."""
     command = [resolve_executable(), "-m", model_path]
     for flag, values in (
@@ -261,6 +263,8 @@ def build_command(request: Any, model_path: str) -> list[str]:
         command.extend(["-ngl", str(request.gpu_layers)])
     if request.flash_attn is not None:
         command.extend(["-fa", "on" if request.flash_attn else "off"])
+    if draft_model_path:
+        command.extend(["--spec-type", "draft-dflash", "-md", draft_model_path])
     return command
 
 

@@ -33,6 +33,7 @@ class ServerConfig:
     jinja: bool = True
     # Multimodal projector path (vision GGUF); None omits the flag
     mmproj_path: str | None = None
+    draft_model_path: str | None = None
     options: dict[str, Any] | None = None
 
 
@@ -206,21 +207,26 @@ class LlamaServerManager:
         if config.flash_attn is not None:
             cmd.extend(["--flash-attn", "on" if config.flash_attn else "off"])
 
-        if config.mtp_draft_max is not None and config.mtp_draft_max > 0:
+        if config.draft_model_path or (
+            config.mtp_draft_max is not None and config.mtp_draft_max > 0
+        ):
             cmd.extend(
                 [
                     "--spec-type",
-                    "draft-mtp",
-                    "--spec-draft-n-max",
-                    str(config.mtp_draft_max),
+                    "draft-dflash" if config.draft_model_path else "draft-mtp",
                 ]
             )
+            if config.mtp_draft_max is not None and config.mtp_draft_max > 0:
+                cmd.extend(["--spec-draft-n-max", str(config.mtp_draft_max)])
 
         if options.get("jinja", config.jinja):
             cmd.append("--jinja")
 
         if config.mmproj_path:
             cmd.extend(["--mmproj", config.mmproj_path])
+
+        if config.draft_model_path:
+            cmd.extend(["-md", config.draft_model_path])
 
         logger.info(
             f"Starting llama.cpp server {server_id} with command: {' '.join(cmd)}"

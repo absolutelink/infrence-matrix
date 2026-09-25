@@ -21,6 +21,8 @@ class BenchmarkRequest(BaseModel):
     context_size: int | None = None
     gpu_layers: int | None = -1
     flash_attn: bool | None = None
+    draft_model_path: str | None = None
+    draft_source: dict[str, str] | None = None
 
 
 class BenchmarkStopRequest(BaseModel):
@@ -32,9 +34,14 @@ async def run_benchmark(request: BenchmarkRequest) -> dict:
     """Resolve/download a model and start llama-bench asynchronously."""
     try:
         model_path = await _ensure_model(request.model_path, request.source)
+        draft_model_path = None
+        if request.draft_model_path:
+            draft_model_path = await _ensure_model(
+                request.draft_model_path, request.draft_source
+            )
         run_id = request.run_id or new_run_id()
         return await llama_bench_manager.start(
-            run_id, build_command(request, model_path)
+            run_id, build_command(request, model_path, draft_model_path)
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

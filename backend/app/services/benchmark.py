@@ -206,6 +206,12 @@ async def _execute(run_id: str) -> None:
                 )
                 model = await session.get(Model, model_id) if model_id else None
                 agent = await session.get(Agent, agent_id) if agent_id else None
+                dflash_model = None
+                dflash_model_id = config.get("dflash_model_id")
+                if dflash_model_id:
+                    dflash_model = await session.get(Model, dflash_model_id)
+                    if not dflash_model or dflash_model.model_type != "dflash":
+                        raise RuntimeError("Benchmark dflash model not found")
             if not model or not agent:
                 raise RuntimeError("Benchmark source server, model, or agent not found")
 
@@ -249,6 +255,17 @@ async def _execute(run_id: str) -> None:
                 "context_size": config.get("context_size"),
                 "gpu_layers": config.get("gpu_layers", 35),
                 "flash_attn": config.get("flash_attn", True),
+                "draft_model_path": config.get("draft_model_path"),
+                "draft_source": (
+                    {
+                        "source": dflash_model.source,
+                        "repo_id": dflash_model.source_repo_id or "",
+                        "filename": dflash_model.source_file
+                        or dflash_model.path.rsplit("/", 1)[-1],
+                    }
+                    if dflash_model and dflash_model.source_repo_id
+                    else None
+                ),
             }
             response = await agent_manager.send_to_agent(
                 str(agent.id),

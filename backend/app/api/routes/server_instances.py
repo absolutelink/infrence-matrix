@@ -45,12 +45,28 @@ async def _resolve_mmproj_model(
     return found
 
 
+async def _resolve_dflash_model(
+    session: AsyncSession, dflash_model_id: str | None
+) -> Model | None:
+    """Fetch and validate the selected dflash draft model."""
+    if not dflash_model_id:
+        return None
+    found = await session.get(Model, uuid_module.UUID(dflash_model_id))
+    if not found:
+        raise HTTPException(status_code=404, detail="dflash model not found")
+    if found.model_type != "dflash":
+        raise HTTPException(status_code=400, detail="Selected model is not dflash")
+    return found
+
+
 class ServerInstanceResponse(BaseModel):
     id: str
     model_id: str
     model_name: str | None = None
     mmproj_model_id: str | None = None
     mmproj_model_name: str | None = None
+    dflash_model_id: str | None = None
+    dflash_model_name: str | None = None
     alias: str
     status: str
     health_status: str
@@ -83,6 +99,7 @@ class StartServerRequest(BaseModel):
     context_size: int = 4096
     # Optional multimodal projector; omitted from server flags when None
     mmproj_model_id: str | None = None
+    dflash_model_id: str | None = None
     # MTP Draft N-Max value; when 0 no MTP flags are added, when > 0 add --spec-type draft-mtp --spec-draft-n-max <value>
     mtp_draft_max: int | None = None
     server_options: ServerOptions = Field(default_factory=ServerOptions)
@@ -103,6 +120,8 @@ class UpdateServerRequest(BaseModel):
     inactivity_timeout_seconds: int | None = Field(None, ge=0, le=86400)
     # Multimodal projector; None = no change, "" = clear selection
     mmproj_model_id: str | None = None
+    # Dflash draft model; None = no change, "" = clear selection
+    dflash_model_id: str | None = None
     server_options: ServerOptions | None = None
     restart: bool = True  # restart immediately if the server is running
 
@@ -130,6 +149,12 @@ async def list_server_instances() -> ServerInstanceListResponse:
                     else None,
                     mmproj_model_name=instance.mmproj_model.name
                     if instance.mmproj_model
+                    else None,
+                    dflash_model_id=str(instance.dflash_model_id)
+                    if instance.dflash_model_id
+                    else None,
+                    dflash_model_name=instance.dflash_model.name
+                    if instance.dflash_model
                     else None,
                     alias=instance.alias,
                     status=instance.status,
@@ -182,6 +207,12 @@ async def get_server_instance(server_id: str) -> ServerInstanceResponse:
             else None,
             mmproj_model_name=instance.mmproj_model.name
             if instance.mmproj_model
+            else None,
+            dflash_model_id=str(instance.dflash_model_id)
+            if instance.dflash_model_id
+            else None,
+            dflash_model_name=instance.dflash_model.name
+            if instance.dflash_model
             else None,
             alias=instance.alias,
             status=instance.status,
@@ -249,6 +280,7 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
         # The agent allocates a random free port per start; the port is not
         # persisted. Create the instance row up front so the UI can track it.
         mmproj_model = await _resolve_mmproj_model(session, request.mmproj_model_id)
+        dflash_model = await _resolve_dflash_model(session, request.dflash_model_id)
         options = validate_server_options(request.server_options)
         server = ServerInstance(
             model_id=model.id,
@@ -260,6 +292,7 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
             flash_attn=True,
             mtp_draft_max=request.mtp_draft_max,
             mmproj_model_id=mmproj_model.id if mmproj_model else None,
+            dflash_model_id=dflash_model.id if dflash_model else None,
             server_options=options,
             status="stopped",
             health_status="unknown",
@@ -309,6 +342,7 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
         was_running = instance.status == "running"
         model_changed = False
         mmproj_changed = False
+        dflash_changed = False
 
         if request.alias is not None and request.alias != instance.alias:
             existing_alias = await session.execute(
@@ -341,6 +375,15 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
                 instance.mmproj_model_id = new_mmproj_id
                 mmproj_changed = True
 
+        if request.dflash_model_id is not None:
+            dflash_model = await _resolve_dflash_model(
+                session, request.dflash_model_id or None
+            )
+            new_dflash_id = dflash_model.id if dflash_model else None
+            if new_dflash_id != instance.dflash_model_id:
+                instance.dflash_model_id = new_dflash_id
+                dflash_changed = True
+
         if request.gpu_layers is not None:
             instance.gpu_layers = request.gpu_layers
         if request.context_size is not None:
@@ -366,7 +409,7 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
         }
         await session.commit()
 
-        needs_start = model_changed or mmproj_changed
+        needs_start = model_changed or mmproj_changed or dflash_changed
 
         # A running server must restart to load a different model file
         if was_running and (request.restart or needs_start):

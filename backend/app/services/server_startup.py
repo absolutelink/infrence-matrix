@@ -49,6 +49,7 @@ def build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any
     """
     filename = model.source_file or model.path.rsplit("/", 1)[-1]
     mmproj = _find_mmproj(instance, model)
+    dflash = _find_dflash(instance, model)
     payload: dict[str, Any] = {
         "config": {
             "id": str(instance.id),
@@ -87,6 +88,16 @@ def build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any
                 "filename": mmproj_filename,
                 "job_id": f"server-{instance.id}-mmproj",
             }
+    if dflash is not None:
+        dflash_model, dflash_filename = dflash
+        payload["config"]["draft_model_path"] = dflash_model.path
+        if dflash_model.source_repo_id:
+            payload["draft_source"] = {
+                "source": dflash_model.source,
+                "repo_id": dflash_model.source_repo_id,
+                "filename": dflash_filename,
+                "job_id": f"server-{instance.id}-dflash",
+            }
     return payload
 
 
@@ -110,6 +121,17 @@ def _find_mmproj(instance: ServerInstance, model: Model) -> tuple[Model, str] | 
         return None
     filename = mmproj_model.source_file or mmproj_model.path.rsplit("/", 1)[-1]
     return mmproj_model, filename
+
+
+def _find_dflash(instance: ServerInstance, model: Model) -> tuple[Model, str] | None:
+    """Return a valid dflash draft model for the instance, if selected."""
+    dflash_model = instance.dflash_model
+    if not dflash_model:
+        return None
+    if dflash_model.model_type != "dflash" or dflash_model.path == model.path:
+        return None
+    filename = dflash_model.source_file or dflash_model.path.rsplit("/", 1)[-1]
+    return dflash_model, filename
 
 
 async def dispatch_start(

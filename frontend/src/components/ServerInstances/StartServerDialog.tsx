@@ -41,6 +41,7 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
   const [gpuLayers, setGpuLayers] = useState("35")
   const [contextSize, setContextSize] = useState("4096")
   const [mmprojModelId, setMmprojModelId] = useState<string>("none")
+  const [dflashModelId, setDflashModelId] = useState<string>("none")
   const [mtpDraftMax, setMtpDraftMax] = useState("0")
   const [serverOptions, setServerOptions] = useState<ServerOptions>({})
 
@@ -78,6 +79,9 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
       if (mmprojModelId && mmprojModelId !== "none") {
         body.mmproj_model_id = mmprojModelId
       }
+      if (dflashModelId !== "none") {
+        body.dflash_model_id = dflashModelId
+      }
       return ServerInstancesService.instancesStartServer({ body })
     },
     onSuccess: () => {
@@ -95,6 +99,9 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
   )
   const mmprojModels = ((modelsQuery.data ?? []) as Model[]).filter(
     (model) => model.model_type === "mmproj",
+  )
+  const dflashModels = ((modelsQuery.data ?? []) as Model[]).filter(
+    (model) => model.model_type === "dflash",
   )
   const agents = (agentsQuery.data ?? []) as Array<{
     id: string
@@ -137,6 +144,22 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
             mtpDraftMax={mtpDraftMax}
             onMtpDraftMaxChange={setMtpDraftMax}
           />
+          <div>
+            <Label>dflash draft model</Label>
+            <Select value={dflashModelId} onValueChange={setDflashModelId}>
+              <SelectTrigger className="mt-1">
+                <SelectValue placeholder="None (standard MTP)" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">None</SelectItem>
+                {dflashModels.map((model) => (
+                  <SelectItem key={model.id} value={model.id as string}>
+                    {model.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
           <div>
             <Label>Model</Label>
             <Select value={modelId} onValueChange={setModelId}>

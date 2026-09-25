@@ -1461,6 +1461,14 @@ export type ServerInstanceResponse = {
      */
     mmproj_model_name?: string | null;
     /**
+     * Dflash Model Id
+     */
+    dflash_model_id?: string | null;
+    /**
+     * Dflash Model Name
+     */
+    dflash_model_name?: string | null;
+    /**
      * Alias
      */
     alias: string;
@@ -1794,6 +1802,10 @@ export type StartServerRequest = {
      */
     mmproj_model_id?: string | null;
     /**
+     * Dflash Model Id
+     */
+    dflash_model_id?: string | null;
+    /**
      * Mtp Draft Max
      */
     mtp_draft_max?: number | null;
@@ -1953,6 +1965,10 @@ export type UpdateServerRequest = {
      * Mmproj Model Id
      */
     mmproj_model_id?: string | null;
+    /**
+     * Dflash Model Id
+     */
+    dflash_model_id?: string | null;
     server_options?: ServerOptions | null;
     /**
      * Restart

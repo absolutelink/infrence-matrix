@@ -37,6 +37,7 @@ interface EditServerDialogProps {
     model_id: string
     model_name: string | null
     mmproj_model_id?: string | null
+    dflash_model_id?: string | null
     status: string
     alias: string
     gpu_layers: number
@@ -61,6 +62,7 @@ export function EditServerDialog({
   const [flashAttn, setFlashAttn] = useState(true)
   const [inactivityTimeout, setInactivityTimeout] = useState("300")
   const [mmprojModelId, setMmprojModelId] = useState<string>("none")
+  const [dflashModelId, setDflashModelId] = useState<string>("none")
   const [mtpDraftMax, setMtpDraftMax] = useState("0")
   const [serverOptions, setServerOptions] = useState<ServerOptions>({})
 
@@ -82,6 +84,7 @@ export function EditServerDialog({
       setFlashAttn(instance.flash_attn)
       setInactivityTimeout(String(instance.inactivity_timeout_seconds))
       setMmprojModelId(instance.mmproj_model_id || "none")
+      setDflashModelId(instance.dflash_model_id || "none")
       setMtpDraftMax(
         instance.mtp_draft_max ? String(instance.mtp_draft_max) : "0",
       )
@@ -103,6 +106,7 @@ export function EditServerDialog({
           flash_attn: flashAttn,
           inactivity_timeout_seconds: Number(inactivityTimeout),
           mmproj_model_id: mmprojModelId === "none" ? "" : mmprojModelId,
+          dflash_model_id: dflashModelId === "none" ? "" : dflashModelId,
           mtp_draft_max: mtpDraftMax === "0" ? null : Number(mtpDraftMax),
           server_options: serverOptions,
         },
@@ -153,6 +157,27 @@ export function EditServerDialog({
               placeholder="Public name clients use in requests"
               className="mt-1"
             />
+          </div>
+          <div className="col-span-2">
+            <Label>dflash draft model</Label>
+            <Select value={dflashModelId} onValueChange={setDflashModelId}>
+              <SelectTrigger className="mt-1">
+                <SelectValue placeholder="None (standard MTP)" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">None</SelectItem>
+                {((modelsQuery.data ?? []) as Model[])
+                  .filter((model) => model.model_type === "dflash")
+                  .map((model) => (
+                    <SelectItem
+                      key={model.id ?? model.name}
+                      value={model.id ?? model.name}
+                    >
+                      {model.name}
+                    </SelectItem>
+                  ))}
+              </SelectContent>
+            </Select>
           </div>
           <div className="col-span-2">
             <Label>Model</Label>
