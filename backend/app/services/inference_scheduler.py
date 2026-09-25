@@ -61,7 +61,7 @@ async def get_slot_telemetry(server: ServerInstance) -> SlotTelemetry:
     try:
         agent = await agent_manager.get_agent(str(server.agent_id))
         if agent is None or agent.status != "online" or not agent.websocket_connected:
-            return SlotTelemetry(0, 0, 0, known=False)
+            return SlotTelemetry(1, 0, 1, known=False)
         payload = await agent_manager.send_to_agent(
             str(server.agent_id),
             "GET",
@@ -214,7 +214,10 @@ class InferenceScheduler:
             servers = list(
                 (
                     await session.execute(
-                        select(ServerInstance).where(ServerInstance.status == "running")
+                        select(ServerInstance).where(
+                            ServerInstance.status == "running",
+                            ServerInstance.health_status == "healthy",
+                        )
                     )
                 ).scalars()
             )

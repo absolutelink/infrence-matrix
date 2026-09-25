@@ -58,7 +58,7 @@ export function QueueStatusBar() {
                 <div className="mt-1 text-[11px] text-muted-foreground">
                   {server.telemetry_known
                     ? `${server.available} slots available`
-                    : "Waiting for server telemetry"}
+                    : "Using health status; telemetry unavailable"}
                 </div>
               </div>
             ))

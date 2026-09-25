@@ -112,6 +112,17 @@ class AgentManager:
                     )
                     .values(status="running", health_status="healthy")
                 )
+                if set(healthy_ids) != set(running_ids):
+                    await session.execute(
+                        update(ServerInstance)
+                        .where(
+                            col(ServerInstance.agent_id) == agent.id,
+                            col(ServerInstance.status) == "running",
+                            col(ServerInstance.id).in_(running_ids),
+                            col(ServerInstance.id).not_in(healthy_ids),
+                        )
+                        .values(health_status="unknown")
+                    )
                 confirmed_count = getattr(confirmed, "rowcount", 0)
                 if confirmed_count:
                     logger.info(
@@ -356,6 +367,7 @@ class AgentManager:
 
             if server:
                 server.status = "error"
+                server.health_status = "unhealthy"
                 server.error_message = data.get("error", "Unknown error")
                 session.add(server)
                 await session.commit()
@@ -402,6 +414,7 @@ class AgentManager:
 
                 if server:
                     server.status = "stopped"
+                    server.health_status = "unknown"
                     session.add(server)
                     await session.commit()
                     logger.info(f"Server {server_id} marked as stopped")

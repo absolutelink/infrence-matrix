@@ -344,12 +344,20 @@ class TestAgentManagerStartingPromotion:
         stale_result.rowcount = 0
         confirmed_result = MagicMock()
         confirmed_result.rowcount = 0
+        reset_result = MagicMock()
+        reset_result.rowcount = 0
 
         session = AsyncMock()
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
         session.execute = AsyncMock(
-            side_effect=[lookup_result, confirmed_result, stale_result, restore_result]
+            side_effect=[
+                lookup_result,
+                confirmed_result,
+                reset_result,
+                stale_result,
+                restore_result,
+            ]
         )
         session.add = Mock()
         session.commit = AsyncMock()

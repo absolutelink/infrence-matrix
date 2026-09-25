@@ -543,6 +543,7 @@ async def stop_server(server_id: str) -> dict[str, str]:
             raise HTTPException(status_code=404, detail="Server instance not found")
 
         instance.status = "stopped"
+        instance.health_status = "unknown"
         await session.commit()
 
         # Forward the stop command to the agent (best effort).
