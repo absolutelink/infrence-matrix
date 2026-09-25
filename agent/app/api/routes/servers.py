@@ -6,7 +6,6 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.core.config import settings
 from app.core.logging import logger
 from app.services.event_bus import publish_event
 from app.services.halogen_server import (
@@ -279,7 +278,6 @@ async def start_server(request: ServerStartRequest) -> dict:
                 api_port=port,
                 engine_port=_allocate_port(),
                 options=request.config.engine_options,
-                cache_dir=str(Path(settings.CACHE_PATH) / request.config.id),
             )
         else:
             config = ServerConfig(

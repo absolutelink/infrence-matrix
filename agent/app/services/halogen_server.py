@@ -2,12 +2,10 @@
 
 import asyncio
 import os
-import shutil
 import signal
 import subprocess
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -29,7 +27,6 @@ class HalogenServerConfig:
     api_port: int
     engine_port: int
     options: dict[str, Any]
-    cache_dir: str
 
 
 class HalogenServerManager:
@@ -139,8 +136,6 @@ class HalogenServerManager:
             HALOGEN_REPO_ID, job_id=f"halogen-{server_id}"
         )
 
-        cache_dir = Path(config.cache_dir)
-        cache_dir.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ)
         env.update(
             {
@@ -150,8 +145,6 @@ class HalogenServerManager:
                 "HALOGEN_ENGINE": f"127.0.0.1:{config.engine_port}",
                 "HALOGEN_CHECKPOINT": HALOGEN_CHECKPOINT,
                 "HALOGEN_TOKENIZER": HALOGEN_TOKENIZER,
-                "HALOGEN_CACHE_DIR": str(cache_dir),
-                "XDG_CACHE_HOME": str(cache_dir),
             }
         )
         options = config.options
@@ -242,11 +235,6 @@ class HalogenServerManager:
         return True
 
     def delete_server(self, server_id: str) -> None:
-        config = self.configs.get(server_id)
-        cache_dir = (
-            config.cache_dir if config else str(Path(settings.CACHE_PATH) / server_id)
-        )
-        shutil.rmtree(cache_dir, ignore_errors=True)
         self._logs.pop(server_id, None)
 
     def _remove(self, server_id: str) -> None:

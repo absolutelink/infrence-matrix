@@ -82,7 +82,7 @@ Designed for single-user home server deployments with support for multiple infer
 │  • Auto start on demand      │                                     │
 │  • Auto shutdown on inactivity                                     │
 │  • Configurable llama.cpp GPU layers or Halogen startup settings    │
-│  • Per-server cache directory under /cache/<server_uuid>           │
+│  • Per-server process with independent API and engine ports        │
 └──────────────────────────────────────────────────────────────────┘
          │
          ▼

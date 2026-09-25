@@ -329,7 +329,7 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
                     status_code=400,
                     detail="Halogen servers require an agent with platform=halogen and type=rocm",
                 )
-            if request.server_options:
+            if request.server_options.model_dump(exclude_none=True):
                 raise HTTPException(
                     status_code=400,
                     detail="llama.cpp server_options are not valid for Halogen",
