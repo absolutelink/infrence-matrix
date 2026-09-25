@@ -40,6 +40,8 @@ class ServerConfig:
 class LlamaServerManager:
     """Manages llama.cpp subprocesses."""
 
+    ServerConfig = ServerConfig
+
     # Number of raw log chunks (per stream) kept in memory per server
     LOG_BUFFER_CHUNKS: int = 64
     HEALTH_CHECK_INTERVAL: float = 10.0

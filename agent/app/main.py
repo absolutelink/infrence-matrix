@@ -7,7 +7,7 @@ from app.api.routes import benchmarks, gpu, models, proxy, servers, websocket
 from app.core.logging import logger
 from app.services.frontend_client import frontend_client
 from app.services.gpu_monitor import start_gpu_monitoring
-from app.services.llama_server import llama_server_manager
+from app.services.server_manager import server_manager
 
 
 def create_app() -> FastAPI:
@@ -58,13 +58,13 @@ def create_app() -> FastAPI:
 
         # Start live log forwarding for llama.cpp servers
         try:
-            llama_server_manager.start_log_forwarding()
+            server_manager.start_log_forwarding()
             logger.info("Started log forwarding")
         except Exception as e:  # noqa: BLE001 - startup must not crash on optional services
             logger.error(f"Failed to start log forwarding: {e}")
 
         try:
-            llama_server_manager.start_health_monitoring()
+            server_manager.start_health_monitoring()
             logger.info("Started server health monitoring")
         except Exception as e:  # noqa: BLE001 - startup must not crash on optional services
             logger.error(f"Failed to start server health monitoring: {e}")
@@ -73,7 +73,7 @@ def create_app() -> FastAPI:
     async def shutdown_event():
         """Shutdown event to cleanup services."""
         logger.info("Shutting down Inference Matrix Agent services...")
-        await llama_server_manager.stop_health_monitoring()
+        await server_manager.stop_health_monitoring()
         await frontend_client.close()
         logger.info("Agent shutdown complete")
 

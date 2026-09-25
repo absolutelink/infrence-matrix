@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import uuid as uuid_module
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -15,7 +15,11 @@ from app.db.session import AsyncSessionMaker
 from app.models import Agent, Model, ServerInstance
 from app.services.agent_manager import agent_manager
 from app.services.benchmark import is_benchmark_blocking
-from app.services.server_options import ServerOptions, validate_server_options
+from app.services.server_options import (
+    ServerOptions,
+    validate_halogen_options,
+    validate_server_options,
+)
 from app.services.server_startup import (
     build_start_payload as _build_start_payload,
 )
@@ -68,6 +72,8 @@ class ServerInstanceResponse(BaseModel):
     dflash_model_id: str | None = None
     dflash_model_name: str | None = None
     alias: str
+    engine: Literal["llamacpp", "halogen"] = "llamacpp"
+    engine_options: dict = Field(default_factory=dict)
     status: str
     health_status: str
     error_message: str | None = None
@@ -107,12 +113,16 @@ class StartServerRequest(BaseModel):
     server_options: ServerOptions = Field(default_factory=ServerOptions)
     # Public name clients use in OpenAI-compatible requests
     alias: str = Field(..., min_length=1, max_length=255)
+    engine: Literal["llamacpp", "halogen"] = "llamacpp"
+    engine_options: dict = Field(default_factory=dict)
 
 
 class UpdateServerRequest(BaseModel):
     """Editable server settings. All fields optional."""
 
     alias: str | None = Field(None, min_length=1, max_length=255)
+    engine: Literal["llamacpp", "halogen"] | None = None
+    engine_options: dict | None = None
     # Swap the model this server serves (requires stop + restart when running)
     model_id: str | None = None
     gpu_layers: int | None = Field(None, ge=0, le=1000)
@@ -159,6 +169,8 @@ async def list_server_instances() -> ServerInstanceListResponse:
                     if instance.dflash_model
                     else None,
                     alias=instance.alias,
+                    engine=instance.engine,
+                    engine_options=instance.engine_options or {},
                     status=instance.status,
                     health_status=instance.health_status,
                     error_message=instance.error_message,
@@ -221,6 +233,8 @@ async def get_server_instance(server_id: str) -> ServerInstanceResponse:
             if instance.dflash_model
             else None,
             alias=instance.alias,
+            engine=instance.engine,
+            engine_options=instance.engine_options or {},
             status=instance.status,
             health_status=instance.health_status,
             error_message=instance.error_message,
@@ -267,15 +281,38 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
             if not agent:
                 raise HTTPException(status_code=404, detail="Agent not found")
         else:
-            result = await session.execute(
-                select(Agent).where(col(Agent.status) == "online").limit(1)
-            )
+            agent_query = select(Agent).where(col(Agent.status) == "online")
+            if request.engine == "halogen":
+                agent_query = agent_query.where(col(Agent.platform) == "halogen")
+            result = await session.execute(agent_query.limit(1))
             agent = result.scalar_one_or_none()
 
         if not agent:
             raise HTTPException(
                 status_code=503, detail="No online agent available to start server"
             )
+
+        if request.engine == "halogen":
+            if agent.platform != "halogen" or agent.type != "rocm":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Halogen servers require an agent with platform=halogen and type=rocm",
+                )
+            if request.server_options:
+                raise HTTPException(
+                    status_code=400,
+                    detail="llama.cpp server_options are not valid for Halogen",
+                )
+            engine_options = validate_halogen_options(request.engine_options)
+        else:
+            # Preserve compatibility with existing custom llama.cpp platform
+            # labels; only Halogen is a distinct engine contract.
+            if agent.platform == "halogen":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Halogen agents require engine=halogen",
+                )
+            engine_options = {}
 
         # Reject duplicate aliases up front for a clean 4xx (the DB unique
         # constraint stays as the race backstop).
@@ -291,6 +328,13 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
 
         # The agent allocates a random free port per start; the port is not
         # persisted. Create the instance row up front so the UI can track it.
+        if request.engine == "halogen" and (
+            request.mmproj_model_id or request.dflash_model_id
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Halogen servers do not support mmproj or dflash models",
+            )
         mmproj_model = await _resolve_mmproj_model(session, request.mmproj_model_id)
         dflash_model = await _resolve_dflash_model(session, request.dflash_model_id)
         options = validate_server_options(request.server_options)
@@ -299,6 +343,8 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
             agent_id=agent.id,
             alias=request.alias,
             process_command=f"{model.source_file or model.path}",
+            engine=request.engine,
+            engine_options=engine_options,
             gpu_layers=request.gpu_layers,
             context_size=request.context_size,
             flash_attn=True,
@@ -368,6 +414,18 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
                     status_code=409, detail=f"Alias '{request.alias}' already exists"
                 )
             instance.alias = request.alias
+
+        if request.engine is not None and request.engine != instance.engine:
+            raise HTTPException(
+                status_code=400,
+                detail="Changing a server engine is not supported; create a new server",
+            )
+        if request.engine_options is not None:
+            instance.engine_options = (
+                validate_halogen_options(request.engine_options)
+                if instance.engine == "halogen"
+                else {}
+            )
 
         if request.model_id is not None and request.model_id != str(instance.model_id):
             new_model = await session.get(Model, uuid_module.UUID(request.model_id))
@@ -587,12 +645,14 @@ async def delete_server(server_id: str) -> dict[str, str]:
 
         # Stop the llama-server on the agent first (best effort) so the
         # process does not outlive its row.
-        if was_active:
+        if was_active or instance.engine == "halogen":
             try:
                 await agent_manager.send_to_agent(
                     agent_id,
                     "POST",
-                    "/servers/stop",
+                    "/servers/delete"
+                    if instance.engine == "halogen"
+                    else "/servers/stop",
                     {"server_id": instance_id},
                     timeout=60.0,
                 )

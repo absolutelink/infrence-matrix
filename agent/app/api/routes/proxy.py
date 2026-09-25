@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app.api.routes.servers import server_manager
-from app.services.proxy import LlamaCppProxy
+from app.services.proxy import ServerProxy
 
 router = APIRouter(prefix="/proxy", tags=["proxy"])
 
@@ -27,7 +27,7 @@ async def proxy_request(
     if server_id not in server_manager.servers:
         raise HTTPException(404, "Server not found")
 
-    proxy = LlamaCppProxy(server_manager)
+    proxy = ServerProxy(server_manager)
 
     body = None
     if request.method in ["POST", "PUT", "PATCH"]:

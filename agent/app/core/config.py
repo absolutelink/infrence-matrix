@@ -25,6 +25,8 @@ class Settings(BaseSettings):
 
     # llama.cpp
     LLAMA_SERVER_PATH: str = "/usr/local/bin/llama-server"
+    HALOGEN_ENTRYPOINT: str = "/usr/local/bin/entrypoint.sh"
+    HALOGEN_MAX_INSTANCES: int = 2
     # ``llama-bench`` is normally installed on PATH in the llama.cpp image.
     LLAMA_BENCH_PATH: str = "llama-bench"
     DEFAULT_GPU_LAYERS: int = 35

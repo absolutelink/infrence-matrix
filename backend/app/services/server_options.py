@@ -105,3 +105,28 @@ def validate_server_options(options: dict | ServerOptions) -> dict:
     if isinstance(options, ServerOptions):
         return options.model_dump(exclude_none=True)
     return ServerOptions.model_validate(options).model_dump(exclude_none=True)
+
+
+class HalogenServerOptions(BaseModel):
+    """Startup settings supported by a Halogen server process."""
+
+    model_id: str | None = None
+    drafter: Literal["serial", "mtp", "dflash2"] | None = None
+    kv_slots: int | None = Field(default=None, ge=1, le=8)
+    slot_ctx: int | None = Field(default=None, ge=256, le=1_048_576)
+    cache_mb: int | None = Field(default=None, ge=0)
+    cache_reserve_mb: int | None = Field(default=None, ge=0)
+    max_tokens_cap: int | None = Field(default=None, ge=1)
+    queue_timeout: int | None = Field(default=None, ge=1)
+    reasoning_effort: (
+        Literal["high", "low", "medium", "minimal", "none", "xhigh"] | None
+    ) = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+def validate_halogen_options(options: dict | HalogenServerOptions) -> dict:
+    """Validate and normalize Halogen startup settings."""
+    if isinstance(options, HalogenServerOptions):
+        return options.model_dump(exclude_none=True)
+    return HalogenServerOptions.model_validate(options).model_dump(exclude_none=True)

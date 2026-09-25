@@ -4,6 +4,10 @@ import { toast } from "sonner"
 import type { Model } from "@/client"
 import { ModelsService, ServerInstancesService } from "@/client"
 import {
+  type HalogenOptions,
+  HalogenSettingsFields,
+} from "@/components/ServerInstances/HalogenSettingsFields"
+import {
   type ServerOptions,
   ServerSettingsFields,
   validateServerOptions,
@@ -36,6 +40,8 @@ interface EditServerDialogProps {
     id: string
     model_id: string
     model_name: string | null
+    engine?: "llamacpp" | "halogen"
+    engine_options?: HalogenOptions
     mmproj_model_id?: string | null
     dflash_model_id?: string | null
     status: string
@@ -65,6 +71,7 @@ export function EditServerDialog({
   const [dflashModelId, setDflashModelId] = useState<string>("none")
   const [mtpDraftMax, setMtpDraftMax] = useState("0")
   const [serverOptions, setServerOptions] = useState<ServerOptions>({})
+  const [engineOptions, setEngineOptions] = useState<HalogenOptions>({})
 
   const modelsQuery = useQuery({
     queryKey: ["models"],
@@ -89,6 +96,7 @@ export function EditServerDialog({
         instance.mtp_draft_max ? String(instance.mtp_draft_max) : "0",
       )
       setServerOptions(instance.server_options || {})
+      setEngineOptions(instance.engine_options || {})
     }
   }, [isOpen, instance])
 
@@ -109,6 +117,7 @@ export function EditServerDialog({
           dflash_model_id: dflashModelId === "none" ? "" : dflashModelId,
           mtp_draft_max: mtpDraftMax === "0" ? null : Number(mtpDraftMax),
           server_options: serverOptions,
+          engine_options: instance.engine === "halogen" ? engineOptions : {},
         },
       })
     },
@@ -148,37 +157,48 @@ export function EditServerDialog({
         </DialogHeader>
 
         <div className="grid grid-cols-2 gap-4 py-2">
-          <div className="col-span-2">
-            <Label htmlFor="alias">Alias</Label>
-            <Input
-              id="alias"
-              value={alias}
-              onChange={(e) => setAlias(e.target.value)}
-              placeholder="Public name clients use in requests"
-              className="mt-1"
-            />
-          </div>
-          <div className="col-span-2">
-            <Label>dflash draft model</Label>
-            <Select value={dflashModelId} onValueChange={setDflashModelId}>
-              <SelectTrigger className="mt-1">
-                <SelectValue placeholder="None (standard MTP)" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="none">None</SelectItem>
-                {((modelsQuery.data ?? []) as Model[])
-                  .filter((model) => model.model_type === "dflash")
-                  .map((model) => (
-                    <SelectItem
-                      key={model.id ?? model.name}
-                      value={model.id ?? model.name}
-                    >
-                      {model.name}
-                    </SelectItem>
-                  ))}
-              </SelectContent>
-            </Select>
-          </div>
+          {instance.engine !== "halogen" && (
+            <div className="col-span-2">
+              <Label htmlFor="alias">Alias</Label>
+              <Input
+                id="alias"
+                value={alias}
+                onChange={(e) => setAlias(e.target.value)}
+                placeholder="Public name clients use in requests"
+                className="mt-1"
+              />
+            </div>
+          )}
+          {instance.engine === "halogen" ? (
+            <div className="col-span-2">
+              <HalogenSettingsFields
+                options={engineOptions}
+                onChange={setEngineOptions}
+              />
+            </div>
+          ) : (
+            <div className="col-span-2">
+              <Label>dflash draft model</Label>
+              <Select value={dflashModelId} onValueChange={setDflashModelId}>
+                <SelectTrigger className="mt-1">
+                  <SelectValue placeholder="None (standard MTP)" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">None</SelectItem>
+                  {((modelsQuery.data ?? []) as Model[])
+                    .filter((model) => model.model_type === "dflash")
+                    .map((model) => (
+                      <SelectItem
+                        key={model.id ?? model.name}
+                        value={model.id ?? model.name}
+                      >
+                        {model.name}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
           <div className="col-span-2">
             <Label>Model</Label>
             <Select value={modelId} onValueChange={setModelId}>
@@ -220,18 +240,20 @@ export function EditServerDialog({
               </SelectContent>
             </Select>
           </div>
-          <div>
-            <Label htmlFor="gpu-layers">GPU layers</Label>
-            <Input
-              id="gpu-layers"
-              type="number"
-              min={0}
-              max={1000}
-              value={gpuLayers}
-              onChange={(e) => setGpuLayers(e.target.value)}
-              className="mt-1"
-            />
-          </div>
+          {instance.engine !== "halogen" && (
+            <div>
+              <Label htmlFor="gpu-layers">GPU layers</Label>
+              <Input
+                id="gpu-layers"
+                type="number"
+                min={0}
+                max={1000}
+                value={gpuLayers}
+                onChange={(e) => setGpuLayers(e.target.value)}
+                className="mt-1"
+              />
+            </div>
+          )}
           <div className="col-span-2">
             <ServerSettingsFields
               options={serverOptions}
@@ -267,19 +289,21 @@ export function EditServerDialog({
               className="mt-1"
             />
           </div>
-          <div className="flex items-end pb-2">
-            <Label
-              htmlFor="flash-attn"
-              className="flex items-center gap-2 text-sm font-medium"
-            >
-              <Checkbox
-                id="flash-attn"
-                checked={flashAttn}
-                onCheckedChange={(checked) => setFlashAttn(checked === true)}
-              />
-              Flash attention
-            </Label>
-          </div>
+          {instance.engine !== "halogen" && (
+            <div className="flex items-end pb-2">
+              <Label
+                htmlFor="flash-attn"
+                className="flex items-center gap-2 text-sm font-medium"
+              >
+                <Checkbox
+                  id="flash-attn"
+                  checked={flashAttn}
+                  onCheckedChange={(checked) => setFlashAttn(checked === true)}
+                />
+                Flash attention
+              </Label>
+            </div>
+          )}
         </div>
 
         <DialogFooter>
@@ -289,7 +313,10 @@ export function EditServerDialog({
           <LoadingButton
             onClick={() => updateMutation.mutate()}
             loading={updateMutation.isPending}
-            disabled={validateServerOptions(serverOptions) !== null}
+            disabled={
+              instance.engine !== "halogen" &&
+              validateServerOptions(serverOptions) !== null
+            }
           >
             {wasRunning ? "Save & Restart" : "Save"}
           </LoadingButton>

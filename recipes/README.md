@@ -1,6 +1,7 @@
 # Agent Recipes
 
-This folder contains Docker recipes for building Inference Matrix Agent images with different llama.cpp backends.
+This folder contains Docker recipes for building Inference Matrix Agent images
+with different inference backends.
 
 ## Available Recipes
 
@@ -48,6 +49,12 @@ docker build \
 README for required device mappings and permissions.
 
 ## Future Recipes (Planned)
+
+### 4. Halogen ROCm (`recipes/halogen-rocm/`)
+
+Agent image for Halogen on AMD Strix Halo. The published image is
+`agent-halogen-rocm` and runs one isolated Halogen process per server instance.
+See the recipe README for device, security, model, and cache requirements.
 
 ### llama.cpp CUDA (`recipes/llama-cpp-cuda/`)
 - NVIDIA GPU support via CUDA

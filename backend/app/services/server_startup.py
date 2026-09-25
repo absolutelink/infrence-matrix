@@ -56,6 +56,8 @@ def build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any
     payload: dict[str, Any] = {
         "config": {
             "id": str(instance.id),
+            "engine": instance.engine,
+            "engine_options": instance.engine_options or {},
             "model_path": model.path,
             "gpu_layers": instance.gpu_layers,
             "context_size": instance.context_size,

@@ -5,7 +5,7 @@ This is the agent service for Inference Matrix, responsible for managing local i
 ## Features
 
 - Registers with the main Inference Matrix frontend
-- Manages llama.cpp server instances
+- Manages llama.cpp or Halogen server instances
 - Handles WebSocket communication for command execution
 - Downloads and manages GGUF model files
 - Reports GPU usage and system information
@@ -20,14 +20,22 @@ This is the agent service for Inference Matrix, responsible for managing local i
 - `LLAMA_SERVER_PATH` - Path to llama-server binary (default: "/usr/local/bin/llama-server")
 - `MODELS_PATH` - Path to download and store models (default: "/models")
 - `CACHE_PATH` - Path for prompt cache files (default: "/cache")
+- `HALOGEN_ENTRYPOINT` - Halogen container entrypoint (default: "/usr/local/bin/entrypoint.sh")
+- `HALOGEN_MAX_INSTANCES` - Maximum concurrent Halogen processes (default: 2)
 
 ## API Endpoints
 
 ### Server Management
-- `POST /servers/start` - Start a llama.cpp server
-- `POST /servers/stop` - Stop a llama.cpp server
+- `POST /servers/start` - Start a platform-specific server
+- `POST /servers/stop` - Stop a server
+- `POST /servers/delete` - Stop a server and remove its cache directory
 - `GET /servers/list` - List all running servers
 - `GET /servers/status/{server_id}` - Get status of a specific server
+
+When `AGENT_PLATFORM=halogen`, each server runs its own Halogen process with
+private API and engine ports. The agent proxies Chat Completions, legacy
+Completions, Responses, health, model, cache, and metrics requests while
+keeping the Halogen engine port private.
 
 ### Model Management
 - `POST /models/download` - Download a model from HuggingFace

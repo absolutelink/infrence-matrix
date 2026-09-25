@@ -362,6 +362,10 @@ class ServerInstance(SQLModel, table=True):
     pid: int | None = None
     process_command: str
 
+    # Selected inference engine. Legacy rows default to llama.cpp.
+    engine: str = "llamacpp"
+    engine_options: dict = Field(default_factory=dict, sa_column=Column(JSON))
+
     # Editable server settings (source of truth; legacy JSON `config` kept
     # for rows written before these columns existed)
     gpu_layers: int = 35

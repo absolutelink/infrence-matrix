@@ -4,6 +4,10 @@ import { toast } from "sonner"
 import type { Model, StartServerRequest } from "@/client"
 import { AgentsService, ModelsService, ServerInstancesService } from "@/client"
 import {
+  type HalogenOptions,
+  HalogenSettingsFields,
+} from "@/components/ServerInstances/HalogenSettingsFields"
+import {
   type ServerOptions,
   ServerSettingsFields,
   validateServerOptions,
@@ -44,6 +48,8 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
   const [dflashModelId, setDflashModelId] = useState<string>("none")
   const [mtpDraftMax, setMtpDraftMax] = useState("0")
   const [serverOptions, setServerOptions] = useState<ServerOptions>({})
+  const [engine, setEngine] = useState<"llamacpp" | "halogen">("llamacpp")
+  const [engineOptions, setEngineOptions] = useState<HalogenOptions>({})
 
   const modelsQuery = useQuery({
     queryKey: ["models"],
@@ -72,6 +78,8 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
         context_size: Number(contextSize) || 4096,
         mtp_draft_max: mtpDraftMax === "0" ? null : Number(mtpDraftMax),
         server_options: serverOptions,
+        engine,
+        engine_options: engine === "halogen" ? engineOptions : {},
       }
       if (agentId && agentId !== "auto") {
         body.agent_id = agentId
@@ -107,7 +115,14 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
     id: string
     name: string
     status: string
+    platform?: string
+    type?: string
   }>
+  const compatibleAgents = agents.filter((agent) =>
+    engine === "halogen"
+      ? agent.platform === "halogen" && agent.type === "rocm"
+      : agent.platform !== "halogen",
+  )
 
   return (
     <Dialog
@@ -129,6 +144,24 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
 
         <div className="space-y-4 py-2">
           <div>
+            <Label>Engine</Label>
+            <Select
+              value={engine}
+              onValueChange={(value) => {
+                setEngine(value as "llamacpp" | "halogen")
+                setAgentId("")
+              }}
+            >
+              <SelectTrigger className="mt-1">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="llamacpp">llama.cpp</SelectItem>
+                <SelectItem value="halogen">Halogen</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
             <Label htmlFor="start-alias">Alias</Label>
             <Input
               id="start-alias"
@@ -138,28 +171,37 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
               className="mt-1"
             />
           </div>
-          <ServerSettingsFields
-            options={serverOptions}
-            onChange={setServerOptions}
-            mtpDraftMax={mtpDraftMax}
-            onMtpDraftMaxChange={setMtpDraftMax}
-          />
-          <div>
-            <Label>dflash draft model</Label>
-            <Select value={dflashModelId} onValueChange={setDflashModelId}>
-              <SelectTrigger className="mt-1">
-                <SelectValue placeholder="None (standard MTP)" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="none">None</SelectItem>
-                {dflashModels.map((model) => (
-                  <SelectItem key={model.id} value={model.id as string}>
-                    {model.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+          {engine === "halogen" ? (
+            <HalogenSettingsFields
+              options={engineOptions}
+              onChange={setEngineOptions}
+            />
+          ) : (
+            <ServerSettingsFields
+              options={serverOptions}
+              onChange={setServerOptions}
+              mtpDraftMax={mtpDraftMax}
+              onMtpDraftMaxChange={setMtpDraftMax}
+            />
+          )}
+          {engine === "llamacpp" && (
+            <div>
+              <Label>dflash draft model</Label>
+              <Select value={dflashModelId} onValueChange={setDflashModelId}>
+                <SelectTrigger className="mt-1">
+                  <SelectValue placeholder="None (standard MTP)" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">None</SelectItem>
+                  {dflashModels.map((model) => (
+                    <SelectItem key={model.id} value={model.id as string}>
+                      {model.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
           <div>
             <Label>Model</Label>
             <Select value={modelId} onValueChange={setModelId}>
@@ -184,7 +226,7 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="auto">Auto (first online agent)</SelectItem>
-                {agents.map((agent) => (
+                {compatibleAgents.map((agent) => (
                   <SelectItem key={agent.id} value={agent.id}>
                     {agent.name} ({agent.status})
                   </SelectItem>
@@ -193,50 +235,54 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
             </Select>
           </div>
 
-          <div>
-            <Label>mmproj (vision projector)</Label>
-            <Select value={mmprojModelId} onValueChange={setMmprojModelId}>
-              <SelectTrigger className="mt-1">
-                <SelectValue placeholder="None (no --mmproj flag)" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="none">None</SelectItem>
-                {mmprojModels.map((model) => (
-                  <SelectItem key={model.id} value={model.id as string}>
-                    {model.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+          {engine === "llamacpp" && (
+            <div>
+              <Label>mmproj (vision projector)</Label>
+              <Select value={mmprojModelId} onValueChange={setMmprojModelId}>
+                <SelectTrigger className="mt-1">
+                  <SelectValue placeholder="None (no --mmproj flag)" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">None</SelectItem>
+                  {mmprojModels.map((model) => (
+                    <SelectItem key={model.id} value={model.id as string}>
+                      {model.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
 
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <Label htmlFor="start-gpu-layers">GPU layers</Label>
-              <Input
-                id="start-gpu-layers"
-                type="number"
-                min={0}
-                max={1000}
-                value={gpuLayers}
-                onChange={(e) => setGpuLayers(e.target.value)}
-                className="mt-1"
-              />
+          {engine === "llamacpp" && (
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label htmlFor="start-gpu-layers">GPU layers</Label>
+                <Input
+                  id="start-gpu-layers"
+                  type="number"
+                  min={0}
+                  max={1000}
+                  value={gpuLayers}
+                  onChange={(e) => setGpuLayers(e.target.value)}
+                  className="mt-1"
+                />
+              </div>
+              <div>
+                <Label htmlFor="start-context-size">Context size</Label>
+                <Input
+                  id="start-context-size"
+                  type="number"
+                  min={256}
+                  max={1048576}
+                  step={256}
+                  value={contextSize}
+                  onChange={(e) => setContextSize(e.target.value)}
+                  className="mt-1"
+                />
+              </div>
             </div>
-            <div>
-              <Label htmlFor="start-context-size">Context size</Label>
-              <Input
-                id="start-context-size"
-                type="number"
-                min={256}
-                max={1048576}
-                step={256}
-                value={contextSize}
-                onChange={(e) => setContextSize(e.target.value)}
-                className="mt-1"
-              />
-            </div>
-          </div>
+          )}
         </div>
 
         <DialogFooter>
@@ -249,7 +295,8 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
             disabled={
               !modelId ||
               !alias.trim() ||
-              validateServerOptions(serverOptions) !== null
+              (engine === "llamacpp" &&
+                validateServerOptions(serverOptions) !== null)
             }
           >
             Create Server

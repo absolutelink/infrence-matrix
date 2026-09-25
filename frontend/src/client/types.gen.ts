@@ -1483,6 +1483,16 @@ export type ServerInstanceResponse = {
      */
     alias: string;
     /**
+     * Engine
+     */
+    engine?: 'llamacpp' | 'halogen';
+    /**
+     * Engine Options
+     */
+    engine_options?: {
+        [key: string]: unknown;
+    };
+    /**
      * Status
      */
     status: string;
@@ -1832,6 +1842,16 @@ export type StartServerRequest = {
      * Alias
      */
     alias: string;
+    /**
+     * Engine
+     */
+    engine?: 'llamacpp' | 'halogen';
+    /**
+     * Engine Options
+     */
+    engine_options?: {
+        [key: string]: unknown;
+    };
 };
 
 /**
@@ -1955,6 +1975,16 @@ export type UpdateServerRequest = {
      * Alias
      */
     alias?: string | null;
+    /**
+     * Engine
+     */
+    engine?: 'llamacpp' | 'halogen' | null;
+    /**
+     * Engine Options
+     */
+    engine_options?: {
+        [key: string]: unknown;
+    } | null;
     /**
      * Model Id
      */

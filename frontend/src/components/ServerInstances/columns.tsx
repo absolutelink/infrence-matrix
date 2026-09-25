@@ -2,7 +2,6 @@ import { useMutation, useQueryClient } from "@tanstack/react-query"
 import type { ColumnDef } from "@tanstack/react-table"
 import {
   Activity,
-  Clock,
   Cpu,
   MemoryStick,
   MoreHorizontal,
@@ -17,6 +16,7 @@ import { toast } from "sonner"
 
 import { AgentsService, ServerInstancesService } from "@/client"
 import { EditServerDialog } from "@/components/ServerInstances/EditServerDialog"
+import type { HalogenOptions } from "@/components/ServerInstances/HalogenSettingsFields"
 import { useLogPanel } from "@/components/ServerInstances/LogPanelContext"
 import type { ServerOptions } from "@/components/ServerInstances/ServerSettingsFields"
 import { Badge } from "@/components/ui/badge"
@@ -35,6 +35,8 @@ type ServerInstance = {
   model_id: string
   model_name: string | null
   alias: string
+  engine?: "llamacpp" | "halogen"
+  engine_options?: HalogenOptions
   status: string
   health_status: string
   error_message: string | null
@@ -45,7 +47,6 @@ type ServerInstance = {
   proxy_url: string | null
   started_at: string | null
   last_health_check: string | null
-  total_requests: number
   cpu_usage_percent: number | null
   ram_usage_bytes: number | null
   vram_usage_bytes: number | null
@@ -66,7 +67,9 @@ export const columns: ColumnDef<ServerInstance>[] = [
         <div>
           <div className="font-medium">{instance.alias || "—"}</div>
           <div className="text-xs text-muted-foreground">
-            {instance.model_name || "Unknown"}
+            {instance.engine === "halogen"
+              ? "Halogen"
+              : instance.model_name || "Unknown"}
           </div>
         </div>
       )
@@ -111,16 +114,19 @@ export const columns: ColumnDef<ServerInstance>[] = [
         instance.status === "starting" ? "booting" : instance.status
 
       return (
-        <div className="flex gap-2">
-          <Badge variant={statusVariant}>{statusLabel}</Badge>
-          <Badge variant={healthVariant} className="text-xs">
-            {instance.health_status}
-          </Badge>
+        <div className="flex flex-col items-start gap-1">
+          <div className="flex gap-2">
+            <Badge variant={statusVariant}>{statusLabel}</Badge>
+            <Badge variant={healthVariant} className="text-xs">
+              {instance.health_status}
+            </Badge>
+          </div>
           {instance.last_health_check && (
             <span
-              className="text-xs text-muted-foreground"
-              title="Last health check"
+              className="text-[11px] text-muted-foreground"
+              title="Last updated"
             >
+              Updated{" "}
               {new Date(instance.last_health_check).toLocaleTimeString()}
             </span>
           )}
@@ -179,55 +185,7 @@ export const columns: ColumnDef<ServerInstance>[] = [
   {
     accessorKey: "started_at",
     header: "Uptime",
-    cell: ({ row }) => {
-      const instance = row.original
-      if (!instance.started_at) {
-        return <span className="text-muted-foreground">-</span>
-      }
-
-      const started = new Date(instance.started_at)
-      const now = new Date()
-      const diff = now.getTime() - started.getTime()
-      const hours = Math.floor(diff / 3600000)
-      const minutes = Math.floor((diff % 3600000) / 60000)
-
-      if (hours > 0) {
-        return (
-          <div className="flex items-center gap-1">
-            <Clock className="h-3 w-3" />
-            <span>
-              {hours}h {minutes}m
-            </span>
-          </div>
-        )
-      }
-      if (minutes > 0) {
-        return (
-          <div className="flex items-center gap-1">
-            <Clock className="h-3 w-3" />
-            <span>{minutes}m</span>
-          </div>
-        )
-      }
-      return (
-        <div className="flex items-center gap-1 text-green-600">
-          <Clock className="h-3 w-3" />
-          <span>Just started</span>
-        </div>
-      )
-    },
-  },
-  {
-    accessorKey: "total_requests",
-    header: "Requests",
-    cell: ({ row }) => {
-      const instance = row.original
-      return (
-        <div className="text-muted-foreground">
-          {instance.total_requests.toLocaleString()}
-        </div>
-      )
-    },
+    cell: () => null,
   },
   {
     id: "actions",

@@ -6,14 +6,15 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.core.config import settings
 from app.core.logging import logger
 from app.services.event_bus import publish_event
-from app.services.llama_server import ServerConfig, llama_server_manager
+from app.services.llama_server import ServerConfig
 from app.services.model_manager import model_manager
+from app.services.server_manager import server_manager
 
 router = APIRouter(prefix="/servers", tags=["servers"])
 
-server_manager = llama_server_manager
 
 # Range for ephemeral llama-server ports when the caller doesn't pin one
 EPHEMERAL_PORT_START = 8090
@@ -23,6 +24,8 @@ EPHEMERAL_PORT_END = 8190
 class ServerSpec(BaseModel):
     id: str
     model_path: str
+    engine: str = "llamacpp"
+    engine_options: dict = Field(default_factory=dict)
     # Omit to let the agent allocate a free random port
     port: int | None = None
     gpu_layers: int = 35
@@ -86,6 +89,10 @@ async def prepare_server(request: ServerStartRequest) -> dict:
 
 
 class ServerStopRequest(BaseModel):
+    server_id: str
+
+
+class ServerDeleteRequest(BaseModel):
     server_id: str
 
 
@@ -204,8 +211,8 @@ async def start_server(request: ServerStartRequest) -> dict:
         # Duplicate start for a running instance is a no-op success (the
         # 60s registration cycle re-dispatches starts the agent already
         # fulfilled — spawning a second process would be wrong).
-        if request.config.id in llama_server_manager.servers:
-            existing = llama_server_manager.configs[request.config.id]
+        if request.config.id in server_manager.servers:
+            existing = server_manager.configs[request.config.id]
             return {
                 "status": "started",
                 "server_id": request.config.id,
@@ -242,22 +249,34 @@ async def start_server(request: ServerStartRequest) -> dict:
         # caller pinned one explicitly.
         port = request.config.port or _allocate_port()
 
-        config = ServerConfig(
-            model_path=model_path,
-            port=port,
-            gpu_layers=request.config.gpu_layers,
-            context_size=request.config.context_size,
-            batch_size=request.config.batch_size,
-            cache_prompt=request.config.cache_prompt,
-            flash_attn=request.config.flash_attn,
-            mtp_draft_max=request.config.mtp_draft_max,
-            jinja=request.config.jinja,
-            mmproj_path=mmproj_path,
-            draft_model_path=draft_model_path,
-            options=request.config.options,
-        )
+        if request.config.engine == "halogen":
+            from app.services.halogen_server import HalogenServerConfig
 
-        success = await llama_server_manager.start_server(request.config.id, config)
+            config = HalogenServerConfig(
+                model_path=model_path,
+                port=port,
+                api_port=port,
+                engine_port=_allocate_port(),
+                options=request.config.engine_options,
+                cache_dir=str(Path(settings.CACHE_PATH) / request.config.id),
+            )
+        else:
+            config = ServerConfig(
+                model_path=model_path,
+                port=port,
+                gpu_layers=request.config.gpu_layers,
+                context_size=request.config.context_size,
+                batch_size=request.config.batch_size,
+                cache_prompt=request.config.cache_prompt,
+                flash_attn=request.config.flash_attn,
+                mtp_draft_max=request.config.mtp_draft_max,
+                jinja=request.config.jinja,
+                mmproj_path=mmproj_path,
+                draft_model_path=draft_model_path,
+                options=request.config.options,
+            )
+
+        success = await server_manager.start_server(request.config.id, config)
         if not success:
             raise HTTPException(status_code=500, detail="Failed to start server")
 
@@ -277,7 +296,7 @@ async def start_server(request: ServerStartRequest) -> dict:
 async def stop_server(request: ServerStopRequest) -> dict:
     """Stop a llama.cpp server (idempotent: already-stopped is success)."""
     try:
-        success = await llama_server_manager.stop_server(request.server_id)
+        success = await server_manager.stop_server(request.server_id)
         if not success:
             # Already stopped/unknown — treat as success so callers can
             # stop-then-start without racing the process table.
@@ -295,18 +314,27 @@ async def stop_server(request: ServerStopRequest) -> dict:
 @router.get("/list")
 async def list_servers() -> dict:
     """List all running servers."""
-    servers = llama_server_manager.list_servers()
+    servers = server_manager.list_servers()
     return {"servers": servers}
 
 
 @router.get("/status/{server_id}")
 async def get_server_status(server_id: str) -> dict:
     """Get status of a specific server."""
-    status = await llama_server_manager.get_server_status(server_id)
+    status = await server_manager.get_server_status(server_id)
     return status
 
 
 @router.get("/logs/{server_id}")
 async def get_server_logs(server_id: str, lines: int = 100) -> dict:
     """Get recent logs from a llama.cpp server."""
-    return llama_server_manager.get_server_logs(server_id, lines)
+    return server_manager.get_server_logs(server_id, lines)
+
+
+@router.post("/delete")
+async def delete_server(request: ServerDeleteRequest) -> dict:
+    """Remove server state and its per-server cache directory."""
+    await server_manager.stop_server(request.server_id)
+    if hasattr(server_manager, "delete_server"):
+        server_manager.delete_server(request.server_id)
+    return {"status": "deleted", "server_id": request.server_id}

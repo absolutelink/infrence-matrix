@@ -1,5 +1,12 @@
 import { useQuery } from "@tanstack/react-query"
-import { Activity, ChevronDown, Cpu, ListOrdered, Server } from "lucide-react"
+import {
+  Activity,
+  ChevronDown,
+  Gauge,
+  ListOrdered,
+  MemoryStick,
+  Server,
+} from "lucide-react"
 
 import { AgentsService } from "@/client"
 import { useQueueStatus } from "@/hook/useQueueStatus"
@@ -56,13 +63,19 @@ export function QueueStatusBar() {
         </span>
         {gpuUtilization !== null && (
           <span className="flex items-center gap-1.5">
-            <Cpu className="h-3.5 w-3.5" />
+            <Gauge className="h-3.5 w-3.5" />
             {gpuUtilization.toFixed(0)}% GPU
+          </span>
+        )}
+        {totalVram > 0 && (
+          <span className="flex items-center gap-1.5">
+            <MemoryStick className="h-3.5 w-3.5" />
+            {formatBytes(usedVram)} / {formatBytes(totalVram)}
           </span>
         )}
         <ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
       </summary>
-      <div className="absolute right-0 top-full z-20 mt-2 w-80 rounded-lg border bg-popover p-3 text-popover-foreground shadow-lg">
+      <div className="absolute right-0 top-full z-20 mt-2 w-96 rounded-lg border bg-popover p-4 text-popover-foreground shadow-lg">
         <div className="mb-3 flex items-center justify-between">
           <div>
             <p className="text-sm font-medium">Inference capacity</p>
@@ -70,24 +83,28 @@ export function QueueStatusBar() {
               {status.available} of {status.capacity} slots available
             </p>
           </div>
-          {gpuSnapshots.length > 0 && (
-            <div className="mb-3 rounded-md bg-muted/60 px-2.5 py-2 text-xs">
-              <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">GPU utilization</span>
-                <span className="font-medium">
-                  {gpuUtilization?.toFixed(0)}%
-                </span>
-              </div>
-              <div className="mt-1 flex items-center justify-between">
-                <span className="text-muted-foreground">VRAM usage</span>
-                <span className="font-medium">
-                  {formatBytes(usedVram)} / {formatBytes(totalVram)}
-                </span>
-              </div>
-            </div>
-          )}
           <Server className="h-4 w-4 text-muted-foreground" />
         </div>
+        {gpuSnapshots.length > 0 && (
+          <div className="mb-3 rounded-md bg-muted/60 px-2.5 py-2 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="flex items-center gap-1.5 text-muted-foreground">
+                <Gauge className="h-3.5 w-3.5" />
+                GPU utilization
+              </span>
+              <span className="font-medium">{gpuUtilization?.toFixed(0)}%</span>
+            </div>
+            <div className="mt-1 flex items-center justify-between">
+              <span className="flex items-center gap-1.5 text-muted-foreground">
+                <MemoryStick className="h-3.5 w-3.5" />
+                VRAM usage
+              </span>
+              <span className="font-medium">
+                {formatBytes(usedVram)} / {formatBytes(totalVram)}
+              </span>
+            </div>
+          </div>
+        )}
         <div className="space-y-2">
           {status.servers.length === 0 ? (
             <p className="text-xs text-muted-foreground">No running servers</p>

@@ -29,7 +29,7 @@ class FrontendClient:
 
     async def register(self) -> bool:
         """Register Agent with Frontend."""
-        from app.services.llama_server import llama_server_manager
+        from app.services.server_manager import server_manager
 
         registration_data = {
             "agent_id": settings.AGENT_ID,
@@ -41,25 +41,25 @@ class FrontendClient:
             "gpu_info": await self._get_gpu_info(),
             # Server ids live in the agent's memory; the backend uses this
             # to only clear instances that are no longer actually running.
-            "running_server_ids": list(llama_server_manager.servers.keys()),
-            "healthy_server_ids": list(llama_server_manager.healthy_servers),
+            "running_server_ids": list(server_manager.servers.keys()),
+            "healthy_server_ids": list(server_manager.healthy_servers),
             "server_statuses": [
                 {
                     "id": server_id,
                     "status": (
                         "running"
-                        if server_id in llama_server_manager.healthy_servers
+                        if server_id in server_manager.healthy_servers
                         else "starting"
                     ),
                     "health_status": (
                         "healthy"
-                        if server_id in llama_server_manager.healthy_servers
+                        if server_id in server_manager.healthy_servers
                         else "unknown"
                     ),
                     "port": config.port,
                 }
-                for server_id, config in llama_server_manager.configs.items()
-                if server_id in llama_server_manager.servers
+                for server_id, config in server_manager.configs.items()
+                if server_id in server_manager.servers
             ],
         }
 
@@ -193,12 +193,12 @@ class FrontendClient:
 
     async def _handle_start_server(self, command: dict) -> None:
         """Handle start server command."""
-        from app.services.llama_server import llama_server_manager
+        from app.services.server_manager import server_manager
 
         server_config = command.get("config", {})
         try:
-            config = llama_server_manager.ServerConfig(**server_config)
-            await llama_server_manager.start_server(server_config.get("id"), config)
+            config = server_manager.ServerConfig(**server_config)
+            await server_manager.start_server(server_config.get("id"), config)
             await self._send_status_update(
                 "server.started",
                 {
@@ -218,11 +218,11 @@ class FrontendClient:
 
     async def _handle_stop_server(self, command: dict) -> None:
         """Handle stop server command."""
-        from app.services.llama_server import llama_server_manager
+        from app.services.server_manager import server_manager
 
         server_id = command.get("server_id")
         try:
-            await llama_server_manager.stop_server(server_id)
+            await server_manager.stop_server(server_id)
             await self._send_status_update(
                 "server.stopped",
                 {

@@ -5,7 +5,7 @@
 Inference Matrix is an OpenAI API-compatible inference server with a distributed architecture. It consists of two services:
 
 1. **Frontend Service** - WebUI, API endpoints, database, and orchestration
-2. **Agent Service** - Hardware-local inference management with llama.cpp
+2. **Agent Service** - Hardware-local inference management with llama.cpp or Halogen
 
 Designed for single-user home server deployments with support for multiple inference agents.
 
@@ -71,18 +71,18 @@ Designed for single-user home server deployments with support for multiple infer
 │  └────────────────────────────────────────────────────────────┘  │
 │                              │                                     │
 │  ┌────────────────────────────────────────────────────────────┐  │
-│  │           llama.cpp Proxy                                  │  │
-│  │  • Proxies all llama.cpp HTTP API calls                   │  │
-│  │  • Forwards inference requests                            │  │
-│  │  • Handles cache save/load                                │  │
+│  │           Inference Proxy                                │  │
+│  │  • Routes to llama.cpp or Halogen per server               │  │
+│  │  • Preserves native OpenAI streaming envelopes            │  │
+│  │  • Exposes cache and metrics telemetry                     │  │
 │  └────────────────────────────────────────────────────────────┘  │
 │                              │                                     │
-│         llama.cpp Servers    │                                     │
-│  (One subprocess per model)  │                                     │
+│       Inference processes    │                                     │
+│  (One subprocess per server) │                                     │
 │  • Auto start on demand      │                                     │
 │  • Auto shutdown on inactivity                                     │
-│  • Configurable GPU layers                                         │
-│  • Prompt caching to disk                                          │
+│  • Configurable llama.cpp GPU layers or Halogen startup settings    │
+│  • Per-server cache directory under /cache/<server_uuid>           │
 └──────────────────────────────────────────────────────────────────┘
          │
          ▼
