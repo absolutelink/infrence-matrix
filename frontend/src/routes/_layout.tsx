@@ -1,6 +1,7 @@
 import { createFileRoute, Outlet } from "@tanstack/react-router"
 
 import { Footer } from "@/components/Common/Footer"
+import { QueueStatusBar } from "@/components/Queue/QueueStatusBar"
 import { BottomLogPanel } from "@/components/ServerInstances/BottomLogPanel"
 import {
   LogPanelProvider,
@@ -33,6 +34,7 @@ function LayoutContent() {
       <SidebarInset>
         <header className="sticky top-0 z-10 flex h-16 shrink-0 items-center gap-2 border-b bg-background px-4">
           <SidebarTrigger className="-ml-1 text-muted-foreground" />
+          <QueueStatusBar />
         </header>
         <main
           className="flex-1 p-6 md:p-8"

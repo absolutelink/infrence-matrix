@@ -6,6 +6,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.logging import logger
 from app.services.agent_manager import agent_manager
+from app.services.inference_scheduler import inference_scheduler
 
 router = APIRouter(tags=["websocket"])
 
@@ -72,3 +73,17 @@ async def agent_events_websocket(websocket: WebSocket, agent_id: str) -> None:
         forward_task.cancel()
         agent_manager.unsubscribe_events(agent_id, queue)
         logger.info(f"UI client unsubscribed from agent {agent_id} events")
+
+
+@router.websocket("/ws/queue-status")
+async def queue_status_websocket(websocket: WebSocket) -> None:
+    """Push aggregate inference queue and slot state to the UI."""
+    await websocket.accept()
+    try:
+        while True:
+            await websocket.send_json(await inference_scheduler.status_snapshot())
+            await asyncio.sleep(2)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.warning(f"Queue status WebSocket error: {e}")

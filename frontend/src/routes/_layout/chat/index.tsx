@@ -139,7 +139,9 @@ function Chat() {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState("")
   const [isLoading, setIsLoading] = useState(false)
+  const [waitingForCapacity, setWaitingForCapacity] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
+  const queueTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const handleSend = async () => {
     if (!input.trim() || !selectedModel) return
@@ -149,6 +151,8 @@ function Chat() {
     setMessages(history)
     setInput("")
     setIsLoading(true)
+    setWaitingForCapacity(false)
+    queueTimerRef.current = setTimeout(() => setWaitingForCapacity(true), 1500)
     abortRef.current = new AbortController()
 
     try {
@@ -168,6 +172,8 @@ function Chat() {
         throw new Error(detail || `Request failed: ${response.status}`)
       }
 
+      if (queueTimerRef.current) clearTimeout(queueTimerRef.current)
+      setWaitingForCapacity(false)
       setMessages((prev) => [...prev, { role: "assistant", content: "" }])
 
       const reader = response.body.getReader()
@@ -228,7 +234,9 @@ function Chat() {
         ])
       }
     } finally {
+      if (queueTimerRef.current) clearTimeout(queueTimerRef.current)
       setIsLoading(false)
+      setWaitingForCapacity(false)
       abortRef.current = null
     }
   }
@@ -338,11 +346,19 @@ function Chat() {
             <div className="flex justify-start">
               <div className="max-w-[80%] rounded-lg px-4 py-2 bg-muted">
                 <div className="font-semibold text-sm mb-1">Assistant</div>
-                <div className="flex items-center gap-2">
-                  <div className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce" />
-                  <div className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce [animation-delay:0.2s]" />
-                  <div className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce [animation-delay:0.4s]" />
-                </div>
+                  <div className="flex items-center gap-2">
+                    {waitingForCapacity ? (
+                      <span className="text-xs text-muted-foreground">
+                        Waiting for an available slot...
+                      </span>
+                    ) : (
+                      <>
+                        <div className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce" />
+                        <div className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce [animation-delay:0.2s]" />
+                        <div className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce [animation-delay:0.4s]" />
+                      </>
+                    )}
+                  </div>
               </div>
             </div>
           )}

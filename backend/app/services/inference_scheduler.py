@@ -208,5 +208,65 @@ class InferenceScheduler:
                 )
             await asyncio.sleep(SCHEDULER_POLL_SECONDS)
 
+    async def status_snapshot(self) -> dict[str, Any]:
+        """Return queue and live slot state for the UI status bar."""
+        async with AsyncSessionMaker() as session:
+            servers = list(
+                (
+                    await session.execute(
+                        select(ServerInstance).where(ServerInstance.status == "running")
+                    )
+                ).scalars()
+            )
+            queued = int(
+                (
+                    await session.execute(
+                        select(func.count(InferenceLease.id)).where(
+                            InferenceLease.status == "queued"
+                        )
+                    )
+                ).scalar_one()
+            )
+
+        telemetry = await asyncio.gather(
+            *(get_slot_telemetry(server) for server in servers),
+            return_exceptions=True,
+        )
+        server_status: list[dict[str, Any]] = []
+        total_capacity = 0
+        total_active = 0
+        total_available = 0
+        for server, value in zip(servers, telemetry, strict=True):
+            slots = (
+                value
+                if isinstance(value, SlotTelemetry)
+                else SlotTelemetry(0, 0, 0, known=False)
+            )
+            total_capacity += slots.capacity
+            total_active += slots.active
+            total_available += slots.available
+            server_status.append(
+                {
+                    "id": str(server.id),
+                    "alias": server.alias,
+                    "model_id": str(server.model_id),
+                    "capacity": slots.capacity,
+                    "active": slots.active,
+                    "available": slots.available,
+                    "telemetry_known": slots.known,
+                }
+            )
+
+        return {
+            "event": "queue.status",
+            "data": {
+                "queued": queued,
+                "active": total_active,
+                "available": total_available,
+                "capacity": total_capacity,
+                "servers": server_status,
+            },
+        }
+
 
 inference_scheduler = InferenceScheduler()
