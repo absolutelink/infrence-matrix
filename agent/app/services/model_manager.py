@@ -70,10 +70,9 @@ class _EventPublishingTqdm:
     def __exit__(self, *args: object) -> None:
         self.close()
 
-    def set_lock(
-        self, lock: threading.Lock
-    ) -> None:  # pragma: no cover - tqdm API shim
-        type(self)._lock = lock
+    @classmethod
+    def set_lock(cls, lock: threading.Lock) -> None:  # pragma: no cover - tqdm API shim
+        cls._lock = lock
 
     @classmethod
     def get_lock(cls) -> threading.Lock:  # pragma: no cover - tqdm API shim

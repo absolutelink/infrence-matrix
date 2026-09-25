@@ -27,6 +27,7 @@ ENV PATH="/agent/.venv/bin:${PATH}" \
     MODELS_PATH=/models \
     CACHE_PATH=/cache \
     HF_HUB_OFFLINE=0 \
+    HF_HUB_DISABLE_XET=1 \
     HALOGEN_ENTRYPOINT=/usr/local/bin/entrypoint.sh \
     HALOGEN_MAX_INSTANCES=2
 
