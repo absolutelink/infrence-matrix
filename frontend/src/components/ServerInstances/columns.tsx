@@ -105,10 +105,11 @@ export const columns: ColumnDef<ServerInstance>[] = [
 
       const statusVariant = statusColors[instance.status] || "outline"
       const healthVariant = statusColors[instance.health_status] || "outline"
+      const statusLabel = instance.status === "starting" ? "booting" : instance.status
 
       return (
         <div className="flex gap-2">
-          <Badge variant={statusVariant}>{instance.status}</Badge>
+          <Badge variant={statusVariant}>{statusLabel}</Badge>
           <Badge variant={healthVariant} className="text-xs">
             {instance.health_status}
           </Badge>

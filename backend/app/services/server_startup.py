@@ -248,8 +248,12 @@ async def ensure_server_ready(
     if instance is None:
         raise ServerStartupError(f"Server {server.id} no longer exists")
 
-        if instance.status == "running" and instance.health_status == "healthy":
-            return instance
+    if instance.status == "running" and instance.health_status == "healthy":
+        return instance
+    if instance.status == "error":
+        raise ServerStartupError(
+            instance.error_message or f"Server {server.id} failed to start"
+        )
 
     if instance.status in {"starting", "running"}:
         # A process may exist before its health check completes; wait for it

@@ -8,6 +8,7 @@ export type QueueServerStatus = {
   active: number
   available: number
   telemetry_known: boolean
+  state: "booting" | "ready"
 }
 
 export type QueueStatus = {

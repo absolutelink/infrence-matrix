@@ -215,8 +215,7 @@ class InferenceScheduler:
                 (
                     await session.execute(
                         select(ServerInstance).where(
-                            ServerInstance.status == "running",
-                            ServerInstance.health_status == "healthy",
+                            ServerInstance.status.in_(["starting", "running"]),
                         )
                     )
                 ).scalars()
@@ -230,11 +229,32 @@ class InferenceScheduler:
                     )
                 ).scalar_one()
             )
+            active_leases = list(
+                (
+                    await session.execute(
+                        select(InferenceLease).where(
+                            InferenceLease.status == "active",
+                            InferenceLease.lease_expires_at > datetime.now(UTC),
+                        )
+                    )
+                ).scalars()
+            )
 
         telemetry = await asyncio.gather(
-            *(get_slot_telemetry(server) for server in servers),
+            *(
+                get_slot_telemetry(server)
+                if server.status == "running" and server.health_status == "healthy"
+                else asyncio.sleep(0, result=SlotTelemetry(0, 0, 0, known=False))
+                for server in servers
+            ),
             return_exceptions=True,
         )
+        lease_counts: dict[uuid.UUID, int] = {}
+        for lease in active_leases:
+            if lease.server_instance_id is not None:
+                lease_counts[lease.server_instance_id] = (
+                    lease_counts.get(lease.server_instance_id, 0) + 1
+                )
         server_status: list[dict[str, Any]] = []
         total_capacity = 0
         total_active = 0
@@ -245,18 +265,25 @@ class InferenceScheduler:
                 if isinstance(value, SlotTelemetry)
                 else SlotTelemetry(0, 0, 0, known=False)
             )
-            total_capacity += slots.capacity
-            total_active += slots.active
-            total_available += slots.available
+            booting = server.status != "running" or server.health_status != "healthy"
+            active = lease_counts.get(server.id, 0) if not booting else 0
+            if not booting:
+                active = max(active, slots.active)
+            capacity = slots.capacity if not booting else 0
+            available = slots.available if not booting else 0
+            total_capacity += capacity
+            total_active += active
+            total_available += available
             server_status.append(
                 {
                     "id": str(server.id),
                     "alias": server.alias,
                     "model_id": str(server.model_id),
-                    "capacity": slots.capacity,
-                    "active": slots.active,
-                    "available": slots.available,
-                    "telemetry_known": slots.known,
+                    "capacity": capacity,
+                    "active": active,
+                    "available": available,
+                    "telemetry_known": slots.known and not booting,
+                    "state": "booting" if booting else "ready",
                 }
             )
 

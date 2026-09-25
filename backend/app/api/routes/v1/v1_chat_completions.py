@@ -502,10 +502,25 @@ async def _get_or_create_server(
     if not agent or agent.status != "online":
         raise HTTPException(503, "No online agents available")
 
-    # Start server via agent. The agent allocates a random free port; we
-    # generate the instance id here since the record is created after the
-    # start call returns.
+    # Create the row before dispatching so a fast healthy start cannot lose
+    # its server.started event before the backend has a matching instance.
     server_id = str(uuid.uuid4())
+    with Session(engine) as session:
+        server = ServerInstance(
+            id=uuid.UUID(server_id),
+            model_id=model.id,
+            agent_id=agent.id,
+            gpu_layers=35,
+            context_size=4096,
+            flash_attn=True,
+            config={},
+            status="starting",
+            inactivity_timeout_seconds=300,
+        )
+        session.add(server)
+        session.commit()
+        session.refresh(server)
+
     start_response = await agent_manager.send_to_agent(
         agent.id,
         "POST",
@@ -521,8 +536,6 @@ async def _get_or_create_server(
                 "cache_prompt": True,
                 "jinja": True,
             },
-            # If the model file is not on the agent yet, it downloads it
-            # from the source repo before launching llama-server.
             "source": {
                 "source": model.source,
                 "repo_id": model.source_repo_id,
@@ -531,31 +544,22 @@ async def _get_or_create_server(
             if model.source_repo_id
             else None,
         },
-        # Cold start can include a model download; the default 30s is far
-        # too short for that.
         timeout=START_DISPATCH_TIMEOUT,
     )
 
-    # Create ServerInstance record. The port is agent-allocated per start
-    # and not persisted; stash it in the JSON config for display only.
     allocated_port = (
         start_response.get("port") if isinstance(start_response, dict) else None
     )
     with Session(engine) as session:
-        server = ServerInstance(
-            model_id=model.id,
-            agent_id=agent.id,
-            gpu_layers=35,
-            context_size=4096,
-            flash_attn=True,
-            config={"port": str(allocated_port)} if allocated_port else {},
-            proxy_url=start_response.get("proxy_url"),
-            status="starting",
-            inactivity_timeout_seconds=300,
-        )
-        session.add(server)
-        session.commit()
-        session.refresh(server)
+        server = session.get(ServerInstance, server.id)
+        if server:
+            server.status = "running"
+            server.health_status = "healthy"
+            server.config = {"port": str(allocated_port)} if allocated_port else {}
+            server.proxy_url = start_response.get("proxy_url")
+            session.add(server)
+            session.commit()
+            session.refresh(server)
 
     logger.info(f"Started new server {server.id} on agent {agent.id}")
     return server

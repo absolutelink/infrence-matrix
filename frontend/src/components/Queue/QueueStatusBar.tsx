@@ -52,11 +52,15 @@ export function QueueStatusBar() {
                     {server.alias || server.model_id.slice(0, 8)}
                   </span>
                   <span className="text-muted-foreground">
-                    {server.active}/{server.capacity} active
+                    {server.state === "booting"
+                      ? "Booting"
+                      : `${server.active}/${server.capacity} active`}
                   </span>
                 </div>
                 <div className="mt-1 text-[11px] text-muted-foreground">
-                  {server.telemetry_known
+                  {server.state === "booting"
+                    ? "Waiting for llama.cpp health"
+                    : server.telemetry_known
                     ? `${server.available} slots available`
                     : "Using health status; telemetry unavailable"}
                 </div>
