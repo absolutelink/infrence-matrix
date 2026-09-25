@@ -414,6 +414,7 @@ API_URL=https://matrix.thelink.family
 - ✅ Queue capacity defaults to 4 slots, or uses the configured `parallel` setting; `/slots` is active-count telemetry only
 - ✅ Logs opened before startup now merge history discovered during later polling with live output
 - ✅ Dashboard cards now use live server and GPU data; bottom status bar summarizes GPU utilization and VRAM
+- ✅ Dashboard GPU/VRAM summaries deduplicate multiple agents reporting the same physical GPU
 
 ### September 23, 2026 (Open Responses conformance pass)
 - ✅ Ran the openresponses.org conformance suite (cloned spec repo, validated against its generated Zod schemas); fixed all reported schema failures

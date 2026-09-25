@@ -13,6 +13,7 @@ import { Suspense } from "react"
 
 import { AgentsService, ModelsService, ServerInstancesService } from "@/client"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { uniqueGpuSnapshots } from "@/lib/gpuMetrics"
 
 export const Route = createFileRoute("/_layout/")({
   component: Dashboard,
@@ -109,20 +110,20 @@ function DashboardContent() {
     (acc: number, s: any) => acc + (s.total_requests || 0),
     0,
   )
-  const gpuAgents = agents.filter((agent: any) => agent.gpu_info?.vram_total)
-  const totalVram = gpuAgents.reduce(
-    (sum: number, agent: any) => sum + (agent.gpu_info?.vram_total || 0),
+  const gpuSnapshots = uniqueGpuSnapshots(agents)
+  const totalVram = gpuSnapshots.reduce(
+    (sum: number, gpu: any) => sum + (gpu.vram_total || 0),
     0,
   )
-  const usedVram = gpuAgents.reduce(
-    (sum: number, agent: any) => sum + (agent.gpu_info?.vram_used || 0),
+  const usedVram = gpuSnapshots.reduce(
+    (sum: number, gpu: any) => sum + (gpu.vram_used || 0),
     0,
   )
-  const gpuUtilization = gpuAgents.length
-    ? gpuAgents.reduce(
-        (sum: number, agent: any) => sum + (agent.gpu_info?.utilization || 0),
+  const gpuUtilization = gpuSnapshots.length
+    ? gpuSnapshots.reduce(
+        (sum: number, gpu: any) => sum + (gpu.utilization || 0),
         0,
-      ) / gpuAgents.length
+      ) / gpuSnapshots.length
     : null
   const formatBytes = (bytes: number) => `${(bytes / 1073741824).toFixed(1)} GB`
 
@@ -176,7 +177,7 @@ function DashboardContent() {
           value={
             gpuUtilization === null ? "—" : `${gpuUtilization.toFixed(0)}%`
           }
-          description={`${gpuAgents.length} agent${gpuAgents.length === 1 ? "" : "s"} reporting`}
+          description={`${gpuSnapshots.length} physical GPU${gpuSnapshots.length === 1 ? "" : "s"} reporting`}
           icon={Cpu}
         />
         <MetricCard

@@ -3,6 +3,7 @@ import { Activity, ChevronDown, Cpu, ListOrdered, Server } from "lucide-react"
 
 import { AgentsService } from "@/client"
 import { useQueueStatus } from "@/hook/useQueueStatus"
+import { uniqueGpuSnapshots } from "@/lib/gpuMetrics"
 
 export function QueueStatusBar() {
   const { status, connected } = useQueueStatus()
@@ -12,20 +13,20 @@ export function QueueStatusBar() {
     refetchInterval: 10000,
   })
 
-  const gpuAgents = agents.filter((agent: any) => agent.gpu_info?.vram_total)
-  const usedVram = gpuAgents.reduce(
-    (sum: number, agent: any) => sum + (agent.gpu_info?.vram_used || 0),
+  const gpuSnapshots = uniqueGpuSnapshots(agents)
+  const usedVram = gpuSnapshots.reduce(
+    (sum: number, gpu: any) => sum + (gpu.vram_used || 0),
     0,
   )
-  const totalVram = gpuAgents.reduce(
-    (sum: number, agent: any) => sum + (agent.gpu_info?.vram_total || 0),
+  const totalVram = gpuSnapshots.reduce(
+    (sum: number, gpu: any) => sum + (gpu.vram_total || 0),
     0,
   )
-  const gpuUtilization = gpuAgents.length
-    ? gpuAgents.reduce(
-        (sum: number, agent: any) => sum + (agent.gpu_info?.utilization || 0),
+  const gpuUtilization = gpuSnapshots.length
+    ? gpuSnapshots.reduce(
+        (sum: number, gpu: any) => sum + (gpu.utilization || 0),
         0,
-      ) / gpuAgents.length
+      ) / gpuSnapshots.length
     : null
   const formatBytes = (bytes: number) => `${(bytes / 1073741824).toFixed(1)} GB`
 
@@ -69,7 +70,7 @@ export function QueueStatusBar() {
               {status.available} of {status.capacity} slots available
             </p>
           </div>
-          {gpuAgents.length > 0 && (
+          {gpuSnapshots.length > 0 && (
             <div className="mb-3 rounded-md bg-muted/60 px-2.5 py-2 text-xs">
               <div className="flex items-center justify-between">
                 <span className="text-muted-foreground">GPU utilization</span>
