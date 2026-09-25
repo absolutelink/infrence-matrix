@@ -167,7 +167,7 @@ Key llama.cpp facts (researched):
 - Conformance harness quirks (openresponses repo, `src/lib/sse-parser.ts`): its generated schemas validate reasoning deltas as `response.reasoning.delta/done` while its own reference/spec text and OpenWebUI use `reasoning_text.*` — hence dual-name emission
 
 #### Dashboard Improvements
-- [ ] System metrics dashboard
+- [x] System metrics dashboard cards (models, agents, servers, requests, GPU, VRAM)
 - [ ] Model usage statistics
 - [ ] Recent activity feed
 - [ ] Quick actions panel
@@ -413,6 +413,7 @@ API_URL=https://matrix.thelink.family
 - ✅ DFlash startup no longer forwards the incompatible `strict_mtp_qwen` flag
 - ✅ Queue capacity defaults to 4 slots, or uses the configured `parallel` setting; `/slots` is active-count telemetry only
 - ✅ Logs opened before startup now merge history discovered during later polling with live output
+- ✅ Dashboard cards now use live server and GPU data; bottom status bar summarizes GPU utilization and VRAM
 
 ### September 23, 2026 (Open Responses conformance pass)
 - ✅ Ran the openresponses.org conformance suite (cloned spec repo, validated against its generated Zod schemas); fixed all reported schema failures

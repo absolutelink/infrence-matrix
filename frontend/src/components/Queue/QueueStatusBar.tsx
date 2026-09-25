@@ -1,9 +1,33 @@
-import { Activity, ChevronDown, ListOrdered, Server } from "lucide-react"
+import { useQuery } from "@tanstack/react-query"
+import { Activity, ChevronDown, Cpu, ListOrdered, Server } from "lucide-react"
 
+import { AgentsService } from "@/client"
 import { useQueueStatus } from "@/hook/useQueueStatus"
 
 export function QueueStatusBar() {
   const { status, connected } = useQueueStatus()
+  const { data: agents = [] } = useQuery({
+    queryKey: ["queue-status-agents"],
+    queryFn: async () => (await AgentsService.listAgents()).data.agents || [],
+    refetchInterval: 10000,
+  })
+
+  const gpuAgents = agents.filter((agent: any) => agent.gpu_info?.vram_total)
+  const usedVram = gpuAgents.reduce(
+    (sum: number, agent: any) => sum + (agent.gpu_info?.vram_used || 0),
+    0,
+  )
+  const totalVram = gpuAgents.reduce(
+    (sum: number, agent: any) => sum + (agent.gpu_info?.vram_total || 0),
+    0,
+  )
+  const gpuUtilization = gpuAgents.length
+    ? gpuAgents.reduce(
+        (sum: number, agent: any) => sum + (agent.gpu_info?.utilization || 0),
+        0,
+      ) / gpuAgents.length
+    : null
+  const formatBytes = (bytes: number) => `${(bytes / 1073741824).toFixed(1)} GB`
 
   if (!status) {
     return (
@@ -29,6 +53,12 @@ export function QueueStatusBar() {
           <ListOrdered className="h-3.5 w-3.5" />
           {status.queued} queued
         </span>
+        {gpuUtilization !== null && (
+          <span className="flex items-center gap-1.5">
+            <Cpu className="h-3.5 w-3.5" />
+            {gpuUtilization.toFixed(0)}% GPU
+          </span>
+        )}
         <ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
       </summary>
       <div className="absolute right-0 top-full z-20 mt-2 w-80 rounded-lg border bg-popover p-3 text-popover-foreground shadow-lg">
@@ -39,6 +69,22 @@ export function QueueStatusBar() {
               {status.available} of {status.capacity} slots available
             </p>
           </div>
+          {gpuAgents.length > 0 && (
+            <div className="mb-3 rounded-md bg-muted/60 px-2.5 py-2 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">GPU utilization</span>
+                <span className="font-medium">
+                  {gpuUtilization?.toFixed(0)}%
+                </span>
+              </div>
+              <div className="mt-1 flex items-center justify-between">
+                <span className="text-muted-foreground">VRAM usage</span>
+                <span className="font-medium">
+                  {formatBytes(usedVram)} / {formatBytes(totalVram)}
+                </span>
+              </div>
+            </div>
+          )}
           <Server className="h-4 w-4 text-muted-foreground" />
         </div>
         <div className="space-y-2">

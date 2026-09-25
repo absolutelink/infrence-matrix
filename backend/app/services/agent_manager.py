@@ -588,7 +588,12 @@ class AgentManager:
                     "port": agent.port,
                     "status": agent.status,
                     "websocket_connected": agent.websocket_connected,
-                    "gpu_info": agent.gpu_info or {},
+                    "gpu_info": (
+                        self.agents.get(str(agent.id)).gpu_info
+                        if self.agents.get(str(agent.id))
+                        else agent.gpu_info
+                    )
+                    or {},
                     "last_seen": agent.last_seen,
                 }
                 for agent in agents

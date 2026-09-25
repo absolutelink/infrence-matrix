@@ -4,13 +4,14 @@ import {
   Activity,
   Clock,
   Cpu,
+  MemoryStick,
   MessageSquare,
   Server,
   TrendingUp,
 } from "lucide-react"
 import { Suspense } from "react"
 
-import { AgentsService, ModelsService } from "@/client"
+import { AgentsService, ModelsService, ServerInstancesService } from "@/client"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 
 export const Route = createFileRoute("/_layout/")({
@@ -42,11 +43,13 @@ function getAgentsQueryOptions() {
   }
 }
 
-// TODO: Add ServerInstancesService when backend is running
 function getServerInstancesQueryOptions() {
   return {
-    queryFn: async () => [],
+    queryFn: async () =>
+      (await ServerInstancesService.instancesListServerInstances()).data
+        .server_instances || [],
     queryKey: ["dashboard-server-instances"],
+    refetchInterval: 10000,
   }
 }
 
@@ -99,10 +102,29 @@ function DashboardContent() {
   const runningServers = serverInstances.filter(
     (s: any) => s.status === "running",
   ).length
+  const healthyServers = serverInstances.filter(
+    (s: any) => s.status === "running" && s.health_status === "healthy",
+  ).length
   const totalRequests = serverInstances.reduce(
     (acc: number, s: any) => acc + (s.total_requests || 0),
     0,
   )
+  const gpuAgents = agents.filter((agent: any) => agent.gpu_info?.vram_total)
+  const totalVram = gpuAgents.reduce(
+    (sum: number, agent: any) => sum + (agent.gpu_info?.vram_total || 0),
+    0,
+  )
+  const usedVram = gpuAgents.reduce(
+    (sum: number, agent: any) => sum + (agent.gpu_info?.vram_used || 0),
+    0,
+  )
+  const gpuUtilization = gpuAgents.length
+    ? gpuAgents.reduce(
+        (sum: number, agent: any) => sum + (agent.gpu_info?.utilization || 0),
+        0,
+      ) / gpuAgents.length
+    : null
+  const formatBytes = (bytes: number) => `${(bytes / 1073741824).toFixed(1)} GB`
 
   return (
     <div className="space-y-6">
@@ -113,7 +135,7 @@ function DashboardContent() {
         </p>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-6">
         <MetricCard
           title="Total Models"
           value={models?.length || 0}
@@ -138,10 +160,34 @@ function DashboardContent() {
           icon={Activity}
         />
         <MetricCard
+          title="Healthy Servers"
+          value={`${healthyServers}/${runningServers}`}
+          description="Ready for inference"
+          icon={Activity}
+        />
+        <MetricCard
           title="Total Requests"
           value={totalRequests.toLocaleString()}
           description="All-time inference requests"
           icon={MessageSquare}
+        />
+        <MetricCard
+          title="GPU Utilization"
+          value={
+            gpuUtilization === null ? "—" : `${gpuUtilization.toFixed(0)}%`
+          }
+          description={`${gpuAgents.length} agent${gpuAgents.length === 1 ? "" : "s"} reporting`}
+          icon={Cpu}
+        />
+        <MetricCard
+          title="VRAM Usage"
+          value={
+            totalVram
+              ? `${formatBytes(usedVram)} / ${formatBytes(totalVram)}`
+              : "—"
+          }
+          description="Across connected agents"
+          icon={MemoryStick}
         />
       </div>
 
