@@ -14,7 +14,9 @@ function getServerInstancesQueryOptions() {
     queryFn: async () => {
       const response =
         await ServerInstancesService.instancesListServerInstances()
-      return response.data.server_instances || []
+      return [...(response.data.server_instances || [])].sort((a, b) =>
+        a.alias.localeCompare(b.alias),
+      )
     },
     queryKey: ["server-instances"],
     refetchInterval: 5000,
