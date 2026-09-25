@@ -166,7 +166,9 @@ class HalogenServerManager:
             if key in options and options[key] is not None:
                 env[variable] = str(options[key])
 
-        command = [settings.HALOGEN_ENTRYPOINT, "all"]
+        # Keep native Halogen diagnostics visible while stdout is captured for
+        # agent events and the server log panel.
+        command = ["stdbuf", "-oL", "-eL", settings.HALOGEN_ENTRYPOINT, "all"]
         logger.info("Starting Halogen %s on API port %s", server_id, config.api_port)
         process = subprocess.Popen(
             command,
@@ -204,7 +206,10 @@ class HalogenServerManager:
         while time.time() < deadline:
             process = self.servers.get(server_id)
             if process is None or process.poll() is not None:
-                raise RuntimeError("Halogen exited before becoming healthy")
+                exit_code = process.returncode if process is not None else None
+                raise RuntimeError(
+                    f"Halogen exited before becoming healthy (exit_code={exit_code})"
+                )
             healthy, _ = await self._check_health(port)
             if healthy:
                 return
