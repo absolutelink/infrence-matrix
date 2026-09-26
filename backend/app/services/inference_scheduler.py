@@ -59,7 +59,11 @@ def normalize_slot_telemetry(
 
 async def get_slot_telemetry(server: ServerInstance) -> SlotTelemetry:
     """Read a server's llama.cpp slots without making telemetry mandatory."""
-    options = server.server_options or {}
+    options = (
+        server.engine_options or {}
+        if server.engine == "halogen-flash"
+        else server.server_options or {}
+    )
     configured_parallel = (
         options.get("kv_slots")
         if server.engine == "halogen-flash"

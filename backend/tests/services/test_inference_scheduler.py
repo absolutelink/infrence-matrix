@@ -45,7 +45,8 @@ async def test_flash_uses_kv_slots_for_capacity(monkeypatch):
         id=uuid4(),
         agent_id=uuid4(),
         engine="halogen-flash",
-        server_options={"kv_slots": 2},
+        engine_options={"kv_slots": 2},
+        server_options={},
     )
     monkeypatch.setattr(agent_manager, "get_agent", AsyncMock(return_value=None))
 
