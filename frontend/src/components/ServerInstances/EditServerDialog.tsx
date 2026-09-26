@@ -18,14 +18,6 @@ import {
 } from "@/components/ServerInstances/ServerSettingsFields"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { LoadingButton } from "@/components/ui/loading-button"
@@ -36,6 +28,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet"
 
 interface EditServerDialogProps {
   isOpen: boolean
@@ -54,6 +54,7 @@ interface EditServerDialogProps {
     context_size: number
     flash_attn: boolean
     mtp_draft_max?: number | null
+    vram_required_bytes?: number | null
     inactivity_timeout_seconds: number
     server_options?: ServerOptions
   }
@@ -69,6 +70,7 @@ export function EditServerDialog({
   const [alias, setAlias] = useState("")
   const [gpuLayers, setGpuLayers] = useState("35")
   const [contextSize, setContextSize] = useState("4096")
+  const [vramRequired, setVramRequired] = useState("")
   const [flashAttn, setFlashAttn] = useState(true)
   const [inactivityTimeout, setInactivityTimeout] = useState("300")
   const [mmprojModelId, setMmprojModelId] = useState<string>("none")
@@ -94,6 +96,11 @@ export function EditServerDialog({
       setAlias(instance.alias)
       setGpuLayers(String(instance.gpu_layers))
       setContextSize(String(instance.context_size))
+      setVramRequired(
+        instance.vram_required_bytes
+          ? String(instance.vram_required_bytes / 1073741824)
+          : "",
+      )
       setFlashAttn(instance.flash_attn)
       setInactivityTimeout(String(instance.inactivity_timeout_seconds))
       setMmprojModelId(instance.mmproj_model_id || "none")
@@ -117,6 +124,13 @@ export function EditServerDialog({
           model_id: instance.engine !== "llamacpp" ? undefined : modelId,
           gpu_layers: Number(gpuLayers),
           context_size: Number(contextSize),
+          ...(vramRequired.trim()
+            ? {
+                vram_required_bytes: Math.round(
+                  Number(vramRequired) * 1024 * 1024 * 1024,
+                ),
+              }
+            : {}),
           flash_attn: flashAttn,
           inactivity_timeout_seconds: Number(inactivityTimeout),
           mmproj_model_id: mmprojModelId === "none" ? "" : mmprojModelId,
@@ -143,7 +157,7 @@ export function EditServerDialog({
   })
 
   return (
-    <Dialog
+    <Sheet
       open={isOpen}
       onOpenChange={(open) => {
         if (!open) {
@@ -151,183 +165,204 @@ export function EditServerDialog({
         }
       }}
     >
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Edit Server Settings</DialogTitle>
-          <DialogDescription>
+      <SheetContent className="w-full gap-0 overflow-hidden p-0 sm:max-w-xl">
+        <SheetHeader className="border-b px-6 py-5">
+          <SheetTitle>Edit Server Settings</SheetTitle>
+          <SheetDescription>
             {instance.model_name || "Server"}
             {wasRunning
               ? " — saving will stop the server and restart it with the new settings/model"
               : ""}
-          </DialogDescription>
-        </DialogHeader>
+          </SheetDescription>
+        </SheetHeader>
 
-        <div className="grid grid-cols-2 gap-4 py-2">
-          <div className="col-span-2">
-            <Label htmlFor="alias">Alias</Label>
-            <Input
-              id="alias"
-              value={alias}
-              onChange={(e) => setAlias(e.target.value)}
-              placeholder="Public name clients use in requests"
-              className="mt-1"
-            />
-          </div>
-          {instance.engine === "halogen" ? (
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+          <div className="grid grid-cols-2 gap-4">
             <div className="col-span-2">
-              <HalogenSettingsFields
-                options={engineOptions}
-                onChange={setEngineOptions}
-              />
-            </div>
-          ) : instance.engine === "halogen-flash" ? (
-            <div className="col-span-2">
-              <HalogenFlashSettingsFields
-                options={engineOptions as HalogenFlashOptions}
-                onChange={setEngineOptions}
-              />
-            </div>
-          ) : (
-            <div className="col-span-2">
-              <Label>dflash draft model</Label>
-              <Select value={dflashModelId} onValueChange={setDflashModelId}>
-                <SelectTrigger className="mt-1">
-                  <SelectValue placeholder="None (standard MTP)" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">None</SelectItem>
-                  {((modelsQuery.data ?? []) as Model[])
-                    .filter((model) => model.model_type === "dflash")
-                    .map((model) => (
-                      <SelectItem
-                        key={model.id ?? model.name}
-                        value={model.id ?? model.name}
-                      >
-                        {model.name}
-                      </SelectItem>
-                    ))}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-          {instance.engine === "llamacpp" && (
-            <div className="col-span-2">
-              <Label>Model</Label>
-              <Select value={modelId} onValueChange={setModelId}>
-                <SelectTrigger className="mt-1">
-                  <SelectValue placeholder="Select a model" />
-                </SelectTrigger>
-                <SelectContent>
-                  {((modelsQuery.data ?? []) as Model[])
-                    .filter((model) => model.model_type === "llm")
-                    .map((model) => (
-                      <SelectItem
-                        key={model.id ?? model.name}
-                        value={model.id ?? model.name}
-                      >
-                        {model.name}
-                      </SelectItem>
-                    ))}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-          {instance.engine === "llamacpp" && (
-            <div className="col-span-2">
-              <Label>mmproj (vision projector)</Label>
-              <Select value={mmprojModelId} onValueChange={setMmprojModelId}>
-                <SelectTrigger className="mt-1">
-                  <SelectValue placeholder="None (no --mmproj flag)" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">None</SelectItem>
-                  {((modelsQuery.data ?? []) as Model[])
-                    .filter((model) => model.model_type === "mmproj")
-                    .map((model) => (
-                      <SelectItem
-                        key={model.id ?? model.name}
-                        value={model.id ?? model.name}
-                      >
-                        {model.name}
-                      </SelectItem>
-                    ))}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-          {instance.engine === "llamacpp" && (
-            <div>
-              <Label htmlFor="gpu-layers">GPU layers</Label>
+              <Label htmlFor="alias">Alias</Label>
               <Input
-                id="gpu-layers"
-                type="number"
-                min={0}
-                max={1000}
-                value={gpuLayers}
-                onChange={(e) => setGpuLayers(e.target.value)}
+                id="alias"
+                value={alias}
+                onChange={(e) => setAlias(e.target.value)}
+                placeholder="Public name clients use in requests"
                 className="mt-1"
               />
             </div>
-          )}
-          {instance.engine === "llamacpp" && (
-            <div className="col-span-2">
-              <ServerSettingsFields
-                options={serverOptions}
-                onChange={setServerOptions}
-                mtpDraftMax={mtpDraftMax}
-                onMtpDraftMaxChange={setMtpDraftMax}
-              />
-            </div>
-          )}
-          {instance.engine === "llamacpp" && (
-            <div>
-              <Label htmlFor="context-size">Context size</Label>
-              <Input
-                id="context-size"
-                type="number"
-                min={256}
-                max={1048576}
-                step={256}
-                value={contextSize}
-                onChange={(e) => setContextSize(e.target.value)}
-                className="mt-1"
-              />
-            </div>
-          )}
-          {instance.engine === "llamacpp" && (
-            <div>
-              <Label htmlFor="inactivity-timeout">
-                Inactivity timeout (seconds)
-              </Label>
-              <Input
-                id="inactivity-timeout"
-                type="number"
-                min={0}
-                max={86400}
-                value={inactivityTimeout}
-                onChange={(e) => setInactivityTimeout(e.target.value)}
-                className="mt-1"
-              />
-            </div>
-          )}
-          {instance.engine === "llamacpp" && (
-            <div className="flex items-end pb-2">
-              <Label
-                htmlFor="flash-attn"
-                className="flex items-center gap-2 text-sm font-medium"
-              >
-                <Checkbox
-                  id="flash-attn"
-                  checked={flashAttn}
-                  onCheckedChange={(checked) => setFlashAttn(checked === true)}
+            {instance.engine === "halogen" ? (
+              <div className="col-span-2">
+                <HalogenSettingsFields
+                  options={engineOptions}
+                  onChange={setEngineOptions}
                 />
-                Flash attention
-              </Label>
+              </div>
+            ) : instance.engine === "halogen-flash" ? (
+              <div className="col-span-2">
+                <HalogenFlashSettingsFields
+                  options={engineOptions as HalogenFlashOptions}
+                  onChange={setEngineOptions}
+                />
+              </div>
+            ) : (
+              <div className="col-span-2">
+                <Label>dflash draft model</Label>
+                <Select value={dflashModelId} onValueChange={setDflashModelId}>
+                  <SelectTrigger className="mt-1">
+                    <SelectValue placeholder="None (standard MTP)" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">None</SelectItem>
+                    {((modelsQuery.data ?? []) as Model[])
+                      .filter((model) => model.model_type === "dflash")
+                      .map((model) => (
+                        <SelectItem
+                          key={model.id ?? model.name}
+                          value={model.id ?? model.name}
+                        >
+                          {model.name}
+                        </SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+            {instance.engine === "llamacpp" && (
+              <div className="col-span-2">
+                <Label>Model</Label>
+                <Select value={modelId} onValueChange={setModelId}>
+                  <SelectTrigger className="mt-1">
+                    <SelectValue placeholder="Select a model" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {((modelsQuery.data ?? []) as Model[])
+                      .filter((model) => model.model_type === "llm")
+                      .map((model) => (
+                        <SelectItem
+                          key={model.id ?? model.name}
+                          value={model.id ?? model.name}
+                        >
+                          {model.name}
+                        </SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+            {instance.engine === "llamacpp" && (
+              <div className="col-span-2">
+                <Label>mmproj (vision projector)</Label>
+                <Select value={mmprojModelId} onValueChange={setMmprojModelId}>
+                  <SelectTrigger className="mt-1">
+                    <SelectValue placeholder="None (no --mmproj flag)" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">None</SelectItem>
+                    {((modelsQuery.data ?? []) as Model[])
+                      .filter((model) => model.model_type === "mmproj")
+                      .map((model) => (
+                        <SelectItem
+                          key={model.id ?? model.name}
+                          value={model.id ?? model.name}
+                        >
+                          {model.name}
+                        </SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+            {instance.engine === "llamacpp" && (
+              <div>
+                <Label htmlFor="gpu-layers">GPU layers</Label>
+                <Input
+                  id="gpu-layers"
+                  type="number"
+                  min={0}
+                  max={1000}
+                  value={gpuLayers}
+                  onChange={(e) => setGpuLayers(e.target.value)}
+                  className="mt-1"
+                />
+              </div>
+            )}
+            <div className="col-span-2">
+              <Label htmlFor="vram-required">Required VRAM (GB)</Label>
+              <Input
+                id="vram-required"
+                type="number"
+                min={0}
+                step={0.1}
+                value={vramRequired}
+                onChange={(e) => setVramRequired(e.target.value)}
+                placeholder="Auto (model size estimate)"
+                className="mt-1"
+              />
+              <p className="mt-1 text-xs text-muted-foreground">
+                Used by the scheduler before loading this server. Leave blank to
+                estimate from the model file size.
+              </p>
             </div>
-          )}
+            {instance.engine === "llamacpp" && (
+              <div className="col-span-2">
+                <ServerSettingsFields
+                  options={serverOptions}
+                  onChange={setServerOptions}
+                  mtpDraftMax={mtpDraftMax}
+                  onMtpDraftMaxChange={setMtpDraftMax}
+                />
+              </div>
+            )}
+            {instance.engine === "llamacpp" && (
+              <div>
+                <Label htmlFor="context-size">Context size</Label>
+                <Input
+                  id="context-size"
+                  type="number"
+                  min={256}
+                  max={1048576}
+                  step={256}
+                  value={contextSize}
+                  onChange={(e) => setContextSize(e.target.value)}
+                  className="mt-1"
+                />
+              </div>
+            )}
+            {instance.engine === "llamacpp" && (
+              <div>
+                <Label htmlFor="inactivity-timeout">
+                  Inactivity timeout (seconds)
+                </Label>
+                <Input
+                  id="inactivity-timeout"
+                  type="number"
+                  min={0}
+                  max={86400}
+                  value={inactivityTimeout}
+                  onChange={(e) => setInactivityTimeout(e.target.value)}
+                  className="mt-1"
+                />
+              </div>
+            )}
+            {instance.engine === "llamacpp" && (
+              <div className="flex items-end pb-2">
+                <Label
+                  htmlFor="flash-attn"
+                  className="flex items-center gap-2 text-sm font-medium"
+                >
+                  <Checkbox
+                    id="flash-attn"
+                    checked={flashAttn}
+                    onCheckedChange={(checked) =>
+                      setFlashAttn(checked === true)
+                    }
+                  />
+                  Flash attention
+                </Label>
+              </div>
+            )}
+          </div>
         </div>
 
-        <DialogFooter>
+        <SheetFooter className="border-t px-6 py-4 sm:flex-row sm:justify-end">
           <Button variant="outline" onClick={onClose}>
             Cancel
           </Button>
@@ -341,8 +376,8 @@ export function EditServerDialog({
           >
             {wasRunning ? "Save & Restart" : "Save"}
           </LoadingButton>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   )
 }
