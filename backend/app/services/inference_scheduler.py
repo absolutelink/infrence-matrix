@@ -12,7 +12,7 @@ from sqlalchemy import func, or_
 from sqlmodel import select
 
 from app.db.session import AsyncSessionMaker
-from app.models import InferenceLease, Model, ServerInstance
+from app.models import Agent, InferenceLease, Model, ServerInstance
 from app.services.agent_manager import agent_manager
 
 logger = logging.getLogger(__name__)
@@ -207,7 +207,7 @@ class InferenceScheduler:
             raise
 
     async def _make_room(self, target: ServerInstance, deadline: float) -> None:
-        """Evict idle same-agent servers until the target fits in VRAM."""
+        """Evict idle co-located servers until the target fits in VRAM."""
         required = await self._required_vram(target)
         while True:
             if asyncio.get_running_loop().time() >= deadline:
@@ -219,26 +219,41 @@ class InferenceScheduler:
                 return
 
             async with AsyncSessionMaker() as session:
-                candidates = list(
-                    (
-                        await session.execute(
-                            select(ServerInstance)
-                            .where(
-                                ServerInstance.agent_id == target.agent_id,
-                                ServerInstance.status == "running",
-                                ServerInstance.id != target.id,
-                            )
-                            .order_by(
-                                ServerInstance.last_request_at,
-                                ServerInstance.id,
-                            )
-                        )
-                    ).scalars()
+                target_agent = await session.get(Agent, target.agent_id)
+                target_host = target_agent.host if target_agent else None
+                target_gpu_id = (
+                    (target_agent.gpu_info or {}).get("id") if target_agent else None
                 )
+                rows = (
+                    await session.execute(
+                        select(ServerInstance, Agent)
+                        .join(Agent, Agent.id == ServerInstance.agent_id)
+                        .where(
+                            ServerInstance.status == "running",
+                            ServerInstance.id != target.id,
+                            Agent.host == target_host,
+                        )
+                        .order_by(
+                            ServerInstance.last_request_at,
+                            ServerInstance.id,
+                        )
+                    )
+                ).all()
+                candidates = [
+                    server
+                    for server, agent in rows
+                    if target_gpu_id is None
+                    or (agent.gpu_info or {}).get("id") == target_gpu_id
+                ]
             stopped = False
             for candidate in candidates:
                 if await self._active_leases(candidate.id):
                     continue
+                logger.info(
+                    "Evicting idle server %s for queued target %s",
+                    candidate.id,
+                    target.id,
+                )
                 await self._stop_idle_server(candidate)
                 stopped = True
                 break
