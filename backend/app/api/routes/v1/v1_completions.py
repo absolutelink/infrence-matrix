@@ -354,9 +354,7 @@ async def create_completion(
             raise HTTPException(404, f"Model {request.model} not found")
 
         try:
-            server = await _get_or_create_server(
-                model, request.agent_id, start=False
-            )
+            server = await _get_or_create_server(model, request.agent_id, start=False)
         except HTTPException:
             raise
         except Exception as e:
