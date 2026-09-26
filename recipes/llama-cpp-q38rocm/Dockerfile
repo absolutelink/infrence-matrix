@@ -1,6 +1,6 @@
 # Inference Matrix Agent with the q38rocm ROCmFP4 engine.
 # AGENT_IMAGE must point at an image built by the agent job.
-ARG AGENT_IMAGE
+ARG AGENT_IMAGE=ghcr.io/absolutelink/agent:main
 
 FROM ${AGENT_IMAGE} AS agent
 

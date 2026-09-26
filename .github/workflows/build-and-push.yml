@@ -14,7 +14,7 @@ env:
 
 jobs:
   test-backend:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     services:
       postgres:
@@ -79,7 +79,7 @@ jobs:
         run: uv run pytest tests/ -v --tb=short
 
   test-agent:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
@@ -113,7 +113,7 @@ jobs:
 
   build-matrix-app:
     needs: [test-backend, test-agent]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -145,7 +145,7 @@ jobs:
             type=sha,prefix=
 
       - name: Build and push Matrix App image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
@@ -160,7 +160,7 @@ jobs:
 
   build-agent:
     needs: [test-backend, test-agent]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -192,7 +192,7 @@ jobs:
             type=sha,prefix=
 
       - name: Build and push Agent image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./agent/Dockerfile
@@ -207,7 +207,7 @@ jobs:
 
   build-vulkan-recipe:
     needs: build-agent
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -248,7 +248,7 @@ jobs:
             type=sha,prefix=
 
       - name: Build and push Vulkan recipe image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./recipes/llama-cpp-vulkan/Dockerfile
@@ -264,7 +264,7 @@ jobs:
 
   build-q38rocm-recipe:
     needs: build-agent
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -305,7 +305,7 @@ jobs:
             type=sha,prefix=
 
       - name: Build and push q38rocm recipe image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./recipes/llama-cpp-q38rocm/Dockerfile
@@ -317,11 +317,11 @@ jobs:
           platforms: linux/amd64
           build-args: |
             BUILDKIT_INLINE_CACHE=1
-             AGENT_IMAGE=${{ steps.agent-tag.outputs.tag }}
+            AGENT_IMAGE=${{ steps.agent-tag.outputs.tag }}
 
   build-halogen-rocm-recipe:
     needs: build-agent
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -362,7 +362,7 @@ jobs:
             type=sha,prefix=
 
       - name: Build and push Halogen ROCm recipe image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./recipes/halogen-rocm/Dockerfile
@@ -378,7 +378,7 @@ jobs:
 
   build-halogen-flash-recipe:
     needs: build-agent
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -419,7 +419,7 @@ jobs:
             type=sha,prefix=
 
       - name: Build and push Halogen Flash recipe image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./recipes/halogen-flash/Dockerfile

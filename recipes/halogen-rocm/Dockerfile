@@ -1,5 +1,5 @@
 # Inference Matrix Agent with one Halogen process per server instance.
-ARG AGENT_IMAGE
+ARG AGENT_IMAGE=ghcr.io/absolutelink/agent:main
 
 FROM ${AGENT_IMAGE} AS agent
 

@@ -3,7 +3,7 @@
 # Instead of compiling llama.cpp, this recipe layers the agent application
 # on top of the official llama.cpp Vulkan image. AGENT_IMAGE must point at
 # an agent image built by the build-agent job (e.g. ghcr.io/<owner>/agent:main).
-ARG AGENT_IMAGE
+ARG AGENT_IMAGE=ghcr.io/absolutelink/agent:main
 
 FROM ${AGENT_IMAGE} AS agent
 
