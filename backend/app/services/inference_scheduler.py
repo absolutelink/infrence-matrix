@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 LEASE_TIMEOUT_SECONDS = 30 * 60
 SCHEDULER_POLL_SECONDS = 1.0
 TELEMETRY_TIMEOUT_SECONDS = 5.0
+ORPHANED_LEASE_GRACE_SECONDS = 30.0
 DEFAULT_PARALLEL_SLOTS = 4
 
 
@@ -81,14 +82,23 @@ async def get_slot_telemetry(server: ServerInstance) -> SlotTelemetry:
     capacity = max(capacity, 1)
     try:
         agent = await agent_manager.get_agent(str(server.agent_id))
-        if agent is None or agent.status != "online" or not agent.websocket_connected:
+        if agent is None or agent.status != "online":
             return SlotTelemetry(capacity, 0, capacity, known=False)
+        telemetry_path = (
+            f"/proxy/{server.id}/health"
+            if server.engine in {"halogen", "halogen-flash"}
+            else f"/proxy/{server.id}/slots"
+        )
         payload = await agent_manager.send_to_agent(
             str(server.agent_id),
             "GET",
-            f"/proxy/{server.id}/slots",
+            telemetry_path,
             timeout=TELEMETRY_TIMEOUT_SECONDS,
         )
+        if server.engine in {"halogen", "halogen-flash"}:
+            capacity = max(int(payload.get("slots", configured_parallel or 1)), 1)
+            active = max(int(payload.get("in_flight", 0)), 0)
+            return SlotTelemetry(capacity, active, max(capacity - active, 0))
         return normalize_slot_telemetry(payload, capacity)
     except Exception as exc:
         logger.debug("Slot telemetry unavailable for %s: %s", server.id, exc)
@@ -176,6 +186,38 @@ class InferenceScheduler:
                         )
                     )
                 ).scalar_one()
+            )
+
+    async def _reconcile_active_leases(
+        self, server_id: uuid.UUID, engine_active: int
+    ) -> None:
+        """Release old leases no longer represented by engine activity."""
+        cutoff = datetime.now(UTC) - timedelta(seconds=ORPHANED_LEASE_GRACE_SECONDS)
+        async with AsyncSessionMaker() as session:
+            result = await session.execute(
+                select(InferenceLease)
+                .where(
+                    InferenceLease.server_instance_id == server_id,
+                    InferenceLease.status == "active",
+                    InferenceLease.started_at < cutoff,
+                )
+                .order_by(InferenceLease.started_at, InferenceLease.id)
+            )
+            leases = list(result.scalars().all())
+            stale = leases[max(engine_active, 0) :]
+            if not stale:
+                return
+            now = datetime.now(UTC)
+            for lease in stale:
+                lease.status = "released"
+                lease.released_at = now
+                session.add(lease)
+            await session.commit()
+            logger.warning(
+                "Released %d orphaned lease(s) for server %s; engine reports %d active",
+                len(stale),
+                server_id,
+                engine_active,
             )
 
     async def _stop_idle_server(self, server: ServerInstance) -> None:
@@ -324,7 +366,8 @@ class InferenceScheduler:
             capacity = max(telemetry.capacity, 1)
             if telemetry.known and telemetry.available <= 0:
                 return None
-            if int(active) >= capacity:
+            admitted_active = telemetry.active if telemetry.known else int(active)
+            if admitted_active >= capacity:
                 return None
 
             lease = await session.get(InferenceLease, lease_id)
@@ -428,6 +471,8 @@ class InferenceScheduler:
                     async with self._agent_lock(server.agent_id):
                         server = await self._prepare_target(server, deadline)
                 telemetry = await get_slot_telemetry(server)
+                if telemetry.known:
+                    await self._reconcile_active_leases(server.id, telemetry.active)
                 scored.append((server, telemetry))
             scored.sort(
                 key=lambda item: (not item[1].known, -item[1].available, item[1].active)
@@ -503,7 +548,7 @@ class InferenceScheduler:
             booting = server.status != "running" or server.health_status != "healthy"
             active = lease_counts.get(server.id, 0) if not booting else 0
             if not booting:
-                active = max(active, slots.active)
+                active = slots.active if slots.known else max(active, slots.active)
             capacity = slots.capacity if not booting else 0
             available = slots.available if not booting else 0
             total_capacity += capacity
