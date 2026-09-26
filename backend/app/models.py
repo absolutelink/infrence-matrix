@@ -1,7 +1,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import BigInteger, DateTime, Index
+from sqlalchemy import BigInteger, DateTime, Index, text
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlmodel import Column, Field, Relationship, SQLModel
 
@@ -394,6 +394,8 @@ class ServerInstance(SQLModel, table=True):
 
     # Incremented when reconciliation observes and cleans up stale slot work.
     slot_generation: int = 0
+    # Capacity confirmed by the agent for the current process generation.
+    effective_capacity: int = 1
 
     total_requests: int = 0
     total_tokens_generated: int = 0
@@ -451,6 +453,27 @@ class InferenceLease(SQLModel, table=True):
         Index("idx_inference_leases_status", "status"),
         Index("idx_inference_leases_server_status", "server_instance_id", "status"),
         Index("idx_inference_leases_expires_at", "lease_expires_at"),
+        Index(
+            "idx_inference_leases_queued_model_order",
+            "model_id",
+            "queued_at",
+            "id",
+            postgresql_where=text("status = 'queued'"),
+        ),
+        Index(
+            "idx_inference_leases_queued_server_order",
+            "preferred_server_id",
+            "queued_at",
+            "id",
+            postgresql_where=text("status = 'queued'"),
+        ),
+        Index(
+            "idx_inference_leases_queued_agent_order",
+            "required_agent_id",
+            "queued_at",
+            "id",
+            postgresql_where=text("status = 'queued'"),
+        ),
     )
 
     id: uuid.UUID = Field(
@@ -465,7 +488,18 @@ class InferenceLease(SQLModel, table=True):
         foreign_key="server_instances.id",
         ondelete="SET NULL",
     )
+    preferred_server_id: uuid.UUID | None = Field(
+        default=None,
+        foreign_key="server_instances.id",
+        ondelete="SET NULL",
+    )
+    required_agent_id: uuid.UUID | None = Field(
+        default=None,
+        foreign_key="agents.id",
+        ondelete="SET NULL",
+    )
     status: str = "queued"
+    terminal_reason: str | None = Field(default=None, max_length=255)
     queued_at: datetime = Field(
         default_factory=get_datetime_utc, sa_type=DateTime(timezone=True)
     )

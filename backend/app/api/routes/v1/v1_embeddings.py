@@ -6,13 +6,14 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlmodel import Session, select
+from sqlmodel import Session
 
 from app.api.deps import get_db
 from app.api.routes.v1.v1_chat_completions import _get_or_create_server
-from app.models import Model, ServerInstance
+from app.models import ServerInstance
 from app.services.agent_manager import agent_manager
 from app.services.inference_scheduler import InferenceLeaseHandle, inference_scheduler
+from app.services.inference_target import resolve_inference_target
 from app.services.server_startup import metadata_capability
 
 logger = logging.getLogger(__name__)
@@ -62,11 +63,12 @@ async def create_embedding(
     """Create embeddings for the given input text via Agent proxy."""
     # Resolve model field: a server alias routes to that server directly;
     # otherwise it is a model name/id and a server is found or started.
-    server: ServerInstance | None = None
-    server_q = select(ServerInstance).where(
-        ServerInstance.alias == request.model,
-    )
-    instance = db.exec(server_q).first()
+    try:
+        target = resolve_inference_target(db, request.model, request.agent_id)
+    except (LookupError, ValueError) as e:
+        raise HTTPException(404, str(e)) from e
+    instance = target.server
+    server: ServerInstance | None = instance
 
     if instance is not None:
         if metadata_capability(instance, "embeddings") is False:
@@ -74,22 +76,9 @@ async def create_embedding(
                 400, f"Model '{request.model}' does not support embeddings"
             )
         server = instance
-        model = db.exec(select(Model).where(Model.id == instance.model_id)).first()
-        if not model:
-            raise HTTPException(
-                404, f"Model for server alias {request.model} not found"
-            )
+        model = target.model
     else:
-        # Get model by name (OpenAI style) or id (UI legacy)
-        model = db.exec(select(Model).where(Model.name == request.model)).first()
-        if not model:
-            try:
-                model = db.exec(select(Model).where(Model.id == request.model)).first()
-            except Exception:
-                model = None
-        if not model:
-            raise HTTPException(404, f"Model {request.model} not found")
-
+        model = target.model
         if not model.supports_embeddings:
             raise HTTPException(
                 400, f"Model '{request.model}' does not support embeddings"
@@ -110,19 +99,23 @@ async def create_embedding(
         lease = await inference_scheduler.acquire(
             model.id,
             f"embed-{uuid.uuid4()}",
-            preferred_server_id=server.id,
+            preferred_server_id=target.preferred_server_id,
+            required_agent_id=target.required_agent_id,
             is_cancelled=http_request.is_disconnected if http_request else None,
         )
         server = lease.server
-        response = await agent_manager.send_to_agent(
-            str(server.agent_id),
-            "POST",
-            f"/proxy/{server.id}/v1/embeddings",
-            {
-                "input": inputs,
-                "encoding_format": request.encoding_format,
-            },
-            timeout=300.0,
+        response = await lease.guard(
+            agent_manager.send_to_agent(
+                str(server.agent_id),
+                "POST",
+                f"/proxy/{server.id}/v1/embeddings",
+                {
+                    "input": inputs,
+                    "encoding_format": request.encoding_format,
+                },
+                timeout=300.0,
+                headers={"X-Inference-Slot-Generation": str(lease.slot_generation)},
+            )
         )
     except TimeoutError as e:
         raise HTTPException(503, str(e)) from e

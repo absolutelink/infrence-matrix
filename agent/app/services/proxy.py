@@ -29,14 +29,17 @@ class ServerProxy:
         path: str,
         headers: dict,
         json: dict | None = None,
+        expected_slot_generation: int | None = None,
     ) -> httpx.Response:
         """Proxy HTTP request to llama.cpp."""
+        self._check_generation(server_id, expected_slot_generation)
         url = self._get_server_url(server_id, path)
         self._connection_started(server_id)
 
         try:
             for delay in (*CONNECT_RETRY_DELAYS, None):
                 try:
+                    self._check_generation(server_id, expected_slot_generation)
                     return await self.client.request(
                         method=method, url=url, headers=headers, json=json
                     )
@@ -48,9 +51,15 @@ class ServerProxy:
             self._connection_finished(server_id)
 
     async def proxy_stream(
-        self, server_id: str, method: str, path: str, json: dict | None = None
+        self,
+        server_id: str,
+        method: str,
+        path: str,
+        json: dict | None = None,
+        expected_slot_generation: int | None = None,
     ) -> AsyncGenerator[bytes, None]:
         """Proxy streaming request (SSE) to llama.cpp."""
+        self._check_generation(server_id, expected_slot_generation)
         url = self._get_server_url(server_id, path)
         self._connection_started(server_id)
 
@@ -58,6 +67,7 @@ class ServerProxy:
             for delay in (*CONNECT_RETRY_DELAYS, None):
                 connected = False
                 try:
+                    self._check_generation(server_id, expected_slot_generation)
                     async with self.client.stream(
                         method=method, url=url, json=json
                     ) as response:
@@ -92,3 +102,14 @@ class ServerProxy:
             raise ValueError(f"Server {server_id} not found")
         port = getattr(config, "api_port", config.port)
         return f"http://127.0.0.1:{port}{path}"
+
+    def _check_generation(self, server_id: str, expected: int | None) -> None:
+        if expected is None:
+            return
+        config = self.server_manager.configs.get(server_id)
+        if config is None or config.slot_generation != expected:
+            raise httpx.HTTPStatusError(
+                "Inference slot generation changed",
+                request=httpx.Request("GET", "http://127.0.0.1/"),
+                response=httpx.Response(409),
+            )

@@ -65,7 +65,12 @@ async def test_halogen_health_requires_consecutive_failures():
     assert manager.server_health["server-1"] == "unhealthy"
     publish.assert_called_once_with(
         "server.health",
-        {"server_id": "server-1", "status": "unhealthy", "error": "not ready"},
+        {
+            "server_id": "server-1",
+            "status": "unhealthy",
+            "error": "not ready",
+            "slot_generation": 0,
+        },
     )
 
 
@@ -156,3 +161,24 @@ async def test_flash_stop_kills_the_whole_process_group():
 
     killpg.assert_called_once_with(1234, 9)
     assert "flash-1" not in manager.servers
+
+
+def test_halogen_capacity_uses_actual_kv_slots():
+    manager = HalogenFlashServerManager()
+    manager.configs["default"] = HalogenFlashServerConfig(
+        model_path=HALOGEN_FLASH_CHECKPOINT,
+        port=8091,
+        api_port=8091,
+        engine_port=8092,
+        options={},
+    )
+    manager.configs["configured"] = HalogenFlashServerConfig(
+        model_path=HALOGEN_FLASH_CHECKPOINT,
+        port=8093,
+        api_port=8093,
+        engine_port=8094,
+        options={"kv_slots": 6},
+    )
+
+    assert manager.get_effective_capacity("default") == 1
+    assert manager.get_effective_capacity("configured") == 6

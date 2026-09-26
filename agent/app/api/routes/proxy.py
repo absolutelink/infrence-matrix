@@ -1,7 +1,7 @@
 """Proxy endpoints for llama.cpp API."""
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app.api.routes.servers import server_manager
@@ -34,11 +34,19 @@ def _is_supported_halogen_flash_path(path: str) -> bool:
     response_model=None,
 )
 async def proxy_request(
-    server_id: str, path: str, request: Request
+    server_id: str,
+    path: str,
+    request: Request,
+    slot_generation: int | None = Header(
+        default=None, alias="X-Inference-Slot-Generation"
+    ),
 ) -> StreamingResponse | dict:
     """Proxy request to llama.cpp server."""
     if server_id not in server_manager.servers:
         raise HTTPException(404, "Server not found")
+    live_generation = server_manager.configs[server_id].slot_generation
+    if slot_generation is not None and slot_generation != live_generation:
+        raise HTTPException(409, "Inference slot generation does not match live server")
 
     if settings.AGENT_PLATFORM == "halogen-flash":
         if not _is_supported_halogen_flash_path(path):
@@ -55,7 +63,13 @@ async def proxy_request(
 
     if path.startswith("stream") or (body and body.get("stream")):
         return StreamingResponse(
-            proxy.proxy_stream(server_id, request.method, f"/{path}", body),
+            proxy.proxy_stream(
+                server_id,
+                request.method,
+                f"/{path}",
+                body,
+                expected_slot_generation=slot_generation,
+            ),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -64,9 +78,19 @@ async def proxy_request(
             },
         )
     else:
-        response = await proxy.proxy_request(
-            server_id, request.method, f"/{path}", dict(request.headers), body
-        )
+        try:
+            response = await proxy.proxy_request(
+                server_id,
+                request.method,
+                f"/{path}",
+                dict(request.headers),
+                body,
+                expected_slot_generation=slot_generation,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 409:
+                raise HTTPException(409, "Inference slot generation changed") from exc
+            raise
         if response.is_error:
             # Relay the upstream status + error body (llama.cpp {"error"})
             detail: dict | str

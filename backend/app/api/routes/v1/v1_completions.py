@@ -10,13 +10,13 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlmodel import Session, select
+from sqlmodel import Session
 
 from app.api.deps import get_db
 from app.api.routes.v1.v1_chat_completions import _get_or_create_server
-from app.models import Model, ServerInstance
 from app.services.agent_manager import agent_manager
 from app.services.inference_scheduler import InferenceLeaseHandle, inference_scheduler
+from app.services.inference_target import resolve_inference_target
 
 logger = logging.getLogger(__name__)
 
@@ -191,10 +191,16 @@ async def _stream_completion_via_agent(
                 "POST",
                 proxy_url,
                 json=payload,
+                headers={"X-Inference-Slot-Generation": str(lease.slot_generation)},
             ) as response:
                 response.raise_for_status()
 
-                async for line in response.aiter_lines():
+                lines = response.aiter_lines()
+                while True:
+                    try:
+                        line = await lease.guard(anext(lines))
+                    except StopAsyncIteration:
+                        break
                     if line.startswith("data: "):
                         data = line[6:]
                         if data.strip() == "[DONE]":
@@ -230,25 +236,27 @@ async def _stream_completion_via_agent(
                             logger.warning(f"Invalid JSON in stream: {data}")
                             continue
 
-                if include_usage:
-                    usage = final_usage
-                    if usage is None:
-                        # Fallback: estimate from prompt length + streamed chars
-                        prompt = _convert_prompt_to_llama_format(request.prompt)
-                        usage = UsageInfo.build(
-                            prompt_tokens=len(prompt) // 4,
-                            completion_tokens=fallback_completion_chars // 4,
-                        )
-                    final_chunk = CompletionChunk(
-                        id=request_id,
-                        created=created,
-                        model=request.model,
-                        choices=[],
-                        usage=usage,
-                    )
-                    yield f"data: {final_chunk.model_dump_json()}\n\n"
+        await lease.release()
 
-                yield "data: [DONE]\n\n"
+        if include_usage:
+            usage = final_usage
+            if usage is None:
+                # Fallback: estimate from prompt length + streamed chars
+                prompt = _convert_prompt_to_llama_format(request.prompt)
+                usage = UsageInfo.build(
+                    prompt_tokens=len(prompt) // 4,
+                    completion_tokens=fallback_completion_chars // 4,
+                )
+            final_chunk = CompletionChunk(
+                id=request_id,
+                created=created,
+                model=request.model,
+                choices=[],
+                usage=usage,
+            )
+            yield f"data: {final_chunk.model_dump_json()}\n\n"
+
+        yield "data: [DONE]\n\n"
 
     except Exception as e:
         logger.error(f"Streaming error: {e}")
@@ -329,31 +337,13 @@ async def create_completion(
 
     # Resolve model field: a server alias routes to that server directly;
     # otherwise it is a model name/id and a server is found or started.
-    server: ServerInstance | None = None
-    server = db.exec(
-        select(ServerInstance).where(
-            ServerInstance.alias == request.model,
-            ServerInstance.status.in_(["starting", "running", "stopped"]),
-        )
-    ).first()
-
-    if server is not None:
-        model = db.exec(select(Model).where(Model.id == server.model_id)).first()
-        if not model:
-            raise HTTPException(
-                404, f"Model for server alias {request.model} not found"
-            )
-    else:
-        # Get model by name (OpenAI style) or id (UI legacy)
-        model = db.exec(select(Model).where(Model.name == request.model)).first()
-        if not model:
-            try:
-                model = db.exec(select(Model).where(Model.id == request.model)).first()
-            except Exception:
-                model = None
-        if not model:
-            raise HTTPException(404, f"Model {request.model} not found")
-
+    try:
+        target = resolve_inference_target(db, request.model, request.agent_id)
+    except (LookupError, ValueError) as e:
+        raise HTTPException(404, str(e)) from e
+    model = target.model
+    server = target.server
+    if server is None:
         try:
             server = await _get_or_create_server(model, request.agent_id, start=False)
         except HTTPException:
@@ -366,7 +356,8 @@ async def create_completion(
         lease = await inference_scheduler.acquire(
             model.id,
             request_id,
-            preferred_server_id=server.id,
+            preferred_server_id=target.preferred_server_id,
+            required_agent_id=target.required_agent_id,
             is_cancelled=http_request.is_disconnected if http_request else None,
         )
     except TimeoutError as e:
@@ -391,12 +382,15 @@ async def create_completion(
         )
 
     try:
-        response = await agent_manager.send_to_agent(
-            str(server.agent_id),
-            "POST",
-            f"/proxy/{server.id}/v1/completions",
-            _build_payload(request, stream=False),
-            timeout=300.0,
+        response = await lease.guard(
+            agent_manager.send_to_agent(
+                str(server.agent_id),
+                "POST",
+                f"/proxy/{server.id}/v1/completions",
+                _build_payload(request, stream=False),
+                timeout=300.0,
+                headers={"X-Inference-Slot-Generation": str(lease.slot_generation)},
+            )
         )
 
         text = ""

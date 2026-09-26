@@ -16,13 +16,20 @@ from app.db.session import AsyncSessionMaker
 from app.models import Agent, InferenceLease
 
 
+class AgentConnectionLost(ConnectionError):
+    """Raised when an established agent WebSocket closes unexpectedly."""
+
+    def __init__(self, message: str, *, reset_failures: bool = False) -> None:
+        super().__init__(message)
+        self.reset_failures = reset_failures
+
+
 class AgentManager:
     """Manages Agent lifecycle and WebSocket connections."""
 
     def __init__(self) -> None:
         self.agents: dict[str, Agent] = {}  # agent_id -> Agent
         self.ws_connections: dict[str, WebSocketClientProtocol] = {}
-        self._reconnect_tasks: dict[str, asyncio.Task[None]] = {}
         self._event_buffers: dict[str, list[dict]] = {}
         self._connect_tasks: dict[str, asyncio.Task[None]] = {}
         self._cleanup_task: asyncio.Task[None] | None = None
@@ -86,88 +93,95 @@ class AgentManager:
                 session.add(agent)
                 logger.info(f"Registered new agent {name}")
 
-            # The agent reports the server ids it currently has running. Any
-            # instance still marked starting/running that is NOT in that set
-            # is stale (e.g. agent restarted). Instances the agent confirms
-            # as running are promoted to running — a stale "starting" row
-            # (e.g. backend restarted while dispatch_start's ack was lost)
-            # would otherwise block every request in wait_until_ready.
             running_ids = agent_data.get("running_server_ids") or []
             healthy_ids = agent_data.get("healthy_server_ids")
             if healthy_ids is None:
-                # Older agents did not distinguish spawned from healthy.
                 healthy_ids = running_ids
-            conditions = [
-                col(ServerInstance.agent_id) == agent.id,
-                col(ServerInstance.status).in_(["starting", "running"]),
-            ]
-            if running_ids:
-                conditions.append(col(ServerInstance.id).not_in(running_ids))
-                confirmed = await session.execute(
-                    update(ServerInstance)
-                    .where(
-                        col(ServerInstance.agent_id) == agent.id,
-                        col(ServerInstance.status) == "starting",
-                        col(ServerInstance.id).in_(healthy_ids),
-                    )
-                    .values(status="running", health_status="healthy")
+            reported_statuses = agent_data.get("server_statuses") or []
+            stale_processes: list[tuple[uuid_module.UUID, int]] = []
+            if reported_statuses:
+                reports = {
+                    str(reported["id"]): reported
+                    for reported in reported_statuses
+                    if reported.get("id")
+                }
+                current_servers = list(
+                    (
+                        await session.execute(
+                            select(ServerInstance)
+                            .where(ServerInstance.agent_id == agent.id)
+                            .with_for_update()
+                        )
+                    ).scalars()
                 )
+                for server in current_servers:
+                    reported = reports.get(str(server.id))
+                    generation = reported.get("slot_generation") if reported else None
+                    report_is_stale = reported is not None and (
+                        generation is not None
+                        and server.slot_generation != int(generation)
+                    )
+                    if reported is None or report_is_stale:
+                        if report_is_stale and generation is not None:
+                            stale_processes.append((server.id, int(generation)))
+                        if server.status in {"starting", "running"}:
+                            server.status = "stopped"
+                            server.health_status = "unknown"
+                            session.add(server)
+                            await self._invalidate_server_leases(session, server.id)
+                        continue
+                    status = reported.get("status", "starting")
+                    if status not in {"starting", "running"}:
+                        continue
+                    server.status = status
+                    server.health_status = reported.get("health_status", "unknown")
+                    if reported.get("effective_capacity") is not None:
+                        server.effective_capacity = max(
+                            int(reported["effective_capacity"]), 1
+                        )
+                    session.add(server)
+            else:
+                # Generation-zero agents use the legacy ID-only snapshot.
+                conditions = [
+                    col(ServerInstance.agent_id) == agent.id,
+                    col(ServerInstance.status).in_(["starting", "running"]),
+                    col(ServerInstance.slot_generation) == 0,
+                ]
+                if running_ids:
+                    conditions.append(col(ServerInstance.id).not_in(running_ids))
+                    await session.execute(
+                        update(ServerInstance)
+                        .where(
+                            col(ServerInstance.agent_id) == agent.id,
+                            col(ServerInstance.status) == "starting",
+                            col(ServerInstance.slot_generation) == 0,
+                            col(ServerInstance.id).in_(healthy_ids),
+                        )
+                        .values(status="running", health_status="healthy")
+                    )
+                stale = await session.execute(
+                    update(ServerInstance)
+                    .where(*conditions)
+                    .values(status="stopped", health_status="unknown")
+                    .returning(ServerInstance.id)
+                )
+                stale_ids = stale.scalars().all()
+                if not isinstance(stale_ids, (list, tuple)):
+                    stale_ids = []
+                for server_id in stale_ids:
+                    await self._invalidate_server_leases(session, server_id)
                 if set(healthy_ids) != set(running_ids):
                     await session.execute(
                         update(ServerInstance)
                         .where(
                             col(ServerInstance.agent_id) == agent.id,
                             col(ServerInstance.status) == "running",
+                            col(ServerInstance.slot_generation) == 0,
                             col(ServerInstance.id).in_(running_ids),
                             col(ServerInstance.id).not_in(healthy_ids),
                         )
                         .values(health_status="unknown")
                     )
-                confirmed_count = getattr(confirmed, "rowcount", 0)
-                if confirmed_count:
-                    logger.info(
-                        f"Marked {confirmed_count} starting server instance(s) "
-                        f"as running (agent {name} reports them live)"
-                    )
-            stale = await session.execute(
-                update(ServerInstance)
-                .where(*conditions)
-                .values(status="stopped", health_status="unknown")
-            )
-            stale_count = getattr(stale, "rowcount", 0)
-            if stale_count:
-                logger.info(
-                    f"Marked {stale_count} server instance(s) as stopped "
-                    f"for restarted agent {name}"
-                )
-                stale_result = await session.execute(
-                    select(ServerInstance.id).where(
-                        ServerInstance.agent_id == agent.id,
-                        ServerInstance.status == "stopped",
-                    )
-                )
-                for server_id in stale_result.scalars().all():
-                    await self._invalidate_server_leases(session, server_id)
-
-            # Reconcile the complete in-memory state reported by newer agents.
-            # This preserves booting state across backend restarts instead of
-            # inferring it from the running/healthy ID lists alone.
-            for reported in agent_data.get("server_statuses") or []:
-                server_id = reported.get("id")
-                if not server_id:
-                    continue
-                status = reported.get("status", "starting")
-                health_status = reported.get("health_status", "unknown")
-                if status not in {"starting", "running"}:
-                    continue
-                await session.execute(
-                    update(ServerInstance)
-                    .where(
-                        col(ServerInstance.agent_id) == agent.id,
-                        col(ServerInstance.id) == server_id,
-                    )
-                    .values(status=status, health_status=health_status)
-                )
 
             await session.commit()
 
@@ -176,6 +190,26 @@ class AgentManager:
             self.agents[str(agent.id)] = agent
             if str(agent.id) not in self._event_buffers:
                 self._event_buffers[str(agent.id)] = []
+
+            for server_id, generation in stale_processes:
+                try:
+                    await self.send_to_agent(
+                        str(agent.id),
+                        "POST",
+                        "/servers/stop",
+                        {
+                            "server_id": str(server_id),
+                            "slot_generation": generation,
+                        },
+                        timeout=60.0,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Unable to stop stale server %s on agent %s",
+                        server_id,
+                        agent.id,
+                        exc_info=True,
+                    )
 
             # Start WebSocket connection (skip if one is already live)
             asyncio.create_task(self.connect_websocket(agent))
@@ -194,7 +228,7 @@ class AgentManager:
         if existing_task is not None and not existing_task.done():
             return
 
-        task = asyncio.create_task(self._run_agent_websocket(agent))
+        task = asyncio.create_task(self._connection_supervisor(agent))
         self._connect_tasks[agent_id] = task
         try:
             await task
@@ -202,75 +236,95 @@ class AgentManager:
             self._connect_tasks.pop(agent_id, None)
 
     async def _run_agent_websocket(self, agent: Agent) -> None:
-        """Run the agent event WebSocket loop until it fails."""
+        """Run one agent event WebSocket connection until it closes."""
         ws_url = f"ws://{agent.host}:{agent.port}/ws/status"
         agent_id = str(agent.id)
 
-        while True:
-            try:
-                async with connect(
-                    ws_url,
-                    extra_headers={"X-Agent-ID": agent_id},
-                    ping_interval=settings.WS_PING_INTERVAL,
-                    ping_timeout=settings.WS_PING_TIMEOUT,
-                ) as websocket:
-                    self.ws_connections[agent_id] = websocket
-                    agent.websocket_connected = True
-                    logger.info(f"WebSocket connected to agent {agent_id}")
+        connected = False
+        try:
+            async with connect(
+                ws_url,
+                extra_headers={"X-Agent-ID": agent_id},
+                ping_interval=settings.WS_PING_INTERVAL,
+                ping_timeout=settings.WS_PING_TIMEOUT,
+            ) as websocket:
+                connected = True
+                self.ws_connections[agent_id] = websocket
+                agent.websocket_connected = True
+                agent.status = "online"
+                async with AsyncSessionMaker() as session:
+                    persisted = await session.get(Agent, agent.id)
+                    if persisted is not None:
+                        persisted.status = "online"
+                        persisted.last_seen = datetime.now(UTC)
+                        session.add(persisted)
+                        await session.commit()
+                logger.info(f"WebSocket connected to agent {agent_id}")
+                async for message in websocket:
+                    try:
+                        event = json.loads(message)
+                    except TypeError, ValueError:
+                        logger.warning(
+                            f"Unparseable message from agent {agent_id}: "
+                            f"{str(message)[:120]}"
+                        )
+                        continue
+                    await self._handle_agent_event(agent_id, event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if connected:
+                raise AgentConnectionLost(
+                    f"Agent {agent_id} event WebSocket failed",
+                    reset_failures=True,
+                ) from exc
+            raise
+        logger.info("Agent %s event WebSocket closed; reconnecting", agent_id)
 
-                    # Listen for events
-                    async for message in websocket:
-                        try:
-                            event = json.loads(message)
-                        except TypeError, ValueError:
-                            logger.warning(
-                                f"Unparseable message from agent {agent_id}: "
-                                f"{str(message)[:120]}"
-                            )
-                            continue
-                        await self._handle_agent_event(agent_id, event)
-
-            except Exception as e:
-                agent.websocket_connected = False
-                logger.error(f"WebSocket error for agent {agent_id}: {e}")
-                self._schedule_reconnect(agent)
-                break
-
-    def _schedule_reconnect(self, agent: Agent) -> None:
-        """Schedule WebSocket reconnection."""
+    async def _connection_supervisor(self, agent: Agent) -> None:
+        """Keep one event connection alive and fence an unreachable agent."""
         agent_id = str(agent.id)
-
-        if agent_id in self._reconnect_tasks:
-            return
-
-        task = asyncio.create_task(self._reconnect_loop(agent))
-        self._reconnect_tasks[agent_id] = task
-
-    async def _reconnect_loop(self, agent: Agent) -> None:
-        """Attempt to reconnect to Agent."""
-        agent_id = str(agent.id)
-        attempts = 0
-
-        while attempts < settings.AGENT_MAX_RECONNECT_ATTEMPTS:
-            try:
-                await asyncio.sleep(settings.WS_RECONNECT_INTERVAL)
-
-                # Try to reconnect via the normal connection runner (it
-                # holds the connection and parses messages).
-                await self._run_agent_websocket(agent)
-                return
-
-            except Exception as e:
-                attempts += 1
-                logger.warning(
-                    f"Reconnect attempt {attempts} failed for agent {agent_id}: {e}"
-                )
-
-        # Max attempts reached
-        agent.status = "unreachable"
-        self._reconnect_tasks.pop(agent_id, None)
-        await self._mark_agent_servers_unavailable(agent_id)
-        logger.error(f"Max reconnect attempts reached for agent {agent_id}")
+        failures = 0
+        marked_unavailable = False
+        try:
+            while True:
+                try:
+                    await self._run_agent_websocket(agent)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if isinstance(exc, AgentConnectionLost) and exc.reset_failures:
+                        failures = 0
+                    failures += 1
+                    agent.websocket_connected = False
+                    self.ws_connections.pop(agent_id, None)
+                    logger.warning(
+                        "Agent %s WebSocket attempt %d failed: %s",
+                        agent_id,
+                        failures,
+                        exc,
+                    )
+                    if (
+                        failures >= settings.AGENT_MAX_RECONNECT_ATTEMPTS
+                        and not marked_unavailable
+                    ):
+                        agent.status = "unreachable"
+                        async with AsyncSessionMaker() as session:
+                            persisted = await session.get(Agent, agent.id)
+                            if persisted is not None:
+                                persisted.status = "unreachable"
+                                session.add(persisted)
+                                await session.commit()
+                        await self._mark_agent_servers_unavailable(agent_id)
+                        marked_unavailable = True
+                    await asyncio.sleep(settings.WS_RECONNECT_INTERVAL)
+                else:
+                    failures = 0
+                    marked_unavailable = False
+                    await asyncio.sleep(settings.WS_RECONNECT_INTERVAL)
+        finally:
+            agent.websocket_connected = False
+            self.ws_connections.pop(agent_id, None)
 
     async def _mark_agent_servers_unavailable(self, agent_id: str) -> None:
         """Stop an unreachable agent's servers and release their active leases."""
@@ -413,21 +467,45 @@ class AgentManager:
             session.add(run)
             await session.commit()
 
+    async def _matching_server(self, session, agent_id: str, data: dict):
+        """Lock the server only when an event belongs to its live generation."""
+        from sqlalchemy import select
+
+        from app.models import ServerInstance
+
+        server_id = data.get("server_id")
+        if not server_id:
+            return None
+        server = (
+            await session.execute(
+                select(ServerInstance)
+                .where(
+                    ServerInstance.id == server_id,
+                    ServerInstance.agent_id == agent_id,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if server is None:
+            return None
+        generation = data.get("slot_generation")
+        if generation is not None and server.slot_generation != int(generation):
+            logger.info(
+                "Ignoring stale event for server %s generation %s (current %s)",
+                server_id,
+                generation,
+                server.slot_generation,
+            )
+            return None
+        return server
+
     async def _handle_server_error(self, agent_id: str, data: dict) -> None:
         """Handle server.error event."""
         async with AsyncSessionMaker() as session:
-            from sqlalchemy import select
-
-            from app.models import ServerInstance
-
             server_id = data.get("server_id")
             if not server_id:
                 return
-
-            result = await session.execute(
-                select(ServerInstance).where(ServerInstance.id == server_id)
-            )
-            server = result.scalar_one_or_none()
+            server = await self._matching_server(session, agent_id, data)
 
             if server:
                 server.status = "error"
@@ -446,14 +524,7 @@ class AgentManager:
             return
 
         async with AsyncSessionMaker() as session:
-            from sqlalchemy import select
-
-            from app.models import ServerInstance
-
-            result = await session.execute(
-                select(ServerInstance).where(ServerInstance.id == server_id)
-            )
-            server = result.scalar_one_or_none()
+            server = await self._matching_server(session, agent_id, data)
             if not server:
                 return
 
@@ -466,6 +537,8 @@ class AgentManager:
             elif data.get("error"):
                 server.error_message = str(data["error"])
             session.add(server)
+            if health_status == "unhealthy":
+                await self._invalidate_server_leases(session, server.id)
             await session.commit()
             logger.info(
                 "Server %s health changed to %s (agent=%s)",
@@ -478,21 +551,19 @@ class AgentManager:
         """Handle server.started event."""
         # Update ServerInstance in database
         async with AsyncSessionMaker() as session:
-            from sqlalchemy import select
-
-            from app.models import ServerInstance
-
             server_id = data.get("server_id")
             if server_id:
-                result = await session.execute(
-                    select(ServerInstance).where(ServerInstance.id == server_id)
-                )
-                server = result.scalar_one_or_none()
+                server = await self._matching_server(session, agent_id, data)
 
                 if server:
-                    if server.status in {"starting", "running"}:
-                        server.status = "running"
+                    if server.status not in {"starting", "running"}:
+                        return
+                    server.status = "running"
                     server.health_status = "healthy"
+                    if data.get("effective_capacity") is not None:
+                        server.effective_capacity = max(
+                            int(data["effective_capacity"]), 1
+                        )
                     server.last_health_check = datetime.now(UTC)
                     if not server.started_at:
                         server.started_at = datetime.now(UTC)
@@ -503,16 +574,9 @@ class AgentManager:
     async def _handle_server_stopped(self, agent_id: str, data: dict) -> None:
         """Handle server.stopped event."""
         async with AsyncSessionMaker() as session:
-            from sqlalchemy import select
-
-            from app.models import ServerInstance
-
             server_id = data.get("server_id")
             if server_id:
-                result = await session.execute(
-                    select(ServerInstance).where(ServerInstance.id == server_id)
-                )
-                server = result.scalar_one_or_none()
+                server = await self._matching_server(session, agent_id, data)
 
                 if server:
                     if server.status not in {"preparing", "metadata_gathering"}:
@@ -526,24 +590,24 @@ class AgentManager:
 
     async def _invalidate_server_leases(self, session, server_id) -> None:
         """Abandon requests whose llama-server can no longer execute them."""
-        from sqlalchemy import select
-
         result = await session.execute(
-            select(InferenceLease).where(
+            update(InferenceLease)
+            .where(
                 InferenceLease.server_instance_id == server_id,
                 InferenceLease.status == "active",
             )
+            .values(
+                status="failed",
+                terminal_reason="server_unavailable",
+                released_at=datetime.now(UTC),
+            )
         )
-        now = datetime.now(UTC)
-        leases = list(result.scalars().all())
-        for lease in leases:
-            lease.status = "failed"
-            lease.released_at = now
-            session.add(lease)
-        if leases:
+        rowcount = getattr(result, "rowcount", 0)
+        count = rowcount if isinstance(rowcount, int) else 0
+        if count:
             logger.warning(
                 "Invalidated %d active lease(s) for terminal server %s",
-                len(leases),
+                count,
                 server_id,
             )
 
@@ -597,6 +661,7 @@ class AgentManager:
         path: str,
         json: dict[str, object] | None = None,
         timeout: float = 30.0,
+        headers: dict[str, str] | None = None,
     ) -> dict:
         """Send HTTP request to Agent."""
         agent = self.agents.get(agent_id)
@@ -618,6 +683,7 @@ class AgentManager:
                     method=method,
                     url=url,
                     json=json,
+                    headers=headers,
                 )
                 response.raise_for_status()
                 return response.json()

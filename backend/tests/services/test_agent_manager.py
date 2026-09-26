@@ -1,12 +1,19 @@
 """Tests for Agent Manager service."""
 
+import asyncio
 from datetime import datetime
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
+from app.core.config import settings
 from app.models import Agent, ServerInstance
-from app.services.agent_manager import AgentManager
+from app.services.agent_manager import AgentConnectionLost, AgentManager
+
+
+async def _wait_for_call_count(mock: AsyncMock, count: int) -> None:
+    while mock.await_count < count:
+        await asyncio.sleep(0)
 
 
 class TestAgentManagerRegistration:
@@ -17,6 +24,7 @@ class TestAgentManagerRegistration:
     async def test_register_new_agent(self, mock_session_maker):
         """Test registering a new agent."""
         manager = AgentManager()
+        manager.connect_websocket = AsyncMock()
 
         mock_result = Mock()
         mock_result.scalar_one_or_none = Mock(return_value=None)
@@ -62,6 +70,7 @@ class TestAgentManagerRegistration:
     async def test_register_existing_agent(self, mock_session_maker):
         """Test updating an existing agent."""
         manager = AgentManager()
+        manager.connect_websocket = AsyncMock()
 
         existing_agent = Agent(
             name="Test Agent",
@@ -574,6 +583,99 @@ class TestAgentManagerSend:
             await manager.send_to_agent("test-agent-id", "GET", "/health")
 
 
+class TestAgentManagerWebSocketSupervisor:
+    @pytest.mark.asyncio
+    async def test_established_socket_failures_accumulate_until_unreachable(self):
+        manager = AgentManager()
+        agent = Agent(
+            name="supervisor-agent",
+            host="localhost",
+            port=8080,
+            status="online",
+        )
+        manager._run_agent_websocket = AsyncMock(
+            side_effect=AgentConnectionLost("socket closed")
+        )
+        manager._mark_agent_servers_unavailable = AsyncMock()
+        session = AsyncMock()
+        session.get.return_value = agent
+        session.add = Mock()
+        session_context = AsyncMock()
+        session_context.__aenter__.return_value = session
+        session_context.__aexit__.return_value = None
+
+        with (
+            patch(
+                "app.services.agent_manager.AsyncSessionMaker",
+                return_value=session_context,
+            ),
+            patch.object(settings, "AGENT_MAX_RECONNECT_ATTEMPTS", 2),
+            patch.object(settings, "WS_RECONNECT_INTERVAL", 0),
+        ):
+            task = asyncio.create_task(manager._connection_supervisor(agent))
+            try:
+                await asyncio.wait_for(
+                    _wait_for_call_count(manager._run_agent_websocket, 2), timeout=1
+                )
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        assert agent.status == "unreachable"
+        manager._mark_agent_servers_unavailable.assert_awaited_once_with(str(agent.id))
+
+    @pytest.mark.asyncio
+    async def test_successful_reconnect_restores_online_status(self):
+        class EmptyWebSocket:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise StopAsyncIteration
+
+        manager = AgentManager()
+        agent = Agent(
+            name="reconnecting-agent",
+            host="localhost",
+            port=8080,
+            status="unreachable",
+        )
+        session = AsyncMock()
+        session.get.return_value = agent
+        session.add = Mock()
+        session_context = AsyncMock()
+        session_context.__aenter__.return_value = session
+        session_context.__aexit__.return_value = None
+
+        with (
+            patch(
+                "app.services.agent_manager.AsyncSessionMaker",
+                return_value=session_context,
+            ),
+            patch("app.services.agent_manager.connect", return_value=EmptyWebSocket()),
+            patch.object(settings, "WS_RECONNECT_INTERVAL", 0),
+        ):
+            task = asyncio.create_task(manager._connection_supervisor(agent))
+            try:
+                for _ in range(100):
+                    if agent.status == "online":
+                        break
+                    await asyncio.sleep(0)
+                else:
+                    pytest.fail("successful WebSocket reconnect did not restore online")
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        assert agent.status == "online"
+
+
 class TestAgentManagerGet:
     """Test getting individual agents."""
 
@@ -687,15 +789,12 @@ class TestServerLeaseInvalidation:
     async def test_terminal_server_state_abandons_active_leases(self):
         from unittest.mock import MagicMock
 
-        lease = MagicMock(status="active")
         result = MagicMock()
-        result.scalars.return_value.all.return_value = [lease]
+        result.rowcount = 1
         session = MagicMock()
         session.execute = AsyncMock(return_value=result)
 
         manager = AgentManager()
         await manager._invalidate_server_leases(session, "server-id")
 
-        assert lease.status == "failed"
-        assert lease.released_at is not None
-        session.add.assert_called_once_with(lease)
+        session.execute.assert_awaited_once()

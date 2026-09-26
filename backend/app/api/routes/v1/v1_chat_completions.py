@@ -11,6 +11,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 from sqlmodel import Session, select
 
 from app.api.deps import get_db
@@ -21,8 +22,8 @@ from app.services.inference_scheduler import (
     InferenceLeaseHandle,
     inference_scheduler,
 )
+from app.services.inference_target import resolve_inference_target
 from app.services.server_startup import (
-    START_DISPATCH_TIMEOUT,
     ServerStartupError,
     ensure_server_ready,
     metadata_capability,
@@ -365,10 +366,16 @@ async def _stream_completion_via_agent(
                 "POST",
                 proxy_url,
                 json=payload,
+                headers={"X-Inference-Slot-Generation": str(lease.slot_generation)},
             ) as response:
                 response.raise_for_status()
 
-                async for line in response.aiter_lines():
+                lines = response.aiter_lines()
+                while True:
+                    try:
+                        line = await lease.guard(anext(lines))
+                    except StopAsyncIteration:
+                        break
                     if line.startswith("data: "):
                         data = line[6:]
                         if data.strip() == "[DONE]":
@@ -525,15 +532,30 @@ async def _get_or_create_server(
     # its server.started event before the backend has a matching instance.
     server_id = str(uuid.uuid4())
     with Session(engine) as session:
+        session.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"),
+            {"key": model.id.int & ((1 << 63) - 1)},
+        )
+        statement = select(ServerInstance).where(
+            ServerInstance.model_id == model.id,
+            ServerInstance.status.in_(["running", "stopped", "starting"]),
+        )
+        if agent_id:
+            statement = statement.where(ServerInstance.agent_id == agent.id)
+        existing = session.exec(statement).first()
+        if existing is not None:
+            return existing
         server = ServerInstance(
             id=uuid.UUID(server_id),
             model_id=model.id,
             agent_id=agent.id,
+            alias=f"auto-{model.id}",
+            process_command=model.source_file or model.path,
             gpu_layers=35,
             context_size=4096,
             flash_attn=True,
             config={},
-            status="starting" if start else "stopped",
+            status="stopped",
             inactivity_timeout_seconds=300,
         )
         session.add(server)
@@ -542,49 +564,7 @@ async def _get_or_create_server(
 
     if not start:
         return server
-
-    start_response = await agent_manager.send_to_agent(
-        agent.id,
-        "POST",
-        "/servers/start",
-        {
-            "model_id": str(model.id),
-            "model_path": model.path,
-            "config": {
-                "id": server_id,
-                "gpu_layers": 35,
-                "context_size": 4096,
-                "batch_size": 512,
-                "cache_prompt": True,
-                "jinja": True,
-            },
-            "source": {
-                "source": model.source,
-                "repo_id": model.source_repo_id,
-                "filename": model.source_file or (model.path.rsplit("/", 1)[-1]),
-            }
-            if model.source_repo_id
-            else None,
-        },
-        timeout=START_DISPATCH_TIMEOUT,
-    )
-
-    allocated_port = (
-        start_response.get("port") if isinstance(start_response, dict) else None
-    )
-    with Session(engine) as session:
-        server = session.get(ServerInstance, server.id)
-        if server:
-            server.status = "running"
-            server.health_status = "healthy"
-            server.config = {"port": str(allocated_port)} if allocated_port else {}
-            server.proxy_url = start_response.get("proxy_url")
-            session.add(server)
-            session.commit()
-            session.refresh(server)
-
-    logger.info(f"Started new server {server.id} on agent {agent.id}")
-    return server
+    return await ensure_server_ready(server)
 
 
 @router.post("/chat/completions", response_model=None)
@@ -602,6 +582,7 @@ async def create_chat_completion(
     """
     request_id = f"chatcmpl-{uuid.uuid4()}"
     created = int(time.time())
+    required_agent_id = uuid.UUID(request.agent_id) if request.agent_id else None
 
     # Debug visibility: what the client actually sent (tools present? which?)
     logger.info(
@@ -620,45 +601,30 @@ async def create_chat_completion(
     # routes directly to that server (auto-starting stopped instances);
     # otherwise it is a model name/id and a server is found or started.
     server: ServerInstance | None = None
-    instance = db.exec(
-        select(ServerInstance).where(ServerInstance.alias == request.model)
-    ).first()
+    try:
+        target = resolve_inference_target(db, request.model, request.agent_id)
+    except (LookupError, ValueError) as e:
+        raise HTTPException(404, str(e)) from e
+    model = target.model
+    instance = target.server
 
     if instance is not None:
         if request.tools and metadata_capability(instance, "tools") is False:
             raise HTTPException(400, f"Model '{request.model}' does not support tools")
         server = instance
-        model = db.exec(select(Model).where(Model.id == server.model_id)).first()
-        if not model:
-            raise HTTPException(
-                404, f"Model for server alias {request.model} not found"
-            )
+        server = instance
     else:
-        # Get model by name (OpenAI style) or id (UI legacy)
-        model = db.exec(select(Model).where(Model.name == request.model)).first()
-        if not model:
-            try:
-                model = db.exec(select(Model).where(Model.id == request.model)).first()
-            except Exception:
-                model = None
-        if not model:
-            raise HTTPException(404, f"Model {request.model} not found")
-
         # Prefer an already-running instance so model-name requests can be
         # load-balanced. Cold-start only when no compatible instance exists.
         try:
-            candidates = await inference_scheduler._candidates(model.id)
-            if request.agent_id:
-                candidates = [
-                    candidate
-                    for candidate in candidates
-                    if str(candidate.agent_id) == request.agent_id
-                ]
+            candidates = await inference_scheduler.candidates_for_model(
+                model.id, required_agent_id=required_agent_id
+            )
             if candidates:
                 lease = await inference_scheduler.acquire(
                     model.id,
                     request_id,
-                    preferred_server_id=candidates[0].id if request.agent_id else None,
+                    required_agent_id=required_agent_id,
                     is_cancelled=http_request.is_disconnected if http_request else None,
                 )
                 server = lease.server
@@ -670,6 +636,7 @@ async def create_chat_completion(
                     model.id,
                     request_id,
                     preferred_server_id=server.id,
+                    required_agent_id=target.required_agent_id,
                     is_cancelled=http_request.is_disconnected if http_request else None,
                 )
         except HTTPException:
@@ -689,7 +656,8 @@ async def create_chat_completion(
         lease = await inference_scheduler.acquire(
             model.id,
             request_id,
-            preferred_server_id=server.id,
+            preferred_server_id=target.preferred_server_id,
+            required_agent_id=target.required_agent_id,
             is_cancelled=http_request.is_disconnected if http_request else None,
         )
 
@@ -732,12 +700,15 @@ async def create_chat_completion(
                 non_stream_payload[key] = value
         non_stream_payload.update(_build_tools_payload(request))
 
-        response = await agent_manager.send_to_agent(
-            str(server.agent_id),
-            "POST",
-            f"/proxy/{server.id}/v1/chat/completions",
-            non_stream_payload,
-            timeout=300.0,
+        response = await lease.guard(
+            agent_manager.send_to_agent(
+                str(server.agent_id),
+                "POST",
+                f"/proxy/{server.id}/v1/chat/completions",
+                non_stream_payload,
+                timeout=300.0,
+                headers={"X-Inference-Slot-Generation": str(lease.slot_generation)},
+            )
         )
 
         # Usage: server-provided numbers win; fall back to estimating

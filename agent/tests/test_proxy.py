@@ -12,6 +12,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
+from app.services.llama_server import ServerConfig
 from app.services.proxy import ServerProxy
 
 
@@ -39,6 +40,9 @@ async def test_metrics_are_returned_as_prometheus_text(monkeypatch):
 
     server_id = "server-1"
     proxy_route.server_manager.servers[server_id] = Mock()
+    proxy_route.server_manager.configs[server_id] = ServerConfig(
+        model_path="/models/test.gguf", port=8091, slot_generation=3
+    )
     response = Mock(is_error=False, text="requests_processing 2\n")
     proxy = Mock()
     proxy.proxy_request = AsyncMock(return_value=response)
@@ -51,3 +55,30 @@ async def test_metrics_are_returned_as_prometheus_text(monkeypatch):
 
     assert result.status_code == 200
     assert result.json() == {"metrics": "requests_processing 2\n"}
+
+    del proxy_route.server_manager.servers[server_id]
+    del proxy_route.server_manager.configs[server_id]
+
+
+@pytest.mark.asyncio
+async def test_proxy_rejects_stale_slot_generation():
+    from app.api.routes import proxy as proxy_route
+
+    server_id = "generation-server"
+    proxy_route.server_manager.servers[server_id] = Mock()
+    proxy_route.server_manager.configs[server_id] = ServerConfig(
+        model_path="/models/test.gguf", port=8091, slot_generation=8
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        result = await client.post(
+            f"/proxy/{server_id}/v1/chat/completions",
+            headers={"X-Inference-Slot-Generation": "7"},
+            json={"messages": []},
+        )
+
+    assert result.status_code == 409
+    del proxy_route.server_manager.servers[server_id]
+    del proxy_route.server_manager.configs[server_id]

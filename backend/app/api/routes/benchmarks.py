@@ -229,7 +229,7 @@ async def abort_run(run_id: str) -> dict[str, Any]:
 
 @router.post("/runs/{run_id}/force-stop")
 async def force_stop_run(run_id: str) -> dict[str, Any]:
-    resolve_timeout(run_id, "force")
+    resolve_timeout(run_id, "abort")
     await stop_run(run_id, force=True)
     return await _get_run_response(run_id)
 

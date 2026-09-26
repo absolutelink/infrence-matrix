@@ -11,6 +11,7 @@ ids fail with previous_response_not_found. A failed turn evicts the
 referenced id (spec reconnect-recovery semantics).
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -125,6 +126,7 @@ async def _stream_to_ws(
     websocket: WebSocket,
     request: CreateResponseBody,
     history: list[dict[str, Any]] | None = None,
+    disconnected: asyncio.Event | None = None,
 ) -> dict[str, Any] | None:
     """Run one response turn, pushing streaming event frames to the socket.
 
@@ -134,11 +136,16 @@ async def _stream_to_ws(
     lease = None
     seq = ev.SSEmitter()
     try:
-        server, model = await resolve_target(request.model)
+        server, model, preferred_server_id = await resolve_target(request.model)
+
+        async def is_disconnected() -> bool:
+            return disconnected is not None and disconnected.is_set()
+
         lease = await inference_scheduler.acquire(
             model.id if model else server.model_id,
             new_id("resp"),
-            preferred_server_id=server.id,
+            preferred_server_id=preferred_server_id,
+            is_cancelled=is_disconnected,
         )
         server = lease.server
         agent = await agent_manager.get_agent(str(server.agent_id))
@@ -176,9 +183,19 @@ async def _stream_to_ws(
         final_usage: dict[str, Any] = {}
         fallback_chars = 0
         async with httpx.AsyncClient(timeout=300.0) as client:
-            async with client.stream("POST", proxy_url, json=payload) as upstream:
+            async with client.stream(
+                "POST",
+                proxy_url,
+                json=payload,
+                headers={"X-Inference-Slot-Generation": str(lease.slot_generation)},
+            ) as upstream:
                 upstream.raise_for_status()
-                async for line in upstream.aiter_lines():
+                lines = upstream.aiter_lines()
+                while True:
+                    try:
+                        line = await lease.guard(anext(lines), cancelled=disconnected)
+                    except StopAsyncIteration:
+                        break
                     if not line.startswith("data: "):
                         continue
                     data = line[6:]
@@ -217,6 +234,9 @@ async def _stream_to_ws(
                     for tc in delta.get("tool_calls") or []:
                         state.add_tool_call_delta(tc.get("index", 0), tc)
                     await _send_events(websocket, seq.drain_events())
+
+        await lease.release()
+        lease = None
 
         state.finish_reasoning()
         state.finish_calls()
@@ -290,9 +310,31 @@ async def responses_websocket(websocket: WebSocket) -> None:
     deadline = time.monotonic() + CONNECTION_LIMIT_SECONDS
     # Connection-local continuation cache (latest turn, store=false)
     cache: dict[str, dict[str, Any]] = {}
+    messages: asyncio.Queue[str | None] = asyncio.Queue(maxsize=16)
+    disconnected = asyncio.Event()
+
+    async def read_messages() -> None:
+        try:
+            while True:
+                raw = await websocket.receive_text()
+                try:
+                    messages.put_nowait(raw)
+                except asyncio.QueueFull:
+                    disconnected.set()
+                    return
+        except WebSocketDisconnect:
+            disconnected.set()
+            try:
+                messages.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
+
+    reader = asyncio.create_task(read_messages())
 
     try:
         while True:
+            if disconnected.is_set():
+                break
             if time.monotonic() > deadline:
                 await websocket.send_text(
                     _error_event(
@@ -304,7 +346,9 @@ async def responses_websocket(websocket: WebSocket) -> None:
                 )
                 break
 
-            raw = await websocket.receive_text()
+            raw = await messages.get()
+            if raw is None:
+                break
             try:
                 message = json.loads(raw)
             except json.JSONDecodeError:
@@ -372,7 +416,9 @@ async def responses_websocket(websocket: WebSocket) -> None:
                     )
                     continue
 
-            terminal = await _stream_to_ws(websocket, request, continuation_history)
+            terminal = await _stream_to_ws(
+                websocket, request, continuation_history, disconnected
+            )
             failed = terminal is None or terminal.get("status") == "failed"
             if failed:
                 if request.previous_response_id:
@@ -395,3 +441,6 @@ async def responses_websocket(websocket: WebSocket) -> None:
             await websocket.close()
         except Exception:
             pass
+    finally:
+        reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)

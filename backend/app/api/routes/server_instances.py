@@ -3,18 +3,24 @@
 import asyncio
 import logging
 import uuid as uuid_module
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
 from app.db.session import AsyncSessionMaker
-from app.models import Agent, Model, ServerInstance
+from app.models import Agent, InferenceLease, Model, ServerInstance
 from app.services.agent_manager import agent_manager
 from app.services.benchmark import is_benchmark_blocking
+from app.services.server_lifecycle import (
+    ServerBusyError,
+    request_server_stop,
+    reserve_server_start,
+)
 from app.services.server_options import (
     ServerOptions,
     validate_halogen_flash_options,
@@ -626,9 +632,20 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
             if instance.mtp_draft_max is not None
             else None,
         }
-        await session.commit()
-
         needs_start = model_changed or mmproj_changed or dflash_changed
+        if was_running and (request.restart or needs_start):
+            active_leases = await session.execute(
+                select(col(InferenceLease.id)).where(
+                    InferenceLease.server_instance_id == instance.id,
+                    InferenceLease.status == "active",
+                )
+            )
+            if active_leases.scalar_one_or_none() is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Server has active inference requests and cannot restart",
+                )
+        await session.commit()
 
         # A running server must restart to load a different model file
         if was_running and (request.restart or needs_start):
@@ -646,17 +663,18 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
                     detail="Settings saved, but model no longer exists",
                 )
 
-            # Stop the running llama-server on the agent
             try:
-                await agent_manager.send_to_agent(
-                    str(instance.agent_id),
-                    "POST",
-                    "/servers/stop",
-                    {"server_id": str(instance.id)},
-                    timeout=60.0,
+                await request_server_stop(
+                    instance.id, force=False, reason="settings_restart"
                 )
+                await session.refresh(instance)
+            except ServerBusyError as e:
+                raise HTTPException(status_code=409, detail=str(e)) from e
             except Exception as e:
-                logger.warning(f"Failed to stop server before restart: {e}")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Settings saved, but the running server could not stop: {e}",
+                ) from e
 
             if needs_start:
                 instance.status = "uninitialized"
@@ -675,10 +693,7 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
                     "message": "Settings saved — reinitializing model metadata",
                 }
 
-            instance.status = "starting"
-            instance.error_message = None
-            await session.commit()
-
+            instance = await reserve_server_start(instance.id)
             payload = _build_start_payload(instance, model)
             asyncio.create_task(
                 _dispatch_start(str(instance.agent_id), str(instance.id), payload)
@@ -768,10 +783,10 @@ async def restart_server(server_id: str) -> dict[str, Any]:
                 status_code=503, detail=f"Agent {agent.name} is {agent.status}"
             )
 
-        instance.status = "starting"
-        instance.error_message = None
-        await session.commit()
-
+        try:
+            instance = await reserve_server_start(instance.id)
+        except ServerBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         payload = _build_start_payload(instance, model)
 
         # Dispatch in the background; the row is already "starting".
@@ -787,40 +802,23 @@ async def restart_server(server_id: str) -> dict[str, Any]:
 
 
 @router.post("/{server_id}/stop")
-async def stop_server(server_id: str) -> dict[str, str]:
+async def stop_server(server_id: str, force: bool = False) -> dict[str, str]:
     """Stop a server instance."""
-    async with AsyncSessionMaker() as session:
-        instance = await session.get(ServerInstance, uuid_module.UUID(server_id))
-        if not instance:
-            raise HTTPException(status_code=404, detail="Server instance not found")
-        if instance.status in {
-            "uninitialized",
-            "preparing",
-            "metadata_gathering",
-            "initialization_failed",
-        }:
-            raise HTTPException(
-                status_code=409,
-                detail="Server is not running or initialized",
-            )
-
-        instance.status = "stopped"
-        instance.health_status = "unknown"
-        await session.commit()
-
-        # Forward the stop command to the agent (best effort).
-        try:
-            await agent_manager.send_to_agent(
-                str(instance.agent_id),
-                "POST",
-                "/servers/stop",
-                {"server_id": str(instance.id)},
-                timeout=60.0,
-            )
-        except Exception as e:
-            logger.warning(f"Failed to stop server on agent: {e}")
-
-        return {"status": "stopped", "message": "Server stop request sent"}
+    try:
+        instance = await request_server_stop(
+            uuid_module.UUID(server_id),
+            force=force,
+            reason="manual_force_stop",
+        )
+    except ServerBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Agent stop failed: {exc}"
+        ) from exc
+    return {"status": instance.status, "message": "Server stopped"}
 
 
 @router.delete("/{server_id}")
@@ -831,25 +829,60 @@ async def delete_server(server_id: str) -> dict[str, str]:
         if not instance:
             raise HTTPException(status_code=404, detail="Server instance not found")
 
-        was_active = instance.status in ("starting", "running")
+        needs_stop = instance.status in (
+            "starting",
+            "running",
+            "stopping",
+            "error",
+        )
         agent_id = str(instance.agent_id)
         instance_id = str(instance.id)
 
-        # Stop the llama-server on the agent first (best effort) so the
-        # process does not outlive its row.
-        if was_active or instance.engine in ("halogen", "halogen-flash"):
+        # Fence active work before deleting the row so a live process cannot
+        # outlive the scheduler state that owns it.
+        if needs_stop:
+            try:
+                await request_server_stop(
+                    instance.id,
+                    force=True,
+                    reason="server_deleted",
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Server could not be stopped before deletion: {exc}",
+                ) from exc
+            await session.refresh(instance)
+        instance.status = "deleting"
+        instance.health_status = "unknown"
+        session.add(instance)
+        await session.commit()
+        await session.execute(
+            update(InferenceLease)
+            .where(
+                InferenceLease.preferred_server_id == instance.id,
+                InferenceLease.status == "queued",
+            )
+            .values(
+                status="cancelled",
+                terminal_reason="preferred_server_deleted",
+                released_at=datetime.now(UTC),
+            )
+        )
+        if instance.engine in ("halogen", "halogen-flash"):
             try:
                 await agent_manager.send_to_agent(
                     agent_id,
                     "POST",
-                    "/servers/delete"
-                    if instance.engine in ("halogen", "halogen-flash")
-                    else "/servers/stop",
+                    "/servers/delete",
                     {"server_id": instance_id},
                     timeout=60.0,
                 )
             except Exception as e:
-                logger.warning(f"Failed to stop server on agent before delete: {e}")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Server could not be removed from agent: {e}",
+                ) from e
 
         await session.delete(instance)
         await session.commit()
@@ -858,5 +891,5 @@ async def delete_server(server_id: str) -> dict[str, str]:
         "status": "deleted",
         "server_id": instance_id,
         "message": "Server instance deleted"
-        + (" (stop request sent to agent)" if was_active else ""),
+        + (" (stop request sent to agent)" if needs_stop else ""),
     }

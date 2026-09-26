@@ -35,6 +35,7 @@ class ServerConfig:
     mmproj_path: str | None = None
     draft_model_path: str | None = None
     options: dict[str, Any] | None = None
+    slot_generation: int = 0
 
 
 class LlamaServerManager:
@@ -52,6 +53,7 @@ class LlamaServerManager:
     def __init__(self) -> None:
         self.servers: dict[str, subprocess.Popen] = {}
         self.configs: dict[str, ServerConfig] = {}
+        self.slot_generations: dict[str, int] = {}
         self.healthy_servers: set[str] = set()
         self.server_health: dict[str, str] = {}
         self._health_failures: dict[str, int] = {}
@@ -94,14 +96,25 @@ class LlamaServerManager:
         exit_code = process.poll()
         if exit_code is not None:
             error = f"llama-server exited with code {exit_code}"
+            slot_generation = config.slot_generation
             self._remove_server_state(server_id, preserve_logs=True)
             publish_event(
                 "server.error",
-                {"server_id": server_id, "error": error, "exit_code": exit_code},
+                {
+                    "server_id": server_id,
+                    "error": error,
+                    "exit_code": exit_code,
+                    "slot_generation": slot_generation,
+                },
             )
             return
 
         healthy, error = await self._check_health(config.port)
+        if (
+            self.servers.get(server_id) is not process
+            or self.configs.get(server_id) is not config
+        ):
+            return
         previous = self.server_health.get(server_id, "healthy")
         if healthy:
             self._health_failures[server_id] = 0
@@ -143,6 +156,7 @@ class LlamaServerManager:
                 "previous_status": previous,
                 "consecutive_failures": self._health_failures.get(server_id, 0),
                 "error": error,
+                "slot_generation": self.configs[server_id].slot_generation,
             },
         )
 
@@ -233,25 +247,22 @@ class LlamaServerManager:
 
     async def start_server(self, server_id: str, config: ServerConfig) -> bool:
         """Start a llama.cpp server subprocess."""
-        if server_id in self.servers:
-            return False
-
-        # Serialize concurrent starts for the same instance: while one
-        # caller is downloading files, a second /servers/start for the same
-        # id (registration cycle) must not spawn a duplicate process. After
-        # the wait, re-check so the second caller sees the running server.
         lock = self._start_locks.setdefault(server_id, asyncio.Lock())
-        if lock.locked():
+        try:
             async with lock:
                 if server_id in self.servers:
+                    current = self.configs[server_id].slot_generation
+                    if config.slot_generation <= current:
+                        return False
+                    await self.stop_server(server_id, slot_generation=current)
+
+                latest = self.slot_generations.get(server_id, -1)
+                generation_is_fenced = latest > 0 or config.slot_generation > 0
+                if generation_is_fenced and config.slot_generation <= latest:
                     return False
-                logger.warning(
-                    f"Server {server_id} start raced a pending start; proceeding"
-                )
-        async with lock:
-            try:
                 return await self._start_server_locked(server_id, config)
-            finally:
+        finally:
+            if self._start_locks.get(server_id) is lock:
                 self._start_locks.pop(server_id, None)
 
     async def _start_server_locked(self, server_id: str, config: ServerConfig) -> bool:
@@ -380,6 +391,7 @@ class LlamaServerManager:
 
             self.servers[server_id] = proc
             self.configs[server_id] = config
+            self.slot_generations[server_id] = config.slot_generation
             self.start_times[server_id] = time.time()
             self._start_log_readers(server_id)
 
@@ -397,6 +409,8 @@ class LlamaServerManager:
                     "status": "running",
                     "model_path": config.model_path,
                     "port": config.port,
+                    "slot_generation": config.slot_generation,
+                    "effective_capacity": self.get_effective_capacity(server_id),
                 },
             )
 
@@ -419,13 +433,23 @@ class LlamaServerManager:
                 {
                     "server_id": server_id,
                     "error": str(e),
+                    "slot_generation": config.slot_generation,
                 },
             )
             return False
 
-    async def stop_server(self, server_id: str, force: bool = False) -> bool:
+    async def stop_server(
+        self,
+        server_id: str,
+        force: bool = False,
+        slot_generation: int | None = None,
+    ) -> bool:
         """Stop a llama.cpp server."""
         if server_id not in self.servers:
+            return False
+
+        config = self.configs[server_id]
+        if slot_generation is not None and slot_generation != config.slot_generation:
             return False
 
         proc = self.servers[server_id]
@@ -449,7 +473,6 @@ class LlamaServerManager:
         self._health_successes.pop(server_id, None)
         self._health_errors.pop(server_id, None)
         self.start_times.pop(server_id, None)
-        self._start_locks.pop(server_id, None)
         self._log_buffers.pop(server_id, None)
 
         publish_event(
@@ -457,6 +480,7 @@ class LlamaServerManager:
             {
                 "server_id": server_id,
                 "status": "stopped",
+                "slot_generation": config.slot_generation,
             },
         )
 
@@ -513,6 +537,17 @@ class LlamaServerManager:
         if not start_time:
             return 0.0
         return time.time() - start_time
+
+    def get_effective_capacity(self, server_id: str) -> int:
+        """Return the concurrency actually passed to llama-server."""
+        config = self.configs[server_id]
+        options = config.options or {}
+        if options.get("strict_mtp_qwen"):
+            return 1
+        try:
+            return max(int(options.get("parallel", 1)), 1)
+        except (TypeError, ValueError):
+            return 1
 
     def _drain_pipes(self, server_id: str) -> None:
         """Read any pending output into the per-server ring buffer."""
@@ -616,6 +651,8 @@ class LlamaServerManager:
                     "status": "running",
                     "health_status": self.server_health.get(server_id, "unknown"),
                     "uptime_seconds": self.get_server_uptime(server_id),
+                    "slot_generation": config.slot_generation,
+                    "effective_capacity": self.get_effective_capacity(server_id),
                 }
             )
 
@@ -633,6 +670,8 @@ class LlamaServerManager:
             "port": self.configs[server_id].port,
             "health_status": self.server_health.get(server_id, "unknown"),
             "uptime_seconds": self.get_server_uptime(server_id),
+            "slot_generation": self.configs[server_id].slot_generation,
+            "effective_capacity": self.get_effective_capacity(server_id),
         }
 
 

@@ -1,8 +1,11 @@
 """GPU info endpoints."""
 
+import subprocess
+
 from fastapi import APIRouter
 
-from app.services.gpu_monitor import _sample_gpu
+from app.core.config import settings
+from app.services.gpu_monitor import _sample_gpu, aggregate_gpu_info
 
 router = APIRouter(prefix="/gpu", tags=["gpu"])
 
@@ -10,41 +13,7 @@ router = APIRouter(prefix="/gpu", tags=["gpu"])
 @router.get("")
 async def get_gpu_info() -> dict:
     """Get GPU information."""
-    gpu_info = {
-        "name": "Unknown",
-        "vram_total": 0,
-        "vram_used": 0,
-        "backend": "auto",
-    }
-
-    try:
-        import subprocess
-
-        result = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=name,memory.total,memory.used",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-
-        if result.returncode == 0:
-            lines = result.stdout.strip().split("\n")
-            if lines:
-                parts = lines[0].split(", ")
-                gpu_info["name"] = parts[0]
-                gpu_info["vram_total"] = int(parts[1]) * 1024 * 1024
-                gpu_info["vram_used"] = int(parts[2]) * 1024 * 1024
-                gpu_info["backend"] = "cuda"
-    except Exception:
-        pass
-
-    sample = _sample_gpu()
-    if sample and sample["gpus"]:
-        gpu_info.update(sample["gpus"][0])
+    gpu_info = aggregate_gpu_info(_sample_gpu(), settings.GPU_BACKEND)
 
     try:
         result = subprocess.run(
@@ -95,11 +64,12 @@ async def get_gpu_usage() -> dict:
 
     sample = _sample_gpu()
     if sample and sample["gpus"]:
-        gpu = sample["gpus"][0]
-        usage["gpu_percent"] = gpu["utilization"]
-        usage["memory_percent"] = (
-            gpu["vram_used"] / gpu["vram_total"] * 100 if gpu["vram_total"] else 0.0
-        )
-        usage["temperature"] = gpu["temperature"]
+        gpus = sample["gpus"]
+        total = sum(gpu["vram_total"] for gpu in gpus)
+        used = sum(gpu["vram_used"] for gpu in gpus)
+        usage["gpu_percent"] = sum(gpu["utilization"] for gpu in gpus) / len(gpus)
+        usage["memory_percent"] = used / total * 100 if total else 0.0
+        temperatures = [gpu["temperature"] for gpu in gpus if gpu["temperature"]]
+        usage["temperature"] = max(temperatures, default=None)
 
     return usage

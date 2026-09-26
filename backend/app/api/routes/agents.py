@@ -1,11 +1,16 @@
 """Agent management endpoints."""
 
+import asyncio
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import select, update
 
 from app.db.session import AsyncSessionMaker
-from app.models import Agent
+from app.models import Agent, InferenceLease, ServerInstance
 from app.services.agent_manager import agent_manager
+from app.services.server_lifecycle import request_server_stop
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -121,11 +126,46 @@ async def delete_agent(agent_id: str) -> dict:
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
 
-        # Remove from manager
-        agent_manager.agents.pop(str(agent.id), None)
-        # Remove from reconnect tasks if exists
-        agent_manager._reconnect_tasks.pop(str(agent.id), None)
+        servers = list(
+            (
+                await session.execute(
+                    select(ServerInstance).where(
+                        ServerInstance.agent_id == agent.id,
+                        ServerInstance.status.in_(
+                            ["starting", "running", "stopping", "error"]
+                        ),
+                    )
+                )
+            ).scalars()
+        )
+        try:
+            for server in servers:
+                await request_server_stop(server.id, force=True, reason="agent_deleted")
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Agent servers could not be stopped: {exc}",
+            ) from exc
 
+        # Remove from manager only after its processes are fenced.
+        agent_manager.agents.pop(str(agent.id), None)
+        connection_task = agent_manager._connect_tasks.pop(str(agent.id), None)
+        if connection_task is not None:
+            connection_task.cancel()
+            await asyncio.gather(connection_task, return_exceptions=True)
+
+        await session.execute(
+            update(InferenceLease)
+            .where(
+                InferenceLease.required_agent_id == agent.id,
+                InferenceLease.status == "queued",
+            )
+            .values(
+                status="cancelled",
+                terminal_reason="required_agent_deleted",
+                released_at=datetime.now(UTC),
+            )
+        )
         await session.delete(agent)
         await session.commit()
 

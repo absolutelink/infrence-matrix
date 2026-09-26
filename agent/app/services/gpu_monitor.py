@@ -36,6 +36,35 @@ def _sample_gpu() -> dict | None:
     return _sample_amd_sysfs()
 
 
+def aggregate_gpu_info(sample: dict | None, default_backend: str) -> dict:
+    """Expose every device while keeping the legacy top-level GPU fields."""
+    gpus = sample.get("gpus", []) if sample else []
+    if not gpus:
+        return {
+            "name": "Unknown",
+            "vram_total": 0,
+            "vram_used": 0,
+            "vram_free": 0,
+            "backend": default_backend,
+            "gpu_count": 0,
+            "gpus": [],
+        }
+
+    first = dict(gpus[0])
+    total = sum(int(gpu.get("vram_total", 0)) for gpu in gpus)
+    used = sum(int(gpu.get("vram_used", 0)) for gpu in gpus)
+    first.update(
+        {
+            "vram_total": total,
+            "vram_used": used,
+            "vram_free": max(total - used, 0),
+            "gpu_count": len(gpus),
+            "gpus": gpus,
+        }
+    )
+    return first
+
+
 def _parse_nvidia_output(output: str) -> dict | None:
     """Parse nvidia-smi CSV output."""
     gpus = []
@@ -72,6 +101,7 @@ def _read_int(path: Path) -> int | None:
 
 def _sample_amd_sysfs() -> dict | None:
     """Read AMDGPU shared-memory metrics exposed by the kernel driver."""
+    gpus = []
     for device in sorted(Path("/sys/class/drm").glob("card*/device")):
         try:
             if device.joinpath("vendor").read_text().strip().lower() != "0x1002":
@@ -90,22 +120,20 @@ def _sample_amd_sysfs() -> dict | None:
             continue
 
         busy = _read_int(device / "gpu_busy_percent") or 0
-        return {
-            "gpus": [
-                {
-                    "id": 0,
-                    "name": "AMD GPU",
-                    "vram_total": total,
-                    "vram_used": used,
-                    "vram_free": max(total - used, 0),
-                    "utilization": float(busy),
-                    "temperature": None,
-                    "backend": settings.GPU_BACKEND,
-                    "memory_type": "shared" if shared_memory else "dedicated",
-                }
-            ]
-        }
-    return None
+        gpus.append(
+            {
+                "id": len(gpus),
+                "name": "AMD GPU",
+                "vram_total": total,
+                "vram_used": used,
+                "vram_free": max(total - used, 0),
+                "utilization": float(busy),
+                "temperature": None,
+                "backend": settings.GPU_BACKEND,
+                "memory_type": "shared" if shared_memory else "dedicated",
+            }
+        )
+    return {"gpus": gpus} if gpus else None
 
 
 class GPUMonitor:

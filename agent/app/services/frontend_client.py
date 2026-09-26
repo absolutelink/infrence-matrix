@@ -10,7 +10,7 @@ from websockets.client import connect
 from app.core.config import settings
 from app.core.logging import logger
 from app.services.event_bus import publish_event
-from app.services.gpu_monitor import _sample_gpu
+from app.services.gpu_monitor import _sample_gpu, aggregate_gpu_info
 
 
 class FrontendClient:
@@ -57,6 +57,10 @@ class FrontendClient:
                         else "unknown"
                     ),
                     "port": config.port,
+                    "slot_generation": config.slot_generation,
+                    "effective_capacity": server_manager.get_effective_capacity(
+                        server_id
+                    ),
                 }
                 for server_id, config in server_manager.configs.items()
                 if server_id in server_manager.servers
@@ -78,39 +82,7 @@ class FrontendClient:
 
     async def _get_gpu_info(self) -> dict:
         """Get GPU information."""
-        gpu_info = {
-            "name": "Unknown",
-            "vram_total": 0,
-            "backend": settings.GPU_BACKEND,
-        }
-
-        try:
-            import subprocess
-
-            result = subprocess.run(
-                [
-                    "nvidia-smi",
-                    "--query-gpu=name,memory.total",
-                    "--format=csv,noheader,nounits",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-
-            if result.returncode == 0:
-                parts = result.stdout.strip().split(", ")
-                gpu_info["name"] = parts[0]
-                gpu_info["vram_total"] = int(parts[1]) * 1024 * 1024
-                gpu_info["backend"] = "cuda"
-        except Exception:
-            pass
-
-        sample = _sample_gpu()
-        if sample and sample["gpus"]:
-            gpu_info.update(sample["gpus"][0])
-
-        return gpu_info
+        return aggregate_gpu_info(_sample_gpu(), settings.GPU_BACKEND)
 
     async def start_background_tasks(self) -> None:
         """Start background tasks: register with frontend, then connect WebSocket."""
@@ -200,14 +172,22 @@ class FrontendClient:
         from app.services.server_manager import server_manager
 
         server_config = command.get("config", {})
+        server_id = server_config.get("id")
+        slot_generation = int(server_config.get("slot_generation", 0))
         try:
-            config = server_manager.ServerConfig(**server_config)
-            await server_manager.start_server(server_config.get("id"), config)
+            config = server_manager.ServerConfig(
+                **{key: value for key, value in server_config.items() if key != "id"}
+            )
+            await server_manager.start_server(server_id, config)
             await self._send_status_update(
                 "server.started",
                 {
-                    "server_id": server_config.get("id"),
+                    "server_id": server_id,
                     "status": "running",
+                    "slot_generation": slot_generation,
+                    "effective_capacity": server_manager.get_effective_capacity(
+                        server_id
+                    ),
                 },
             )
         except Exception as e:
@@ -215,8 +195,9 @@ class FrontendClient:
             await self._send_status_update(
                 "server.error",
                 {
-                    "server_id": server_config.get("id"),
+                    "server_id": server_id,
                     "error": str(e),
+                    "slot_generation": slot_generation,
                 },
             )
 
@@ -225,13 +206,15 @@ class FrontendClient:
         from app.services.server_manager import server_manager
 
         server_id = command.get("server_id")
+        slot_generation = int(command.get("slot_generation") or 0)
         try:
-            await server_manager.stop_server(server_id)
+            await server_manager.stop_server(server_id, slot_generation=slot_generation)
             await self._send_status_update(
                 "server.stopped",
                 {
                     "server_id": server_id,
                     "status": "stopped",
+                    "slot_generation": slot_generation,
                 },
             )
         except Exception as e:
@@ -241,6 +224,7 @@ class FrontendClient:
                 {
                     "server_id": server_id,
                     "error": str(e),
+                    "slot_generation": slot_generation,
                 },
             )
 

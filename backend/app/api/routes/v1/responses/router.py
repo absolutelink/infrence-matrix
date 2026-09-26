@@ -9,6 +9,7 @@ import contextlib
 import json
 import logging
 import time
+import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
@@ -49,8 +50,10 @@ from app.models import Model, ResponseRecord, ServerInstance
 from app.services.agent_manager import agent_manager
 from app.services.inference_scheduler import (
     InferenceLeaseHandle,
+    InferenceLeaseLost,
     inference_scheduler,
 )
+from app.services.inference_target import resolve_inference_target
 from app.services.server_startup import (
     ServerStartupError,
     ensure_server_ready_by_id,
@@ -277,14 +280,18 @@ async def _complete(
     history: list[dict[str, Any]],
     response_id: str,
     created_at: int,
+    lease: InferenceLeaseHandle,
 ) -> ResponseResource:
     payload = _llama_payload(request, history, stream=False)
-    response = await agent_manager.send_to_agent(
-        agent_id,
-        "POST",
-        f"/proxy/{server_id}/v1/chat/completions",
-        payload,
-        timeout=300.0,
+    response = await lease.guard(
+        agent_manager.send_to_agent(
+            agent_id,
+            "POST",
+            f"/proxy/{server_id}/v1/chat/completions",
+            payload,
+            timeout=300.0,
+            headers={"X-Inference-Slot-Generation": str(lease.slot_generation)},
+        )
     )
 
     choice = (response.get("choices") or [{}])[0]
@@ -400,15 +407,23 @@ def _persist_response(
 
 async def _upstream_lines_with_keepalive(
     upstream: httpx.Response,
+    lease: InferenceLeaseHandle | None = None,
 ) -> AsyncIterator[str | None]:
     """Read upstream SSE lines while emitting comments during idle periods."""
     lines = upstream.aiter_lines()
     pending = asyncio.create_task(anext(lines))
+    lease_lost = asyncio.create_task(lease.lost.wait()) if lease is not None else None
     try:
         while True:
+            waiting = {pending}
+            if lease_lost is not None:
+                waiting.add(lease_lost)
             done, _ = await asyncio.wait(
-                (pending,), timeout=SSE_KEEPALIVE_INTERVAL_SECONDS
+                waiting,
+                timeout=SSE_KEEPALIVE_INTERVAL_SECONDS,
             )
+            if lease_lost is not None and lease_lost in done:
+                raise InferenceLeaseLost("Inference lease ownership was lost")
             if not done:
                 yield None
                 continue
@@ -424,6 +439,10 @@ async def _upstream_lines_with_keepalive(
             pending.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await pending
+        if lease_lost is not None:
+            lease_lost.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await lease_lost
 
 
 async def _stream_events(
@@ -483,9 +502,16 @@ async def _stream_events(
             f"http://{agent.host}:{agent.port}/proxy/{server_id}/v1/chat/completions"
         )
         async with httpx.AsyncClient(timeout=300.0) as client:
-            async with client.stream("POST", proxy_url, json=payload) as upstream:
+            async with client.stream(
+                "POST",
+                proxy_url,
+                json=payload,
+                headers={"X-Inference-Slot-Generation": str(lease.slot_generation)}
+                if lease is not None
+                else None,
+            ) as upstream:
                 upstream.raise_for_status()
-                async for line in _upstream_lines_with_keepalive(upstream):
+                async for line in _upstream_lines_with_keepalive(upstream, lease):
                     if line is None:
                         yield ": keep-alive\n\n"
                         continue
@@ -537,6 +563,10 @@ async def _stream_events(
                     # Emit the item/delta events built during this chunk
                     for frame in seq.drain_frames():
                         yield frame
+
+        if lease is not None:
+            await lease.release()
+            lease = None
 
         state.apply_allowed_tools(allowed)
         state.finish_reasoning()
@@ -644,7 +674,9 @@ class TargetError(Exception):
         self.message = message
 
 
-async def resolve_target(model_ref: str) -> tuple[ServerInstance, Model | None]:
+async def resolve_target(
+    model_ref: str,
+) -> tuple[ServerInstance, Model | None, uuid.UUID | None]:
     """Resolve a server alias / model name / model id to a ready server.
 
     Aliases route directly (auto-starting stopped/errored instances);
@@ -653,34 +685,17 @@ async def resolve_target(model_ref: str) -> tuple[ServerInstance, Model | None]:
     """
     from app.api.routes.v1.v1_chat_completions import _get_or_create_server
 
-    instance = await find_alias_instance(model_ref)
-    if instance is not None:
-        try:
-            server = instance
-        except ServerStartupError as e:
-            raise TargetError(
-                503, "no_agent_available", f"Server not available: {e}"
-            ) from e
-        with Session(engine) as session:
-            model = session.exec(
-                select(Model).where(Model.id == server.model_id)
-            ).first()
-        if not model:
-            raise TargetError(
-                404, "model_not_found", f"Model for server alias {model_ref} not found"
-            )
-        return server, model
-
     with Session(engine) as session:
         try:
-            model = _resolve_model(session, model_ref)
-        except HTTPException as e:
-            if e.status_code == 404:
-                raise TargetError(404, "model_not_found", str(e.detail)) from e
-            raise TargetError(400, "invalid_request", str(e.detail)) from e
+            target = resolve_inference_target(session, model_ref)
+        except (LookupError, ValueError) as e:
+            raise TargetError(404, "model_not_found", str(e)) from e
+
+    if target.server is not None:
+        return target.server, target.model, target.preferred_server_id
 
     try:
-        server = await _get_or_create_server(model, None, start=False)
+        server = await _get_or_create_server(target.model, None, start=False)
     except HTTPException as e:
         raise TargetError(
             e.status_code or 503, "no_agent_available", str(e.detail)
@@ -693,7 +708,7 @@ async def resolve_target(model_ref: str) -> tuple[ServerInstance, Model | None]:
         raise TargetError(
             503, "no_agent_available", f"Failed to start server: {e}"
         ) from e
-    return server, model
+    return server, target.model, target.preferred_server_id
 
 
 @router.post("/responses", response_model=None)
@@ -733,68 +748,24 @@ async def create_response(
             param="previous_response_id",
         )
 
-    from app.api.routes.v1.v1_chat_completions import _get_or_create_server
-
-    # Resolve the target server. Server aliases route directly (with
-    # auto-start); names/ids resolve to a model and a server is found or
-    # started for it.
-    server = None
-    model: Model | None = None
-    lease_preference = None
-    instance = await find_alias_instance(request.model)
-    if instance is not None:
-        server = instance
-        model = db.exec(select(Model).where(Model.id == server.model_id)).first()
-        if not model:
-            return _error_response(
-                404,
-                "not_found",
-                "model_not_found",
-                f"Model for server alias {request.model} not found",
-                param="model",
-            )
-        lease_preference = server.id
-        if request.tools and metadata_capability(instance, "tools") is False:
-            return _error_response(
-                400,
-                "invalid_request",
-                "unsupported_capability",
-                f"Model '{request.model}' does not support tools",
-                param="tools",
-            )
-    else:
-        try:
-            model = _resolve_model(db, request.model)
-        except HTTPException as e:
-            return _error_response(
-                e.status_code or 404,
-                "not_found" if e.status_code == 404 else "invalid_request",
-                "model_not_found",
-                str(e.detail),
-                param="model",
-            )
-        try:
-            candidates = await inference_scheduler._candidates(model.id)
-            if candidates:
-                # The scheduler performs the actual load-balanced claim below.
-                server = candidates[0]
-            else:
-                server = await _get_or_create_server(model, None, start=False)
-                lease_preference = server.id
-        except HTTPException as e:
-            return _error_response(
-                e.status_code or 503,
-                "too_many_requests" if e.status_code == 503 else "server_error",
-                "no_agent_available",
-                str(e.detail),
-            )
-        except ServerStartupError as e:
-            return _error_response(
-                503,
-                "too_many_requests",
-                "no_agent_available",
-                f"Server not available: {e}",
-            )
+    try:
+        server, model, lease_preference = await resolve_target(request.model)
+    except TargetError as e:
+        return _error_response(
+            e.status,
+            "not_found" if e.status == 404 else "too_many_requests",
+            e.code,
+            e.message,
+            param="model",
+        )
+    if request.tools and metadata_capability(server, "tools") is False:
+        return _error_response(
+            400,
+            "invalid_request",
+            "unsupported_capability",
+            f"Model '{request.model}' does not support tools",
+            param="tools",
+        )
 
     # Chaining context: walk the previous_response_id chain to the root and
     # concatenate each record's input+output in order (full conversation).
@@ -906,6 +877,7 @@ async def create_response(
             history,
             response_id,
             created_at,
+            lease,
         )
     except TranslationError as e:
         return _error_response(400, "invalid_request", "invalid_input", str(e))
@@ -1026,7 +998,7 @@ async def compact_response(
         lease = await inference_scheduler.acquire(
             server.model_id,
             new_id("compact"),
-            preferred_server_id=server.id,
+            preferred_server_id=instance.id if instance is not None else None,
             is_cancelled=http_request.is_disconnected if http_request else None,
         )
         server = lease.server
@@ -1035,12 +1007,15 @@ async def compact_response(
             return _error_response(
                 503, "server_error", "no_agent_available", "Agent not found"
             )
-        response = await agent_manager.send_to_agent(
-            str(server.agent_id),
-            "POST",
-            f"/proxy/{server.id}/v1/chat/completions",
-            llama_payload,
-            timeout=300.0,
+        response = await lease.guard(
+            agent_manager.send_to_agent(
+                str(server.agent_id),
+                "POST",
+                f"/proxy/{server.id}/v1/chat/completions",
+                llama_payload,
+                timeout=300.0,
+                headers={"X-Inference-Slot-Generation": str(lease.slot_generation)},
+            )
         )
         choice = (response.get("choices") or [{}])[0]
         message = choice.get("message") or {}

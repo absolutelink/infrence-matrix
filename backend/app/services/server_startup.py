@@ -21,12 +21,15 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+from sqlalchemy import text
 from sqlmodel import col, select
 
 from app.db.session import AsyncSessionMaker
+from app.db.session import engine as async_engine
 from app.models import Agent, Model, ServerInstance
 from app.services.agent_manager import agent_manager
 from app.services.benchmark import is_benchmark_blocking
+from app.services.scheduler_locks import BENCHMARK_ADVISORY_LOCK_KEY
 from app.services.server_options import validate_server_options
 
 logger = logging.getLogger(__name__)
@@ -43,6 +46,46 @@ READY_TIMEOUT = 900.0
 # window, but must not hold an inference request for the full cold-start budget.
 UNHEALTHY_RECOVERY_TIMEOUT = 30.0
 READY_POLL_INTERVAL = 1.0
+
+
+async def _send_start_with_gate(
+    agent_id: str, payload: dict[str, Any], timeout: float
+) -> dict:
+    """Prevent process launch while a benchmark owns exclusive admission."""
+    async with async_engine.connect() as connection:
+        await connection.execute(
+            text("SELECT pg_advisory_lock_shared(:key)"),
+            {"key": BENCHMARK_ADVISORY_LOCK_KEY},
+        )
+        await connection.commit()
+        try:
+            server_id = payload.get("config", {}).get("id")
+            generation = payload.get("config", {}).get("slot_generation", 0)
+            if server_id:
+                async with AsyncSessionMaker() as session:
+                    server = await session.get(
+                        ServerInstance, uuid_module.UUID(str(server_id))
+                    )
+                    if (
+                        server is None
+                        or server.status != "starting"
+                        or server.slot_generation != int(generation)
+                    ):
+                        return {}
+            response = await agent_manager.send_to_agent(
+                agent_id,
+                "POST",
+                "/servers/start",
+                payload,
+                timeout=timeout,
+            )
+            return response or {}
+        finally:
+            await connection.execute(
+                text("SELECT pg_advisory_unlock_shared(:key)"),
+                {"key": BENCHMARK_ADVISORY_LOCK_KEY},
+            )
+            await connection.commit()
 
 
 def build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any]:
@@ -69,6 +112,7 @@ def build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any
             "flash_attn": instance.flash_attn,
             "mtp_draft_max": instance.mtp_draft_max,
             "options": validate_server_options(instance.server_options or {}),
+            "slot_generation": instance.slot_generation,
         },
         # The agent downloads the model file first if it is missing.
         "source": {
@@ -172,25 +216,38 @@ async def dispatch_start(
     agent_id: str, server_id: str, payload: dict[str, Any]
 ) -> None:
     """Send the start command to the agent, marking failure on the row."""
+    expected_generation = int(payload["config"].get("slot_generation", 0))
     try:
-        response = await agent_manager.send_to_agent(
-            agent_id,
-            "POST",
-            "/servers/start",
-            payload,
-            timeout=START_DISPATCH_TIMEOUT,
+        response = await _send_start_with_gate(
+            agent_id, payload, START_DISPATCH_TIMEOUT
         )
         # The agent returned success (llama-server healthy). Mark running in
         # case the server.started event was lost (e.g. backend restart). The
         # agent-allocated port is echoed back and kept in the JSON config
         # for display only (not a column).
         allocated_port = response.get("port") if isinstance(response, dict) else None
+        response_generation = (
+            response.get("slot_generation") if isinstance(response, dict) else None
+        )
+        effective_capacity = (
+            response.get("effective_capacity") if isinstance(response, dict) else None
+        )
         async with AsyncSessionMaker() as session:
             server = await session.get(ServerInstance, uuid_module.UUID(server_id))
-            if server and server.status in {"starting", "running"}:
+            if (
+                server
+                and server.status in {"starting", "running"}
+                and server.slot_generation == expected_generation
+                and (
+                    response_generation is None
+                    or int(response_generation) == expected_generation
+                )
+            ):
                 server.status = "running"
                 server.health_status = "healthy"
                 server.started_at = server.started_at or datetime.now(UTC)
+                if effective_capacity is not None:
+                    server.effective_capacity = max(int(effective_capacity), 1)
                 if allocated_port:
                     server.config = {
                         **(server.config or {}),
@@ -211,7 +268,11 @@ async def dispatch_start(
         )
         async with AsyncSessionMaker() as session:
             server = await session.get(ServerInstance, uuid_module.UUID(server_id))
-            if server:
+            if (
+                server
+                and server.slot_generation == expected_generation
+                and server.status == "starting"
+            ):
                 server.status = "starting"
                 server.health_status = "unknown"
                 server.error_message = str(e)
@@ -223,7 +284,11 @@ async def dispatch_start(
         )
         async with AsyncSessionMaker() as session:
             server = await session.get(ServerInstance, uuid_module.UUID(server_id))
-            if server:
+            if (
+                server
+                and server.slot_generation == expected_generation
+                and server.status == "starting"
+            ):
                 server.status = "error"
                 server.error_message = str(e)
                 session.add(server)
@@ -259,6 +324,21 @@ async def initialize_server(
     """
     server_uuid = uuid_module.UUID(server_id)
 
+    async with AsyncSessionMaker() as session:
+        instance = (
+            await session.execute(
+                select(ServerInstance)
+                .where(ServerInstance.id == server_uuid)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if instance is None:
+            return
+        instance.slot_generation += 1
+        request["config"]["slot_generation"] = instance.slot_generation
+        session.add(instance)
+        await session.commit()
+
     async def set_status(status: str, error: str | None = None) -> None:
         async with AsyncSessionMaker() as session:
             instance = await session.get(ServerInstance, server_uuid)
@@ -284,13 +364,7 @@ async def initialize_server(
         )
         await set_status("metadata_gathering")
 
-        await agent_manager.send_to_agent(
-            agent_id,
-            "POST",
-            "/servers/start",
-            request,
-            timeout=START_DISPATCH_TIMEOUT,
-        )
+        await _send_start_with_gate(agent_id, request, START_DISPATCH_TIMEOUT)
         metadata_response = await agent_manager.send_to_agent(
             agent_id,
             "GET",
@@ -314,7 +388,10 @@ async def initialize_server(
                 agent_id,
                 "POST",
                 "/servers/stop",
-                {"server_id": server_id},
+                {
+                    "server_id": server_id,
+                    "slot_generation": request["config"].get("slot_generation", 0),
+                },
                 timeout=60.0,
             )
         except Exception as e:
@@ -458,6 +535,7 @@ async def ensure_server_ready(
             raise ServerStartupError(f"Agent {agent.name} is {agent.status}")
 
         if should_start:
+            fresh.slot_generation += 1
             fresh.status = "starting"
             fresh.health_status = "unknown"
             fresh.error_message = None

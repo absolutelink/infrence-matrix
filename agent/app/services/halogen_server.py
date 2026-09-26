@@ -27,6 +27,7 @@ class HalogenServerConfig:
     api_port: int
     engine_port: int
     options: dict[str, Any]
+    slot_generation: int = 0
 
 
 class HalogenServerManager:
@@ -42,11 +43,13 @@ class HalogenServerManager:
     def __init__(self) -> None:
         self.servers: dict[str, subprocess.Popen] = {}
         self.configs: dict[str, HalogenServerConfig] = {}
+        self.slot_generations: dict[str, int] = {}
         self.healthy_servers: set[str] = set()
         self.server_health: dict[str, str] = {}
         self._health_failures: dict[str, int] = {}
         self.start_times: dict[str, float] = {}
         self._health_task: asyncio.Task | None = None
+        self._start_locks: dict[str, asyncio.Lock] = {}
         self._log_readers: dict[str, asyncio.Task] = {}
         self._log_forwarding_started = False
         self._logs: dict[str, list[str]] = {}
@@ -73,16 +76,23 @@ class HalogenServerManager:
             return
         exit_code = process.poll()
         if exit_code is not None:
+            slot_generation = config.slot_generation
             self._remove(server_id)
             publish_event(
                 "server.error",
                 {
                     "server_id": server_id,
                     "error": f"{self.PROCESS_LABEL} exited with code {exit_code}",
+                    "slot_generation": slot_generation,
                 },
             )
             return
         healthy, error = await self._check_health(config.api_port)
+        if (
+            self.servers.get(server_id) is not process
+            or self.configs.get(server_id) is not config
+        ):
+            return
         previous = self.server_health.get(server_id, "unknown")
         if healthy:
             self._health_failures[server_id] = 0
@@ -107,7 +117,12 @@ class HalogenServerManager:
         if status != previous:
             publish_event(
                 "server.health",
-                {"server_id": server_id, "status": status, "error": error},
+                {
+                    "server_id": server_id,
+                    "status": status,
+                    "error": error,
+                    "slot_generation": config.slot_generation,
+                },
             )
 
     async def stop_health_monitoring(self) -> None:
@@ -162,8 +177,23 @@ class HalogenServerManager:
             self._log_readers.pop(server_id, None)
 
     async def start_server(self, server_id: str, config: HalogenServerConfig) -> bool:
+        lock = self._start_locks.setdefault(server_id, asyncio.Lock())
+        async with lock:
+            return await self._start_server_locked(server_id, config)
+
+    async def _start_server_locked(
+        self, server_id: str, config: HalogenServerConfig
+    ) -> bool:
+        latest = self.slot_generations.get(server_id, -1)
+        generation_is_fenced = latest > 0 or config.slot_generation > 0
+        if server_id not in self.servers and generation_is_fenced:
+            if config.slot_generation <= latest:
+                return False
         if server_id in self.servers:
-            return False
+            current = self.configs[server_id].slot_generation
+            if config.slot_generation <= current:
+                return False
+            await self.stop_server(server_id, slot_generation=current)
         if len(self.servers) >= settings.HALOGEN_MAX_INSTANCES:
             raise RuntimeError("Halogen instance limit reached")
 
@@ -221,6 +251,7 @@ class HalogenServerManager:
         )
         self.servers[server_id] = process
         self.configs[server_id] = config
+        self.slot_generations[server_id] = config.slot_generation
         self.start_times[server_id] = time.time()
         self._start_log_reader(server_id)
         try:
@@ -237,6 +268,8 @@ class HalogenServerManager:
                 "status": "running",
                 "model_path": config.model_path,
                 "port": config.api_port,
+                "slot_generation": config.slot_generation,
+                "effective_capacity": self.get_effective_capacity(server_id),
             },
         )
         return True
@@ -268,9 +301,17 @@ class HalogenServerManager:
         except Exception as error:
             return False, str(error)
 
-    async def stop_server(self, server_id: str, force: bool = False) -> bool:
+    async def stop_server(
+        self,
+        server_id: str,
+        force: bool = False,
+        slot_generation: int | None = None,
+    ) -> bool:
         process = self.servers.get(server_id)
         if process is None:
+            return False
+        config = self.configs[server_id]
+        if slot_generation is not None and slot_generation != config.slot_generation:
             return False
         try:
             os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
@@ -287,7 +328,14 @@ class HalogenServerManager:
                 pass
             await asyncio.to_thread(process.wait)
         self._remove(server_id)
-        publish_event("server.stopped", {"server_id": server_id, "status": "stopped"})
+        publish_event(
+            "server.stopped",
+            {
+                "server_id": server_id,
+                "status": "stopped",
+                "slot_generation": config.slot_generation,
+            },
+        )
         return True
 
     def delete_server(self, server_id: str) -> None:
@@ -304,6 +352,13 @@ class HalogenServerManager:
         self._health_failures.pop(server_id, None)
         self.start_times.pop(server_id, None)
 
+    def get_effective_capacity(self, server_id: str) -> int:
+        """Return the number of request slots configured in Halogen."""
+        try:
+            return max(int(self.configs[server_id].options.get("kv_slots", 1)), 1)
+        except (TypeError, ValueError):
+            return 1
+
     def list_servers(self) -> list[dict]:
         return [
             {
@@ -314,6 +369,8 @@ class HalogenServerManager:
                 "health_status": self.server_health.get(server_id, "unknown"),
                 "uptime_seconds": time.time()
                 - self.start_times.get(server_id, time.time()),
+                "slot_generation": config.slot_generation,
+                "effective_capacity": self.get_effective_capacity(server_id),
             }
             for server_id, config in self.configs.items()
             if server_id in self.servers
@@ -330,6 +387,8 @@ class HalogenServerManager:
             "port": config.api_port,
             "health_status": self.server_health.get(server_id, "unknown"),
             "uptime_seconds": time.time() - self.start_times[server_id],
+            "slot_generation": config.slot_generation,
+            "effective_capacity": self.get_effective_capacity(server_id),
         }
 
     def get_server_logs(self, server_id: str, lines: int = 100) -> dict:

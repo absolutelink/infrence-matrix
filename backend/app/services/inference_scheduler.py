@@ -1,27 +1,31 @@
 """PostgreSQL-backed scheduling leases for inference requests."""
 
 import asyncio
+import hashlib
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, or_
+from sqlalchemy import exists, func, or_, text, update
 from sqlmodel import select
 
 from app.db.session import AsyncSessionMaker
+from app.db.session import engine as async_engine
 from app.models import Agent, InferenceLease, Model, ServerInstance
 from app.services.agent_manager import agent_manager
+from app.services.scheduler_locks import BENCHMARK_ADVISORY_LOCK_KEY
 
 logger = logging.getLogger(__name__)
 
 LEASE_TIMEOUT_SECONDS = 30 * 60
+ACTIVE_LEASE_TTL_SECONDS = 90
+LEASE_RENEWAL_INTERVAL_SECONDS = 30
 SCHEDULER_POLL_SECONDS = 1.0
 TELEMETRY_TIMEOUT_SECONDS = 5.0
 RECONCILIATION_INTERVAL_SECONDS = 30.0
-DEFAULT_PARALLEL_SLOTS = 4
 DEFAULT_SINGLE_REQUEST_CAPACITY = 1
 
 
@@ -33,28 +37,15 @@ def _vram_requirements_fit(
 
 
 def server_capacity(server: ServerInstance) -> int:
-    """Return configured request capacity without probing the inference server."""
-    if server.engine == "halogen":
-        return DEFAULT_SINGLE_REQUEST_CAPACITY
-    options = (
-        server.engine_options or {}
-        if server.engine == "halogen-flash"
-        else server.server_options or {}
-    )
-    configured_parallel = (
-        options.get("kv_slots")
-        if server.engine == "halogen-flash"
-        else options.get("parallel")
-    )
+    """Return capacity confirmed by the agent for this server generation."""
     try:
-        return max(
-            int(configured_parallel)
-            if configured_parallel is not None
-            else DEFAULT_PARALLEL_SLOTS,
-            1,
-        )
+        return max(int(getattr(server, "effective_capacity", 1)), 1)
     except TypeError, ValueError:
-        return DEFAULT_PARALLEL_SLOTS
+        return DEFAULT_SINGLE_REQUEST_CAPACITY
+
+
+class InferenceLeaseLost(RuntimeError):
+    """Raised when an active request no longer owns its server slot."""
 
 
 @dataclass
@@ -62,16 +53,137 @@ class InferenceLeaseHandle:
     request_id: str
     server: ServerInstance
     lease_id: uuid.UUID
+    slot_generation: int | None = None
+    lost: asyncio.Event = field(default_factory=asyncio.Event)
+    _upstream_started: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    _renewal_task: asyncio.Task[None] | None = field(default=None, init=False)
+
+    def start_renewal(self) -> None:
+        if self._renewal_task is None:
+            self._renewal_task = asyncio.create_task(self._renew_loop())
+
+    async def guard(
+        self,
+        awaitable: Awaitable[Any],
+        *,
+        cancelled: asyncio.Event | None = None,
+    ) -> Any:
+        """Cancel one upstream operation when lease ownership or its client is lost."""
+        self._upstream_started.set()
+        operation = asyncio.ensure_future(awaitable)
+        lease_lost = asyncio.create_task(self.lost.wait())
+        client_lost = (
+            asyncio.create_task(cancelled.wait()) if cancelled is not None else None
+        )
+        sentinels = {lease_lost}
+        if client_lost is not None:
+            sentinels.add(client_lost)
+        try:
+            done, _pending = await asyncio.wait(
+                {operation, *sentinels}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if operation in done and not any(
+                task.result() for task in done & sentinels
+            ):
+                return await operation
+            operation.cancel()
+            await asyncio.gather(operation, return_exceptions=True)
+            if self.lost.is_set():
+                raise InferenceLeaseLost("Inference lease ownership was lost")
+            raise InferenceRequestCancelled
+        finally:
+            if not operation.done():
+                operation.cancel()
+                await asyncio.gather(operation, return_exceptions=True)
+            for task in sentinels:
+                task.cancel()
+            await asyncio.gather(*sentinels, return_exceptions=True)
+
+    async def _renew_loop(self) -> None:
+        expiry = asyncio.get_running_loop().time() + ACTIVE_LEASE_TTL_SECONDS
+        try:
+            while True:
+                await asyncio.sleep(LEASE_RENEWAL_INTERVAL_SECONDS)
+                try:
+                    if not self._upstream_started.is_set():
+                        if asyncio.get_running_loop().time() >= expiry:
+                            self.lost.set()
+                            return
+                        continue
+                    async with AsyncSessionMaker() as session:
+                        healthy_server = exists(
+                            select(ServerInstance.id).where(
+                                ServerInstance.id == self.server.id,
+                                ServerInstance.status == "running",
+                                ServerInstance.health_status == "healthy",
+                                ServerInstance.slot_generation == self.slot_generation,
+                            )
+                        )
+                        result = await session.execute(
+                            update(InferenceLease)
+                            .where(
+                                InferenceLease.id == self.lease_id,
+                                InferenceLease.status == "active",
+                                InferenceLease.slot_generation == self.slot_generation,
+                                healthy_server,
+                            )
+                            .values(
+                                lease_expires_at=datetime.now(UTC)
+                                + timedelta(seconds=ACTIVE_LEASE_TTL_SECONDS)
+                            )
+                        )
+                        await session.commit()
+                    if result.rowcount == 0:
+                        self.lost.set()
+                        return
+                    expiry = (
+                        asyncio.get_running_loop().time() + ACTIVE_LEASE_TTL_SECONDS
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "Unable to renew inference lease %s", self.lease_id
+                    )
+                    if asyncio.get_running_loop().time() >= expiry:
+                        self.lost.set()
+                        return
+        except asyncio.CancelledError:
+            pass
 
     async def release(self) -> None:
         """Release the lease in a short, independent transaction."""
-        async with AsyncSessionMaker() as session:
-            lease = await session.get(InferenceLease, self.lease_id)
-            if lease and lease.status == "active":
-                lease.status = "released"
-                lease.released_at = datetime.now(UTC)
-                session.add(lease)
+
+        if self._renewal_task is not None:
+            self._renewal_task.cancel()
+            await asyncio.gather(self._renewal_task, return_exceptions=True)
+            self._renewal_task = None
+
+        async def _release() -> None:
+            async with AsyncSessionMaker() as session:
+                await session.execute(
+                    update(InferenceLease)
+                    .where(
+                        InferenceLease.id == self.lease_id,
+                        InferenceLease.status == "active",
+                        InferenceLease.slot_generation == self.slot_generation,
+                    )
+                    .values(
+                        status="released",
+                        terminal_reason="completed",
+                        released_at=datetime.now(UTC),
+                    )
+                )
                 await session.commit()
+
+        # ASGI cancels the request task when a client disconnects. Shield the
+        # database update so cancellation cannot strand the slot as active.
+        release_task = asyncio.create_task(_release())
+        try:
+            await asyncio.shield(release_task)
+        except asyncio.CancelledError:
+            await asyncio.shield(release_task)
+            raise
 
 
 class InferenceRequestCancelled(asyncio.CancelledError):
@@ -112,27 +224,26 @@ class InferenceScheduler:
                 logger.exception("Inference lease reconciliation failed")
 
     async def reconcile_persisted_leases(self) -> int:
-        """Invalidate work that cannot survive a backend process restart."""
-        async with AsyncSessionMaker() as session:
-            result = await session.execute(
-                select(InferenceLease).where(
-                    InferenceLease.status.in_(["active", "queued"])
-                )
-            )
-            leases = list(result.scalars().all())
-            now = datetime.now(UTC)
-            for lease in leases:
-                lease.status = "failed" if lease.status == "active" else "cancelled"
-                lease.released_at = now
-                session.add(lease)
-            if leases:
-                await session.commit()
-            return len(leases)
+        """Reconcile deadlines without disturbing work owned by other workers."""
+        return await self.reconcile_stale_leases()
 
     async def reconcile_stale_leases(self) -> int:
-        """Release expired leases and leases on servers no longer executable."""
+        """Expire queued work and fence servers whose active ownership was lost."""
         now = datetime.now(UTC)
+        stops: list[tuple[uuid.UUID, uuid.UUID, int]] = []
         async with AsyncSessionMaker() as session:
+            expired_queued = await session.execute(
+                update(InferenceLease)
+                .where(
+                    InferenceLease.status == "queued",
+                    InferenceLease.lease_expires_at <= now,
+                )
+                .values(
+                    status="expired",
+                    terminal_reason="queue_timeout",
+                    released_at=now,
+                )
+            )
             result = await session.execute(
                 select(InferenceLease, ServerInstance)
                 .outerjoin(
@@ -150,29 +261,88 @@ class InferenceScheduler:
                 )
             )
             stale = list(result.all())
-            for lease, _server in stale:
-                lease.status = "failed"
-                lease.released_at = now
-                session.add(lease)
-            if stale:
-                await session.commit()
-                logger.warning("Reconciled %d stale inference lease(s)", len(stale))
-            return len(stale)
+            server_ids = {server.id for _lease, server in stale if server is not None}
+            for server_id in server_ids:
+                locked = (
+                    await session.execute(
+                        select(ServerInstance)
+                        .where(ServerInstance.id == server_id)
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if locked is None:
+                    continue
+                server_unavailable = (
+                    locked.status != "running" or locked.health_status != "healthy"
+                )
+                generation = locked.slot_generation
+                failure_update = update(InferenceLease).where(
+                    InferenceLease.server_instance_id == locked.id,
+                    InferenceLease.status == "active",
+                    InferenceLease.slot_generation == generation,
+                )
+                if not server_unavailable:
+                    failure_update = failure_update.where(
+                        InferenceLease.lease_expires_at <= now
+                    )
+                failed = await session.execute(
+                    failure_update.values(
+                        status="failed",
+                        terminal_reason="lease_expired_or_server_unavailable",
+                        released_at=now,
+                    )
+                )
+                if not failed.rowcount:
+                    continue
+                if locked.status in {"running", "starting"}:
+                    locked.status = "stopping"
+                    session.add(locked)
+                    stops.append((locked.id, locked.agent_id, generation))
+            missing_ids = [lease.id for lease, server in stale if server is None]
+            if missing_ids:
+                await session.execute(
+                    update(InferenceLease)
+                    .where(
+                        InferenceLease.id.in_(missing_ids),
+                        InferenceLease.status == "active",
+                    )
+                    .values(
+                        status="failed",
+                        terminal_reason="server_missing",
+                        released_at=now,
+                    )
+                )
+            await session.commit()
+
+        for server_id, agent_id, generation in stops:
+            try:
+                await agent_manager.send_to_agent(
+                    str(agent_id),
+                    "POST",
+                    "/servers/stop",
+                    {"server_id": str(server_id), "slot_generation": generation},
+                    timeout=60.0,
+                )
+            except Exception:
+                logger.exception("Unable to stop fenced server %s", server_id)
+        count = int(expired_queued.rowcount or 0) + len(stale)
+        if count:
+            logger.warning("Reconciled %d stale inference lease(s)", count)
+        return count
 
     def _agent_lock(self, agent_id: uuid.UUID) -> asyncio.Lock:
         return self._admission_locks.setdefault(agent_id, asyncio.Lock())
 
-    async def _queue_is_head(self, lease_id: uuid.UUID) -> bool:
+    async def _admission_open(self) -> bool:
         async with AsyncSessionMaker() as session:
-            head = (
-                await session.execute(
-                    select(InferenceLease)
-                    .where(InferenceLease.status == "queued")
-                    .order_by(InferenceLease.queued_at, InferenceLease.id)
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
-            return head is not None and head.id == lease_id
+            return bool(
+                (
+                    await session.execute(
+                        text("SELECT pg_try_advisory_xact_lock_shared(:key)"),
+                        {"key": BENCHMARK_ADVISORY_LOCK_KEY},
+                    )
+                ).scalar_one()
+            )
 
     async def _live_vram(self, agent_id: uuid.UUID) -> int | None:
         """Read maximum VRAM from the target agent, ignoring transient usage."""
@@ -191,11 +361,9 @@ class InferenceScheduler:
             model = await session.get(Model, server.model_id)
             if model is None:
                 return server.vram_required_bytes or 0
-            required = (
-                server.vram_required_bytes
-                if server.vram_required_bytes is not None
-                else model.size_bytes
-            )
+            if server.vram_required_bytes is not None:
+                return server.vram_required_bytes
+            required = model.size_bytes
             for model_id in (server.mmproj_model_id, server.dflash_model_id):
                 if model_id:
                     extra = await session.get(Model, model_id)
@@ -211,7 +379,6 @@ class InferenceScheduler:
                         select(func.count(InferenceLease.id)).where(
                             InferenceLease.server_instance_id == server_id,
                             InferenceLease.status == "active",
-                            InferenceLease.lease_expires_at > datetime.now(UTC),
                         )
                     )
                 ).scalar_one()
@@ -219,31 +386,15 @@ class InferenceScheduler:
 
     async def _stop_idle_server(self, server: ServerInstance) -> None:
         """Stop an idle server and wait for its stopped event."""
-        if await self._active_leases(server.id):
-            return
-        async with AsyncSessionMaker() as session:
-            current = await session.get(ServerInstance, server.id)
-            if current is None or current.status != "running":
-                return
-            current.status = "stopping"
-            session.add(current)
-            await session.commit()
+        from app.services.server_lifecycle import (
+            ServerBusyError,
+            request_server_stop,
+        )
+
         try:
-            await agent_manager.send_to_agent(
-                str(server.agent_id),
-                "POST",
-                "/servers/stop",
-                {"server_id": str(server.id)},
-                timeout=60.0,
-            )
-        except Exception:
-            async with AsyncSessionMaker() as session:
-                current = await session.get(ServerInstance, server.id)
-                if current and current.status == "stopping":
-                    current.status = "running"
-                    session.add(current)
-                    await session.commit()
-            raise
+            await request_server_stop(server.id, force=False, reason="vram_eviction")
+        except ServerBusyError:
+            return
 
     async def _make_room(self, target: ServerInstance, deadline: float) -> None:
         """Evict idle co-located servers until the target fits in VRAM."""
@@ -285,9 +436,10 @@ class InferenceScheduler:
                 allocated = 0
                 for candidate in candidates:
                     allocated += await self._required_vram(candidate)
-            if total_vram is not None and _vram_requirements_fit(
-                total_vram, required, allocated
-            ):
+            if total_vram is None:
+                await asyncio.sleep(SCHEDULER_POLL_SECONDS)
+                continue
+            if _vram_requirements_fit(total_vram, required, allocated):
                 return
             stopped = False
             for candidate in candidates:
@@ -312,26 +464,100 @@ class InferenceScheduler:
         """Make a stopped target fit in VRAM, then cold-start it."""
         from app.services.server_startup import ensure_server_ready
 
-        if server.status != "running":
-            await self._make_room(server, deadline)
-            server = await ensure_server_ready(server)
-        return server
-
-    async def _candidates(self, model_id: uuid.UUID) -> list[ServerInstance]:
         async with AsyncSessionMaker() as session:
-            result = await session.execute(
-                select(ServerInstance)
-                .where(
-                    ServerInstance.model_id == model_id,
-                    ServerInstance.status.in_(["stopped", "starting", "running"]),
-                    or_(
-                        ServerInstance.status != "running",
-                        ServerInstance.health_status == "healthy",
-                    ),
+            agent = await session.get(Agent, server.agent_id)
+        resource_name = (
+            f"{agent.host}:{(agent.gpu_info or {}).get('id', server.agent_id)}"
+            if agent is not None
+            else str(server.agent_id)
+        )
+        resource_key = int.from_bytes(
+            hashlib.blake2b(resource_name.encode(), digest_size=8).digest(),
+            "big",
+        ) & ((1 << 63) - 1)
+
+        async with async_engine.connect() as connection:
+            locked = False
+            while not locked:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        "Inference queue deadline elapsed during startup"
+                    )
+                locked = bool(
+                    (
+                        await connection.execute(
+                            text("SELECT pg_try_advisory_lock(:key)"),
+                            {"key": resource_key},
+                        )
+                    ).scalar_one()
                 )
-                .order_by(ServerInstance.last_request_at, ServerInstance.id)
+                await connection.commit()
+                if not locked:
+                    await asyncio.sleep(min(SCHEDULER_POLL_SECONDS, remaining))
+            try:
+                async with AsyncSessionMaker() as session:
+                    current = await session.get(ServerInstance, server.id)
+                if current is None:
+                    raise RuntimeError("Server instance no longer exists")
+                if current.status == "stopped":
+                    await self._make_room(current, deadline)
+                if current.status != "running":
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        raise TimeoutError(
+                            "Inference queue deadline elapsed during startup"
+                        )
+                    current = await ensure_server_ready(
+                        current, start_timeout=remaining
+                    )
+                return current
+            finally:
+                await connection.execute(
+                    text("SELECT pg_advisory_unlock(:key)"),
+                    {"key": resource_key},
+                )
+                await connection.commit()
+
+    async def _candidates(
+        self,
+        model_id: uuid.UUID,
+        preferred_server_id: uuid.UUID | None = None,
+        required_agent_id: uuid.UUID | None = None,
+    ) -> list[ServerInstance]:
+        async with AsyncSessionMaker() as session:
+            statement = select(ServerInstance).where(
+                ServerInstance.model_id == model_id,
+                ServerInstance.status.in_(["stopped", "starting", "running"]),
+                or_(
+                    ServerInstance.status != "running",
+                    ServerInstance.health_status == "healthy",
+                ),
+            )
+            if preferred_server_id is not None:
+                statement = statement.where(ServerInstance.id == preferred_server_id)
+            if required_agent_id is not None:
+                statement = statement.where(
+                    ServerInstance.agent_id == required_agent_id
+                )
+            result = await session.execute(
+                statement.order_by(
+                    ServerInstance.last_request_at.nulls_last(), ServerInstance.id
+                )
             )
             return list(result.scalars().all())
+
+    async def candidates_for_model(
+        self,
+        model_id: uuid.UUID,
+        *,
+        required_agent_id: uuid.UUID | None = None,
+    ) -> list[ServerInstance]:
+        """Return compatible server candidates for endpoint target resolution."""
+        return await self._candidates(
+            model_id,
+            required_agent_id=required_agent_id,
+        )
 
     async def _claim(
         self,
@@ -341,6 +567,14 @@ class InferenceScheduler:
     ) -> InferenceLeaseHandle | None:
         now = datetime.now(UTC)
         async with AsyncSessionMaker() as session:
+            benchmark_lock = (
+                await session.execute(
+                    text("SELECT pg_try_advisory_xact_lock_shared(:key)"),
+                    {"key": BENCHMARK_ADVISORY_LOCK_KEY},
+                )
+            ).scalar_one()
+            if not benchmark_lock:
+                return None
             # Lock the server row so two backend workers cannot claim its last
             # known capacity at the same time.
             locked = (
@@ -356,74 +590,118 @@ class InferenceScheduler:
                 or locked.health_status != "healthy"
             ):
                 return None
+            oldest_compatible = (
+                await session.execute(
+                    select(InferenceLease)
+                    .where(
+                        InferenceLease.status == "queued",
+                        InferenceLease.model_id == locked.model_id,
+                        InferenceLease.lease_expires_at > now,
+                        or_(
+                            InferenceLease.preferred_server_id.is_(None),
+                            InferenceLease.preferred_server_id == locked.id,
+                        ),
+                        or_(
+                            InferenceLease.required_agent_id.is_(None),
+                            InferenceLease.required_agent_id == locked.agent_id,
+                        ),
+                    )
+                    .order_by(InferenceLease.queued_at, InferenceLease.id)
+                    .with_for_update(skip_locked=True)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if oldest_compatible is None or oldest_compatible.id != lease_id:
+                return None
+
             active = (
                 await session.execute(
                     select(func.count(InferenceLease.id)).where(
                         InferenceLease.server_instance_id == locked.id,
                         InferenceLease.status == "active",
-                        InferenceLease.lease_expires_at > now,
                     )
                 )
             ).scalar_one()
-            if int(active) >= capacity:
+            if int(active) >= server_capacity(locked):
                 return None
 
-            lease = await session.get(InferenceLease, lease_id)
-            if lease is None or lease.status != "queued":
-                return None
+            lease = oldest_compatible
             lease.server_instance_id = locked.id
             lease.status = "active"
             lease.started_at = now
-            lease.lease_expires_at = now + timedelta(seconds=LEASE_TIMEOUT_SECONDS)
+            lease.lease_expires_at = now + timedelta(seconds=ACTIVE_LEASE_TTL_SECONDS)
             lease.slot_generation = locked.slot_generation
             locked.last_request_at = now
             session.add(locked)
             session.add(lease)
             await session.commit()
             await session.refresh(lease)
-            return InferenceLeaseHandle(lease.request_id, locked, lease.id)
+            handle = InferenceLeaseHandle(
+                lease.request_id, locked, lease.id, lease.slot_generation
+            )
+            handle.start_renewal()
+            return handle
 
-    async def _queue(self, request_id: str, model_id: uuid.UUID) -> InferenceLease:
+    async def _queue(
+        self,
+        request_id: str,
+        model_id: uuid.UUID,
+        deadline_at: datetime,
+        preferred_server_id: uuid.UUID | None,
+        required_agent_id: uuid.UUID | None,
+    ) -> InferenceLease:
         async with AsyncSessionMaker() as session:
-            lease = InferenceLease(request_id=request_id, model_id=model_id)
+            lease = InferenceLease(
+                request_id=request_id,
+                model_id=model_id,
+                lease_expires_at=deadline_at,
+                preferred_server_id=preferred_server_id,
+                required_agent_id=required_agent_id,
+            )
             session.add(lease)
             await session.commit()
             await session.refresh(lease)
             return lease
 
-    async def _expire(self, lease_id: uuid.UUID) -> None:
+    async def _finish_queued(
+        self, lease_id: uuid.UUID, status: str, reason: str
+    ) -> bool:
         async with AsyncSessionMaker() as session:
-            lease = await session.get(InferenceLease, lease_id)
-            if lease and lease.status == "queued":
-                lease.status = "expired"
-                lease.released_at = datetime.now(UTC)
-                session.add(lease)
-                await session.commit()
+            result = await session.execute(
+                update(InferenceLease)
+                .where(
+                    InferenceLease.id == lease_id,
+                    InferenceLease.status == "queued",
+                )
+                .values(
+                    status=status,
+                    terminal_reason=reason,
+                    released_at=datetime.now(UTC),
+                )
+            )
+            await session.commit()
+            return bool(result.rowcount)
+
+    async def _expire(self, lease_id: uuid.UUID) -> None:
+        await self._finish_queued(lease_id, "expired", "queue_timeout")
 
     async def _cancel(self, lease_id: uuid.UUID) -> None:
-        async with AsyncSessionMaker() as session:
-            lease = await session.get(InferenceLease, lease_id)
-            if lease and lease.status in {"queued", "active"}:
-                lease.status = "cancelled" if lease.status == "queued" else "released"
-                lease.released_at = datetime.now(UTC)
-                session.add(lease)
-                await session.commit()
+        await self._finish_queued(lease_id, "cancelled", "client_disconnected")
 
     async def clear_queue(self) -> int:
         """Cancel every queued request without interrupting active inference."""
         async with AsyncSessionMaker() as session:
             result = await session.execute(
-                select(InferenceLease).where(InferenceLease.status == "queued")
+                update(InferenceLease)
+                .where(InferenceLease.status == "queued")
+                .values(
+                    status="cancelled",
+                    terminal_reason="queue_cleared",
+                    released_at=datetime.now(UTC),
+                )
             )
-            leases = list(result.scalars().all())
-            now = datetime.now(UTC)
-            for lease in leases:
-                lease.status = "cancelled"
-                lease.released_at = now
-                session.add(lease)
-            if leases:
-                await session.commit()
-            return len(leases)
+            await session.commit()
+            return int(result.rowcount or 0)
 
     async def _ensure_queued(self, lease_id: uuid.UUID) -> None:
         async with AsyncSessionMaker() as session:
@@ -436,6 +714,7 @@ class InferenceScheduler:
         model_id: uuid.UUID,
         request_id: str,
         preferred_server_id: uuid.UUID | None = None,
+        required_agent_id: uuid.UUID | None = None,
         timeout: float = LEASE_TIMEOUT_SECONDS,
         is_cancelled: Callable[[], Awaitable[bool]] | None = None,
     ) -> InferenceLeaseHandle:
@@ -445,31 +724,35 @@ class InferenceScheduler:
         requests can use any compatible healthy instance.
         """
         deadline = asyncio.get_running_loop().time() + timeout
-        queued = await self._queue(request_id, model_id)
+        queued = await self._queue(
+            request_id,
+            model_id,
+            datetime.now(UTC) + timedelta(seconds=timeout),
+            preferred_server_id,
+            required_agent_id,
+        )
+        claimed = False
         try:
             while True:
                 if is_cancelled is not None and await is_cancelled():
                     await self._cancel(queued.id)
                     raise InferenceRequestCancelled
                 await self._ensure_queued(queued.id)
-                if not await self._queue_is_head(queued.id):
-                    if asyncio.get_running_loop().time() >= deadline:
-                        await self._expire(queued.id)
-                        raise TimeoutError(
-                            "No inference server slot became available within 30 minutes"
-                        )
+                if asyncio.get_running_loop().time() >= deadline:
+                    await self._expire(queued.id)
+                    raise TimeoutError(
+                        f"No inference server slot became available within {timeout:g} seconds"
+                    )
+                if not await self._admission_open():
                     await asyncio.sleep(SCHEDULER_POLL_SECONDS)
                     continue
-                candidates = await self._candidates(model_id)
-                if preferred_server_id is not None:
-                    async with AsyncSessionMaker() as session:
-                        target = await session.get(ServerInstance, preferred_server_id)
-                    candidates = [target] if target is not None else []
+                candidates = await self._candidates(
+                    model_id, preferred_server_id, required_agent_id
+                )
                 scored: list[tuple[ServerInstance, int, int]] = []
                 for server in candidates:
                     if server.status != "running":
-                        async with self._agent_lock(server.agent_id):
-                            server = await self._prepare_target(server, deadline)
+                        continue
                     capacity = server_capacity(server)
                     active = await self._active_leases(server.id)
                     scored.append((server, capacity, active))
@@ -482,18 +765,62 @@ class InferenceScheduler:
                 for server, capacity, _active in scored:
                     lease = await self._claim(queued.id, server, capacity)
                     if lease:
+                        claimed = True
+                        return lease
+
+                starting = next(
+                    (server for server in candidates if server.status == "starting"),
+                    None,
+                )
+                stopped = next(
+                    (server for server in candidates if server.status == "stopped"),
+                    None,
+                )
+                target = starting or stopped
+                if target is not None:
+                    async with self._agent_lock(target.agent_id):
+                        prepared = await self._prepare_target(target, deadline)
+                    if is_cancelled is not None and await is_cancelled():
+                        await self._cancel(queued.id)
+                        raise InferenceRequestCancelled
+                    await self._ensure_queued(queued.id)
+                    lease = await self._claim(
+                        queued.id, prepared, server_capacity(prepared)
+                    )
+                    if lease:
+                        claimed = True
                         return lease
                 if asyncio.get_running_loop().time() >= deadline:
                     await self._expire(queued.id)
                     raise TimeoutError(
-                        "No inference server slot became available within 30 minutes"
+                        f"No inference server slot became available within {timeout:g} seconds"
                     )
                 await asyncio.sleep(SCHEDULER_POLL_SECONDS)
+        except InferenceRequestCancelled:
+            await self._finish_queued(
+                queued.id, "cancelled", "client_disconnected_or_queue_cleared"
+            )
+            raise
         except asyncio.CancelledError:
             # ASGI cancellation is the reliable signal for a disconnected
             # client while waiting in the FIFO queue.
-            await asyncio.shield(self._cancel(queued.id))
+            cancel_task = asyncio.create_task(self._cancel(queued.id))
+            try:
+                await asyncio.shield(cancel_task)
+            except asyncio.CancelledError:
+                await asyncio.shield(cancel_task)
             raise
+        except TimeoutError:
+            await self._finish_queued(queued.id, "expired", "queue_timeout")
+            raise
+        except BaseException:
+            await self._finish_queued(queued.id, "failed", "admission_error")
+            raise
+        finally:
+            if not claimed:
+                # This is intentionally conditional so a concurrent claim or
+                # queue clear cannot be overwritten by late request cleanup.
+                await self._finish_queued(queued.id, "failed", "request_abandoned")
 
     async def status_snapshot(self) -> dict[str, Any]:
         """Return queue and live slot state for the UI status bar."""
@@ -521,7 +848,6 @@ class InferenceScheduler:
                     await session.execute(
                         select(InferenceLease).where(
                             InferenceLease.status == "active",
-                            InferenceLease.lease_expires_at > datetime.now(UTC),
                         )
                     )
                 ).scalars()

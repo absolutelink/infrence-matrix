@@ -315,6 +315,7 @@ class TestLlamaServerManager:
                 "previous_status": "healthy",
                 "consecutive_failures": manager.HEALTH_FAILURE_THRESHOLD,
                 "error": "connection refused",
+                "slot_generation": 0,
             },
         )
         assert manager.healthy_servers == set()
@@ -343,6 +344,7 @@ class TestLlamaServerManager:
                 "previous_status": "unhealthy",
                 "consecutive_failures": 0,
                 "error": None,
+                "slot_generation": 0,
             },
         )
         assert manager.healthy_servers == {"test-server"}
@@ -367,6 +369,7 @@ class TestLlamaServerManager:
                 "server_id": "test-server",
                 "error": "llama-server exited with code 137",
                 "exit_code": 137,
+                "slot_generation": 0,
             },
         )
 
@@ -389,3 +392,38 @@ class TestLlamaServerManager:
 
         assert logs["status"] == "error"
         assert logs["stderr"] == ["fatal startup error"]
+
+    def test_effective_capacity_matches_launch_options(self):
+        manager = LlamaServerManager()
+        manager.configs["default"] = ServerConfig("/models/test.gguf", 8081)
+        manager.configs["parallel"] = ServerConfig(
+            "/models/test.gguf", 8082, options={"parallel": 4}
+        )
+        manager.configs["strict"] = ServerConfig(
+            "/models/test.gguf",
+            8083,
+            options={"parallel": 4, "strict_mtp_qwen": True},
+        )
+
+        assert manager.get_effective_capacity("default") == 1
+        assert manager.get_effective_capacity("parallel") == 4
+        assert manager.get_effective_capacity("strict") == 1
+
+    @pytest.mark.asyncio
+    async def test_stopped_generation_cannot_be_restarted_by_stale_command(self):
+        manager = LlamaServerManager()
+        manager.slot_generations["test-server"] = 5
+
+        started = await manager.start_server(
+            "test-server",
+            ServerConfig(model_path="/models/test.gguf", port=8081, slot_generation=4),
+        )
+
+        assert started is False
+        assert manager.servers == {}
+
+        started = await manager.start_server(
+            "test-server",
+            ServerConfig(model_path="/models/test.gguf", port=8081),
+        )
+        assert started is False

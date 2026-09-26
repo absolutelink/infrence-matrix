@@ -1,5 +1,6 @@
 """Manages halogen-flash-server subprocesses behind the Matrix agent contract."""
 
+import asyncio
 import os
 import subprocess
 import time
@@ -29,6 +30,7 @@ class HalogenFlashServerConfig:
     api_port: int
     engine_port: int
     options: dict[str, Any]
+    slot_generation: int = 0
 
 
 class HalogenFlashServerManager(HalogenServerManager):
@@ -43,8 +45,23 @@ class HalogenFlashServerManager(HalogenServerManager):
     async def start_server(
         self, server_id: str, config: HalogenFlashServerConfig
     ) -> bool:
+        lock = self._start_locks.setdefault(server_id, asyncio.Lock())
+        async with lock:
+            return await self._start_server_locked(server_id, config)
+
+    async def _start_server_locked(
+        self, server_id: str, config: HalogenFlashServerConfig
+    ) -> bool:
+        latest = self.slot_generations.get(server_id, -1)
+        generation_is_fenced = latest > 0 or config.slot_generation > 0
+        if server_id not in self.servers and generation_is_fenced:
+            if config.slot_generation <= latest:
+                return False
         if server_id in self.servers:
-            return False
+            current = self.configs[server_id].slot_generation
+            if config.slot_generation <= current:
+                return False
+            await self.stop_server(server_id, slot_generation=current)
         if len(self.servers) >= settings.HALOGEN_MAX_INSTANCES:
             raise RuntimeError("Halogen Flash instance limit reached")
 
@@ -131,6 +148,7 @@ class HalogenFlashServerManager(HalogenServerManager):
         )
         self.servers[server_id] = process
         self.configs[server_id] = config
+        self.slot_generations[server_id] = config.slot_generation
         self.start_times[server_id] = time.time()
         self._health_failures[server_id] = 0
         self.server_health[server_id] = "starting"
@@ -150,6 +168,8 @@ class HalogenFlashServerManager(HalogenServerManager):
                 "status": "running",
                 "model_path": config.model_path,
                 "port": config.api_port,
+                "slot_generation": config.slot_generation,
+                "effective_capacity": self.get_effective_capacity(server_id),
             },
         )
         return True

@@ -6,13 +6,22 @@ import uuid as uuid_module
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select, text, update
 
 from app.core.config import settings
 from app.db.session import AsyncSessionMaker
-from app.models import Agent, BenchmarkDefinition, BenchmarkRun, Model, ServerInstance
+from app.db.session import engine as async_engine
+from app.models import (
+    Agent,
+    BenchmarkDefinition,
+    BenchmarkRun,
+    InferenceLease,
+    Model,
+    ServerInstance,
+)
 from app.services.agent_manager import agent_manager
-from app.services.request_activity import active_request_count
+from app.services.scheduler_locks import BENCHMARK_ADVISORY_LOCK_KEY
+from app.services.server_lifecycle import request_server_stop
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +29,6 @@ ACTIVE_STATUSES = {"waiting_for_idle", "stopping_servers", "running", "idle_time
 _run_tasks: dict[str, asyncio.Task[None]] = {}
 _run_controls: dict[str, asyncio.Event] = {}
 _run_decisions: dict[str, str] = {}
-_execution_lock = asyncio.Lock()
 _queue_task: asyncio.Task[None] | None = None
 
 
@@ -89,26 +97,26 @@ async def _wait_for_idle(run_id: str) -> bool:
     deadline = asyncio.get_running_loop().time() + settings.BENCHMARK_IDLE_TIMEOUT
     while True:
         async with AsyncSessionMaker() as session:
-            result = await session.execute(
-                select(ServerInstance).where(ServerInstance.status == "running")
+            run = await session.get(BenchmarkRun, uuid_module.UUID(run_id))
+            if run is None or run.status == "cancelled":
+                return False
+            active = int(
+                (
+                    await session.execute(
+                        select(func.count(InferenceLease.id)).where(
+                            InferenceLease.status == "active"
+                        )
+                    )
+                ).scalar_one()
             )
-            running = list(result.scalars().all())
-        now = datetime.now(UTC)
-        # The active request paths update last_request_at. Keep a short grace
-        # period so a request finishing at the boundary is not interrupted.
-        busy = [
-            server
-            for server in running
-            if server.last_request_at
-            and (now - server.last_request_at).total_seconds() < 5
-        ]
-        if not busy and await active_request_count() == 0:
+        if active == 0:
             return True
         if asyncio.get_running_loop().time() >= deadline:
             await _set_run(run_id, status="idle_timeout")
             control = _run_controls.setdefault(run_id, asyncio.Event())
             await control.wait()
-            return _run_decisions.pop(run_id, "abort") == "force"
+            _run_decisions.pop(run_id, None)
+            return False
         await asyncio.sleep(settings.BENCHMARK_IDLE_POLL_INTERVAL)
 
 
@@ -120,17 +128,19 @@ async def _stop_servers() -> None:
             )
         )
         servers = list(result.scalars().all())
+    failures = 0
     for server in servers:
         try:
-            await agent_manager.send_to_agent(
-                str(server.agent_id),
-                "POST",
-                "/servers/stop",
-                {"server_id": str(server.id)},
+            await request_server_stop(
+                server.id,
+                force=True,
+                reason="benchmark_stop",
             )
         except Exception as exc:  # noqa: BLE001 - one agent must not block cleanup
+            failures += 1
             logger.warning("Unable to stop server %s: %s", server.id, exc)
-        await _set_server_stopped(str(server.id))
+    if failures:
+        raise RuntimeError(f"Unable to stop {failures} inference server(s)")
 
 
 async def _set_server_stopped(server_id: str) -> None:
@@ -148,6 +158,10 @@ async def _monitor_agent_run(run_id: str, agent_id: str) -> None:
     terminal = {"completed", "failed", "stopped"}
     while True:
         await asyncio.sleep(2)
+        async with AsyncSessionMaker() as session:
+            persisted = await session.get(BenchmarkRun, uuid_module.UUID(run_id))
+        if persisted is None or persisted.status in terminal | {"cancelled"}:
+            return
         try:
             status = await agent_manager.send_to_agent(
                 agent_id,
@@ -175,7 +189,46 @@ async def _monitor_agent_run(run_id: str, agent_id: str) -> None:
 
 
 async def _execute(run_id: str) -> None:
-    async with _execution_lock:
+    resume_status: str | None = None
+    async with AsyncSessionMaker() as claim_session:
+        claimed = await claim_session.execute(
+            update(BenchmarkRun)
+            .where(
+                BenchmarkRun.id == uuid_module.UUID(run_id),
+                BenchmarkRun.status == "queued",
+            )
+            .values(status="waiting_for_idle")
+            .returning(BenchmarkRun.id)
+        )
+        await claim_session.commit()
+        if claimed.scalar_one_or_none() is None:
+            persisted = await claim_session.get(BenchmarkRun, uuid_module.UUID(run_id))
+            if persisted is None or persisted.status not in {
+                "waiting_for_idle",
+                "stopping_servers",
+                "running",
+            }:
+                _run_tasks.pop(run_id, None)
+                return
+            resume_status = persisted.status
+        else:
+            resume_status = "waiting_for_idle"
+
+    async with async_engine.connect() as gate_connection:
+        gate_acquired = bool(
+            (
+                await gate_connection.execute(
+                    text("SELECT pg_try_advisory_lock(:key)"),
+                    {"key": BENCHMARK_ADVISORY_LOCK_KEY},
+                )
+            ).scalar_one()
+        )
+        await gate_connection.commit()
+        if not gate_acquired:
+            if resume_status == "waiting_for_idle":
+                await _set_run(run_id, status="queued")
+            _run_tasks.pop(run_id, None)
+            return
         try:
             async with AsyncSessionMaker() as session:
                 run = await session.get(BenchmarkRun, uuid_module.UUID(run_id))
@@ -215,17 +268,24 @@ async def _execute(run_id: str) -> None:
             if not model or not agent:
                 raise RuntimeError("Benchmark source server, model, or agent not found")
 
-            await _set_run(run_id, status="waiting_for_idle")
-            if not await _wait_for_idle(run_id):
-                await _set_run(
-                    run_id,
-                    status="cancelled",
-                    error="Idle timeout exceeded",
-                    finished_at=datetime.now(UTC),
-                )
+            if resume_status == "running":
+                await _monitor_agent_run(run_id, str(agent.id))
                 return
 
-            await _set_run(run_id, status="stopping_servers")
+            if resume_status == "waiting_for_idle" and not await _wait_for_idle(run_id):
+                async with AsyncSessionMaker() as session:
+                    current = await session.get(BenchmarkRun, uuid_module.UUID(run_id))
+                if current is not None and current.status != "cancelled":
+                    await _set_run(
+                        run_id,
+                        status="cancelled",
+                        error="Idle timeout exceeded",
+                        finished_at=datetime.now(UTC),
+                    )
+                return
+
+            if resume_status != "stopping_servers":
+                await _set_run(run_id, status="stopping_servers")
             await _stop_servers()
 
             while agent.status != "online":
@@ -292,6 +352,11 @@ async def _execute(run_id: str) -> None:
                 finished_at=datetime.now(UTC),
             )
         finally:
+            await gate_connection.execute(
+                text("SELECT pg_advisory_unlock(:key)"),
+                {"key": BENCHMARK_ADVISORY_LOCK_KEY},
+            )
+            await gate_connection.commit()
             _run_tasks.pop(run_id, None)
             _run_controls.pop(run_id, None)
 
@@ -307,7 +372,16 @@ async def _queue_loop() -> None:
             async with AsyncSessionMaker() as session:
                 result = await session.execute(
                     select(BenchmarkRun.id)
-                    .where(BenchmarkRun.status == "queued")
+                    .where(
+                        BenchmarkRun.status.in_(
+                            [
+                                "queued",
+                                "waiting_for_idle",
+                                "stopping_servers",
+                                "running",
+                            ]
+                        )
+                    )
                     .order_by(BenchmarkRun.created_at)
                 )
                 queued_ids = [str(row[0]) for row in result.all()]
@@ -332,6 +406,11 @@ async def stop_queue_worker() -> None:
     if _queue_task and not _queue_task.done():
         _queue_task.cancel()
         await asyncio.gather(_queue_task, return_exceptions=True)
+    running_tasks = list(_run_tasks.values())
+    for task in running_tasks:
+        task.cancel()
+    if running_tasks:
+        await asyncio.gather(*running_tasks, return_exceptions=True)
 
 
 def resolve_timeout(run_id: str, decision: str) -> None:
@@ -341,24 +420,23 @@ def resolve_timeout(run_id: str, decision: str) -> None:
 
 
 async def stop_run(run_id: str, *, force: bool = False) -> None:
-    del force
     async with AsyncSessionMaker() as session:
         run = await session.get(BenchmarkRun, uuid_module.UUID(run_id))
         if not run:
             return
         status = run.status
         agent_id = run.agent_id
+    if status in {"queued", "waiting_for_idle", "idle_timeout"} or force:
+        await _set_run(
+            run_id,
+            status="cancelled",
+            error="Cancelled by user",
+            finished_at=datetime.now(UTC),
+        )
     if agent_id:
         await agent_manager.send_to_agent(
             str(agent_id),
             "POST",
             "/benchmarks/stop",
             {"run_id": run_id},
-        )
-    if status in {"queued", "waiting_for_idle", "idle_timeout"}:
-        await _set_run(
-            run_id,
-            status="cancelled",
-            error="Cancelled by user",
-            finished_at=datetime.now(UTC),
         )

@@ -54,6 +54,7 @@ class ServerSpec(BaseModel):
     mmproj_path: str | None = None
     draft_model_path: str | None = None
     options: dict = Field(default_factory=dict)
+    slot_generation: int = Field(default=0, ge=0)
 
 
 class ServerStartRequest(BaseModel):
@@ -138,6 +139,7 @@ async def prepare_server(request: ServerStartRequest) -> dict:
 
 class ServerStopRequest(BaseModel):
     server_id: str
+    slot_generation: int | None = Field(default=None, ge=0)
 
 
 class ServerDeleteRequest(BaseModel):
@@ -257,18 +259,40 @@ async def start_server(request: ServerStartRequest) -> dict:
     """
     try:
         _validate_engine_platform(request.config.engine)
+        latest_generation = server_manager.slot_generations.get(request.config.id, -1)
+        generation_is_fenced = (
+            latest_generation > 0 or request.config.slot_generation > 0
+        )
+        if (
+            request.config.id not in server_manager.servers
+            and generation_is_fenced
+            and request.config.slot_generation <= latest_generation
+        ):
+            raise HTTPException(status_code=409, detail="Stale slot generation")
         # Duplicate start for a running instance is a no-op success (the
         # 60s registration cycle re-dispatches starts the agent already
         # fulfilled — spawning a second process would be wrong).
         if request.config.id in server_manager.servers:
             existing = server_manager.configs[request.config.id]
-            return {
-                "status": "started",
-                "server_id": request.config.id,
-                "model_path": existing.model_path,
-                "port": existing.port,
-                "already_running": True,
-            }
+            if request.config.slot_generation < existing.slot_generation:
+                raise HTTPException(status_code=409, detail="Stale slot generation")
+            if request.config.slot_generation > existing.slot_generation:
+                await server_manager.stop_server(
+                    request.config.id,
+                    slot_generation=existing.slot_generation,
+                )
+            else:
+                return {
+                    "status": "started",
+                    "server_id": request.config.id,
+                    "model_path": existing.model_path,
+                    "port": existing.port,
+                    "slot_generation": existing.slot_generation,
+                    "effective_capacity": server_manager.get_effective_capacity(
+                        request.config.id
+                    ),
+                    "already_running": True,
+                }
 
         if request.config.engine == "halogen":
             await model_manager.download_repository(
@@ -318,6 +342,7 @@ async def start_server(request: ServerStartRequest) -> dict:
                 api_port=port,
                 engine_port=_allocate_port(),
                 options=request.config.engine_options,
+                slot_generation=request.config.slot_generation,
             )
         elif request.config.engine == "halogen-flash":
             config = HalogenFlashServerConfig(
@@ -326,6 +351,7 @@ async def start_server(request: ServerStartRequest) -> dict:
                 api_port=port,
                 engine_port=_allocate_port(),
                 options=request.config.engine_options,
+                slot_generation=request.config.slot_generation,
             )
         else:
             config = ServerConfig(
@@ -341,6 +367,7 @@ async def start_server(request: ServerStartRequest) -> dict:
                 mmproj_path=mmproj_path,
                 draft_model_path=draft_model_path,
                 options=request.config.options,
+                slot_generation=request.config.slot_generation,
             )
 
         success = await server_manager.start_server(request.config.id, config)
@@ -352,6 +379,10 @@ async def start_server(request: ServerStartRequest) -> dict:
             "server_id": request.config.id,
             "model_path": model_path,
             "port": port,
+            "slot_generation": request.config.slot_generation,
+            "effective_capacity": server_manager.get_effective_capacity(
+                request.config.id
+            ),
         }
     except HTTPException:
         raise
@@ -363,7 +394,16 @@ async def start_server(request: ServerStartRequest) -> dict:
 async def stop_server(request: ServerStopRequest) -> dict:
     """Stop a llama.cpp server (idempotent: already-stopped is success)."""
     try:
-        success = await server_manager.stop_server(request.server_id)
+        config = server_manager.configs.get(request.server_id)
+        if (
+            config is not None
+            and request.slot_generation is not None
+            and request.slot_generation != config.slot_generation
+        ):
+            raise HTTPException(status_code=409, detail="Stale slot generation")
+        success = await server_manager.stop_server(
+            request.server_id, slot_generation=request.slot_generation
+        )
         if not success:
             # Already stopped/unknown — treat as success so callers can
             # stop-then-start without racing the process table.
@@ -374,6 +414,8 @@ async def stop_server(request: ServerStopRequest) -> dict:
             }
 
         return {"status": "stopped", "server_id": request.server_id}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
