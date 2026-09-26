@@ -53,3 +53,35 @@ async def test_flash_uses_kv_slots_for_capacity(monkeypatch):
     telemetry = await get_slot_telemetry(server)
 
     assert (telemetry.capacity, telemetry.available) == (2, 2)
+
+
+@pytest.mark.asyncio
+async def test_metrics_use_requests_processing(monkeypatch):
+    server = SimpleNamespace(
+        id=uuid4(),
+        agent_id=uuid4(),
+        engine="llamacpp",
+        engine_options={},
+        server_options={"parallel": 8},
+    )
+    monkeypatch.setattr(
+        agent_manager,
+        "get_agent",
+        AsyncMock(return_value=SimpleNamespace(status="online")),
+    )
+    send_to_agent = AsyncMock(
+        return_value={
+            "metrics": """
+# HELP llamacpp:requests_processing Active requests.
+# TYPE llamacpp:requests_processing gauge
+llamacpp:requests_processing 3
+"""
+        }
+    )
+    monkeypatch.setattr(agent_manager, "send_to_agent", send_to_agent)
+
+    telemetry = await get_slot_telemetry(server)
+
+    assert (telemetry.capacity, telemetry.active, telemetry.available) == (8, 3, 5)
+    send_to_agent.assert_awaited_once()
+    assert send_to_agent.await_args.args[2] == f"/proxy/{server.id}/metrics"

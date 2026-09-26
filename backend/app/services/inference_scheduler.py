@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from prometheus_client.parser import text_string_to_metric_families
 from sqlalchemy import func, or_
 from sqlmodel import select
 
@@ -84,6 +85,24 @@ async def get_slot_telemetry(server: ServerInstance) -> SlotTelemetry:
         agent = await agent_manager.get_agent(str(server.agent_id))
         if agent is None or agent.status != "online":
             return SlotTelemetry(capacity, 0, capacity, known=False)
+        payload = await agent_manager.send_to_agent(
+            str(server.agent_id),
+            "GET",
+            f"/proxy/{server.id}/metrics",
+            timeout=TELEMETRY_TIMEOUT_SECONDS,
+        )
+        metrics = payload.get("metrics")
+        if isinstance(metrics, str):
+            active: int | None = None
+            for family in text_string_to_metric_families(metrics):
+                if family.name.endswith("requests_processing"):
+                    active = max(
+                        round(sum(sample.value for sample in family.samples)), 0
+                    )
+                    break
+            if active is not None:
+                return SlotTelemetry(capacity, active, max(capacity - active, 0))
+
         telemetry_path = (
             f"/proxy/{server.id}/health"
             if server.engine in {"halogen", "halogen-flash"}

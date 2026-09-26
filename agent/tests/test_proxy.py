@@ -28,3 +28,26 @@ async def test_proxy_request_retries_connection_failures():
     assert result is response
     assert proxy.client.request.await_count == 2
     sleep.assert_awaited_once_with(0.5)
+
+
+@pytest.mark.asyncio
+async def test_metrics_are_returned_as_prometheus_text(monkeypatch):
+    from app.api.routes import proxy as proxy_route
+
+    server_id = "server-1"
+    proxy_route.server_manager.servers[server_id] = Mock()
+    response = Mock(is_error=False, text="requests_processing 2\n")
+    proxy = Mock()
+    proxy.proxy_request = AsyncMock(return_value=response)
+    monkeypatch.setattr(proxy_route, "ServerProxy", Mock(return_value=proxy))
+
+    from httpx import ASGITransport, AsyncClient
+    from app.main import app
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        result = await client.get(f"/proxy/{server_id}/metrics")
+
+    assert result.status_code == 200
+    assert result.json() == {"metrics": "requests_processing 2\n"}

@@ -16,6 +16,7 @@ router = APIRouter(prefix="/proxy", tags=["proxy"])
 STATUS_ERRORS = (httpx.HTTPStatusError,)
 HALOGEN_FLASH_PATHS = {
     "health",
+    "metrics",
     "cache",
     "v1/models",
     "v1/completions",
@@ -74,4 +75,6 @@ async def proxy_request(
             except Exception:
                 detail = response.text or "llama-server error"
             raise HTTPException(status_code=response.status_code, detail=detail)
+        if path == "metrics":
+            return {"metrics": response.text}
         return response.json()
