@@ -159,29 +159,32 @@ class StreamOptions(BaseModel):
 
 def _convert_messages_to_llama_format(
     messages: list[ChatMessage],
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Convert messages to llama.cpp chat format.
 
-    llama.cpp's OpenAI endpoint has limited tool-role support, so tool
-    results are flattened into user messages and assistant tool_calls are
-    described in text — the model still sees the full exchange.
+    Keep assistant tool calls and tool results in the native OpenAI shape.
+    llama.cpp's Jinja chat templates use these fields to reconstruct the
+    tool-call turn; flattening them into prose can make the model emit the
+    marker (for example, ``[Called tools: ...]``) as its next response.
     """
-    converted: list[dict[str, str]] = []
+    converted: list[dict[str, Any]] = []
     for msg in messages:
         content = msg.llama_content()
         if msg.role == "tool":
-            label = msg.name or msg.tool_call_id or "tool"
             converted.append(
-                {"role": "user", "content": f"[Tool result ({label})]: {content}"}
+                {
+                    "role": "tool",
+                    "content": content,
+                    **({"tool_call_id": msg.tool_call_id} if msg.tool_call_id else {}),
+                    **({"name": msg.name} if msg.name else {}),
+                }
             )
         elif msg.role == "assistant" and msg.tool_calls:
-            calls = ", ".join(
-                c.get("function", {}).get("name", "unknown") for c in msg.tool_calls
-            )
             converted.append(
                 {
                     "role": "assistant",
-                    "content": f"{content}\n[Called tools: {calls}]".strip(),
+                    "content": content,
+                    "tool_calls": msg.tool_calls,
                 }
             )
         else:

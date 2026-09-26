@@ -3,7 +3,55 @@
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
+from app.api.routes.v1.v1_chat_completions import (
+    ChatMessage,
+    _convert_messages_to_llama_format,
+)
 from app.models import Model
+
+
+def test_tool_messages_preserve_native_chat_shape() -> None:
+    messages = _convert_messages_to_llama_format(
+        [
+            ChatMessage(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{}"},
+                    }
+                ],
+            ),
+            ChatMessage(
+                role="tool",
+                content="file contents",
+                tool_call_id="call_1",
+                name="read_file",
+            ),
+        ]
+    )
+
+    assert messages == [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "content": "file contents",
+            "tool_call_id": "call_1",
+            "name": "read_file",
+        },
+    ]
 
 
 class TestCreateChatCompletion:
