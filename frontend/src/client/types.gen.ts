@@ -3058,6 +3058,26 @@ export type modelsUpdateModelResponses = {
 
 export type modelsUpdateModelResponse = modelsUpdateModelResponses[keyof modelsUpdateModelResponses];
 
+export type queueClearInferenceQueueData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/queue/clear';
+};
+
+export type queueClearInferenceQueueResponses = {
+    /**
+     * Response Queue-Clear Inference Queue
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: number | string;
+    };
+};
+
+export type queueClearInferenceQueueResponse = queueClearInferenceQueueResponses[keyof queueClearInferenceQueueResponses];
+
 export type huggingfaceSearchModelsData = {
     body?: never;
     path?: never;

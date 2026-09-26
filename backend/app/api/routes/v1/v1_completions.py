@@ -7,7 +7,7 @@ import uuid
 from collections.abc import AsyncGenerator
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
@@ -321,6 +321,7 @@ def _extract_chunk_text(chunk_data: dict) -> str:
 async def create_completion(
     request: CompletionRequest,
     db: Session = Depends(get_db),
+    http_request: Request = None,
 ) -> CompletionResponse | StreamingResponse:
     """Create a completion (legacy GPT-3 style endpoint) via Agent proxy."""
     request_id = f"cmpl-{uuid.uuid4()}"
@@ -363,7 +364,10 @@ async def create_completion(
 
     try:
         lease = await inference_scheduler.acquire(
-            model.id, request_id, preferred_server_id=server.id
+            model.id,
+            request_id,
+            preferred_server_id=server.id,
+            is_cancelled=http_request.is_disconnected if http_request else None,
         )
     except TimeoutError as e:
         raise HTTPException(503, str(e)) from e

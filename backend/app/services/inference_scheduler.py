@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -109,6 +110,10 @@ class InferenceLeaseHandle:
                 lease.released_at = datetime.now(UTC)
                 session.add(lease)
                 await session.commit()
+
+
+class InferenceRequestCancelled(asyncio.CancelledError):
+    """Raised when a queued request no longer has a client waiting for it."""
 
 
 class InferenceScheduler:
@@ -335,12 +340,44 @@ class InferenceScheduler:
                 session.add(lease)
                 await session.commit()
 
+    async def _cancel(self, lease_id: uuid.UUID) -> None:
+        async with AsyncSessionMaker() as session:
+            lease = await session.get(InferenceLease, lease_id)
+            if lease and lease.status == "queued":
+                lease.status = "cancelled"
+                lease.released_at = datetime.now(UTC)
+                session.add(lease)
+                await session.commit()
+
+    async def clear_queue(self) -> int:
+        """Cancel every queued request without interrupting active inference."""
+        async with AsyncSessionMaker() as session:
+            result = await session.execute(
+                select(InferenceLease).where(InferenceLease.status == "queued")
+            )
+            leases = list(result.scalars().all())
+            now = datetime.now(UTC)
+            for lease in leases:
+                lease.status = "cancelled"
+                lease.released_at = now
+                session.add(lease)
+            if leases:
+                await session.commit()
+            return len(leases)
+
+    async def _ensure_queued(self, lease_id: uuid.UUID) -> None:
+        async with AsyncSessionMaker() as session:
+            lease = await session.get(InferenceLease, lease_id)
+            if lease is None or lease.status != "queued":
+                raise InferenceRequestCancelled
+
     async def acquire(
         self,
         model_id: uuid.UUID,
         request_id: str,
         preferred_server_id: uuid.UUID | None = None,
         timeout: float = LEASE_TIMEOUT_SECONDS,
+        is_cancelled: Callable[[], Awaitable[bool]] | None = None,
     ) -> InferenceLeaseHandle:
         """Wait for and claim a compatible server slot.
 
@@ -350,6 +387,10 @@ class InferenceScheduler:
         deadline = asyncio.get_running_loop().time() + timeout
         queued = await self._queue(request_id, model_id)
         while True:
+            if is_cancelled is not None and await is_cancelled():
+                await self._cancel(queued.id)
+                raise InferenceRequestCancelled
+            await self._ensure_queued(queued.id)
             if not await self._queue_is_head(queued.id):
                 if asyncio.get_running_loop().time() >= deadline:
                     await self._expire(queued.id)

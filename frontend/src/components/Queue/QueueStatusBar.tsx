@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query"
+import { useMutation, useQuery } from "@tanstack/react-query"
 import {
   Activity,
   ChevronDown,
@@ -6,14 +6,24 @@ import {
   ListOrdered,
   MemoryStick,
   Server,
+  Trash2,
 } from "lucide-react"
+import { toast } from "sonner"
 
-import { AgentsService } from "@/client"
+import { AgentsService, QueueService } from "@/client"
+import { Button } from "@/components/ui/button"
 import { useQueueStatus } from "@/hook/useQueueStatus"
 import { uniqueGpuSnapshots } from "@/lib/gpuMetrics"
 
 export function QueueStatusBar() {
   const { status, connected } = useQueueStatus()
+  const clearQueueMutation = useMutation({
+    mutationFn: () => QueueService.clearInferenceQueue(),
+    onSuccess: (result) => {
+      toast.success(`Cleared ${result.data?.cancelled ?? 0} queued request(s)`)
+    },
+    onError: () => toast.error("Failed to clear the inference queue"),
+  })
   const { data: agents = [] } = useQuery({
     queryKey: ["queue-status-agents"],
     queryFn: async () => (await AgentsService.listAgents()).data.agents || [],
@@ -134,6 +144,19 @@ export function QueueStatusBar() {
               </div>
             ))
           )}
+        </div>
+        <div className="mt-4 border-t pt-3">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="w-full justify-center text-destructive hover:text-destructive"
+            onClick={() => clearQueueMutation.mutate()}
+            disabled={status.queued === 0 || clearQueueMutation.isPending}
+          >
+            <Trash2 className="mr-2 h-3.5 w-3.5" />
+            {clearQueueMutation.isPending ? "Clearing queue..." : "Clear queue"}
+          </Button>
         </div>
         {!connected && (
           <p className="mt-3 text-[11px] text-amber-600">

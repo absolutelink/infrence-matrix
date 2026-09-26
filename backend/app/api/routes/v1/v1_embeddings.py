@@ -4,7 +4,7 @@ import logging
 import uuid
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
@@ -57,6 +57,7 @@ class EmbeddingResponse(BaseModel):
 async def create_embedding(
     request: EmbeddingRequest,
     db: Session = Depends(get_db),
+    http_request: Request = None,
 ) -> EmbeddingResponse:
     """Create embeddings for the given input text via Agent proxy."""
     # Resolve model field: a server alias routes to that server directly;
@@ -107,7 +108,10 @@ async def create_embedding(
     lease: InferenceLeaseHandle | None = None
     try:
         lease = await inference_scheduler.acquire(
-            model.id, f"embed-{uuid.uuid4()}", preferred_server_id=server.id
+            model.id,
+            f"embed-{uuid.uuid4()}",
+            preferred_server_id=server.id,
+            is_cancelled=http_request.is_disconnected if http_request else None,
         )
         server = lease.server
         response = await agent_manager.send_to_agent(

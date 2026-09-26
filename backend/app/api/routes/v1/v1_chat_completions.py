@@ -8,7 +8,7 @@ from collections.abc import AsyncGenerator
 from typing import Any, Literal
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
@@ -583,6 +583,7 @@ async def _get_or_create_server(
 async def create_chat_completion(
     request: ChatCompletionRequest,
     db: Session = Depends(get_db),
+    http_request: Request = None,
 ) -> ChatCompletionResponse | StreamingResponse:
     """Create chat completion via Agent proxy.
 
@@ -650,6 +651,7 @@ async def create_chat_completion(
                     model.id,
                     request_id,
                     preferred_server_id=candidates[0].id if request.agent_id else None,
+                    is_cancelled=http_request.is_disconnected if http_request else None,
                 )
                 server = lease.server
             else:
@@ -657,7 +659,10 @@ async def create_chat_completion(
                     model, request.agent_id, start=False
                 )
                 lease = await inference_scheduler.acquire(
-                    model.id, request_id, preferred_server_id=server.id
+                    model.id,
+                    request_id,
+                    preferred_server_id=server.id,
+                    is_cancelled=http_request.is_disconnected if http_request else None,
                 )
         except HTTPException:
             raise
@@ -674,7 +679,10 @@ async def create_chat_completion(
     # upstream call; the streaming generator releases it on disconnect/end.
     if instance is not None:
         lease = await inference_scheduler.acquire(
-            model.id, request_id, preferred_server_id=server.id
+            model.id,
+            request_id,
+            preferred_server_id=server.id,
+            is_cancelled=http_request.is_disconnected if http_request else None,
         )
 
     if request.stream:

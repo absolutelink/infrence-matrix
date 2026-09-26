@@ -2,7 +2,7 @@
 
 import { type Client, formDataBodySerializer, type Options as Options2, type TDataShape } from './client';
 import { client } from './client.gen';
-import type { agentsDeleteAgentData, agentsDeleteAgentErrors, agentsDeleteAgentResponses, agentsGetAgentData, agentsGetAgentErrors, agentsGetAgentResponses, agentsListAgentsData, agentsListAgentsResponses, agentsRegisterAgentData, agentsRegisterAgentErrors, agentsRegisterAgentResponses, agentsSendCommandData, agentsSendCommandErrors, agentsSendCommandResponses, agentsUpdateAgentData, agentsUpdateAgentErrors, agentsUpdateAgentResponses, benchmarksAbortRunData, benchmarksAbortRunErrors, benchmarksAbortRunResponses, benchmarksCancelRunData, benchmarksCancelRunErrors, benchmarksCancelRunResponses, benchmarksCreateDefinitionData, benchmarksCreateDefinitionErrors, benchmarksCreateDefinitionResponses, benchmarksCreateRunData, benchmarksCreateRunErrors, benchmarksCreateRunResponses, benchmarksDeleteDefinitionData, benchmarksDeleteDefinitionErrors, benchmarksDeleteDefinitionResponses, benchmarksForceStopRunData, benchmarksForceStopRunErrors, benchmarksForceStopRunResponses, benchmarksGetResultsData, benchmarksGetResultsErrors, benchmarksGetResultsResponses, benchmarksListDefinitionsData, benchmarksListDefinitionsResponses, benchmarksListRunsData, benchmarksListRunsResponses, benchmarksUpdateDefinitionData, benchmarksUpdateDefinitionErrors, benchmarksUpdateDefinitionResponses, huggingfaceGetModelInfoData, huggingfaceGetModelInfoErrors, huggingfaceGetModelInfoResponses, huggingfaceGetParameterCountData, huggingfaceGetParameterCountErrors, huggingfaceGetParameterCountResponses, huggingfaceListModelFilesData, huggingfaceListModelFilesErrors, huggingfaceListModelFilesResponses, huggingfaceSearchModelsData, huggingfaceSearchModelsErrors, huggingfaceSearchModelsResponses, metricsMetricsData, metricsMetricsResponses, modelsCreateModelData, modelsCreateModelErrors, modelsCreateModelResponses, modelsDeleteModelData, modelsDeleteModelErrors, modelsDeleteModelResponses, modelsReadModelData, modelsReadModelErrors, modelsReadModelResponses, modelsReadModelsData, modelsReadModelsErrors, modelsReadModelsResponses, modelsUpdateModelData, modelsUpdateModelErrors, modelsUpdateModelResponses, serverInstancesDeleteServerData, serverInstancesDeleteServerErrors, serverInstancesDeleteServerResponses, serverInstancesGetServerInstanceData, serverInstancesGetServerInstanceErrors, serverInstancesGetServerInstanceResponses, serverInstancesInitializeExistingServerData, serverInstancesInitializeExistingServerErrors, serverInstancesInitializeExistingServerResponses, serverInstancesListServerInstancesData, serverInstancesListServerInstancesResponses, serverInstancesRestartServerData, serverInstancesRestartServerErrors, serverInstancesRestartServerResponses, serverInstancesStartServerData, serverInstancesStartServerErrors, serverInstancesStartServerResponses, serverInstancesStopServerData, serverInstancesStopServerErrors, serverInstancesStopServerResponses, serverInstancesUpdateServerData, serverInstancesUpdateServerErrors, serverInstancesUpdateServerMetadataData, serverInstancesUpdateServerMetadataErrors, serverInstancesUpdateServerMetadataResponses, serverInstancesUpdateServerResponses, utilsHealthCheckData, utilsHealthCheckResponses, v1AudioCreateSpeechData, v1AudioCreateSpeechErrors, v1AudioCreateSpeechResponses, v1AudioCreateTranscriptionData, v1AudioCreateTranscriptionErrors, v1AudioCreateTranscriptionResponses, v1AudioCreateTranslationData, v1AudioCreateTranslationErrors, v1AudioCreateTranslationResponses, v1BatchesCancelBatchData, v1BatchesCancelBatchErrors, v1BatchesCancelBatchResponses, v1BatchesCreateBatchData, v1BatchesCreateBatchErrors, v1BatchesCreateBatchResponses, v1BatchesListBatchesData, v1BatchesListBatchesErrors, v1BatchesListBatchesResponses, v1BatchesRetrieveBatchData, v1BatchesRetrieveBatchErrors, v1BatchesRetrieveBatchResponses, v1ChatCreateChatCompletionData, v1ChatCreateChatCompletionErrors, v1ChatCreateChatCompletionResponses, v1CompletionsCreateCompletionData, v1CompletionsCreateCompletionErrors, v1CompletionsCreateCompletionResponses, v1EmbeddingsCreateEmbeddingData, v1EmbeddingsCreateEmbeddingErrors, v1EmbeddingsCreateEmbeddingResponses, v1FilesDeleteFileData, v1FilesDeleteFileErrors, v1FilesDeleteFileResponses, v1FilesListFilesData, v1FilesListFilesErrors, v1FilesListFilesResponses, v1FilesRetrieveFileContentData, v1FilesRetrieveFileContentErrors, v1FilesRetrieveFileContentResponses, v1FilesRetrieveFileData, v1FilesRetrieveFileErrors, v1FilesRetrieveFileResponses, v1FilesUploadFileData, v1FilesUploadFileErrors, v1FilesUploadFileResponses, v1ModelsListModelsData, v1ModelsListModelsResponses, v1ModelsRetrieveModelData, v1ModelsRetrieveModelErrors, v1ModelsRetrieveModelResponses, v1ResponsesCompactResponseData, v1ResponsesCompactResponseErrors, v1ResponsesCompactResponseResponses, v1ResponsesCreateResponseData, v1ResponsesCreateResponseErrors, v1ResponsesCreateResponseResponses } from './types.gen';
+import type { agentsDeleteAgentData, agentsDeleteAgentErrors, agentsDeleteAgentResponses, agentsGetAgentData, agentsGetAgentErrors, agentsGetAgentResponses, agentsListAgentsData, agentsListAgentsResponses, agentsRegisterAgentData, agentsRegisterAgentErrors, agentsRegisterAgentResponses, agentsSendCommandData, agentsSendCommandErrors, agentsSendCommandResponses, agentsUpdateAgentData, agentsUpdateAgentErrors, agentsUpdateAgentResponses, benchmarksAbortRunData, benchmarksAbortRunErrors, benchmarksAbortRunResponses, benchmarksCancelRunData, benchmarksCancelRunErrors, benchmarksCancelRunResponses, benchmarksCreateDefinitionData, benchmarksCreateDefinitionErrors, benchmarksCreateDefinitionResponses, benchmarksCreateRunData, benchmarksCreateRunErrors, benchmarksCreateRunResponses, benchmarksDeleteDefinitionData, benchmarksDeleteDefinitionErrors, benchmarksDeleteDefinitionResponses, benchmarksForceStopRunData, benchmarksForceStopRunErrors, benchmarksForceStopRunResponses, benchmarksGetResultsData, benchmarksGetResultsErrors, benchmarksGetResultsResponses, benchmarksListDefinitionsData, benchmarksListDefinitionsResponses, benchmarksListRunsData, benchmarksListRunsResponses, benchmarksUpdateDefinitionData, benchmarksUpdateDefinitionErrors, benchmarksUpdateDefinitionResponses, huggingfaceGetModelInfoData, huggingfaceGetModelInfoErrors, huggingfaceGetModelInfoResponses, huggingfaceGetParameterCountData, huggingfaceGetParameterCountErrors, huggingfaceGetParameterCountResponses, huggingfaceListModelFilesData, huggingfaceListModelFilesErrors, huggingfaceListModelFilesResponses, huggingfaceSearchModelsData, huggingfaceSearchModelsErrors, huggingfaceSearchModelsResponses, metricsMetricsData, metricsMetricsResponses, modelsCreateModelData, modelsCreateModelErrors, modelsCreateModelResponses, modelsDeleteModelData, modelsDeleteModelErrors, modelsDeleteModelResponses, modelsReadModelData, modelsReadModelErrors, modelsReadModelResponses, modelsReadModelsData, modelsReadModelsErrors, modelsReadModelsResponses, modelsUpdateModelData, modelsUpdateModelErrors, modelsUpdateModelResponses, queueClearInferenceQueueData, queueClearInferenceQueueResponses, serverInstancesDeleteServerData, serverInstancesDeleteServerErrors, serverInstancesDeleteServerResponses, serverInstancesGetServerInstanceData, serverInstancesGetServerInstanceErrors, serverInstancesGetServerInstanceResponses, serverInstancesInitializeExistingServerData, serverInstancesInitializeExistingServerErrors, serverInstancesInitializeExistingServerResponses, serverInstancesListServerInstancesData, serverInstancesListServerInstancesResponses, serverInstancesRestartServerData, serverInstancesRestartServerErrors, serverInstancesRestartServerResponses, serverInstancesStartServerData, serverInstancesStartServerErrors, serverInstancesStartServerResponses, serverInstancesStopServerData, serverInstancesStopServerErrors, serverInstancesStopServerResponses, serverInstancesUpdateServerData, serverInstancesUpdateServerErrors, serverInstancesUpdateServerMetadataData, serverInstancesUpdateServerMetadataErrors, serverInstancesUpdateServerMetadataResponses, serverInstancesUpdateServerResponses, utilsHealthCheckData, utilsHealthCheckResponses, v1AudioCreateSpeechData, v1AudioCreateSpeechErrors, v1AudioCreateSpeechResponses, v1AudioCreateTranscriptionData, v1AudioCreateTranscriptionErrors, v1AudioCreateTranscriptionResponses, v1AudioCreateTranslationData, v1AudioCreateTranslationErrors, v1AudioCreateTranslationResponses, v1BatchesCancelBatchData, v1BatchesCancelBatchErrors, v1BatchesCancelBatchResponses, v1BatchesCreateBatchData, v1BatchesCreateBatchErrors, v1BatchesCreateBatchResponses, v1BatchesListBatchesData, v1BatchesListBatchesErrors, v1BatchesListBatchesResponses, v1BatchesRetrieveBatchData, v1BatchesRetrieveBatchErrors, v1BatchesRetrieveBatchResponses, v1ChatCreateChatCompletionData, v1ChatCreateChatCompletionErrors, v1ChatCreateChatCompletionResponses, v1CompletionsCreateCompletionData, v1CompletionsCreateCompletionErrors, v1CompletionsCreateCompletionResponses, v1EmbeddingsCreateEmbeddingData, v1EmbeddingsCreateEmbeddingErrors, v1EmbeddingsCreateEmbeddingResponses, v1FilesDeleteFileData, v1FilesDeleteFileErrors, v1FilesDeleteFileResponses, v1FilesListFilesData, v1FilesListFilesErrors, v1FilesListFilesResponses, v1FilesRetrieveFileContentData, v1FilesRetrieveFileContentErrors, v1FilesRetrieveFileContentResponses, v1FilesRetrieveFileData, v1FilesRetrieveFileErrors, v1FilesRetrieveFileResponses, v1FilesUploadFileData, v1FilesUploadFileErrors, v1FilesUploadFileResponses, v1ModelsListModelsData, v1ModelsListModelsResponses, v1ModelsRetrieveModelData, v1ModelsRetrieveModelErrors, v1ModelsRetrieveModelResponses, v1ResponsesCompactResponseData, v1ResponsesCompactResponseErrors, v1ResponsesCompactResponseResponses, v1ResponsesCreateResponseData, v1ResponsesCreateResponseErrors, v1ResponsesCreateResponseResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -35,7 +35,7 @@ export class AgentsService {
             }
         });
     }
-    
+
     /**
      * Register Agent
      *
@@ -52,7 +52,7 @@ export class AgentsService {
             }
         });
     }
-    
+
     /**
      * List Agents
      *
@@ -65,7 +65,7 @@ export class AgentsService {
             ...options
         });
     }
-    
+
     /**
      * List Agents
      *
@@ -78,7 +78,7 @@ export class AgentsService {
             ...options
         });
     }
-    
+
     /**
      * Delete Agent
      *
@@ -91,7 +91,7 @@ export class AgentsService {
             ...options
         });
     }
-    
+
     /**
      * Delete Agent
      *
@@ -104,7 +104,7 @@ export class AgentsService {
             ...options
         });
     }
-    
+
     /**
      * Get Agent
      *
@@ -117,7 +117,7 @@ export class AgentsService {
             ...options
         });
     }
-    
+
     /**
      * Get Agent
      *
@@ -130,7 +130,7 @@ export class AgentsService {
             ...options
         });
     }
-    
+
     /**
      * Update Agent
      *
@@ -147,7 +147,7 @@ export class AgentsService {
             }
         });
     }
-    
+
     /**
      * Update Agent
      *
@@ -164,7 +164,7 @@ export class AgentsService {
             }
         });
     }
-    
+
     /**
      * Send Command
      *
@@ -181,7 +181,7 @@ export class AgentsService {
             }
         });
     }
-    
+
     /**
      * Send Command
      *
@@ -213,7 +213,7 @@ export class MetricsService {
             ...options
         });
     }
-    
+
     /**
      * Metrics
      *
@@ -241,7 +241,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-    
+
     /**
      * List Server Instances
      *
@@ -254,7 +254,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-    
+
     /**
      * Delete Server
      *
@@ -267,7 +267,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-    
+
     /**
      * Delete Server
      *
@@ -280,7 +280,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-    
+
     /**
      * Get Server Instance
      *
@@ -293,7 +293,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-    
+
     /**
      * Get Server Instance
      *
@@ -306,7 +306,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-    
+
     /**
      * Update Server
      *
@@ -323,7 +323,7 @@ export class ServerInstancesService {
             }
         });
     }
-    
+
     /**
      * Update Server
      *
@@ -340,7 +340,7 @@ export class ServerInstancesService {
             }
         });
     }
-    
+
     /**
      * Start Server
      *
@@ -357,7 +357,7 @@ export class ServerInstancesService {
             }
         });
     }
-    
+
     /**
      * Start Server
      *
@@ -374,7 +374,7 @@ export class ServerInstancesService {
             }
         });
     }
-    
+
     /**
      * Initialize Existing Server
      *
@@ -387,7 +387,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-    
+
     /**
      * Initialize Existing Server
      *
@@ -400,7 +400,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-    
+
     /**
      * Update Server Metadata
      *
@@ -417,7 +417,7 @@ export class ServerInstancesService {
             }
         });
     }
-    
+
     /**
      * Update Server Metadata
      *
@@ -434,7 +434,7 @@ export class ServerInstancesService {
             }
         });
     }
-    
+
     /**
      * Restart Server
      *
@@ -447,7 +447,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-    
+
     /**
      * Restart Server
      *
@@ -460,7 +460,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-    
+
     /**
      * Stop Server
      *
@@ -473,7 +473,7 @@ export class ServerInstancesService {
             ...options
         });
     }
-    
+
     /**
      * Stop Server
      *
@@ -499,7 +499,7 @@ export class BenchmarksService {
             ...options
         });
     }
-    
+
     /**
      * List Definitions
      */
@@ -510,7 +510,7 @@ export class BenchmarksService {
             ...options
         });
     }
-    
+
     /**
      * Create Definition
      */
@@ -525,7 +525,7 @@ export class BenchmarksService {
             }
         });
     }
-    
+
     /**
      * Create Definition
      */
@@ -540,21 +540,21 @@ export class BenchmarksService {
             }
         });
     }
-    
+
     /**
      * Delete Definition
      */
     public static deleteDefinition<ThrowOnError extends boolean = true>(options: Options<benchmarksDeleteDefinitionData, ThrowOnError>) {
         return (options.client ?? client).delete<benchmarksDeleteDefinitionResponses, benchmarksDeleteDefinitionErrors, ThrowOnError>({ url: '/api/v1/benchmarks/definitions/{definition_id}', ...options });
     }
-    
+
     /**
      * Delete Definition
      */
     public static deleteDefinition2<ThrowOnError extends boolean = true>(options: Options<benchmarksDeleteDefinitionData, ThrowOnError>) {
         return (options.client ?? client).delete<benchmarksDeleteDefinitionResponses, benchmarksDeleteDefinitionErrors, ThrowOnError>({ url: '/api/v1/benchmarks/definitions/{definition_id}', ...options });
     }
-    
+
     /**
      * Update Definition
      */
@@ -569,7 +569,7 @@ export class BenchmarksService {
             }
         });
     }
-    
+
     /**
      * Update Definition
      */
@@ -584,7 +584,7 @@ export class BenchmarksService {
             }
         });
     }
-    
+
     /**
      * List Runs
      */
@@ -595,7 +595,7 @@ export class BenchmarksService {
             ...options
         });
     }
-    
+
     /**
      * List Runs
      */
@@ -606,7 +606,7 @@ export class BenchmarksService {
             ...options
         });
     }
-    
+
     /**
      * Create Run
      */
@@ -621,7 +621,7 @@ export class BenchmarksService {
             }
         });
     }
-    
+
     /**
      * Create Run
      */
@@ -636,7 +636,7 @@ export class BenchmarksService {
             }
         });
     }
-    
+
     /**
      * Get Results
      */
@@ -647,7 +647,7 @@ export class BenchmarksService {
             ...options
         });
     }
-    
+
     /**
      * Get Results
      */
@@ -658,7 +658,7 @@ export class BenchmarksService {
             ...options
         });
     }
-    
+
     /**
      * Cancel Run
      */
@@ -669,7 +669,7 @@ export class BenchmarksService {
             ...options
         });
     }
-    
+
     /**
      * Cancel Run
      */
@@ -680,7 +680,7 @@ export class BenchmarksService {
             ...options
         });
     }
-    
+
     /**
      * Abort Run
      */
@@ -691,7 +691,7 @@ export class BenchmarksService {
             ...options
         });
     }
-    
+
     /**
      * Abort Run
      */
@@ -702,7 +702,7 @@ export class BenchmarksService {
             ...options
         });
     }
-    
+
     /**
      * Force Stop Run
      */
@@ -713,7 +713,7 @@ export class BenchmarksService {
             ...options
         });
     }
-    
+
     /**
      * Force Stop Run
      */
@@ -739,7 +739,7 @@ export class ModelsService {
             ...options
         });
     }
-    
+
     /**
      * Read Models
      *
@@ -752,7 +752,7 @@ export class ModelsService {
             ...options
         });
     }
-    
+
     /**
      * Create Model
      *
@@ -769,7 +769,7 @@ export class ModelsService {
             }
         });
     }
-    
+
     /**
      * Create Model
      *
@@ -786,7 +786,7 @@ export class ModelsService {
             }
         });
     }
-    
+
     /**
      * Delete Model
      *
@@ -799,7 +799,7 @@ export class ModelsService {
             ...options
         });
     }
-    
+
     /**
      * Delete Model
      *
@@ -812,7 +812,7 @@ export class ModelsService {
             ...options
         });
     }
-    
+
     /**
      * Read Model
      *
@@ -825,7 +825,7 @@ export class ModelsService {
             ...options
         });
     }
-    
+
     /**
      * Read Model
      *
@@ -838,7 +838,7 @@ export class ModelsService {
             ...options
         });
     }
-    
+
     /**
      * Update Model
      *
@@ -855,7 +855,7 @@ export class ModelsService {
             }
         });
     }
-    
+
     /**
      * Update Model
      *
@@ -874,6 +874,34 @@ export class ModelsService {
     }
 }
 
+export class QueueService {
+    /**
+     * Clear Inference Queue
+     *
+     * Cancel queued requests while allowing active requests to finish.
+     */
+    public static clearInferenceQueue<ThrowOnError extends boolean = true>(options?: Options<queueClearInferenceQueueData, ThrowOnError>) {
+        return (options?.client ?? client).post<queueClearInferenceQueueResponses, unknown, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/queue/clear',
+            ...options
+        });
+    }
+
+    /**
+     * Clear Inference Queue
+     *
+     * Cancel queued requests while allowing active requests to finish.
+     */
+    public static clearInferenceQueue2<ThrowOnError extends boolean = true>(options?: Options<queueClearInferenceQueueData, ThrowOnError>) {
+        return (options?.client ?? client).post<queueClearInferenceQueueResponses, unknown, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/queue/clear',
+            ...options
+        });
+    }
+}
+
 export class HuggingfaceService {
     /**
      * Search Models
@@ -887,7 +915,7 @@ export class HuggingfaceService {
             ...options
         });
     }
-    
+
     /**
      * Search Models
      *
@@ -900,7 +928,7 @@ export class HuggingfaceService {
             ...options
         });
     }
-    
+
     /**
      * List Model Files
      *
@@ -913,7 +941,7 @@ export class HuggingfaceService {
             ...options
         });
     }
-    
+
     /**
      * List Model Files
      *
@@ -926,7 +954,7 @@ export class HuggingfaceService {
             ...options
         });
     }
-    
+
     /**
      * Get Model Info
      *
@@ -939,7 +967,7 @@ export class HuggingfaceService {
             ...options
         });
     }
-    
+
     /**
      * Get Model Info
      *
@@ -952,7 +980,7 @@ export class HuggingfaceService {
             ...options
         });
     }
-    
+
     /**
      * Get Parameter Count
      *
@@ -966,7 +994,7 @@ export class HuggingfaceService {
             ...options
         });
     }
-    
+
     /**
      * Get Parameter Count
      *
@@ -993,7 +1021,7 @@ export class UtilsService {
             ...options
         });
     }
-    
+
     /**
      * Health Check
      */
@@ -1022,7 +1050,7 @@ export class V1 {
             ...options
         });
     }
-    
+
     /**
      * Retrieve Model
      *
@@ -1139,7 +1167,7 @@ export class V15 {
             }
         });
     }
-    
+
     /**
      * Compact Response
      *
@@ -1184,7 +1212,7 @@ export class V16 {
             ...options
         });
     }
-    
+
     /**
      * Upload File
      *
@@ -1206,7 +1234,7 @@ export class V16 {
             }
         });
     }
-    
+
     /**
      * Delete File
      *
@@ -1222,7 +1250,7 @@ export class V16 {
             ...options
         });
     }
-    
+
     /**
      * Retrieve File
      *
@@ -1238,7 +1266,7 @@ export class V16 {
             ...options
         });
     }
-    
+
     /**
      * Retrieve File Content
      *
@@ -1276,7 +1304,7 @@ export class V17 {
             ...options
         });
     }
-    
+
     /**
      * Create Batch
      *
@@ -1296,7 +1324,7 @@ export class V17 {
             }
         });
     }
-    
+
     /**
      * Retrieve Batch
      *
@@ -1312,7 +1340,7 @@ export class V17 {
             ...options
         });
     }
-    
+
     /**
      * Cancel Batch
      *
@@ -1360,7 +1388,7 @@ export class V18 {
             }
         });
     }
-    
+
     /**
      * Create Translation
      *
@@ -1385,7 +1413,7 @@ export class V18 {
             }
         });
     }
-    
+
     /**
      * Create Speech
      *

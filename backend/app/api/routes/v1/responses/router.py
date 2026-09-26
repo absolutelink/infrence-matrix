@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, TypeAdapter
 from sqlmodel import Session, select
@@ -691,6 +691,7 @@ async def resolve_target(model_ref: str) -> tuple[ServerInstance, Model | None]:
 async def create_response(
     request: CreateResponseBody,
     db: Session = Depends(get_db),
+    http_request: Request = None,
 ) -> ResponseResource | StreamingResponse | JSONResponse:
     """Create a model response (Open Responses spec).
 
@@ -864,6 +865,7 @@ async def create_response(
             model.id,
             response_id,
             preferred_server_id=lease_preference,
+            is_cancelled=http_request.is_disconnected if http_request else None,
         )
         server = lease.server
     except TimeoutError as e:
@@ -939,6 +941,7 @@ async def create_response(
 async def compact_response(
     request: CompactRequestBody,
     db: Session = Depends(get_db),
+    http_request: Request = None,
 ) -> CompactResource | JSONResponse:
     """Compact a conversation into a portable compaction item.
 
@@ -1012,7 +1015,10 @@ async def compact_response(
     lease = None
     try:
         lease = await inference_scheduler.acquire(
-            server.model_id, new_id("compact"), preferred_server_id=server.id
+            server.model_id,
+            new_id("compact"),
+            preferred_server_id=server.id,
+            is_cancelled=http_request.is_disconnected if http_request else None,
         )
         server = lease.server
         agent = await agent_manager.get_agent(str(server.agent_id))
