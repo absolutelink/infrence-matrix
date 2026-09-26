@@ -217,10 +217,13 @@ class InferenceScheduler:
             )
 
     async def _reconcile_active_leases(
-        self, server_id: uuid.UUID, engine_active: int
+        self,
+        server_id: uuid.UUID,
+        engine_active: int,
+        grace_seconds: float = ORPHANED_LEASE_GRACE_SECONDS,
     ) -> None:
         """Release old leases no longer represented by engine activity."""
-        cutoff = datetime.now(UTC) - timedelta(seconds=ORPHANED_LEASE_GRACE_SECONDS)
+        cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
         async with AsyncSessionMaker() as session:
             result = await session.execute(
                 select(InferenceLease)
@@ -313,15 +316,22 @@ class InferenceScheduler:
                     if target_gpu_id is None
                     or (agent.gpu_info or {}).get("id") == target_gpu_id
                 ]
-                allocated = sum(
-                    await self._required_vram(candidate) for candidate in candidates
-                )
+                allocated = 0
+                for candidate in candidates:
+                    allocated += await self._required_vram(candidate)
             if total_vram is not None and _vram_requirements_fit(
                 total_vram, required, allocated
             ):
                 return
             stopped = False
             for candidate in candidates:
+                candidate_telemetry = await get_slot_telemetry(candidate)
+                if candidate_telemetry.known:
+                    await self._reconcile_active_leases(
+                        candidate.id,
+                        candidate_telemetry.active,
+                        grace_seconds=0,
+                    )
                 if await self._active_leases(candidate.id):
                     continue
                 logger.info(
