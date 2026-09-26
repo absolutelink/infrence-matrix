@@ -16,6 +16,7 @@ from app.api.deps import get_db
 from app.api.routes.v1.v1_chat_completions import _get_or_create_server
 from app.models import Model, ServerInstance
 from app.services.agent_manager import agent_manager
+from app.services.inference_scheduler import InferenceLeaseHandle, inference_scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +166,7 @@ async def _stream_completion_via_agent(
     server_id: str,
     request: CompletionRequest,
     request_id: str,
+    lease: InferenceLeaseHandle,
 ) -> AsyncGenerator[str]:
     """Stream completion via Agent proxy."""
     payload = _build_payload(request, stream=True)
@@ -252,6 +254,8 @@ async def _stream_completion_via_agent(
         logger.error(f"Streaming error: {e}")
         error_chunk = {"error": {"message": str(e), "type": "server_error"}}
         yield f"data: {json.dumps(error_chunk)}\n\n"
+    finally:
+        await lease.release()
 
 
 def _extract_completion_usage(chunk_data: dict) -> UsageInfo | None:
@@ -328,7 +332,7 @@ async def create_completion(
     server = db.exec(
         select(ServerInstance).where(
             ServerInstance.alias == request.model,
-            ServerInstance.status.in_(["starting", "running"]),
+            ServerInstance.status.in_(["starting", "running", "stopped"]),
         )
     ).first()
 
@@ -350,12 +354,22 @@ async def create_completion(
             raise HTTPException(404, f"Model {request.model} not found")
 
         try:
-            server = await _get_or_create_server(model, request.agent_id)
+            server = await _get_or_create_server(
+                model, request.agent_id, start=False
+            )
         except HTTPException:
             raise
         except Exception as e:
             logger.error(f"Server creation failed: {e}")
             raise HTTPException(503, f"Failed to start server: {e}")
+
+    try:
+        lease = await inference_scheduler.acquire(
+            model.id, request_id, preferred_server_id=server.id
+        )
+    except TimeoutError as e:
+        raise HTTPException(503, str(e)) from e
+    server = lease.server
 
     if request.stream:
         return StreamingResponse(
@@ -364,6 +378,7 @@ async def create_completion(
                 str(server.id),
                 request,
                 request_id,
+                lease,
             ),
             media_type="text/event-stream",
             headers={
@@ -435,3 +450,5 @@ async def create_completion(
     except Exception as e:
         logger.error(f"Completion error: {e}")
         raise HTTPException(500, f"Inference failed: {e}")
+    finally:
+        await lease.release()

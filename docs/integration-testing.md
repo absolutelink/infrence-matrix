@@ -5,10 +5,10 @@ Deployment logs stream to `/tmp/lfai-matrix.log` (wipe before each deploy cycle)
 
 ```bash
 # full run
-bun run test:compliance --base-url https://matrix.thelink.family/v1 --api-key none --model voyager
+bun run test:compliance --base-url https://matrix.thelink.family/v1 --api-key none --model voyager-flash
 
 # single test
-bun run test:compliance --base-url https://matrix.thelink.family/v1 --api-key none --model voyager --filter <test-id>
+bun run test:compliance --base-url https://matrix.thelink.family/v1 --api-key none --model voyager-flash --filter <test-id>
 ```
 
 ## Status

@@ -11,7 +11,7 @@ from sqlalchemy import func
 from sqlmodel import select
 
 from app.db.session import AsyncSessionMaker
-from app.models import InferenceLease, ServerInstance
+from app.models import InferenceLease, Model, ServerInstance
 from app.services.agent_manager import agent_manager
 
 logger = logging.getLogger(__name__)
@@ -114,6 +114,145 @@ class InferenceLeaseHandle:
 class InferenceScheduler:
     """Select healthy instances and atomically claim PostgreSQL leases."""
 
+    def __init__(self) -> None:
+        self._admission_locks: dict[uuid.UUID, asyncio.Lock] = {}
+
+    def _agent_lock(self, agent_id: uuid.UUID) -> asyncio.Lock:
+        return self._admission_locks.setdefault(agent_id, asyncio.Lock())
+
+    async def _queue_is_head(self, lease_id: uuid.UUID) -> bool:
+        async with AsyncSessionMaker() as session:
+            head = (
+                await session.execute(
+                    select(InferenceLease)
+                    .where(InferenceLease.status == "queued")
+                    .order_by(InferenceLease.queued_at, InferenceLease.id)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            return head is not None and head.id == lease_id
+
+    async def _live_vram(self, agent_id: uuid.UUID) -> tuple[int, int] | None:
+        """Read current total/free VRAM from the target agent."""
+        try:
+            payload = await agent_manager.send_to_agent(
+                str(agent_id), "GET", "/gpu", timeout=TELEMETRY_TIMEOUT_SECONDS
+            )
+            total = int(payload.get("vram_total", 0))
+            used = int(payload.get("vram_used", 0))
+            free = int(payload.get("vram_free", total - used))
+            return total, max(free, 0)
+        except Exception as exc:
+            logger.debug("VRAM telemetry unavailable for %s: %s", agent_id, exc)
+            return None
+
+    async def _required_vram(self, server: ServerInstance) -> int:
+        async with AsyncSessionMaker() as session:
+            model = await session.get(Model, server.model_id)
+            if model is None:
+                return server.vram_required_bytes or 0
+            required = server.vram_required_bytes or model.size_bytes
+            for model_id in (server.mmproj_model_id, server.dflash_model_id):
+                if model_id:
+                    extra = await session.get(Model, model_id)
+                    if extra:
+                        required += extra.size_bytes
+            return required
+
+    async def _active_leases(self, server_id: uuid.UUID) -> int:
+        async with AsyncSessionMaker() as session:
+            return int(
+                (
+                    await session.execute(
+                        select(func.count(InferenceLease.id)).where(
+                            InferenceLease.server_instance_id == server_id,
+                            InferenceLease.status == "active",
+                            InferenceLease.lease_expires_at > datetime.now(UTC),
+                        )
+                    )
+                ).scalar_one()
+            )
+
+    async def _stop_idle_server(self, server: ServerInstance) -> None:
+        """Stop an idle server and wait for its stopped event."""
+        if await self._active_leases(server.id):
+            return
+        async with AsyncSessionMaker() as session:
+            current = await session.get(ServerInstance, server.id)
+            if current is None or current.status != "running":
+                return
+            current.status = "stopping"
+            session.add(current)
+            await session.commit()
+        try:
+            await agent_manager.send_to_agent(
+                str(server.agent_id),
+                "POST",
+                "/servers/stop",
+                {"server_id": str(server.id)},
+                timeout=60.0,
+            )
+        except Exception:
+            async with AsyncSessionMaker() as session:
+                current = await session.get(ServerInstance, server.id)
+                if current and current.status == "stopping":
+                    current.status = "running"
+                    session.add(current)
+                    await session.commit()
+            raise
+
+    async def _make_room(self, target: ServerInstance, deadline: float) -> None:
+        """Evict idle same-agent servers until the target fits in VRAM."""
+        required = await self._required_vram(target)
+        while True:
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError(
+                    "No VRAM became available for the queued inference request"
+                )
+            usage = await self._live_vram(target.agent_id)
+            if usage is not None and usage[1] >= required:
+                return
+
+            async with AsyncSessionMaker() as session:
+                candidates = list(
+                    (
+                        await session.execute(
+                            select(ServerInstance)
+                            .where(
+                                ServerInstance.agent_id == target.agent_id,
+                                ServerInstance.status == "running",
+                                ServerInstance.id != target.id,
+                            )
+                            .order_by(
+                                ServerInstance.last_request_at,
+                                ServerInstance.id,
+                            )
+                        )
+                    ).scalars()
+                )
+            stopped = False
+            for candidate in candidates:
+                if await self._active_leases(candidate.id):
+                    continue
+                await self._stop_idle_server(candidate)
+                stopped = True
+                break
+            if not stopped:
+                await asyncio.sleep(SCHEDULER_POLL_SECONDS)
+            else:
+                await asyncio.sleep(SCHEDULER_POLL_SECONDS)
+
+    async def _prepare_target(
+        self, server: ServerInstance, deadline: float
+    ) -> ServerInstance:
+        """Make a stopped target fit in VRAM, then cold-start it."""
+        from app.services.server_startup import ensure_server_ready
+
+        if server.status != "running":
+            await self._make_room(server, deadline)
+            server = await ensure_server_ready(server)
+        return server
+
     async def _candidates(self, model_id: uuid.UUID) -> list[ServerInstance]:
         async with AsyncSessionMaker() as session:
             result = await session.execute(
@@ -211,11 +350,24 @@ class InferenceScheduler:
         deadline = asyncio.get_running_loop().time() + timeout
         queued = await self._queue(request_id, model_id)
         while True:
+            if not await self._queue_is_head(queued.id):
+                if asyncio.get_running_loop().time() >= deadline:
+                    await self._expire(queued.id)
+                    raise TimeoutError(
+                        "No inference server slot became available within 30 minutes"
+                    )
+                await asyncio.sleep(SCHEDULER_POLL_SECONDS)
+                continue
             candidates = await self._candidates(model_id)
             if preferred_server_id is not None:
-                candidates = [s for s in candidates if s.id == preferred_server_id]
+                async with AsyncSessionMaker() as session:
+                    target = await session.get(ServerInstance, preferred_server_id)
+                candidates = [target] if target is not None else []
             scored: list[tuple[ServerInstance, SlotTelemetry]] = []
             for server in candidates:
+                if server.status != "running":
+                    async with self._agent_lock(server.agent_id):
+                        server = await self._prepare_target(server, deadline)
                 telemetry = await get_slot_telemetry(server)
                 scored.append((server, telemetry))
             scored.sort(

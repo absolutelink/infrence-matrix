@@ -1,6 +1,7 @@
 """V1 Embeddings endpoint - OpenAI-compatible embeddings API via Agent proxy."""
 
 import logging
+import uuid
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -11,11 +12,8 @@ from app.api.deps import get_db
 from app.api.routes.v1.v1_chat_completions import _get_or_create_server
 from app.models import Model, ServerInstance
 from app.services.agent_manager import agent_manager
-from app.services.server_startup import (
-    ServerStartupError,
-    ensure_server_ready,
-    metadata_capability,
-)
+from app.services.inference_scheduler import InferenceLeaseHandle, inference_scheduler
+from app.services.server_startup import metadata_capability
 
 logger = logging.getLogger(__name__)
 
@@ -74,10 +72,7 @@ async def create_embedding(
             raise HTTPException(
                 400, f"Model '{request.model}' does not support embeddings"
             )
-        try:
-            server = await ensure_server_ready(instance)
-        except ServerStartupError as e:
-            raise HTTPException(503, str(e)) from e
+        server = instance
         model = db.exec(select(Model).where(Model.id == instance.model_id)).first()
         if not model:
             raise HTTPException(
@@ -100,7 +95,9 @@ async def create_embedding(
             )
 
         try:
-            server = await _get_or_create_server(model, request.agent_id)
+            server = await _get_or_create_server(
+                model, request.agent_id, start=False
+            )
         except HTTPException:
             raise
         except Exception as e:
@@ -109,7 +106,12 @@ async def create_embedding(
 
     inputs = request.input if isinstance(request.input, list) else [request.input]
 
+    lease: InferenceLeaseHandle | None = None
     try:
+        lease = await inference_scheduler.acquire(
+            model.id, f"embed-{uuid.uuid4()}", preferred_server_id=server.id
+        )
+        server = lease.server
         response = await agent_manager.send_to_agent(
             str(server.agent_id),
             "POST",
@@ -120,9 +122,14 @@ async def create_embedding(
             },
             timeout=300.0,
         )
+    except TimeoutError as e:
+        raise HTTPException(503, str(e)) from e
     except Exception as e:
         logger.error(f"Embedding error: {e}")
         raise HTTPException(500, f"Failed to create embeddings: {e}")
+    finally:
+        if lease is not None:
+            await lease.release()
 
     if not isinstance(response, dict) or "data" not in response:
         raise HTTPException(500, "Invalid embedding response from server")

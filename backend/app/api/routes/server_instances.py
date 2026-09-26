@@ -92,6 +92,7 @@ class ServerInstanceResponse(BaseModel):
     cpu_usage_percent: float | None = None
     ram_usage_bytes: int | None = None
     vram_usage_bytes: int | None = None
+    vram_required_bytes: int | None = None
     gpu_layers: int = 35
     context_size: int = 4096
     flash_attn: bool = True
@@ -110,6 +111,7 @@ class StartServerRequest(BaseModel):
     agent_id: str | None = None
     gpu_layers: int = 35
     context_size: int = 4096
+    vram_required_bytes: int | None = Field(None, ge=0)
     # Optional multimodal projector; omitted from server flags when None
     mmproj_model_id: str | None = None
     dflash_model_id: str | None = None
@@ -135,6 +137,7 @@ class UpdateServerRequest(BaseModel):
     flash_attn: bool | None = None
     mtp_draft_max: int | None = None
     inactivity_timeout_seconds: int | None = Field(None, ge=0, le=86400)
+    vram_required_bytes: int | None = Field(None, ge=0)
     # Multimodal projector; None = no change, "" = clear selection
     mmproj_model_id: str | None = None
     # Dflash draft model; None = no change, "" = clear selection
@@ -203,6 +206,7 @@ async def list_server_instances() -> ServerInstanceListResponse:
                     cpu_usage_percent=instance.cpu_usage_percent,
                     ram_usage_bytes=instance.ram_usage_bytes,
                     vram_usage_bytes=instance.vram_usage_bytes,
+                    vram_required_bytes=instance.vram_required_bytes,
                     gpu_layers=instance.gpu_layers,
                     context_size=instance.context_size,
                     flash_attn=instance.flash_attn,
@@ -268,6 +272,7 @@ async def get_server_instance(server_id: str) -> ServerInstanceResponse:
             cpu_usage_percent=instance.cpu_usage_percent,
             ram_usage_bytes=instance.ram_usage_bytes,
             vram_usage_bytes=instance.vram_usage_bytes,
+            vram_required_bytes=instance.vram_required_bytes,
             gpu_layers=instance.gpu_layers,
             context_size=instance.context_size,
             flash_attn=instance.flash_attn,
@@ -430,6 +435,7 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
             status="preparing",
             health_status="unknown",
             inactivity_timeout_seconds=300,
+            vram_required_bytes=request.vram_required_bytes,
         )
         session.add(server)
         await session.commit()
@@ -607,6 +613,8 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
             instance.server_options = validate_server_options(request.server_options)
         if request.inactivity_timeout_seconds is not None:
             instance.inactivity_timeout_seconds = request.inactivity_timeout_seconds
+        if request.vram_required_bytes is not None:
+            instance.vram_required_bytes = request.vram_required_bytes
 
         # Keep the legacy JSON config in sync for old readers
         instance.config = {

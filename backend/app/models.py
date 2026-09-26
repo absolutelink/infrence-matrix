@@ -397,6 +397,8 @@ class ServerInstance(SQLModel, table=True):
     average_response_time_ms: float = 0.0
 
     vram_usage_bytes: int | None = None
+    # Estimated VRAM required to load this server configuration.
+    vram_required_bytes: int | None = Field(default=None, sa_type=BigInteger)
     ram_usage_bytes: int | None = None
     cpu_usage_percent: float | None = None
 

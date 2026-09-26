@@ -1575,6 +1575,10 @@ export type ServerInstanceResponse = {
      */
     vram_usage_bytes?: number | null;
     /**
+     * Vram Required Bytes
+     */
+    vram_required_bytes?: number | null;
+    /**
      * Gpu Layers
      */
     gpu_layers?: number;
@@ -1858,6 +1862,10 @@ export type StartServerRequest = {
      */
     context_size?: number;
     /**
+     * Vram Required Bytes
+     */
+    vram_required_bytes?: number | null;
+    /**
      * Mmproj Model Id
      */
     mmproj_model_id?: string | null;
@@ -2041,6 +2049,10 @@ export type UpdateServerRequest = {
      * Inactivity Timeout Seconds
      */
     inactivity_timeout_seconds?: number | null;
+    /**
+     * Vram Required Bytes
+     */
+    vram_required_bytes?: number | null;
     /**
      * Mmproj Model Id
      */

@@ -449,11 +449,11 @@ async def _stream_completion_via_agent(
 def _find_existing_server(
     model_id: Any, agent_id: str | None = None
 ) -> ServerInstance | None:
-    """Find a running server instance for the model (optionally on a specific agent)."""
+    """Find a reusable server instance for the model."""
     with Session(engine) as session:
         stmt = select(ServerInstance).where(
             ServerInstance.model_id == model_id,
-            ServerInstance.status == "running",
+            ServerInstance.status.in_(["running", "stopped", "starting"]),
         )
         if agent_id:
             stmt = stmt.where(ServerInstance.agent_id == agent_id)
@@ -475,7 +475,7 @@ def _find_starting_server(
 
 
 async def _get_or_create_server(
-    model: Model, agent_id: str | None = None
+    model: Model, agent_id: str | None = None, *, start: bool = True
 ) -> ServerInstance:
     """Get existing server or create new one via Agent.
 
@@ -494,8 +494,9 @@ async def _get_or_create_server(
         logger.info(f"Joining in-flight startup for server {starting.id}")
         return starting
 
-    # Need to start a new server
-    logger.info("No existing server found, starting new one")
+    # Need to create a new server row. The scheduler may defer the actual
+    # process start until this request reaches the FIFO queue head.
+    logger.info("No existing server found, creating server row")
 
     # Find an agent
     if agent_id:
@@ -524,12 +525,15 @@ async def _get_or_create_server(
             context_size=4096,
             flash_attn=True,
             config={},
-            status="starting",
+            status="starting" if start else "stopped",
             inactivity_timeout_seconds=300,
         )
         session.add(server)
         session.commit()
         session.refresh(server)
+
+    if not start:
+        return server
 
     start_response = await agent_manager.send_to_agent(
         agent.id,
@@ -614,10 +618,7 @@ async def create_chat_completion(
     if instance is not None:
         if request.tools and metadata_capability(instance, "tools") is False:
             raise HTTPException(400, f"Model '{request.model}' does not support tools")
-        try:
-            server = await ensure_server_ready(instance)
-        except ServerStartupError as e:
-            raise HTTPException(503, f"Server not available: {e}")
+        server = instance
         model = db.exec(select(Model).where(Model.id == server.model_id)).first()
         if not model:
             raise HTTPException(
@@ -652,8 +653,9 @@ async def create_chat_completion(
                 )
                 server = lease.server
             else:
-                server = await _get_or_create_server(model, request.agent_id)
-                server = await ensure_server_ready(server)
+                server = await _get_or_create_server(
+                    model, request.agent_id, start=False
+                )
                 lease = await inference_scheduler.acquire(
                     model.id, request_id, preferred_server_id=server.id
                 )

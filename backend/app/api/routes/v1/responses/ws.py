@@ -50,7 +50,6 @@ from app.api.routes.v1.responses.translator import (
 from app.core.db import engine
 from app.services.agent_manager import agent_manager
 from app.services.inference_scheduler import inference_scheduler
-from app.services.server_startup import find_alias_instance
 
 logger = logging.getLogger(__name__)
 
@@ -136,11 +135,10 @@ async def _stream_to_ws(
     seq = ev.SSEmitter()
     try:
         server, model = await resolve_target(request.model)
-        alias = await find_alias_instance(request.model)
         lease = await inference_scheduler.acquire(
             model.id if model else server.model_id,
             new_id("resp"),
-            preferred_server_id=server.id if alias is not None else None,
+            preferred_server_id=server.id,
         )
         server = lease.server
         agent = await agent_manager.get_agent(str(server.agent_id))

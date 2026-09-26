@@ -53,7 +53,6 @@ from app.services.inference_scheduler import (
 )
 from app.services.server_startup import (
     ServerStartupError,
-    ensure_server_ready,
     ensure_server_ready_by_id,
     find_alias_instance,
     metadata_capability,
@@ -648,7 +647,7 @@ async def resolve_target(model_ref: str) -> tuple[ServerInstance, Model | None]:
     instance = await find_alias_instance(model_ref)
     if instance is not None:
         try:
-            server = await ensure_server_ready(instance)
+            server = instance
         except ServerStartupError as e:
             raise TargetError(
                 503, "no_agent_available", f"Server not available: {e}"
@@ -672,8 +671,7 @@ async def resolve_target(model_ref: str) -> tuple[ServerInstance, Model | None]:
             raise TargetError(400, "invalid_request", str(e.detail)) from e
 
     try:
-        server = await _get_or_create_server(model, None)
-        server = await ensure_server_ready(server)
+        server = await _get_or_create_server(model, None, start=False)
     except HTTPException as e:
         raise TargetError(
             e.status_code or 503, "no_agent_available", str(e.detail)
@@ -735,15 +733,7 @@ async def create_response(
     lease_preference = None
     instance = await find_alias_instance(request.model)
     if instance is not None:
-        try:
-            server = await ensure_server_ready(instance)
-        except ServerStartupError as e:
-            return _error_response(
-                503,
-                "too_many_requests",
-                "no_agent_available",
-                f"Server not available: {e}",
-            )
+        server = instance
         model = db.exec(select(Model).where(Model.id == server.model_id)).first()
         if not model:
             return _error_response(
@@ -779,8 +769,7 @@ async def create_response(
                 # The scheduler performs the actual load-balanced claim below.
                 server = candidates[0]
             else:
-                server = await _get_or_create_server(model, None)
-                server = await ensure_server_ready(server)
+                server = await _get_or_create_server(model, None, start=False)
                 lease_preference = server.id
         except HTTPException as e:
             return _error_response(
@@ -965,13 +954,12 @@ async def compact_response(
         instance = await find_alias_instance(request.model)
         server = None
         if instance is not None:
-            server = await ensure_server_ready(instance)
+            server = instance
         else:
             model = _resolve_model(db, request.model)
             from app.api.routes.v1.v1_chat_completions import _get_or_create_server
 
-            server = await _get_or_create_server(model, None)
-            server = await ensure_server_ready(server)
+            server = await _get_or_create_server(model, None, start=False)
     except ServerStartupError as e:
         return _error_response(
             503, "too_many_requests", "no_agent_available", f"Server not available: {e}"
@@ -1021,7 +1009,17 @@ async def compact_response(
             503, "server_error", "no_agent_available", "Agent not found"
         )
 
+    lease = None
     try:
+        lease = await inference_scheduler.acquire(
+            server.model_id, new_id("compact"), preferred_server_id=server.id
+        )
+        server = lease.server
+        agent = await agent_manager.get_agent(str(server.agent_id))
+        if not agent:
+            return _error_response(
+                503, "server_error", "no_agent_available", "Agent not found"
+            )
         response = await agent_manager.send_to_agent(
             str(server.agent_id),
             "POST",
@@ -1033,9 +1031,14 @@ async def compact_response(
         message = choice.get("message") or {}
         summary_text = message.get("content") or ""
         usage_data = response.get("usage") or {}
+    except TimeoutError as e:
+        return _error_response(503, "too_many_requests", "no_slot", str(e))
     except Exception as e:
         logger.error(f"Compaction sampling error: {e}")
         return _error_response(500, "model_error", "model_error", str(e))
+    finally:
+        if lease is not None:
+            await lease.release()
 
     prompt_tokens = int(usage_data.get("prompt_tokens") or 0)
     completion_tokens = int(usage_data.get("completion_tokens") or 0)
