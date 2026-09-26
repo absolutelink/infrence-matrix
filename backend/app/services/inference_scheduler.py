@@ -316,9 +316,9 @@ class InferenceScheduler:
                     if target_gpu_id is None
                     or (agent.gpu_info or {}).get("id") == target_gpu_id
                 ]
-                allocated = 0
-                for candidate in candidates:
-                    allocated += await self._required_vram(candidate)
+                allocated = sum(
+                    await self._required_vram(candidate) for candidate in candidates
+                )
             if total_vram is not None and _vram_requirements_fit(
                 total_vram, required, allocated
             ):
