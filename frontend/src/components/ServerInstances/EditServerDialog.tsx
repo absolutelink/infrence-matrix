@@ -326,22 +326,20 @@ export function EditServerDialog({
                 />
               </div>
             )}
-            {instance.engine === "llamacpp" && (
-              <div>
-                <Label htmlFor="inactivity-timeout">
-                  Inactivity timeout (seconds)
-                </Label>
-                <Input
-                  id="inactivity-timeout"
-                  type="number"
-                  min={0}
-                  max={86400}
-                  value={inactivityTimeout}
-                  onChange={(e) => setInactivityTimeout(e.target.value)}
-                  className="mt-1"
-                />
-              </div>
-            )}
+            <div>
+              <Label htmlFor="inactivity-timeout">
+                Inactivity timeout (seconds)
+              </Label>
+              <Input
+                id="inactivity-timeout"
+                type="number"
+                min={0}
+                max={86400}
+                value={inactivityTimeout}
+                onChange={(e) => setInactivityTimeout(e.target.value)}
+                className="mt-1"
+              />
+            </div>
             {instance.engine === "llamacpp" && (
               <div className="flex items-end pb-2">
                 <Label

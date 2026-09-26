@@ -37,6 +37,7 @@ class HalogenServerManager:
     HEALTH_CHECK_INTERVAL = 10.0
     HEALTH_CHECK_TIMEOUT = 5.0
     HEALTH_FAILURE_THRESHOLD = 3
+    STARTUP_HEALTH_GRACE_SECONDS = 900.0
 
     def __init__(self) -> None:
         self.servers: dict[str, subprocess.Popen] = {}
@@ -87,6 +88,12 @@ class HalogenServerManager:
             self._health_failures[server_id] = 0
             status = "healthy"
         else:
+            started_at = self.start_times.get(server_id)
+            if (
+                started_at is not None
+                and time.time() - started_at < self.STARTUP_HEALTH_GRACE_SECONDS
+            ):
+                return
             failures = self._health_failures.get(server_id, 0) + 1
             self._health_failures[server_id] = failures
             if failures < self.HEALTH_FAILURE_THRESHOLD:

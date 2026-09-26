@@ -87,6 +87,7 @@ Run 11 (full-suite regression sweep): 2026-09-25 — **17 passed / 0 failed**
 | 2026-09-25 | Full-suite regression sweep | 15 | 2 | `websocket-continuation` and `websocket-reconnect-store-false-recovery` timed out under concurrent load; both passed individually. `websocket-failed-continuation-evicts-cache` and `websocket-compact-new-chain` passed |
 | 2026-09-25 | Full-suite regression sweep after restart | 10 | 7 | HTTP/model-backed tests returned 500s while the agent/server was restarting; one compaction request exposed an upstream 503. All WebSocket tests passed |
 | 2026-09-25 | Full-suite regression sweep | 17 | 0 | All compliance tests passed |
+| 2026-09-26 | Full-suite regression sweep after cross-agent eviction fix | 12 | 5 | Voyager started successfully after evicting co-located rocinante-tiny; remaining failures were WebSocket 30s contention timeouts |
 | 2026-09-24 | (baseline) | 3 | 14 | Initial full run |
 | 2026-09-24 | serialize_spec fix (pushed) | 10 | 7 | Clusters 1–3 + 5 fixed: spec serializer (`serialize_spec`), `completed_at` at finalize, dropped `reasoning_text.*` event twins. Unblocked: basic-response, system-prompt, tool-calling, streaming-response, assistant-phase, multi-turn, compact-response |
 | 2026-09-24 | WS framing + compaction-input (pushed) | 10 | 7 | Clusters 4 + 6 fixed: raw JSON per WS message, compaction items replayed as assistant context. Exposed: WS turns not persisted; 30s harness timer vs thinking-model latency |

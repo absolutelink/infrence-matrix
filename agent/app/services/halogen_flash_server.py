@@ -132,6 +132,9 @@ class HalogenFlashServerManager(HalogenServerManager):
         self.servers[server_id] = process
         self.configs[server_id] = config
         self.start_times[server_id] = time.time()
+        self._health_failures[server_id] = 0
+        self.server_health[server_id] = "starting"
+        self.healthy_servers.discard(server_id)
         self._start_log_reader(server_id)
         try:
             await self._wait_for_health(server_id, config.api_port)
