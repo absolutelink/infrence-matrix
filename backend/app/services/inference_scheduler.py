@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlmodel import select
 
 from app.db.session import AsyncSessionMaker
@@ -264,8 +264,11 @@ class InferenceScheduler:
                 select(ServerInstance)
                 .where(
                     ServerInstance.model_id == model_id,
-                    ServerInstance.status == "running",
-                    ServerInstance.health_status == "healthy",
+                    ServerInstance.status.in_(["stopped", "starting", "running"]),
+                    or_(
+                        ServerInstance.status != "running",
+                        ServerInstance.health_status == "healthy",
+                    ),
                 )
                 .order_by(ServerInstance.last_request_at, ServerInstance.id)
             )
