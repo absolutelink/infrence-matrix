@@ -11,6 +11,11 @@ from app.api.deps import get_db
 from app.api.routes.v1.v1_chat_completions import _get_or_create_server
 from app.models import Model, ServerInstance
 from app.services.agent_manager import agent_manager
+from app.services.server_startup import (
+    ServerStartupError,
+    ensure_server_ready,
+    metadata_capability,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,12 +66,18 @@ async def create_embedding(
     server: ServerInstance | None = None
     server_q = select(ServerInstance).where(
         ServerInstance.alias == request.model,
-        ServerInstance.status.in_(["starting", "running"]),
     )
     instance = db.exec(server_q).first()
 
     if instance is not None:
-        server = instance
+        if metadata_capability(instance, "embeddings") is False:
+            raise HTTPException(
+                400, f"Model '{request.model}' does not support embeddings"
+            )
+        try:
+            server = await ensure_server_ready(instance)
+        except ServerStartupError as e:
+            raise HTTPException(503, str(e)) from e
         model = db.exec(select(Model).where(Model.id == instance.model_id)).first()
         if not model:
             raise HTTPException(

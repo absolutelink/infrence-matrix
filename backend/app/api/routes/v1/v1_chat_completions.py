@@ -25,6 +25,7 @@ from app.services.server_startup import (
     START_DISPATCH_TIMEOUT,
     ServerStartupError,
     ensure_server_ready,
+    metadata_capability,
 )
 
 logger = logging.getLogger(__name__)
@@ -611,6 +612,8 @@ async def create_chat_completion(
     ).first()
 
     if instance is not None:
+        if request.tools and metadata_capability(instance, "tools") is False:
+            raise HTTPException(400, f"Model '{request.model}' does not support tools")
         try:
             server = await ensure_server_ready(instance)
         except ServerStartupError as e:

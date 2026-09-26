@@ -8,6 +8,7 @@ import {
   Pencil,
   Play,
   Power,
+  RefreshCw,
   Terminal,
   Trash2,
 } from "lucide-react"
@@ -18,6 +19,7 @@ import { AgentsService, ServerInstancesService } from "@/client"
 import { EditServerDialog } from "@/components/ServerInstances/EditServerDialog"
 import type { HalogenOptions } from "@/components/ServerInstances/HalogenSettingsFields"
 import { useLogPanel } from "@/components/ServerInstances/LogPanelContext"
+import { MetadataDialog } from "@/components/ServerInstances/MetadataDialog"
 import type { ServerOptions } from "@/components/ServerInstances/ServerSettingsFields"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -55,6 +57,7 @@ type ServerInstance = {
   flash_attn: boolean
   inactivity_timeout_seconds: number
   server_options?: ServerOptions
+  model_metadata?: Record<string, unknown>
 }
 
 export const columns: ColumnDef<ServerInstance>[] = [
@@ -108,13 +111,21 @@ export const columns: ColumnDef<ServerInstance>[] = [
         stopped: "secondary",
         healthy: "default",
         unhealthy: "destructive",
+        initialization_failed: "destructive",
+        metadata_gathering: "secondary",
+        preparing: "secondary",
+        uninitialized: "outline",
         unknown: "outline",
       }
 
       const statusVariant = statusColors[instance.status] || "outline"
       const healthVariant = statusColors[instance.health_status] || "outline"
       const statusLabel =
-        instance.status === "starting" ? "booting" : instance.status
+        instance.status === "starting"
+          ? "booting"
+          : instance.status === "metadata_gathering"
+            ? "gathering metadata"
+            : instance.status
 
       return (
         <div className="flex flex-col items-start gap-1">
@@ -204,6 +215,7 @@ function InstanceActions({ instance }: { instance: ServerInstance }) {
   const queryClient = useQueryClient()
   const { openLogs } = useLogPanel()
   const [editOpen, setEditOpen] = useState(false)
+  const [metadataOpen, setMetadataOpen] = useState(false)
 
   const stopMutation = useMutation({
     mutationFn: async () => {
@@ -245,6 +257,20 @@ function InstanceActions({ instance }: { instance: ServerInstance }) {
     },
   })
 
+  const initializeMutation = useMutation({
+    mutationFn: async () =>
+      ServerInstancesService.instancesInitializeExistingServer({
+        path: { server_id: instance.id },
+      }),
+    onSuccess: () => {
+      toast.success("Server initialization started")
+      queryClient.invalidateQueries({ queryKey: ["server-instances"] })
+    },
+    onError: () => {
+      toast.error("Failed to initialize server")
+    },
+  })
+
   const deleteMutation = useMutation({
     mutationFn: async () =>
       ServerInstancesService.instancesDeleteServer({
@@ -259,8 +285,13 @@ function InstanceActions({ instance }: { instance: ServerInstance }) {
     },
   })
 
-  const canStart =
-    instance.status !== "running" && instance.status !== "starting"
+  const canStart = instance.status === "stopped"
+  const canEdit = ["stopped", "running", "error"].includes(instance.status)
+  const canInitialize = [
+    "uninitialized",
+    "stopped",
+    "initialization_failed",
+  ].includes(instance.status)
 
   return (
     <>
@@ -278,11 +309,35 @@ function InstanceActions({ instance }: { instance: ServerInstance }) {
             <Terminal className="mr-2 h-4 w-4" />
             View Logs
           </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => setEditOpen(true)}>
+          <DropdownMenuItem
+            onClick={() => setEditOpen(true)}
+            disabled={!canEdit}
+          >
             <Pencil className="mr-2 h-4 w-4" />
             Edit Settings
           </DropdownMenuItem>
+          <DropdownMenuItem
+            onClick={() => setMetadataOpen(true)}
+            disabled={
+              instance.status === "preparing" ||
+              instance.status === "metadata_gathering"
+            }
+          >
+            <Pencil className="mr-2 h-4 w-4" />
+            Edit Metadata
+          </DropdownMenuItem>
           <DropdownMenuSeparator />
+          {canInitialize ? (
+            <DropdownMenuItem
+              onClick={() => initializeMutation.mutate()}
+              disabled={initializeMutation.isPending}
+            >
+              <RefreshCw className="mr-2 h-4 w-4" />
+              {instance.status === "initialization_failed"
+                ? "Retry Initialization"
+                : "Initialize / Refresh Metadata"}
+            </DropdownMenuItem>
+          ) : null}
           {instance.status === "running" ? (
             <DropdownMenuItem
               className="text-destructive"
@@ -332,6 +387,11 @@ function InstanceActions({ instance }: { instance: ServerInstance }) {
           ...instance,
           alias: instance.alias ?? "",
         }}
+      />
+      <MetadataDialog
+        isOpen={metadataOpen}
+        onClose={() => setMetadataOpen(false)}
+        instance={instance}
       />
     </>
   )

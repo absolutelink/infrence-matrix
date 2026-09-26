@@ -149,7 +149,8 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
           <DialogTitle>Create Server</DialogTitle>
           <DialogDescription>
             Create a server configuration. The assigned agent will prepare the
-            model files, but the server remains stopped until you start it.
+            files, gather OpenAI model metadata, and leave the server stopped
+            when initialization completes.
           </DialogDescription>
         </DialogHeader>
 

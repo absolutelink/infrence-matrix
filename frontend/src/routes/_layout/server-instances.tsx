@@ -43,9 +43,11 @@ function ServerInstancesTableContent() {
         <div className="rounded-full bg-muted p-4 mb-4">
           <Server className="h-8 w-8 text-muted-foreground" />
         </div>
-        <h3 className="text-lg font-semibold">No server instances running</h3>
+        <h3 className="text-lg font-semibold">
+          No server instances configured
+        </h3>
         <p className="text-muted-foreground">
-          Start a server instance to begin inference
+          Create a server instance to begin initialization
         </p>
       </div>
     )
@@ -79,7 +81,7 @@ function ServerInstances() {
             Server Instances
           </h1>
           <p className="text-muted-foreground">
-            Manage llama.cpp server instances
+            Manage inference server instances and model metadata
           </p>
         </div>
         <Button onClick={() => setStartOpen(true)}>

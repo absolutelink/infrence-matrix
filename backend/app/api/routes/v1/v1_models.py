@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, col, select
 
 from app.api.deps import get_db
-from app.models import Model, ServerInstance
+from app.models import ServerInstance
 
 logger = logging.getLogger(__name__)
 
@@ -33,16 +33,13 @@ class ModelsList(BaseModel):
 @router.get("/models", response_model=ModelsList)
 def list_models(db: Session = Depends(get_db)) -> ModelsList:
     """
-    List available models.
+    List all configured server models.
 
-    Returns the aliases of server instances that are starting or running —
-    these are the names clients can use in the `model` field of
-    /v1/chat/completions, /v1/completions, and /v1/embeddings.
+    Server aliases remain discoverable even when their server is stopped.
+    Requests using a stopped model can trigger the normal server startup flow.
     """
-    statement = (
-        select(ServerInstance)
-        .where(col(ServerInstance.status).in_(["starting", "running"]))
-        .join(Model, col(ServerInstance.model_id) == col(Model.id))
+    statement = select(ServerInstance).where(
+        col(ServerInstance.status).in_(["stopped", "starting", "running", "error"])
     )
     instances = db.exec(statement).all()
 
@@ -50,14 +47,20 @@ def list_models(db: Session = Depends(get_db)) -> ModelsList:
     for instance in instances:
         if not instance.alias:
             continue
+        metadata_created = (instance.model_metadata or {}).get("created")
         created_timestamp = (
-            int(instance.started_at.timestamp()) if instance.started_at else 0
+            int(metadata_created)
+            if isinstance(metadata_created, int)
+            else int(instance.started_at.timestamp())
+            if instance.started_at
+            else 0
         )
+        owned_by = (instance.model_metadata or {}).get("owned_by")
         model_data.append(
             ModelData(
                 id=instance.alias,
                 created=created_timestamp,
-                owned_by=instance.model.name if instance.model else "inference-matrix",
+                owned_by=owned_by if isinstance(owned_by, str) else "inference-matrix",
             )
         )
 
@@ -75,14 +78,25 @@ def retrieve_model(model_id: str, db: Session = Depends(get_db)) -> ModelData:
     statement = select(ServerInstance).where(ServerInstance.alias == model_id)
     instance = db.exec(statement).first()
 
-    if not instance:
+    if not instance or instance.status not in {
+        "stopped",
+        "starting",
+        "running",
+        "error",
+    }:
         raise HTTPException(status_code=404, detail="Model not found")
 
+    metadata_created = (instance.model_metadata or {}).get("created")
     created_timestamp = (
-        int(instance.started_at.timestamp()) if instance.started_at else 0
+        int(metadata_created)
+        if isinstance(metadata_created, int)
+        else int(instance.started_at.timestamp())
+        if instance.started_at
+        else 0
     )
+    owned_by = (instance.model_metadata or {}).get("owned_by")
     return ModelData(
         id=instance.alias,
         created=created_timestamp,
-        owned_by=instance.model.name if instance.model else "inference-matrix",
+        owned_by=owned_by if isinstance(owned_by, str) else "inference-matrix",
     )

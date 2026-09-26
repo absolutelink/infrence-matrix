@@ -1231,6 +1231,32 @@ export type ModelData = {
 };
 
 /**
+ * ModelMetadataUpdate
+ *
+ * User-editable overrides for discovered OpenAI model metadata.
+ */
+export type ModelMetadataUpdate = {
+    /**
+     * Description
+     */
+    description?: string | null;
+    /**
+     * Owned By
+     */
+    owned_by?: string | null;
+    /**
+     * Capabilities
+     */
+    capabilities?: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * Max Context Length
+     */
+    max_context_length?: number | null;
+};
+
+/**
  * ModelUpdate
  *
  * Model update model.
@@ -1572,6 +1598,12 @@ export type ServerInstanceResponse = {
      * Server Options
      */
     server_options?: {
+        [key: string]: unknown;
+    };
+    /**
+     * Model Metadata
+     */
+    model_metadata?: {
         [key: string]: unknown;
     };
 };
@@ -2428,6 +2460,74 @@ export type serverInstancesStartServerResponses = {
 };
 
 export type serverInstancesStartServerResponse = serverInstancesStartServerResponses[keyof serverInstancesStartServerResponses];
+
+export type serverInstancesInitializeExistingServerData = {
+    body?: never;
+    path: {
+        /**
+         * Server Id
+         */
+        server_id: string;
+    };
+    query?: never;
+    url: '/api/v1/server-instances/{server_id}/initialize';
+};
+
+export type serverInstancesInitializeExistingServerErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type serverInstancesInitializeExistingServerError = serverInstancesInitializeExistingServerErrors[keyof serverInstancesInitializeExistingServerErrors];
+
+export type serverInstancesInitializeExistingServerResponses = {
+    /**
+     * Response Server-Instances-Initialize Existing Server
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type serverInstancesInitializeExistingServerResponse = serverInstancesInitializeExistingServerResponses[keyof serverInstancesInitializeExistingServerResponses];
+
+export type serverInstancesUpdateServerMetadataData = {
+    body: ModelMetadataUpdate;
+    path: {
+        /**
+         * Server Id
+         */
+        server_id: string;
+    };
+    query?: never;
+    url: '/api/v1/server-instances/{server_id}/metadata';
+};
+
+export type serverInstancesUpdateServerMetadataErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type serverInstancesUpdateServerMetadataError = serverInstancesUpdateServerMetadataErrors[keyof serverInstancesUpdateServerMetadataErrors];
+
+export type serverInstancesUpdateServerMetadataResponses = {
+    /**
+     * Response Server-Instances-Update Server Metadata
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type serverInstancesUpdateServerMetadataResponse = serverInstancesUpdateServerMetadataResponses[keyof serverInstancesUpdateServerMetadataResponses];
 
 export type serverInstancesRestartServerData = {
     body?: never;

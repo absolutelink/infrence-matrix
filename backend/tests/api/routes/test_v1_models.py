@@ -82,7 +82,7 @@ class TestListModels:
         assert len(data["data"]) == 1
         assert data["data"][0]["id"] == "test-alias"
         assert data["data"][0]["object"] == "model"
-        assert data["data"][0]["owned_by"] == "test-model.Q4_K_M.gguf"
+        assert data["data"][0]["owned_by"] == "inference-matrix"
 
     def test_list_models_multiple(self, client: TestClient, db: Session) -> None:
         """Multiple running instances are all listed."""
@@ -99,10 +99,10 @@ class TestListModels:
         assert len(data["data"]) == 2
         assert {m["id"] for m in data["data"]} == {"alias1", "alias2"}
 
-    def test_list_models_skips_offline_instances(
+    def test_list_models_includes_offline_instances(
         self, client: TestClient, db: Session
     ) -> None:
-        """Stopped instances are not listed."""
+        """Stopped instances remain discoverable as configured models."""
         model = _make_model(db, "test-model.Q4_K_M.gguf")
         agent = _make_agent(db, "agent-1")
         _make_instance(db, model, agent, "alias-running", "running")
@@ -112,7 +112,46 @@ class TestListModels:
         response = client.get("/v1/models")
         assert response.status_code == 200
         data = response.json()
-        assert [m["id"] for m in data["data"]] == ["alias-running"]
+        assert {m["id"] for m in data["data"]} == {
+            "alias-running",
+            "alias-stopped",
+        }
+
+    def test_list_models_hides_initialization_states(
+        self, client: TestClient, db: Session
+    ) -> None:
+        """Servers are not advertised until initialization completes."""
+        model = _make_model(db, "test-model.Q4_K_M.gguf")
+        agent = _make_agent(db, "agent-1")
+        _make_instance(db, model, agent, "alias-preparing", "preparing")
+        _make_instance(db, model, agent, "alias-failed", "initialization_failed")
+        db.commit()
+
+        response = client.get("/v1/models")
+        assert response.status_code == 200
+        assert response.json()["data"] == []
+
+    def test_list_models_uses_discovered_metadata(
+        self, client: TestClient, db: Session
+    ) -> None:
+        """Discovered OpenAI timestamps and ownership are exposed."""
+        model = _make_model(db, "test-model.Q4_K_M.gguf")
+        agent = _make_agent(db, "agent-1")
+        instance = _make_instance(db, model, agent, "alias-metadata", "stopped")
+        instance.model_metadata = {"created": 123, "owned_by": "halogen"}
+        db.add(instance)
+        db.commit()
+
+        response = client.get("/v1/models")
+        assert response.status_code == 200
+        assert response.json()["data"] == [
+            {
+                "id": "alias-metadata",
+                "object": "model",
+                "created": 123,
+                "owned_by": "halogen",
+            }
+        ]
 
     def test_list_models_skips_instances_without_alias(
         self, client: TestClient, db: Session
@@ -146,7 +185,7 @@ class TestRetrieveModel:
         data = response.json()
         assert data["id"] == "test-alias"
         assert data["object"] == "model"
-        assert data["owned_by"] == "test-model.Q4_K_M.gguf"
+        assert data["owned_by"] == "inference-matrix"
 
     def test_retrieve_model_not_found(self, client: TestClient, db: Session) -> None:
         """Test retrieving a non-existent model alias."""

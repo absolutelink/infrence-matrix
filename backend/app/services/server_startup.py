@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 # Cold start includes a possible model download (multi-GB GGUF), so the
 # dispatch must allow far more than the default 30s agent timeout.
 START_DISPATCH_TIMEOUT = 900.0
+# Repository downloads and first-time model loading can take up to an hour.
+INITIALIZATION_TIMEOUT = 3600.0
 # How long we wait for an in-flight (or newly dispatched) start to become
 # healthy before giving up on the request.
 READY_TIMEOUT = 900.0
@@ -118,6 +120,20 @@ def build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any
     return payload
 
 
+def metadata_capability(instance: ServerInstance, capability: str) -> bool | None:
+    """Read an explicitly discovered or user-overridden capability."""
+    metadata = instance.model_metadata or {}
+    direct = metadata.get(f"supports_{capability}")
+    if isinstance(direct, bool):
+        return direct
+    capabilities = metadata.get("capabilities")
+    if isinstance(capabilities, dict) and isinstance(
+        capabilities.get(capability), bool
+    ):
+        return capabilities[capability]
+    return None
+
+
 def _find_mmproj(instance: ServerInstance, model: Model) -> tuple[Model, str] | None:
     """mmproj projector for a server instance, else None.
 
@@ -170,7 +186,7 @@ async def dispatch_start(
         allocated_port = response.get("port") if isinstance(response, dict) else None
         async with AsyncSessionMaker() as session:
             server = await session.get(ServerInstance, uuid_module.UUID(server_id))
-            if server and server.status != "running":
+            if server and server.status in {"starting", "running"}:
                 server.status = "running"
                 server.health_status = "healthy"
                 server.started_at = server.started_at or datetime.now(UTC)
@@ -208,6 +224,99 @@ async def dispatch_prepare(
         logger.info(f"Prepared files for server {server_id} on agent {agent_id}")
     except Exception as e:
         logger.warning(f"Failed to prepare files for server {server_id}: {e}")
+
+
+async def initialize_server(
+    agent_id: str, server_id: str, request: dict[str, Any]
+) -> None:
+    """Prepare, inspect, and stop a server before making it available.
+
+    The agent performs the expensive download and starts the process only long
+    enough to query its OpenAI model metadata. Initialization failures are
+    persisted separately from a normal stopped server so they cannot be
+    accidentally started or advertised.
+    """
+    server_uuid = uuid_module.UUID(server_id)
+
+    async def set_status(status: str, error: str | None = None) -> None:
+        async with AsyncSessionMaker() as session:
+            instance = await session.get(ServerInstance, server_uuid)
+            if instance is None:
+                return
+            instance.status = status
+            instance.health_status = "unknown"
+            instance.error_message = error
+            session.add(instance)
+            await session.commit()
+
+    model_metadata: dict[str, Any] | None = None
+    initialization_error: str | None = None
+    stop_error: str | None = None
+    await set_status("preparing")
+    try:
+        await agent_manager.send_to_agent(
+            agent_id,
+            "POST",
+            "/servers/prepare",
+            request,
+            timeout=INITIALIZATION_TIMEOUT,
+        )
+        await set_status("metadata_gathering")
+
+        await agent_manager.send_to_agent(
+            agent_id,
+            "POST",
+            "/servers/start",
+            request,
+            timeout=START_DISPATCH_TIMEOUT,
+        )
+        metadata_response = await agent_manager.send_to_agent(
+            agent_id,
+            "GET",
+            f"/servers/metadata/{server_id}",
+            None,
+            timeout=60.0,
+        )
+        metadata_items = metadata_response.get("data")
+        if not isinstance(metadata_items, list) or not metadata_items:
+            raise RuntimeError("Server returned no model metadata")
+        model_metadata = metadata_items[0]
+        if not isinstance(model_metadata, dict):
+            raise RuntimeError("Server returned invalid model metadata")
+    except Exception as e:
+        logger.error("Failed to initialize server %s: %s", server_id, e)
+        initialization_error = str(e)
+        model_metadata = None
+    finally:
+        try:
+            await agent_manager.send_to_agent(
+                agent_id,
+                "POST",
+                "/servers/stop",
+                {"server_id": server_id},
+                timeout=60.0,
+            )
+        except Exception as e:
+            logger.warning("Failed to stop initialized server %s: %s", server_id, e)
+            stop_error = str(e)
+
+    if model_metadata is None or stop_error is not None:
+        await set_status(
+            "initialization_failed",
+            stop_error or initialization_error or "Metadata gathering failed",
+        )
+        return
+
+    async with AsyncSessionMaker() as session:
+        instance = await session.get(ServerInstance, server_uuid)
+        if instance is None:
+            return
+        instance.model_metadata = model_metadata
+        instance.status = "stopped"
+        instance.health_status = "unknown"
+        instance.error_message = None
+        session.add(instance)
+        await session.commit()
 
 
 async def _reload_instance(server_id: str) -> ServerInstance | None:
@@ -270,6 +379,15 @@ async def ensure_server_ready(
     if instance.status == "error":
         raise ServerStartupError(
             instance.error_message or f"Server {server.id} failed to start"
+        )
+    if instance.status in {
+        "uninitialized",
+        "preparing",
+        "metadata_gathering",
+        "initialization_failed",
+    }:
+        raise ServerStartupError(
+            "Server must complete initialization before it can be started"
         )
 
     if instance.status in {"starting", "running"}:

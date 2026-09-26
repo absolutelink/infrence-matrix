@@ -56,6 +56,7 @@ from app.services.server_startup import (
     ensure_server_ready,
     ensure_server_ready_by_id,
     find_alias_instance,
+    metadata_capability,
 )
 
 logger = logging.getLogger(__name__)
@@ -753,6 +754,14 @@ async def create_response(
                 param="model",
             )
         lease_preference = server.id
+        if request.tools and metadata_capability(instance, "tools") is False:
+            return _error_response(
+                400,
+                "invalid_request",
+                "unsupported_capability",
+                f"Model '{request.model}' does not support tools",
+                param="tools",
+            )
     else:
         try:
             model = _resolve_model(db, request.model)

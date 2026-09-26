@@ -2,7 +2,7 @@
 
 import { type Client, formDataBodySerializer, type Options as Options2, type TDataShape } from './client';
 import { client } from './client.gen';
-import type { agentsDeleteAgentData, agentsDeleteAgentErrors, agentsDeleteAgentResponses, agentsGetAgentData, agentsGetAgentErrors, agentsGetAgentResponses, agentsListAgentsData, agentsListAgentsResponses, agentsRegisterAgentData, agentsRegisterAgentErrors, agentsRegisterAgentResponses, agentsSendCommandData, agentsSendCommandErrors, agentsSendCommandResponses, agentsUpdateAgentData, agentsUpdateAgentErrors, agentsUpdateAgentResponses, benchmarksAbortRunData, benchmarksAbortRunErrors, benchmarksAbortRunResponses, benchmarksCancelRunData, benchmarksCancelRunErrors, benchmarksCancelRunResponses, benchmarksCreateDefinitionData, benchmarksCreateDefinitionErrors, benchmarksCreateDefinitionResponses, benchmarksCreateRunData, benchmarksCreateRunErrors, benchmarksCreateRunResponses, benchmarksDeleteDefinitionData, benchmarksDeleteDefinitionErrors, benchmarksDeleteDefinitionResponses, benchmarksForceStopRunData, benchmarksForceStopRunErrors, benchmarksForceStopRunResponses, benchmarksGetResultsData, benchmarksGetResultsErrors, benchmarksGetResultsResponses, benchmarksListDefinitionsData, benchmarksListDefinitionsResponses, benchmarksListRunsData, benchmarksListRunsResponses, benchmarksUpdateDefinitionData, benchmarksUpdateDefinitionErrors, benchmarksUpdateDefinitionResponses, huggingfaceGetModelInfoData, huggingfaceGetModelInfoErrors, huggingfaceGetModelInfoResponses, huggingfaceGetParameterCountData, huggingfaceGetParameterCountErrors, huggingfaceGetParameterCountResponses, huggingfaceListModelFilesData, huggingfaceListModelFilesErrors, huggingfaceListModelFilesResponses, huggingfaceSearchModelsData, huggingfaceSearchModelsErrors, huggingfaceSearchModelsResponses, metricsMetricsData, metricsMetricsResponses, modelsCreateModelData, modelsCreateModelErrors, modelsCreateModelResponses, modelsDeleteModelData, modelsDeleteModelErrors, modelsDeleteModelResponses, modelsReadModelData, modelsReadModelErrors, modelsReadModelResponses, modelsReadModelsData, modelsReadModelsErrors, modelsReadModelsResponses, modelsUpdateModelData, modelsUpdateModelErrors, modelsUpdateModelResponses, serverInstancesDeleteServerData, serverInstancesDeleteServerErrors, serverInstancesDeleteServerResponses, serverInstancesGetServerInstanceData, serverInstancesGetServerInstanceErrors, serverInstancesGetServerInstanceResponses, serverInstancesListServerInstancesData, serverInstancesListServerInstancesResponses, serverInstancesRestartServerData, serverInstancesRestartServerErrors, serverInstancesRestartServerResponses, serverInstancesStartServerData, serverInstancesStartServerErrors, serverInstancesStartServerResponses, serverInstancesStopServerData, serverInstancesStopServerErrors, serverInstancesStopServerResponses, serverInstancesUpdateServerData, serverInstancesUpdateServerErrors, serverInstancesUpdateServerResponses, utilsHealthCheckData, utilsHealthCheckResponses, v1AudioCreateSpeechData, v1AudioCreateSpeechErrors, v1AudioCreateSpeechResponses, v1AudioCreateTranscriptionData, v1AudioCreateTranscriptionErrors, v1AudioCreateTranscriptionResponses, v1AudioCreateTranslationData, v1AudioCreateTranslationErrors, v1AudioCreateTranslationResponses, v1BatchesCancelBatchData, v1BatchesCancelBatchErrors, v1BatchesCancelBatchResponses, v1BatchesCreateBatchData, v1BatchesCreateBatchErrors, v1BatchesCreateBatchResponses, v1BatchesListBatchesData, v1BatchesListBatchesErrors, v1BatchesListBatchesResponses, v1BatchesRetrieveBatchData, v1BatchesRetrieveBatchErrors, v1BatchesRetrieveBatchResponses, v1ChatCreateChatCompletionData, v1ChatCreateChatCompletionErrors, v1ChatCreateChatCompletionResponses, v1CompletionsCreateCompletionData, v1CompletionsCreateCompletionErrors, v1CompletionsCreateCompletionResponses, v1EmbeddingsCreateEmbeddingData, v1EmbeddingsCreateEmbeddingErrors, v1EmbeddingsCreateEmbeddingResponses, v1FilesDeleteFileData, v1FilesDeleteFileErrors, v1FilesDeleteFileResponses, v1FilesListFilesData, v1FilesListFilesErrors, v1FilesListFilesResponses, v1FilesRetrieveFileContentData, v1FilesRetrieveFileContentErrors, v1FilesRetrieveFileContentResponses, v1FilesRetrieveFileData, v1FilesRetrieveFileErrors, v1FilesRetrieveFileResponses, v1FilesUploadFileData, v1FilesUploadFileErrors, v1FilesUploadFileResponses, v1ModelsListModelsData, v1ModelsListModelsResponses, v1ModelsRetrieveModelData, v1ModelsRetrieveModelErrors, v1ModelsRetrieveModelResponses, v1ResponsesCompactResponseData, v1ResponsesCompactResponseErrors, v1ResponsesCompactResponseResponses, v1ResponsesCreateResponseData, v1ResponsesCreateResponseErrors, v1ResponsesCreateResponseResponses } from './types.gen';
+import type { agentsDeleteAgentData, agentsDeleteAgentErrors, agentsDeleteAgentResponses, agentsGetAgentData, agentsGetAgentErrors, agentsGetAgentResponses, agentsListAgentsData, agentsListAgentsResponses, agentsRegisterAgentData, agentsRegisterAgentErrors, agentsRegisterAgentResponses, agentsSendCommandData, agentsSendCommandErrors, agentsSendCommandResponses, agentsUpdateAgentData, agentsUpdateAgentErrors, agentsUpdateAgentResponses, benchmarksAbortRunData, benchmarksAbortRunErrors, benchmarksAbortRunResponses, benchmarksCancelRunData, benchmarksCancelRunErrors, benchmarksCancelRunResponses, benchmarksCreateDefinitionData, benchmarksCreateDefinitionErrors, benchmarksCreateDefinitionResponses, benchmarksCreateRunData, benchmarksCreateRunErrors, benchmarksCreateRunResponses, benchmarksDeleteDefinitionData, benchmarksDeleteDefinitionErrors, benchmarksDeleteDefinitionResponses, benchmarksForceStopRunData, benchmarksForceStopRunErrors, benchmarksForceStopRunResponses, benchmarksGetResultsData, benchmarksGetResultsErrors, benchmarksGetResultsResponses, benchmarksListDefinitionsData, benchmarksListDefinitionsResponses, benchmarksListRunsData, benchmarksListRunsResponses, benchmarksUpdateDefinitionData, benchmarksUpdateDefinitionErrors, benchmarksUpdateDefinitionResponses, huggingfaceGetModelInfoData, huggingfaceGetModelInfoErrors, huggingfaceGetModelInfoResponses, huggingfaceGetParameterCountData, huggingfaceGetParameterCountErrors, huggingfaceGetParameterCountResponses, huggingfaceListModelFilesData, huggingfaceListModelFilesErrors, huggingfaceListModelFilesResponses, huggingfaceSearchModelsData, huggingfaceSearchModelsErrors, huggingfaceSearchModelsResponses, metricsMetricsData, metricsMetricsResponses, modelsCreateModelData, modelsCreateModelErrors, modelsCreateModelResponses, modelsDeleteModelData, modelsDeleteModelErrors, modelsDeleteModelResponses, modelsReadModelData, modelsReadModelErrors, modelsReadModelResponses, modelsReadModelsData, modelsReadModelsErrors, modelsReadModelsResponses, modelsUpdateModelData, modelsUpdateModelErrors, modelsUpdateModelResponses, serverInstancesDeleteServerData, serverInstancesDeleteServerErrors, serverInstancesDeleteServerResponses, serverInstancesGetServerInstanceData, serverInstancesGetServerInstanceErrors, serverInstancesGetServerInstanceResponses, serverInstancesInitializeExistingServerData, serverInstancesInitializeExistingServerErrors, serverInstancesInitializeExistingServerResponses, serverInstancesListServerInstancesData, serverInstancesListServerInstancesResponses, serverInstancesRestartServerData, serverInstancesRestartServerErrors, serverInstancesRestartServerResponses, serverInstancesStartServerData, serverInstancesStartServerErrors, serverInstancesStartServerResponses, serverInstancesStopServerData, serverInstancesStopServerErrors, serverInstancesStopServerResponses, serverInstancesUpdateServerData, serverInstancesUpdateServerErrors, serverInstancesUpdateServerMetadataData, serverInstancesUpdateServerMetadataErrors, serverInstancesUpdateServerMetadataResponses, serverInstancesUpdateServerResponses, utilsHealthCheckData, utilsHealthCheckResponses, v1AudioCreateSpeechData, v1AudioCreateSpeechErrors, v1AudioCreateSpeechResponses, v1AudioCreateTranscriptionData, v1AudioCreateTranscriptionErrors, v1AudioCreateTranscriptionResponses, v1AudioCreateTranslationData, v1AudioCreateTranslationErrors, v1AudioCreateTranslationResponses, v1BatchesCancelBatchData, v1BatchesCancelBatchErrors, v1BatchesCancelBatchResponses, v1BatchesCreateBatchData, v1BatchesCreateBatchErrors, v1BatchesCreateBatchResponses, v1BatchesListBatchesData, v1BatchesListBatchesErrors, v1BatchesListBatchesResponses, v1BatchesRetrieveBatchData, v1BatchesRetrieveBatchErrors, v1BatchesRetrieveBatchResponses, v1ChatCreateChatCompletionData, v1ChatCreateChatCompletionErrors, v1ChatCreateChatCompletionResponses, v1CompletionsCreateCompletionData, v1CompletionsCreateCompletionErrors, v1CompletionsCreateCompletionResponses, v1EmbeddingsCreateEmbeddingData, v1EmbeddingsCreateEmbeddingErrors, v1EmbeddingsCreateEmbeddingResponses, v1FilesDeleteFileData, v1FilesDeleteFileErrors, v1FilesDeleteFileResponses, v1FilesListFilesData, v1FilesListFilesErrors, v1FilesListFilesResponses, v1FilesRetrieveFileContentData, v1FilesRetrieveFileContentErrors, v1FilesRetrieveFileContentResponses, v1FilesRetrieveFileData, v1FilesRetrieveFileErrors, v1FilesRetrieveFileResponses, v1FilesUploadFileData, v1FilesUploadFileErrors, v1FilesUploadFileResponses, v1ModelsListModelsData, v1ModelsListModelsResponses, v1ModelsRetrieveModelData, v1ModelsRetrieveModelErrors, v1ModelsRetrieveModelResponses, v1ResponsesCompactResponseData, v1ResponsesCompactResponseErrors, v1ResponsesCompactResponseResponses, v1ResponsesCreateResponseData, v1ResponsesCreateResponseErrors, v1ResponsesCreateResponseResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -367,6 +367,66 @@ export class ServerInstancesService {
         return (options.client ?? client).post<serverInstancesStartServerResponses, serverInstancesStartServerErrors, ThrowOnError>({
             responseType: 'json',
             url: '/api/v1/server-instances/start',
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                ...options.headers
+            }
+        });
+    }
+    
+    /**
+     * Initialize Existing Server
+     *
+     * Retry initialization and refresh metadata for an existing server.
+     */
+    public static instancesInitializeExistingServer<ThrowOnError extends boolean = true>(options: Options<serverInstancesInitializeExistingServerData, ThrowOnError>) {
+        return (options.client ?? client).post<serverInstancesInitializeExistingServerResponses, serverInstancesInitializeExistingServerErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/server-instances/{server_id}/initialize',
+            ...options
+        });
+    }
+    
+    /**
+     * Initialize Existing Server
+     *
+     * Retry initialization and refresh metadata for an existing server.
+     */
+    public static instancesInitializeExistingServer2<ThrowOnError extends boolean = true>(options: Options<serverInstancesInitializeExistingServerData, ThrowOnError>) {
+        return (options.client ?? client).post<serverInstancesInitializeExistingServerResponses, serverInstancesInitializeExistingServerErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/server-instances/{server_id}/initialize',
+            ...options
+        });
+    }
+    
+    /**
+     * Update Server Metadata
+     *
+     * Update editable overrides without changing server runtime settings.
+     */
+    public static instancesUpdateServerMetadata<ThrowOnError extends boolean = true>(options: Options<serverInstancesUpdateServerMetadataData, ThrowOnError>) {
+        return (options.client ?? client).put<serverInstancesUpdateServerMetadataResponses, serverInstancesUpdateServerMetadataErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/server-instances/{server_id}/metadata',
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                ...options.headers
+            }
+        });
+    }
+    
+    /**
+     * Update Server Metadata
+     *
+     * Update editable overrides without changing server runtime settings.
+     */
+    public static instancesUpdateServerMetadata2<ThrowOnError extends boolean = true>(options: Options<serverInstancesUpdateServerMetadataData, ThrowOnError>) {
+        return (options.client ?? client).put<serverInstancesUpdateServerMetadataResponses, serverInstancesUpdateServerMetadataErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/api/v1/server-instances/{server_id}/metadata',
             ...options,
             headers: {
                 'Content-Type': 'application/json',
@@ -950,11 +1010,10 @@ export class V1 {
     /**
      * List Models
      *
-     * List available models.
+     * List all configured server models.
      *
-     * Returns the aliases of server instances that are starting or running —
-     * these are the names clients can use in the `model` field of
-     * /v1/chat/completions, /v1/completions, and /v1/embeddings.
+     * Server aliases remain discoverable even when their server is stopped.
+     * Requests using a stopped model can trigger the normal server startup flow.
      */
     public static listModels<ThrowOnError extends boolean = true>(options?: Options<v1ModelsListModelsData, ThrowOnError>) {
         return (options?.client ?? client).get<v1ModelsListModelsResponses, unknown, ThrowOnError>({

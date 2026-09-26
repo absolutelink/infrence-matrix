@@ -21,13 +21,9 @@ from app.services.server_options import (
     validate_halogen_options,
     validate_server_options,
 )
-from app.services.server_startup import (
-    build_start_payload as _build_start_payload,
-)
-from app.services.server_startup import dispatch_prepare as _dispatch_prepare
-from app.services.server_startup import (
-    dispatch_start as _dispatch_start,
-)
+from app.services.server_startup import build_start_payload as _build_start_payload
+from app.services.server_startup import dispatch_start as _dispatch_start
+from app.services.server_startup import initialize_server as _initialize_server
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +98,7 @@ class ServerInstanceResponse(BaseModel):
     mtp_draft_max: int | None = None
     inactivity_timeout_seconds: int = 300
     server_options: dict = Field(default_factory=dict)
+    model_metadata: dict = Field(default_factory=dict)
 
 
 class ServerInstanceListResponse(BaseModel):
@@ -144,6 +141,15 @@ class UpdateServerRequest(BaseModel):
     dflash_model_id: str | None = None
     server_options: ServerOptions | None = None
     restart: bool = True  # restart immediately if the server is running
+
+
+class ModelMetadataUpdate(BaseModel):
+    """User-editable overrides for discovered OpenAI model metadata."""
+
+    description: str | None = None
+    owned_by: str | None = None
+    capabilities: dict[str, Any] | None = None
+    max_context_length: int | None = Field(default=None, ge=1)
 
 
 @router.get("", response_model=ServerInstanceListResponse)
@@ -203,6 +209,7 @@ async def list_server_instances() -> ServerInstanceListResponse:
                     mtp_draft_max=instance.mtp_draft_max,
                     inactivity_timeout_seconds=instance.inactivity_timeout_seconds,
                     server_options=instance.server_options or {},
+                    model_metadata=instance.model_metadata or {},
                 )
             )
 
@@ -267,6 +274,7 @@ async def get_server_instance(server_id: str) -> ServerInstanceResponse:
             mtp_draft_max=instance.mtp_draft_max,
             inactivity_timeout_seconds=instance.inactivity_timeout_seconds,
             server_options=instance.server_options or {},
+            model_metadata=instance.model_metadata or {},
         )
 
 
@@ -419,7 +427,7 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
             mmproj_model_id=mmproj_model.id if mmproj_model else None,
             dflash_model_id=dflash_model.id if dflash_model else None,
             server_options=options,
-            status="stopped",
+            status="preparing",
             health_status="unknown",
             inactivity_timeout_seconds=300,
         )
@@ -431,18 +439,76 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
 
         payload = _build_start_payload(server, model)
 
-        # Dispatch to the agent in the background: the download can take a
-        # long time and the HTTP request from the UI must not block on it.
+        # Initialization downloads, starts, inspects, and stops the server in
+        # the background. The UI tracks the persisted preparation states.
         agent_id = str(agent.id)
-        asyncio.create_task(_dispatch_prepare(agent_id, server_id, payload))
+        asyncio.create_task(_initialize_server(agent_id, server_id, payload))
 
         return {
-            "status": "stopped",
+            "status": "preparing",
             "server_id": server_id,
             "model_id": str(model.id),
             "agent_id": agent_id,
-            "message": "Server created; model preparation requested",
+            "message": "Server created; initialization started",
         }
+
+
+@router.post("/{server_id}/initialize")
+async def initialize_existing_server(server_id: str) -> dict[str, Any]:
+    """Retry initialization and refresh metadata for an existing server."""
+    async with AsyncSessionMaker() as session:
+        instance = await session.get(ServerInstance, uuid_module.UUID(server_id))
+        if not instance:
+            raise HTTPException(status_code=404, detail="Server instance not found")
+        if instance.status in {"preparing", "metadata_gathering"}:
+            raise HTTPException(
+                status_code=409, detail="Server initialization is already running"
+            )
+        if instance.status in {"starting", "running"}:
+            raise HTTPException(
+                status_code=409, detail="Stop the server before initializing it"
+            )
+        agent = await session.get(Agent, instance.agent_id)
+        model = await session.get(Model, instance.model_id)
+        if not agent or not model:
+            raise HTTPException(status_code=404, detail="Server dependencies not found")
+        if agent.status != "online":
+            raise HTTPException(
+                status_code=503, detail=f"Agent {agent.name} is {agent.status}"
+            )
+        instance.status = "preparing"
+        instance.health_status = "unknown"
+        instance.error_message = None
+        await session.commit()
+        payload = _build_start_payload(instance, model)
+        asyncio.create_task(_initialize_server(str(agent.id), server_id, payload))
+        return {"status": "preparing", "server_id": server_id}
+
+
+@router.put("/{server_id}/metadata")
+async def update_server_metadata(
+    server_id: str, request: ModelMetadataUpdate
+) -> dict[str, Any]:
+    """Update editable overrides without changing server runtime settings."""
+    async with AsyncSessionMaker() as session:
+        instance = await session.get(ServerInstance, uuid_module.UUID(server_id))
+        if not instance:
+            raise HTTPException(status_code=404, detail="Server instance not found")
+        if instance.status in {"preparing", "metadata_gathering"}:
+            raise HTTPException(
+                status_code=409, detail="Server initialization is in progress"
+            )
+        metadata = dict(instance.model_metadata or {})
+        updates = request.model_dump(exclude_unset=True)
+        for key, value in updates.items():
+            if value is not None:
+                metadata[key] = value
+            else:
+                metadata.pop(key, None)
+        instance.model_metadata = metadata
+        session.add(instance)
+        await session.commit()
+        return {"status": "saved", "server_id": server_id, "model_metadata": metadata}
 
 
 @router.put("/{server_id}")
@@ -458,10 +524,16 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
         if not instance:
             raise HTTPException(status_code=404, detail="Server instance not found")
 
-        if instance.status == "starting":
+        if instance.status in {
+            "uninitialized",
+            "preparing",
+            "metadata_gathering",
+            "initialization_failed",
+            "starting",
+        }:
             raise HTTPException(
                 status_code=409,
-                detail="Server is starting; wait for it to finish before editing",
+                detail="Server must be initialized and stopped before editing",
             )
 
         was_running = instance.status == "running"
@@ -578,6 +650,23 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
             except Exception as e:
                 logger.warning(f"Failed to stop server before restart: {e}")
 
+            if needs_start:
+                instance.status = "uninitialized"
+                instance.model_metadata = {}
+                instance.error_message = None
+                await session.commit()
+                payload = _build_start_payload(instance, model)
+                asyncio.create_task(
+                    _initialize_server(
+                        str(instance.agent_id), str(instance.id), payload
+                    )
+                )
+                return {
+                    "status": "preparing",
+                    "server_id": str(instance.id),
+                    "message": "Settings saved — reinitializing model metadata",
+                }
+
             instance.status = "starting"
             instance.error_message = None
             await session.commit()
@@ -593,28 +682,34 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
                 "message": "Settings saved — restarting server",
             }
 
-        # A stopped/errored server whose model or projector changed gets
-        # started right away (download included, status stays "starting"
-        # until the agent reports healthy).
+        # A stopped/errored server whose model or projector changed must be
+        # reinitialized before it can return to the stopped state.
         if not was_running and needs_start:
+            instance.status = "uninitialized"
+            instance.model_metadata = {}
+            instance.error_message = None
+            await session.commit()
             agent = await session.get(Agent, instance.agent_id)
             if agent and agent.status == "online":
                 model = await session.get(Model, instance.model_id)
                 if model:
-                    instance.status = "starting"
-                    instance.error_message = None
-                    await session.commit()
-
                     payload = _build_start_payload(instance, model)
                     agent_id = str(agent.id)
                     server_id = str(instance.id)
-                    asyncio.create_task(_dispatch_start(agent_id, server_id, payload))
+                    asyncio.create_task(
+                        _initialize_server(agent_id, server_id, payload)
+                    )
 
                     return {
-                        "status": "starting",
+                        "status": "preparing",
                         "server_id": server_id,
-                        "message": "Settings saved — starting server (downloads may take a while)",
+                        "message": "Settings saved — reinitializing model metadata",
                     }
+            return {
+                "status": "uninitialized",
+                "server_id": str(instance.id),
+                "message": "Settings saved — initialize when the agent is online",
+            }
 
         return {
             "status": instance.status,
@@ -636,6 +731,16 @@ async def restart_server(server_id: str) -> dict[str, Any]:
         if not instance:
             raise HTTPException(status_code=404, detail="Server instance not found")
 
+        if instance.status in {
+            "uninitialized",
+            "preparing",
+            "metadata_gathering",
+            "initialization_failed",
+        }:
+            raise HTTPException(
+                status_code=409,
+                detail="Server must be initialized before it can be started",
+            )
         if instance.status in ("starting", "running"):
             raise HTTPException(
                 status_code=409,
@@ -680,6 +785,16 @@ async def stop_server(server_id: str) -> dict[str, str]:
         instance = await session.get(ServerInstance, uuid_module.UUID(server_id))
         if not instance:
             raise HTTPException(status_code=404, detail="Server instance not found")
+        if instance.status in {
+            "uninitialized",
+            "preparing",
+            "metadata_gathering",
+            "initialization_failed",
+        }:
+            raise HTTPException(
+                status_code=409,
+                detail="Server is not running or initialized",
+            )
 
         instance.status = "stopped"
         instance.health_status = "unknown"

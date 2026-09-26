@@ -3,6 +3,7 @@
 import socket
 from pathlib import Path
 
+import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -389,6 +390,26 @@ async def get_server_status(server_id: str) -> dict:
     """Get status of a specific server."""
     status = await server_manager.get_server_status(server_id)
     return status
+
+
+@router.get("/metadata/{server_id}")
+async def get_server_metadata(server_id: str) -> dict:
+    """Return the OpenAI model list from a healthy managed server."""
+    config = server_manager.configs.get(server_id)
+    if config is None or server_id not in server_manager.servers:
+        raise HTTPException(status_code=404, detail="Server is not running")
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(f"http://127.0.0.1:{config.port}/v1/models")
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            raise HTTPException(status_code=502, detail="Invalid /v1/models response")
+        return payload
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
 
 
 @router.get("/logs/{server_id}")

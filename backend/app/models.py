@@ -384,6 +384,10 @@ class ServerInstance(SQLModel, table=True):
     status: str
     health_status: str = "unknown"
 
+    # OpenAI model metadata discovered during initialization. The configured
+    # alias remains the public model id; this stores the upstream model object.
+    model_metadata: dict = Field(default_factory=dict, sa_column=Column(JSON))
+
     started_at: datetime | None = None
     last_request_at: datetime | None = None
     last_health_check: datetime | None = None

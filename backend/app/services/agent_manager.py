@@ -447,7 +447,8 @@ class AgentManager:
                 server = result.scalar_one_or_none()
 
                 if server:
-                    server.status = "running"
+                    if server.status in {"starting", "running"}:
+                        server.status = "running"
                     server.health_status = "healthy"
                     server.last_health_check = datetime.now(UTC)
                     if not server.started_at:
@@ -471,7 +472,8 @@ class AgentManager:
                 server = result.scalar_one_or_none()
 
                 if server:
-                    server.status = "stopped"
+                    if server.status not in {"preparing", "metadata_gathering"}:
+                        server.status = "stopped"
                     server.health_status = "unknown"
                     session.add(server)
                     await session.commit()

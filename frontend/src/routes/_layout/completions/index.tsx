@@ -158,7 +158,16 @@ function TextCompletion() {
                 <SelectGroup>
                   <SelectLabel>Servers</SelectLabel>
                   {servers.map((server) => (
-                    <SelectItem key={server.id} value={server.alias}>
+                    <SelectItem
+                      key={server.id}
+                      value={server.alias}
+                      disabled={
+                        server.status === "uninitialized" ||
+                        server.status === "preparing" ||
+                        server.status === "metadata_gathering" ||
+                        server.status === "initialization_failed"
+                      }
+                    >
                       <div className="flex flex-col items-start">
                         <span>
                           {server.alias || server.model_name}
@@ -166,6 +175,10 @@ function TextCompletion() {
                           server.status === "error" ? (
                             <span className="ml-2 text-xs text-muted-foreground">
                               (will start on first prompt)
+                            </span>
+                          ) : server.status !== "running" ? (
+                            <span className="ml-2 text-xs text-muted-foreground">
+                              ({server.status.split("_").join(" ")})
                             </span>
                           ) : null}
                         </span>
