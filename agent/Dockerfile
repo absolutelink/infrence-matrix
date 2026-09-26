@@ -41,4 +41,4 @@ EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # Use uvicorn to run the FastAPI app directly
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port \"${AGENT_PORT:-8080}\" --log-level info"]
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port \"${AGENT_PORT:-8080}\" --log-level info --ws-ping-interval 30 --ws-ping-timeout 60"]

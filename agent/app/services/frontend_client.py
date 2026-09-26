@@ -161,7 +161,11 @@ class FrontendClient:
 
         while True:
             try:
-                async with connect(ws_url) as websocket:
+                async with connect(
+                    ws_url,
+                    ping_interval=settings.WS_PING_INTERVAL,
+                    ping_timeout=settings.WS_PING_TIMEOUT,
+                ) as websocket:
                     self._ws_connection = websocket
                     self.ws_connected = True
                     logger.info("WebSocket connected to frontend")

@@ -82,6 +82,8 @@ class Settings(BaseSettings):
     BENCHMARK_IDLE_POLL_INTERVAL: float = 2.0
 
     # Agent WebSocket
+    WS_PING_INTERVAL: int = 30
+    WS_PING_TIMEOUT: int = 60
     WS_RECONNECT_INTERVAL: int = 5
     AGENT_MAX_RECONNECT_ATTEMPTS: int = 10
 

@@ -116,7 +116,7 @@ class GPUMonitor:
 
     async def get_gpu_info(self) -> dict:
         """Get GPU information."""
-        info = _sample_gpu()
+        info = await asyncio.to_thread(_sample_gpu)
         if info:
             return info
 
@@ -125,14 +125,14 @@ class GPUMonitor:
 
     async def get_vram_usage(self) -> int:
         """Get current VRAM usage in bytes."""
-        info = _sample_gpu()
+        info = await asyncio.to_thread(_sample_gpu)
         if info and info["gpus"]:
             return sum(g["vram_used"] for g in info["gpus"])
         return 0
 
     async def get_utilization(self) -> float:
         """Get GPU utilization percentage."""
-        info = _sample_gpu()
+        info = await asyncio.to_thread(_sample_gpu)
         if info and info["gpus"]:
             return sum(g["utilization"] for g in info["gpus"]) / len(info["gpus"])
         return 0.0
@@ -142,7 +142,9 @@ async def _gpu_usage_loop() -> None:
     """Periodically emit gpu.usage events."""
     while True:
         try:
-            sample = _sample_gpu()
+            # nvidia-smi and sysfs reads are blocking; never stall the event
+            # loop that services the agent WebSocket.
+            sample = await asyncio.to_thread(_sample_gpu)
             if sample:
                 total = sum(g["vram_total"] for g in sample["gpus"])
                 used = sum(g["vram_used"] for g in sample["gpus"])

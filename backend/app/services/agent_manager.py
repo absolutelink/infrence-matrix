@@ -209,7 +209,10 @@ class AgentManager:
         while True:
             try:
                 async with connect(
-                    ws_url, extra_headers={"X-Agent-ID": agent_id}
+                    ws_url,
+                    extra_headers={"X-Agent-ID": agent_id},
+                    ping_interval=settings.WS_PING_INTERVAL,
+                    ping_timeout=settings.WS_PING_TIMEOUT,
                 ) as websocket:
                     self.ws_connections[agent_id] = websocket
                     agent.websocket_connected = True

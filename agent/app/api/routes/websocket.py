@@ -31,12 +31,15 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     queue = subscribe()
     heartbeat_task = asyncio.create_task(_heartbeat(websocket))
     sender_task = asyncio.create_task(_send_events(websocket, queue))
+    tasks = {heartbeat_task, sender_task}
 
     try:
-        # Keep the connection open until the client disconnects. Any send
-        # failure in the background tasks surfaces here as an exception.
-        while True:
-            await asyncio.sleep(3600)
+        # Keep the connection open until the client disconnects or a sender
+        # observes a failed socket. Waiting on the tasks prevents send errors
+        # from becoming unhandled task exceptions.
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        for task in done:
+            task.result()
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
     except Exception as e:  # noqa: BLE001 - keep connection errors from crashing the endpoint

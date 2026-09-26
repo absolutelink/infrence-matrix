@@ -69,4 +69,4 @@ RUN chmod +x /etc/entrypoint.d/*.sh
 ENTRYPOINT ["/entrypoint.sh"]
 
 # Run FastAPI server
-CMD ["fastapi", "run", "app/main.py", "--workers", "4"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4", "--ws-ping-interval", "30", "--ws-ping-timeout", "60"]

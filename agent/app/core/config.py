@@ -43,6 +43,8 @@ class Settings(BaseSettings):
 
     # WebSocket
     WS_HEARTBEAT_INTERVAL: int = 30
+    WS_PING_INTERVAL: int = 30
+    WS_PING_TIMEOUT: int = 60
     WS_RECONNECT_INTERVAL: int = 5
     WS_MAX_BUFFER_EVENTS: int = 1000
 
