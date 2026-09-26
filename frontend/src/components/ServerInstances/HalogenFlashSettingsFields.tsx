@@ -26,6 +26,7 @@ export type HalogenFlashOptions = {
   composable_context?: number
   composable_context_floor?: number
   composable_context_bytes?: number
+  vision_tower?: number
 }
 
 type Props = {
@@ -93,6 +94,22 @@ export function HalogenFlashSettingsFields({ options, onChange }: Props) {
             </div>
           ))}
         </div>
+        <label
+          htmlFor="halogen-flash-vision-tower"
+          className="flex items-center gap-2 text-sm"
+        >
+          <Checkbox
+            id="halogen-flash-vision-tower"
+            checked={options.vision_tower === 1}
+            onCheckedChange={(checked) =>
+              onChange({
+                ...options,
+                vision_tower: checked === true ? 1 : undefined,
+              })
+            }
+          />
+          Enable Vision
+        </label>
       </section>
       <section className="space-y-3 border-t pt-4">
         <h3 className="text-sm font-medium">Prompt Cache</h3>

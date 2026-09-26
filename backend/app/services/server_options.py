@@ -170,7 +170,7 @@ class HalogenFlashServerOptions(BaseModel):
     composable_context_floor: int | None = Field(default=None, ge=0)
     composable_context_bytes: int | None = Field(default=None, ge=0)
     grammar: int | None = Field(default=None, ge=0, le=1)
-    vision_tower: str | None = None
+    vision_tower: int | None = Field(default=None, ge=0, le=1)
 
     model_config = ConfigDict(extra="forbid")
 
