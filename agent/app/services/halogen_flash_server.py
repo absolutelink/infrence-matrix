@@ -4,6 +4,7 @@ import os
 import subprocess
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
@@ -68,6 +69,10 @@ class HalogenFlashServerManager(HalogenServerManager):
                 "HALOGEN_TOKENIZER": HALOGEN_FLASH_TOKENIZER,
             }
         )
+        if config.options.get("cache_dir_enabled", False):
+            cache_dir = Path(settings.CACHE_PATH) / server_id
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            env["HALOGEN_CACHE_DIR"] = str(cache_dir)
         mappings = {
             "kv_slots": "HALOGEN_KV_SLOTS",
             "kv_pool_positions": "HALOGEN_KV_POOL_POSITIONS",
@@ -91,10 +96,16 @@ class HalogenFlashServerManager(HalogenServerManager):
             "max_thinking_tokens": "HALOGEN_MAX_THINKING_TOKENS",
             "drafter_default": "HALOGEN_DRAFTER_DEFAULT",
             "prompt_cache": "HALOGEN_PROMPT_CACHE",
+            "prefill_chunk": "HALOGEN_PREFILL_CHUNK",
             "cache_entries": "HALOGEN_CACHE_ENTRIES",
             "cache_branches": "HALOGEN_CACHE_BRANCHES",
             "cache_snap3": "HALOGEN_CACHE_SNAP3",
             "cache_full": "HALOGEN_CACHE_FULL",
+            "cache_disk_gib": "HALOGEN_CACHE_DISK_GIB",
+            "cache_prune_old": "HALOGEN_CACHE_PRUNE_OLD",
+            "composable_context": "HALOGEN_COMPOSABLE_CONTEXT",
+            "composable_context_floor": "HALOGEN_COMPOSABLE_CONTEXT_FLOOR",
+            "composable_context_bytes": "HALOGEN_COMPOSABLE_CONTEXT_BYTES",
             "grammar": "HALOGEN_GRAMMAR",
             "vision_tower": "HALOGEN_VISION_TOWER",
         }

@@ -77,6 +77,34 @@ async def test_flash_start_uses_flash_environment_and_two_ports(mock_popen):
 
 
 @pytest.mark.asyncio
+@patch("app.services.halogen_flash_server.subprocess.Popen")
+async def test_flash_cache_directory_is_created_before_start(mock_popen, tmp_path):
+    manager = HalogenFlashServerManager()
+    mock_popen.return_value = Mock()
+    config = HalogenFlashServerConfig(
+        model_path=HALOGEN_FLASH_CHECKPOINT,
+        port=8091,
+        api_port=8091,
+        engine_port=8092,
+        options={"cache_dir_enabled": True},
+    )
+
+    with (
+        patch("app.services.halogen_flash_server.settings.CACHE_PATH", str(tmp_path)),
+        patch(
+            "app.services.halogen_flash_server.model_manager.download_repository",
+            new=AsyncMock(),
+        ),
+        patch.object(manager, "_wait_for_health", new=AsyncMock()),
+    ):
+        assert await manager.start_server("flash-cache-uuid", config) is True
+
+    cache_dir = tmp_path / "flash-cache-uuid"
+    assert cache_dir.is_dir()
+    assert mock_popen.call_args.kwargs["env"]["HALOGEN_CACHE_DIR"] == str(cache_dir)
+
+
+@pytest.mark.asyncio
 async def test_flash_stop_kills_the_whole_process_group():
     manager = HalogenFlashServerManager()
     process = Mock(pid=1234)

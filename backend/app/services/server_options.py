@@ -158,10 +158,17 @@ class HalogenFlashServerOptions(BaseModel):
     max_thinking_tokens: int | None = Field(default=None, ge=0)
     drafter_default: int | None = Field(default=None, ge=0, le=1)
     prompt_cache: int | None = Field(default=None, ge=0, le=2)
+    cache_dir_enabled: bool = False
+    prefill_chunk: int | None = Field(default=None, ge=1)
     cache_entries: int | None = Field(default=None, ge=1)
     cache_branches: int | None = Field(default=None, ge=1)
     cache_snap3: int | None = Field(default=None, ge=0, le=1)
     cache_full: int | None = Field(default=None, ge=0, le=1)
+    cache_disk_gib: int | None = Field(default=None, ge=0)
+    cache_prune_old: int | None = Field(default=None, ge=0, le=1)
+    composable_context: int | None = Field(default=None, ge=0, le=1)
+    composable_context_floor: int | None = Field(default=None, ge=0)
+    composable_context_bytes: int | None = Field(default=None, ge=0)
     grammar: int | None = Field(default=None, ge=0, le=1)
     vision_tower: str | None = None
 
