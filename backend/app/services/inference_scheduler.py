@@ -60,6 +60,13 @@ def normalize_slot_telemetry(
     return SlotTelemetry(capacity, active, max(capacity - active, 0))
 
 
+def _vram_requirements_fit(
+    total_vram: int, target_required: int, running_required: int
+) -> bool:
+    """Check configured VRAM requirements against physical capacity."""
+    return running_required + target_required <= total_vram
+
+
 async def get_slot_telemetry(server: ServerInstance) -> SlotTelemetry:
     """Read a server's llama.cpp slots without making telemetry mandatory."""
     options = (
@@ -166,16 +173,14 @@ class InferenceScheduler:
             ).scalar_one_or_none()
             return head is not None and head.id == lease_id
 
-    async def _live_vram(self, agent_id: uuid.UUID) -> tuple[int, int] | None:
-        """Read current total/free VRAM from the target agent."""
+    async def _live_vram(self, agent_id: uuid.UUID) -> int | None:
+        """Read maximum VRAM from the target agent, ignoring transient usage."""
         try:
             payload = await agent_manager.send_to_agent(
                 str(agent_id), "GET", "/gpu", timeout=TELEMETRY_TIMEOUT_SECONDS
             )
             total = int(payload.get("vram_total", 0))
-            used = int(payload.get("vram_used", 0))
-            free = int(payload.get("vram_free", total - used))
-            return total, max(free, 0)
+            return max(total, 0)
         except Exception as exc:
             logger.debug("VRAM telemetry unavailable for %s: %s", agent_id, exc)
             return None
@@ -185,7 +190,11 @@ class InferenceScheduler:
             model = await session.get(Model, server.model_id)
             if model is None:
                 return server.vram_required_bytes or 0
-            required = server.vram_required_bytes or model.size_bytes
+            required = (
+                server.vram_required_bytes
+                if server.vram_required_bytes is not None
+                else model.size_bytes
+            )
             for model_id in (server.mmproj_model_id, server.dflash_model_id):
                 if model_id:
                     extra = await session.get(Model, model_id)
@@ -275,9 +284,7 @@ class InferenceScheduler:
                 raise TimeoutError(
                     "No VRAM became available for the queued inference request"
                 )
-            usage = await self._live_vram(target.agent_id)
-            if usage is not None and usage[1] >= required:
-                return
+            total_vram = await self._live_vram(target.agent_id)
 
             async with AsyncSessionMaker() as session:
                 target_agent = await session.get(Agent, target.agent_id)
@@ -306,6 +313,13 @@ class InferenceScheduler:
                     if target_gpu_id is None
                     or (agent.gpu_info or {}).get("id") == target_gpu_id
                 ]
+                allocated = sum(
+                    await self._required_vram(candidate) for candidate in candidates
+                )
+            if total_vram is not None and _vram_requirements_fit(
+                total_vram, required, allocated
+            ):
+                return
             stopped = False
             for candidate in candidates:
                 if await self._active_leases(candidate.id):

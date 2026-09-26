@@ -6,6 +6,7 @@ import pytest
 
 from app.services.agent_manager import agent_manager
 from app.services.inference_scheduler import (
+    _vram_requirements_fit,
     get_slot_telemetry,
     normalize_slot_telemetry,
 )
@@ -85,3 +86,8 @@ llamacpp:requests_processing 3
     assert (telemetry.capacity, telemetry.active, telemetry.available) == (8, 3, 5)
     send_to_agent.assert_awaited_once()
     assert send_to_agent.await_args.args[2] == f"/proxy/{server.id}/metrics"
+
+
+def test_vram_admission_uses_configured_requirements():
+    assert not _vram_requirements_fit(113, 30, 110)
+    assert _vram_requirements_fit(113, 30, 0)
