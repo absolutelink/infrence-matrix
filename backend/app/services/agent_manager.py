@@ -140,6 +140,14 @@ class AgentManager:
                     f"Marked {stale_count} server instance(s) as stopped "
                     f"for restarted agent {name}"
                 )
+                stale_result = await session.execute(
+                    select(ServerInstance.id).where(
+                        ServerInstance.agent_id == agent.id,
+                        ServerInstance.status == "stopped",
+                    )
+                )
+                for server_id in stale_result.scalars().all():
+                    await self._invalidate_server_leases(session, server_id)
 
             # Reconcile the complete in-memory state reported by newer agents.
             # This preserves booting state across backend restarts instead of
@@ -258,7 +266,38 @@ class AgentManager:
         # Max attempts reached
         agent.status = "unreachable"
         self._reconnect_tasks.pop(agent_id, None)
+        await self._mark_agent_servers_unavailable(agent_id)
         logger.error(f"Max reconnect attempts reached for agent {agent_id}")
+
+    async def _mark_agent_servers_unavailable(self, agent_id: str) -> None:
+        """Stop an unreachable agent's servers and release their active leases."""
+        from sqlalchemy import select
+
+        from app.models import ServerInstance
+
+        async with AsyncSessionMaker() as session:
+            result = await session.execute(
+                select(ServerInstance.id).where(
+                    ServerInstance.agent_id == agent_id,
+                    ServerInstance.status.in_(["starting", "running"]),
+                )
+            )
+            server_ids = list(result.scalars().all())
+            if not server_ids:
+                return
+            await session.execute(
+                update(ServerInstance)
+                .where(ServerInstance.id.in_(server_ids))
+                .values(status="stopped", health_status="unknown")
+            )
+            for server_id in server_ids:
+                await self._invalidate_server_leases(session, server_id)
+            await session.commit()
+            logger.warning(
+                "Stopped %d server instance(s) for unreachable agent %s",
+                len(server_ids),
+                agent_id,
+            )
 
     async def _handle_agent_event(self, agent_id: str, event: dict) -> None:
         """Process event from Agent."""

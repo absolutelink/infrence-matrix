@@ -10,3 +10,4 @@ backend/app/frontend/
 .devcontainer/.envbuilder.tmp
 __pycache__/
 *.pyc
+AGENTS.md
