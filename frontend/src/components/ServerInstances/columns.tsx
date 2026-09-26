@@ -285,7 +285,7 @@ function InstanceActions({ instance }: { instance: ServerInstance }) {
     },
   })
 
-  const canStart = instance.status === "stopped"
+  const canStart = ["stopped", "error"].includes(instance.status)
   const canEdit = ["stopped", "running", "error"].includes(instance.status)
   const canInitialize = [
     "uninitialized",
@@ -338,14 +338,16 @@ function InstanceActions({ instance }: { instance: ServerInstance }) {
                 : "Initialize / Refresh Metadata"}
             </DropdownMenuItem>
           ) : null}
-          {instance.status === "running" ? (
+          {instance.status === "running" ||
+          instance.status === "starting" ||
+          instance.status === "stopping" ? (
             <DropdownMenuItem
               className="text-destructive"
               onClick={() => stopMutation.mutate()}
               disabled={stopMutation.isPending}
             >
               <Power className="mr-2 h-4 w-4" />
-              Stop Server
+              {instance.status === "running" ? "Stop Server" : "Force Stop"}
             </DropdownMenuItem>
           ) : null}
           {canStart ? (
@@ -354,7 +356,7 @@ function InstanceActions({ instance }: { instance: ServerInstance }) {
               disabled={startMutation.isPending}
             >
               <Play className="mr-2 h-4 w-4" />
-              Start Server
+              {instance.status === "error" ? "Restart Server" : "Start Server"}
             </DropdownMenuItem>
           ) : null}
           <DropdownMenuSeparator />

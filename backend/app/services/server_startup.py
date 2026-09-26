@@ -20,6 +20,7 @@ import uuid as uuid_module
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 from sqlmodel import col, select
 
 from app.db.session import AsyncSessionMaker
@@ -198,8 +199,28 @@ async def dispatch_start(
                 session.add(server)
                 await session.commit()
                 logger.info(f"Server {server_id} marked as running (dispatch ack)")
+    except httpx.RequestError as e:
+        # The agent request can disconnect while the process is still loading.
+        # Leave startup reconciliation to the agent registration/status events
+        # instead of turning a potentially live process into a terminal error.
+        logger.warning(
+            "Start response lost for server %s on agent %s: %s",
+            server_id,
+            agent_id,
+            e,
+        )
+        async with AsyncSessionMaker() as session:
+            server = await session.get(ServerInstance, uuid_module.UUID(server_id))
+            if server:
+                server.status = "starting"
+                server.health_status = "unknown"
+                server.error_message = str(e)
+                session.add(server)
+                await session.commit()
     except Exception as e:
-        logger.error(f"Failed to start server {server_id} on agent {agent_id}: {e}")
+        logger.error(
+            "Failed to start server %s on agent %s: %s", server_id, agent_id, e
+        )
         async with AsyncSessionMaker() as session:
             server = await session.get(ServerInstance, uuid_module.UUID(server_id))
             if server:
