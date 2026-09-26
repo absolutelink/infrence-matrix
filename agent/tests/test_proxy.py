@@ -9,13 +9,15 @@ os.environ["MODELS_PATH"] = "/tmp/models"
 
 import httpx
 import pytest
+from httpx import ASGITransport, AsyncClient
 
+from app.main import app
 from app.services.proxy import ServerProxy
 
 
 @pytest.mark.asyncio
 async def test_proxy_request_retries_connection_failures():
-    manager = Mock(configs={"server-1": Mock(port=8091)})
+    manager = Mock(configs={"server-1": Mock(port=8091)}, _active_connections={})
     proxy = ServerProxy(manager)
     response = Mock()
     proxy.client.request = AsyncMock(
@@ -28,6 +30,7 @@ async def test_proxy_request_retries_connection_failures():
     assert result is response
     assert proxy.client.request.await_count == 2
     sleep.assert_awaited_once_with(0.5)
+    assert manager._active_connections == {}
 
 
 @pytest.mark.asyncio
@@ -40,9 +43,6 @@ async def test_metrics_are_returned_as_prometheus_text(monkeypatch):
     proxy = Mock()
     proxy.proxy_request = AsyncMock(return_value=response)
     monkeypatch.setattr(proxy_route, "ServerProxy", Mock(return_value=proxy))
-
-    from httpx import ASGITransport, AsyncClient
-    from app.main import app
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"

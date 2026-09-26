@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from prometheus_client.parser import text_string_to_metric_families
 from sqlalchemy import func, or_
 from sqlmodel import select
 
@@ -21,44 +20,8 @@ logger = logging.getLogger(__name__)
 LEASE_TIMEOUT_SECONDS = 30 * 60
 SCHEDULER_POLL_SECONDS = 1.0
 TELEMETRY_TIMEOUT_SECONDS = 5.0
-ORPHANED_LEASE_GRACE_SECONDS = 30.0
-RECONCILIATION_INTERVAL_SECONDS = 5.0
 DEFAULT_PARALLEL_SLOTS = 4
-
-
-@dataclass(frozen=True)
-class SlotTelemetry:
-    """Normalized llama.cpp slot state."""
-
-    capacity: int
-    active: int
-    available: int
-    known: bool = True
-
-
-def normalize_slot_telemetry(
-    payload: Any, capacity: int = DEFAULT_PARALLEL_SLOTS
-) -> SlotTelemetry:
-    """Normalize the several llama.cpp `/slots` response shapes.
-
-    Older llama.cpp builds expose a list directly, while newer builds wrap it
-    in ``slots``. The endpoint reports active slots, not configured capacity,
-    so capacity comes from the server's configured parallel count.
-    """
-    capacity = max(int(capacity), 1)
-    slots: Any = payload.get("slots") if isinstance(payload, dict) else payload
-    if not isinstance(slots, list):
-        return SlotTelemetry(capacity, 0, capacity, known=False)
-    active = 0
-    for slot in slots:
-        if not isinstance(slot, dict):
-            continue
-        state = slot.get("state")
-        busy = slot.get("is_processing") is True or slot.get("processing") is True
-        busy = busy or state in {1, "processing", "busy", "generating"}
-        if busy:
-            active += 1
-    return SlotTelemetry(capacity, active, max(capacity - active, 0))
+DEFAULT_SINGLE_REQUEST_CAPACITY = 1
 
 
 def _vram_requirements_fit(
@@ -68,13 +31,10 @@ def _vram_requirements_fit(
     return running_required + target_required <= total_vram
 
 
-def admitted_active_count(active_leases: int, telemetry: SlotTelemetry) -> int:
-    """Keep persisted leases as a lower bound when slot telemetry resets."""
-    return max(int(active_leases), telemetry.active if telemetry.known else 0)
-
-
-async def get_slot_telemetry(server: ServerInstance) -> SlotTelemetry:
-    """Read a server's llama.cpp slots without making telemetry mandatory."""
+def server_capacity(server: ServerInstance) -> int:
+    """Return configured request capacity without probing the inference server."""
+    if server.engine == "halogen":
+        return DEFAULT_SINGLE_REQUEST_CAPACITY
     options = (
         server.engine_options or {}
         if server.engine == "halogen-flash"
@@ -86,55 +46,14 @@ async def get_slot_telemetry(server: ServerInstance) -> SlotTelemetry:
         else options.get("parallel")
     )
     try:
-        capacity = (
+        return max(
             int(configured_parallel)
             if configured_parallel is not None
-            else DEFAULT_PARALLEL_SLOTS
+            else DEFAULT_PARALLEL_SLOTS,
+            1,
         )
     except TypeError, ValueError:
-        capacity = DEFAULT_PARALLEL_SLOTS
-    capacity = max(capacity, 1)
-    try:
-        agent = await agent_manager.get_agent(str(server.agent_id))
-        if agent is None or agent.status != "online":
-            return SlotTelemetry(capacity, 0, capacity, known=False)
-        payload = await agent_manager.send_to_agent(
-            str(server.agent_id),
-            "GET",
-            f"/proxy/{server.id}/metrics",
-            timeout=TELEMETRY_TIMEOUT_SECONDS,
-        )
-        metrics = payload.get("metrics")
-        if isinstance(metrics, str):
-            active: int | None = None
-            for family in text_string_to_metric_families(metrics):
-                if family.name.endswith("requests_processing"):
-                    active = max(
-                        round(sum(sample.value for sample in family.samples)), 0
-                    )
-                    break
-            if active is not None:
-                return SlotTelemetry(capacity, active, max(capacity - active, 0))
-
-        telemetry_path = (
-            f"/proxy/{server.id}/health"
-            if server.engine in {"halogen", "halogen-flash"}
-            else f"/proxy/{server.id}/slots"
-        )
-        payload = await agent_manager.send_to_agent(
-            str(server.agent_id),
-            "GET",
-            telemetry_path,
-            timeout=TELEMETRY_TIMEOUT_SECONDS,
-        )
-        if server.engine in {"halogen", "halogen-flash"}:
-            capacity = max(int(payload.get("slots", configured_parallel or 1)), 1)
-            active = max(int(payload.get("in_flight", 0)), 0)
-            return SlotTelemetry(capacity, active, max(capacity - active, 0))
-        return normalize_slot_telemetry(payload, capacity)
-    except Exception as exc:
-        logger.debug("Slot telemetry unavailable for %s: %s", server.id, exc)
-        return SlotTelemetry(capacity, 0, capacity, known=False)
+        return DEFAULT_PARALLEL_SLOTS
 
 
 @dataclass
@@ -163,51 +82,6 @@ class InferenceScheduler:
 
     def __init__(self) -> None:
         self._admission_locks: dict[uuid.UUID, asyncio.Lock] = {}
-        self._reconciliation_task: asyncio.Task[None] | None = None
-
-    def start_reconciliation(self) -> None:
-        """Start background cleanup of leases orphaned by slot resets."""
-        if self._reconciliation_task is None or self._reconciliation_task.done():
-            self._reconciliation_task = asyncio.create_task(self._reconciliation_loop())
-
-    async def stop_reconciliation(self) -> None:
-        """Stop the slot reconciliation task during application shutdown."""
-        if self._reconciliation_task is None:
-            return
-        self._reconciliation_task.cancel()
-        try:
-            await self._reconciliation_task
-        except asyncio.CancelledError:
-            pass
-        self._reconciliation_task = None
-
-    async def _reconciliation_loop(self) -> None:
-        while True:
-            await asyncio.sleep(RECONCILIATION_INTERVAL_SECONDS)
-            try:
-                await self.reconcile_running_servers()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("Inference lease reconciliation failed")
-
-    async def reconcile_running_servers(self) -> None:
-        """Reconcile persisted leases even when no request is queued."""
-        async with AsyncSessionMaker() as session:
-            servers = list(
-                (
-                    await session.execute(
-                        select(ServerInstance).where(
-                            ServerInstance.status == "running",
-                            ServerInstance.health_status == "healthy",
-                        )
-                    )
-                ).scalars()
-            )
-        for server in servers:
-            telemetry = await get_slot_telemetry(server)
-            if telemetry.known:
-                await self._reconcile_active_leases(server.id, telemetry.active)
 
     def _agent_lock(self, agent_id: uuid.UUID) -> asyncio.Lock:
         return self._admission_locks.setdefault(agent_id, asyncio.Lock())
@@ -265,47 +139,6 @@ class InferenceScheduler:
                         )
                     )
                 ).scalar_one()
-            )
-
-    async def _reconcile_active_leases(
-        self,
-        server_id: uuid.UUID,
-        engine_active: int,
-        grace_seconds: float = ORPHANED_LEASE_GRACE_SECONDS,
-    ) -> None:
-        """Release old leases no longer represented by engine activity."""
-        cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
-        async with AsyncSessionMaker() as session:
-            server = await session.get(ServerInstance, server_id)
-            if server is None:
-                return
-            result = await session.execute(
-                select(InferenceLease)
-                .where(
-                    InferenceLease.server_instance_id == server_id,
-                    InferenceLease.status == "active",
-                    InferenceLease.lease_expires_at > datetime.now(UTC),
-                    InferenceLease.started_at < cutoff,
-                )
-                .order_by(InferenceLease.started_at, InferenceLease.id)
-            )
-            leases = list(result.scalars().all())
-            stale = leases[max(engine_active, 0) :]
-            if not stale:
-                return
-            now = datetime.now(UTC)
-            for lease in stale:
-                lease.status = "released"
-                lease.released_at = now
-                session.add(lease)
-            server.slot_generation += 1
-            session.add(server)
-            await session.commit()
-            logger.warning(
-                "Released %d orphaned lease(s) for server %s; engine reports %d active",
-                len(stale),
-                server_id,
-                engine_active,
             )
 
     async def _stop_idle_server(self, server: ServerInstance) -> None:
@@ -382,13 +215,6 @@ class InferenceScheduler:
                 return
             stopped = False
             for candidate in candidates:
-                candidate_telemetry = await get_slot_telemetry(candidate)
-                if candidate_telemetry.known:
-                    await self._reconcile_active_leases(
-                        candidate.id,
-                        candidate_telemetry.active,
-                        grace_seconds=0,
-                    )
                 if await self._active_leases(candidate.id):
                     continue
                 logger.info(
@@ -435,7 +261,7 @@ class InferenceScheduler:
         self,
         lease_id: uuid.UUID,
         server: ServerInstance,
-        telemetry: SlotTelemetry,
+        capacity: int,
     ) -> InferenceLeaseHandle | None:
         now = datetime.now(UTC)
         async with AsyncSessionMaker() as session:
@@ -463,11 +289,7 @@ class InferenceScheduler:
                     )
                 )
             ).scalar_one()
-            capacity = max(telemetry.capacity, 1)
-            # Database leases are the lower bound. A cleared slot response must
-            # not make an in-flight request disappear from admission accounting.
-            admitted_active = admitted_active_count(int(active), telemetry)
-            if admitted_active >= capacity:
+            if int(active) >= capacity:
                 return None
 
             lease = await session.get(InferenceLease, lease_id)
@@ -567,24 +389,22 @@ class InferenceScheduler:
                     async with AsyncSessionMaker() as session:
                         target = await session.get(ServerInstance, preferred_server_id)
                     candidates = [target] if target is not None else []
-                scored: list[tuple[ServerInstance, SlotTelemetry]] = []
+                scored: list[tuple[ServerInstance, int, int]] = []
                 for server in candidates:
                     if server.status != "running":
                         async with self._agent_lock(server.agent_id):
                             server = await self._prepare_target(server, deadline)
-                    telemetry = await get_slot_telemetry(server)
-                    if telemetry.known:
-                        await self._reconcile_active_leases(server.id, telemetry.active)
-                    scored.append((server, telemetry))
+                    capacity = server_capacity(server)
+                    active = await self._active_leases(server.id)
+                    scored.append((server, capacity, active))
                 scored.sort(
                     key=lambda item: (
-                        not item[1].known,
-                        -item[1].available,
-                        item[1].active,
+                        -(item[1] - item[2]),
+                        item[2],
                     )
                 )
-                for server, telemetry in scored:
-                    lease = await self._claim(queued.id, server, telemetry)
+                for server, capacity, _active in scored:
+                    lease = await self._claim(queued.id, server, capacity)
                     if lease:
                         return lease
                 if asyncio.get_running_loop().time() >= deadline:
@@ -631,15 +451,6 @@ class InferenceScheduler:
                 ).scalars()
             )
 
-        telemetry = await asyncio.gather(
-            *(
-                get_slot_telemetry(server)
-                if server.status == "running" and server.health_status == "healthy"
-                else asyncio.sleep(0, result=SlotTelemetry(0, 0, 0, known=False))
-                for server in servers
-            ),
-            return_exceptions=True,
-        )
         lease_counts: dict[uuid.UUID, int] = {}
         for lease in active_leases:
             if lease.server_instance_id is not None:
@@ -650,17 +461,10 @@ class InferenceScheduler:
         total_capacity = 0
         total_active = 0
         total_available = 0
-        for server, value in zip(servers, telemetry, strict=True):
-            slots = (
-                value
-                if isinstance(value, SlotTelemetry)
-                else SlotTelemetry(0, 0, 0, known=False)
-            )
+        for server in servers:
             booting = server.status != "running" or server.health_status != "healthy"
             active = lease_counts.get(server.id, 0) if not booting else 0
-            if not booting:
-                active = admitted_active_count(active, slots)
-            capacity = slots.capacity if not booting else 0
+            capacity = server_capacity(server) if not booting else 0
             available = max(capacity - active, 0) if not booting else 0
             total_capacity += capacity
             total_active += active
@@ -673,7 +477,7 @@ class InferenceScheduler:
                     "capacity": capacity,
                     "active": active,
                     "available": available,
-                    "telemetry_known": slots.known and not booting,
+                    "telemetry_known": not booting,
                     "state": "booting" if booting else "ready",
                 }
             )

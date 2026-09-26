@@ -44,7 +44,7 @@ class LlamaServerManager:
 
     # Number of raw log chunks (per stream) kept in memory per server
     LOG_BUFFER_CHUNKS: int = 64
-    HEALTH_CHECK_INTERVAL: float = 10.0
+    HEALTH_CHECK_INTERVAL: float = 30.0
     HEALTH_CHECK_TIMEOUT: float = 5.0
     HEALTH_FAILURE_THRESHOLD: int = 3
     HEALTH_RECOVERY_THRESHOLD: int = 2
