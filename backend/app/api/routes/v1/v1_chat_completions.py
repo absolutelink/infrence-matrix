@@ -416,27 +416,32 @@ async def _stream_completion_via_agent(
                             logger.warning(f"Invalid JSON in stream: {data}")
                             continue
 
-                if include_usage:
-                    usage = final_usage
-                    if usage is None:
-                        # Fallback: estimate tokens from content length.
-                        # ~4 chars/token heuristic for prompt; completion
-                        # counts actual streamed characters.
-                        prompt_chars = sum(len(m["content"]) for m in messages)
-                        usage = UsageInfo.build(
-                            prompt_tokens=max(prompt_chars // 4, 0),
-                            completion_tokens=fallback_completion_chars // 4,
-                        )
-                    final_chunk = ChatCompletionChunk(
-                        id=request_id,
-                        created=created,
-                        model=request.model,
-                        choices=[],
-                        usage=usage,
-                    )
-                    yield f"data: {final_chunk.model_dump_json()}\n\n"
+        # The upstream slot is free as soon as its response stream closes.
+        # Do not wait for a slow or disconnected downstream consumer to finish
+        # draining the already-produced SSE response.
+        await lease.release()
 
-                yield "data: [DONE]\n\n"
+        if include_usage:
+            usage = final_usage
+            if usage is None:
+                # Fallback: estimate tokens from content length.
+                # ~4 chars/token heuristic for prompt; completion
+                # counts actual streamed characters.
+                prompt_chars = sum(len(m["content"]) for m in messages)
+                usage = UsageInfo.build(
+                    prompt_tokens=max(prompt_chars // 4, 0),
+                    completion_tokens=fallback_completion_chars // 4,
+                )
+            final_chunk = ChatCompletionChunk(
+                id=request_id,
+                created=created,
+                model=request.model,
+                choices=[],
+                usage=usage,
+            )
+            yield f"data: {final_chunk.model_dump_json()}\n\n"
+
+        yield "data: [DONE]\n\n"
 
     except Exception as e:
         logger.error(f"Streaming error: {e}")

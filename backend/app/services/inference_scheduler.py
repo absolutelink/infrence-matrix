@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 LEASE_TIMEOUT_SECONDS = 30 * 60
 SCHEDULER_POLL_SECONDS = 1.0
 TELEMETRY_TIMEOUT_SECONDS = 5.0
+RECONCILIATION_INTERVAL_SECONDS = 30.0
 DEFAULT_PARALLEL_SLOTS = 4
 DEFAULT_SINGLE_REQUEST_CAPACITY = 1
 
@@ -82,6 +83,81 @@ class InferenceScheduler:
 
     def __init__(self) -> None:
         self._admission_locks: dict[uuid.UUID, asyncio.Lock] = {}
+        self._reconciliation_task: asyncio.Task[None] | None = None
+
+    def start_reconciliation(self) -> None:
+        """Start cleanup for leases left behind by failed requests or restarts."""
+        if self._reconciliation_task is None or self._reconciliation_task.done():
+            self._reconciliation_task = asyncio.create_task(self._reconciliation_loop())
+
+    async def stop_reconciliation(self) -> None:
+        """Stop the lease cleanup task during application shutdown."""
+        if self._reconciliation_task is None:
+            return
+        self._reconciliation_task.cancel()
+        try:
+            await self._reconciliation_task
+        except asyncio.CancelledError:
+            pass
+        self._reconciliation_task = None
+
+    async def _reconciliation_loop(self) -> None:
+        while True:
+            await asyncio.sleep(RECONCILIATION_INTERVAL_SECONDS)
+            try:
+                await self.reconcile_stale_leases()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Inference lease reconciliation failed")
+
+    async def reconcile_persisted_leases(self) -> int:
+        """Invalidate work that cannot survive a backend process restart."""
+        async with AsyncSessionMaker() as session:
+            result = await session.execute(
+                select(InferenceLease).where(
+                    InferenceLease.status.in_(["active", "queued"])
+                )
+            )
+            leases = list(result.scalars().all())
+            now = datetime.now(UTC)
+            for lease in leases:
+                lease.status = "failed" if lease.status == "active" else "cancelled"
+                lease.released_at = now
+                session.add(lease)
+            if leases:
+                await session.commit()
+            return len(leases)
+
+    async def reconcile_stale_leases(self) -> int:
+        """Release expired leases and leases on servers no longer executable."""
+        now = datetime.now(UTC)
+        async with AsyncSessionMaker() as session:
+            result = await session.execute(
+                select(InferenceLease, ServerInstance)
+                .outerjoin(
+                    ServerInstance,
+                    ServerInstance.id == InferenceLease.server_instance_id,
+                )
+                .where(
+                    InferenceLease.status == "active",
+                    or_(
+                        InferenceLease.lease_expires_at <= now,
+                        InferenceLease.server_instance_id.is_(None),
+                        ServerInstance.status != "running",
+                        ServerInstance.health_status != "healthy",
+                    ),
+                )
+            )
+            stale = list(result.all())
+            for lease, _server in stale:
+                lease.status = "failed"
+                lease.released_at = now
+                session.add(lease)
+            if stale:
+                await session.commit()
+                logger.warning("Reconciled %d stale inference lease(s)", len(stale))
+            return len(stale)
 
     def _agent_lock(self, agent_id: uuid.UUID) -> asyncio.Lock:
         return self._admission_locks.setdefault(agent_id, asyncio.Lock())
