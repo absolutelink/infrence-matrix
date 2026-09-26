@@ -19,6 +19,7 @@ from app.services.halogen_flash_server import (
     HalogenFlashServerConfig,
     HalogenFlashServerManager,
 )
+from app.services.halogen_server import HalogenServerConfig, HalogenServerManager
 
 
 def test_flash_proxy_allows_documented_routes_only() -> None:
@@ -34,6 +35,38 @@ def test_flash_agent_rejects_other_engines(monkeypatch) -> None:
     )
     with pytest.raises(Exception, match="only supports engine=halogen-flash"):
         _validate_engine_platform("halogen")
+
+
+@pytest.mark.asyncio
+async def test_halogen_health_requires_consecutive_failures():
+    manager = HalogenServerManager()
+    manager.servers["server-1"] = Mock(poll=Mock(return_value=None))
+    manager.configs["server-1"] = HalogenServerConfig(
+        model_path="/models/test",
+        port=8091,
+        api_port=8091,
+        engine_port=8092,
+        options={},
+    )
+    manager.server_health["server-1"] = "healthy"
+    manager.healthy_servers.add("server-1")
+
+    with patch.object(
+        manager, "_check_health", new=AsyncMock(return_value=(False, "not ready"))
+    ):
+        with patch("app.services.halogen_server.publish_event") as publish:
+            await manager._monitor("server-1")
+            await manager._monitor("server-1")
+            assert manager.server_health["server-1"] == "healthy"
+            publish.assert_not_called()
+
+            await manager._monitor("server-1")
+
+    assert manager.server_health["server-1"] == "unhealthy"
+    publish.assert_called_once_with(
+        "server.health",
+        {"server_id": "server-1", "status": "unhealthy", "error": "not ready"},
+    )
 
 
 @pytest.mark.asyncio

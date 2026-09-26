@@ -36,12 +36,14 @@ class HalogenServerManager:
 
     HEALTH_CHECK_INTERVAL = 10.0
     HEALTH_CHECK_TIMEOUT = 5.0
+    HEALTH_FAILURE_THRESHOLD = 3
 
     def __init__(self) -> None:
         self.servers: dict[str, subprocess.Popen] = {}
         self.configs: dict[str, HalogenServerConfig] = {}
         self.healthy_servers: set[str] = set()
         self.server_health: dict[str, str] = {}
+        self._health_failures: dict[str, int] = {}
         self.start_times: dict[str, float] = {}
         self._health_task: asyncio.Task | None = None
         self._log_task: asyncio.Task | None = None
@@ -80,7 +82,15 @@ class HalogenServerManager:
             return
         healthy, error = await self._check_health(config.api_port)
         previous = self.server_health.get(server_id, "unknown")
-        status = "healthy" if healthy else "unhealthy"
+        if healthy:
+            self._health_failures[server_id] = 0
+            status = "healthy"
+        else:
+            failures = self._health_failures.get(server_id, 0) + 1
+            self._health_failures[server_id] = failures
+            if failures < self.HEALTH_FAILURE_THRESHOLD:
+                return
+            status = "unhealthy"
         self.server_health[server_id] = status
         if healthy:
             self.healthy_servers.add(server_id)
@@ -264,6 +274,7 @@ class HalogenServerManager:
         self.configs.pop(server_id, None)
         self.healthy_servers.discard(server_id)
         self.server_health.pop(server_id, None)
+        self._health_failures.pop(server_id, None)
         self.start_times.pop(server_id, None)
 
     def list_servers(self) -> list[dict]:

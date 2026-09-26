@@ -475,6 +475,7 @@ class AgentManager:
                     if server.status not in {"preparing", "metadata_gathering"}:
                         server.status = "stopped"
                     server.health_status = "unknown"
+                    server.error_message = None
                     session.add(server)
                     await session.commit()
                     logger.info(f"Server {server_id} marked as stopped")
