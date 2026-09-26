@@ -22,6 +22,7 @@ LEASE_TIMEOUT_SECONDS = 30 * 60
 SCHEDULER_POLL_SECONDS = 1.0
 TELEMETRY_TIMEOUT_SECONDS = 5.0
 ORPHANED_LEASE_GRACE_SECONDS = 30.0
+RECONCILIATION_INTERVAL_SECONDS = 5.0
 DEFAULT_PARALLEL_SLOTS = 4
 
 
@@ -65,6 +66,11 @@ def _vram_requirements_fit(
 ) -> bool:
     """Check configured VRAM requirements against physical capacity."""
     return running_required + target_required <= total_vram
+
+
+def admitted_active_count(active_leases: int, telemetry: SlotTelemetry) -> int:
+    """Keep persisted leases as a lower bound when slot telemetry resets."""
+    return max(int(active_leases), telemetry.active if telemetry.known else 0)
 
 
 async def get_slot_telemetry(server: ServerInstance) -> SlotTelemetry:
@@ -157,6 +163,51 @@ class InferenceScheduler:
 
     def __init__(self) -> None:
         self._admission_locks: dict[uuid.UUID, asyncio.Lock] = {}
+        self._reconciliation_task: asyncio.Task[None] | None = None
+
+    def start_reconciliation(self) -> None:
+        """Start background cleanup of leases orphaned by slot resets."""
+        if self._reconciliation_task is None or self._reconciliation_task.done():
+            self._reconciliation_task = asyncio.create_task(self._reconciliation_loop())
+
+    async def stop_reconciliation(self) -> None:
+        """Stop the slot reconciliation task during application shutdown."""
+        if self._reconciliation_task is None:
+            return
+        self._reconciliation_task.cancel()
+        try:
+            await self._reconciliation_task
+        except asyncio.CancelledError:
+            pass
+        self._reconciliation_task = None
+
+    async def _reconciliation_loop(self) -> None:
+        while True:
+            await asyncio.sleep(RECONCILIATION_INTERVAL_SECONDS)
+            try:
+                await self.reconcile_running_servers()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Inference lease reconciliation failed")
+
+    async def reconcile_running_servers(self) -> None:
+        """Reconcile persisted leases even when no request is queued."""
+        async with AsyncSessionMaker() as session:
+            servers = list(
+                (
+                    await session.execute(
+                        select(ServerInstance).where(
+                            ServerInstance.status == "running",
+                            ServerInstance.health_status == "healthy",
+                        )
+                    )
+                ).scalars()
+            )
+        for server in servers:
+            telemetry = await get_slot_telemetry(server)
+            if telemetry.known:
+                await self._reconcile_active_leases(server.id, telemetry.active)
 
     def _agent_lock(self, agent_id: uuid.UUID) -> asyncio.Lock:
         return self._admission_locks.setdefault(agent_id, asyncio.Lock())
@@ -225,11 +276,15 @@ class InferenceScheduler:
         """Release old leases no longer represented by engine activity."""
         cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
         async with AsyncSessionMaker() as session:
+            server = await session.get(ServerInstance, server_id)
+            if server is None:
+                return
             result = await session.execute(
                 select(InferenceLease)
                 .where(
                     InferenceLease.server_instance_id == server_id,
                     InferenceLease.status == "active",
+                    InferenceLease.lease_expires_at > datetime.now(UTC),
                     InferenceLease.started_at < cutoff,
                 )
                 .order_by(InferenceLease.started_at, InferenceLease.id)
@@ -243,6 +298,8 @@ class InferenceScheduler:
                 lease.status = "released"
                 lease.released_at = now
                 session.add(lease)
+            server.slot_generation += 1
+            session.add(server)
             await session.commit()
             logger.warning(
                 "Released %d orphaned lease(s) for server %s; engine reports %d active",
@@ -407,9 +464,9 @@ class InferenceScheduler:
                 )
             ).scalar_one()
             capacity = max(telemetry.capacity, 1)
-            if telemetry.known and telemetry.available <= 0:
-                return None
-            admitted_active = telemetry.active if telemetry.known else int(active)
+            # Database leases are the lower bound. A cleared slot response must
+            # not make an in-flight request disappear from admission accounting.
+            admitted_active = admitted_active_count(int(active), telemetry)
             if admitted_active >= capacity:
                 return None
 
@@ -420,6 +477,7 @@ class InferenceScheduler:
             lease.status = "active"
             lease.started_at = now
             lease.lease_expires_at = now + timedelta(seconds=LEASE_TIMEOUT_SECONDS)
+            lease.slot_generation = locked.slot_generation
             locked.last_request_at = now
             session.add(locked)
             session.add(lease)
@@ -447,8 +505,8 @@ class InferenceScheduler:
     async def _cancel(self, lease_id: uuid.UUID) -> None:
         async with AsyncSessionMaker() as session:
             lease = await session.get(InferenceLease, lease_id)
-            if lease and lease.status == "queued":
-                lease.status = "cancelled"
+            if lease and lease.status in {"queued", "active"}:
+                lease.status = "cancelled" if lease.status == "queued" else "released"
                 lease.released_at = datetime.now(UTC)
                 session.add(lease)
                 await session.commit()
@@ -490,46 +548,56 @@ class InferenceScheduler:
         """
         deadline = asyncio.get_running_loop().time() + timeout
         queued = await self._queue(request_id, model_id)
-        while True:
-            if is_cancelled is not None and await is_cancelled():
-                await self._cancel(queued.id)
-                raise InferenceRequestCancelled
-            await self._ensure_queued(queued.id)
-            if not await self._queue_is_head(queued.id):
+        try:
+            while True:
+                if is_cancelled is not None and await is_cancelled():
+                    await self._cancel(queued.id)
+                    raise InferenceRequestCancelled
+                await self._ensure_queued(queued.id)
+                if not await self._queue_is_head(queued.id):
+                    if asyncio.get_running_loop().time() >= deadline:
+                        await self._expire(queued.id)
+                        raise TimeoutError(
+                            "No inference server slot became available within 30 minutes"
+                        )
+                    await asyncio.sleep(SCHEDULER_POLL_SECONDS)
+                    continue
+                candidates = await self._candidates(model_id)
+                if preferred_server_id is not None:
+                    async with AsyncSessionMaker() as session:
+                        target = await session.get(ServerInstance, preferred_server_id)
+                    candidates = [target] if target is not None else []
+                scored: list[tuple[ServerInstance, SlotTelemetry]] = []
+                for server in candidates:
+                    if server.status != "running":
+                        async with self._agent_lock(server.agent_id):
+                            server = await self._prepare_target(server, deadline)
+                    telemetry = await get_slot_telemetry(server)
+                    if telemetry.known:
+                        await self._reconcile_active_leases(server.id, telemetry.active)
+                    scored.append((server, telemetry))
+                scored.sort(
+                    key=lambda item: (
+                        not item[1].known,
+                        -item[1].available,
+                        item[1].active,
+                    )
+                )
+                for server, telemetry in scored:
+                    lease = await self._claim(queued.id, server, telemetry)
+                    if lease:
+                        return lease
                 if asyncio.get_running_loop().time() >= deadline:
                     await self._expire(queued.id)
                     raise TimeoutError(
                         "No inference server slot became available within 30 minutes"
                     )
                 await asyncio.sleep(SCHEDULER_POLL_SECONDS)
-                continue
-            candidates = await self._candidates(model_id)
-            if preferred_server_id is not None:
-                async with AsyncSessionMaker() as session:
-                    target = await session.get(ServerInstance, preferred_server_id)
-                candidates = [target] if target is not None else []
-            scored: list[tuple[ServerInstance, SlotTelemetry]] = []
-            for server in candidates:
-                if server.status != "running":
-                    async with self._agent_lock(server.agent_id):
-                        server = await self._prepare_target(server, deadline)
-                telemetry = await get_slot_telemetry(server)
-                if telemetry.known:
-                    await self._reconcile_active_leases(server.id, telemetry.active)
-                scored.append((server, telemetry))
-            scored.sort(
-                key=lambda item: (not item[1].known, -item[1].available, item[1].active)
-            )
-            for server, telemetry in scored:
-                lease = await self._claim(queued.id, server, telemetry)
-                if lease:
-                    return lease
-            if asyncio.get_running_loop().time() >= deadline:
-                await self._expire(queued.id)
-                raise TimeoutError(
-                    "No inference server slot became available within 30 minutes"
-                )
-            await asyncio.sleep(SCHEDULER_POLL_SECONDS)
+        except asyncio.CancelledError:
+            # ASGI cancellation is the reliable signal for a disconnected
+            # client while waiting in the FIFO queue.
+            await asyncio.shield(self._cancel(queued.id))
+            raise
 
     async def status_snapshot(self) -> dict[str, Any]:
         """Return queue and live slot state for the UI status bar."""
@@ -591,9 +659,9 @@ class InferenceScheduler:
             booting = server.status != "running" or server.health_status != "healthy"
             active = lease_counts.get(server.id, 0) if not booting else 0
             if not booting:
-                active = slots.active if slots.known else max(active, slots.active)
+                active = admitted_active_count(active, slots)
             capacity = slots.capacity if not booting else 0
-            available = slots.available if not booting else 0
+            available = max(capacity - active, 0) if not booting else 0
             total_capacity += capacity
             total_active += active
             total_available += available

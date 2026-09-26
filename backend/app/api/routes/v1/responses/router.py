@@ -447,10 +447,19 @@ async def _stream_events(
     )
     # Build then drain: make() queues events so everything flows through
     # drain_frames() exactly once (no double-emitted lifecycle frames).
-    ev.response_created(seq, response)
-    ev.response_in_progress(seq, response)
-    for frame in seq.drain_frames():
-        yield frame
+    # Keep the lease until the first frame has been resumed. If the client
+    # disconnects at the initial yield, the generator's finally block below
+    # has not started yet, so explicitly cover that early-close window.
+    initial_frames_sent = False
+    try:
+        ev.response_created(seq, response)
+        ev.response_in_progress(seq, response)
+        for frame in seq.drain_frames():
+            yield frame
+        initial_frames_sent = True
+    finally:
+        if not initial_frames_sent and lease is not None:
+            await lease.release()
 
     state = StreamState(seq, request.model)
     state.assistant_phase = _last_assistant_phase(request)

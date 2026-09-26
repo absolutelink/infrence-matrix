@@ -680,3 +680,22 @@ class TestHandleDownloadProgressSyntheticJobId:
         assert job.current_speed == 10_000_000
         session.add.assert_called_once_with(job)
         assert session.commit.await_count == 1
+
+
+class TestServerLeaseInvalidation:
+    @pytest.mark.asyncio
+    async def test_terminal_server_state_abandons_active_leases(self):
+        from unittest.mock import MagicMock
+
+        lease = MagicMock(status="active")
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = [lease]
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=result)
+
+        manager = AgentManager()
+        await manager._invalidate_server_leases(session, "server-id")
+
+        assert lease.status == "failed"
+        assert lease.released_at is not None
+        session.add.assert_called_once_with(lease)

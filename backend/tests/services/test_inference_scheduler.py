@@ -6,7 +6,9 @@ import pytest
 
 from app.services.agent_manager import agent_manager
 from app.services.inference_scheduler import (
+    SlotTelemetry,
     _vram_requirements_fit,
+    admitted_active_count,
     get_slot_telemetry,
     normalize_slot_telemetry,
 )
@@ -91,3 +93,16 @@ llamacpp:requests_processing 3
 def test_vram_admission_uses_configured_requirements():
     assert not _vram_requirements_fit(113, 30, 110)
     assert _vram_requirements_fit(113, 30, 0)
+
+
+def test_persisted_leases_are_lower_bound_after_slot_reset():
+    telemetry = SlotTelemetry(capacity=1, active=0, available=1)
+
+    assert admitted_active_count(1, telemetry) == 1
+    assert admitted_active_count(0, telemetry) == 0
+
+
+def test_unknown_telemetry_does_not_claim_capacity():
+    telemetry = SlotTelemetry(capacity=1, active=0, available=1, known=False)
+
+    assert admitted_active_count(1, telemetry) == 1

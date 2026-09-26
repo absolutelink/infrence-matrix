@@ -392,6 +392,9 @@ class ServerInstance(SQLModel, table=True):
     last_request_at: datetime | None = None
     last_health_check: datetime | None = None
 
+    # Incremented when reconciliation observes and cleans up stale slot work.
+    slot_generation: int = 0
+
     total_requests: int = 0
     total_tokens_generated: int = 0
     average_response_time_ms: float = 0.0
@@ -470,6 +473,7 @@ class InferenceLease(SQLModel, table=True):
     lease_expires_at: datetime | None = Field(
         default=None, sa_type=DateTime(timezone=True)
     )
+    slot_generation: int | None = None
     released_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
 
 

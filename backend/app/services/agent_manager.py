@@ -13,7 +13,7 @@ from websockets.client import WebSocketClientProtocol, connect
 from app.core.config import settings
 from app.core.logging import logger
 from app.db.session import AsyncSessionMaker
-from app.models import Agent
+from app.models import Agent, InferenceLease
 
 
 class AgentManager:
@@ -392,6 +392,7 @@ class AgentManager:
                 server.health_status = "unhealthy"
                 server.error_message = data.get("error", "Unknown error")
                 session.add(server)
+                await self._invalidate_server_leases(session, server.id)
                 await session.commit()
                 logger.warning(f"Server {server_id} error: {data.get('error')}")
 
@@ -477,8 +478,32 @@ class AgentManager:
                     server.health_status = "unknown"
                     server.error_message = None
                     session.add(server)
+                    await self._invalidate_server_leases(session, server.id)
                     await session.commit()
                     logger.info(f"Server {server_id} marked as stopped")
+
+    async def _invalidate_server_leases(self, session, server_id) -> None:
+        """Abandon requests whose llama-server can no longer execute them."""
+        from sqlalchemy import select
+
+        result = await session.execute(
+            select(InferenceLease).where(
+                InferenceLease.server_instance_id == server_id,
+                InferenceLease.status == "active",
+            )
+        )
+        now = datetime.now(UTC)
+        leases = list(result.scalars().all())
+        for lease in leases:
+            lease.status = "failed"
+            lease.released_at = now
+            session.add(lease)
+        if leases:
+            logger.warning(
+                "Invalidated %d active lease(s) for terminal server %s",
+                len(leases),
+                server_id,
+            )
 
     async def _handle_gpu_usage(self, agent_id: str, data: dict) -> None:
         """Handle gpu.usage event."""

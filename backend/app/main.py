@@ -22,6 +22,7 @@ from app.api.routes.websocket import router as agent_ws_router
 from app.core.config import settings
 from app.services.agent_manager import agent_manager
 from app.services.benchmark import start_queue_worker, stop_queue_worker
+from app.services.inference_scheduler import inference_scheduler
 from app.services.request_activity import (
     request_finished,
     request_started,
@@ -33,8 +34,10 @@ FRONTEND_DIR = Path(__file__).parent / "frontend"
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     agent_manager.start_cleanup_loop()
+    inference_scheduler.start_reconciliation()
     start_queue_worker()
     yield
+    await inference_scheduler.stop_reconciliation()
     await stop_queue_worker()
 
 
