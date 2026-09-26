@@ -98,10 +98,13 @@ class SSEmitter:
         self._pending.clear()
         return events
 
-    async def stream(self, events: AsyncIterator[dict[str, Any]]) -> AsyncIterator[str]:
+    async def stream(
+        self, events: AsyncIterator[dict[str, Any]] | None
+    ) -> AsyncIterator[str]:
         """Wrap an event iterator, framing each event and ending with [DONE]."""
-        async for event in events:
-            yield self.frame(event)
+        if events is not None:
+            async for event in events:
+                yield self.frame(event)
         yield "data: [DONE]\n\n"
 
 

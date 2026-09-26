@@ -33,6 +33,14 @@ class TestIds:
         assert new_id("x") != new_id("x")
 
 
+class TestSSEmitter:
+    @pytest.mark.asyncio
+    async def test_stream_handles_missing_events(self) -> None:
+        frames = [frame async for frame in ev.SSEmitter().stream(None)]
+
+        assert frames == ["data: [DONE]\n\n"]
+
+
 class TestRequestParsing:
     def test_string_input(self) -> None:
         req = CreateResponseBody(model="m", input="hi")
