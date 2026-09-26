@@ -63,7 +63,8 @@ class LlamaServerManager:
         self._start_locks: dict[str, asyncio.Lock] = {}
         # server_id -> list of (stream_key, raw_chunk) in order
         self._log_buffers: dict[str, list[tuple[str, str]]] = {}
-        self._log_task: asyncio.Task | None = None
+        self._log_readers: dict[str, set[asyncio.Task]] = {}
+        self._log_forwarding_started = False
         self._health_task: asyncio.Task | None = None
 
     def start_health_monitoring(self) -> None:
@@ -155,6 +156,9 @@ class LlamaServerManager:
         self._health_successes.pop(server_id, None)
         self._health_errors.pop(server_id, None)
         self.start_times.pop(server_id, None)
+        readers = self._log_readers.pop(server_id, set())
+        for reader in readers:
+            reader.cancel()
         if not preserve_logs:
             self._log_buffers.pop(server_id, None)
 
@@ -171,47 +175,61 @@ class LlamaServerManager:
 
     def start_log_forwarding(self) -> None:
         """Start the background loop emitting log.lines events."""
-        if self._log_task is None or self._log_task.done():
-            self._log_task = asyncio.create_task(self._log_forward_loop())
+        self._log_forwarding_started = True
+        for server_id in self.servers:
+            self._start_log_readers(server_id)
 
-    async def _log_forward_loop(self) -> None:
-        """Periodically drain server output and emit log.lines events."""
-        positions: dict[str, tuple[int, int]] = {}
-        while True:
-            await asyncio.sleep(settings.LOG_FORWARD_INTERVAL)
-            for server_id in list(self.servers.keys()):
-                from_stdout, from_stderr = positions.get(server_id, (0, 0))
-                (
-                    stdout_lines,
-                    stderr_lines,
-                    total_stdout,
-                    total_stderr,
-                ) = self._collect_logs(server_id, from_stdout, from_stderr)
+    def _start_log_readers(self, server_id: str) -> None:
+        process = self.servers.get(server_id)
+        if not self._log_forwarding_started or process is None:
+            return
+        readers = self._log_readers.setdefault(server_id, set())
+        if readers:
+            return
+        for stream, stream_name in (
+            (process.stdout, "stdout"),
+            (process.stderr, "stderr"),
+        ):
+            if stream is None:
+                continue
+            reader = asyncio.create_task(
+                self._read_log_lines(server_id, stream, stream_name)
+            )
+            readers.add(reader)
 
-                lines = [
-                    {"stream": "stdout", "line": line} for line in stdout_lines
-                ] + [{"stream": "stderr", "line": line} for line in stderr_lines]
-
-                if lines:
-                    # Echo llama-server output into the agent log so a single
-                    # deployment log surface shows inference traffic.
-                    for entry in lines:
-                        (logger.error if entry["stream"] == "stderr" else logger.info)(
-                            "llama-server %s [%s]: %s",
-                            server_id[:8],
-                            entry["stream"],
-                            entry["line"],
-                        )
-
-                    publish_event(
-                        "log.lines",
-                        {
-                            "server_id": server_id,
-                            "lines": lines,
-                        },
-                    )
-
-                positions[server_id] = (total_stdout, total_stderr)
+    async def _read_log_lines(self, server_id: str, stream, stream_name: str) -> None:
+        process = self.servers.get(server_id)
+        try:
+            while process is not None and process.poll() is None:
+                line = await asyncio.to_thread(stream.readline)
+                if not line:
+                    break
+                self._log_buffers.setdefault(server_id, []).append((stream_name, line))
+                if len(self._log_buffers[server_id]) > self.LOG_BUFFER_CHUNKS:
+                    self._log_buffers[server_id].pop(0)
+                text = line.rstrip()
+                log_fn = logger.error if stream_name == "stderr" else logger.info
+                log_fn(
+                    "llama-server %s [%s]: %s",
+                    server_id[:8],
+                    stream_name,
+                    text,
+                )
+                publish_event(
+                    "log.lines",
+                    {
+                        "server_id": server_id,
+                        "lines": [{"stream": stream_name, "line": text}],
+                    },
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Log reader failed for server %s", server_id)
+        finally:
+            readers = self._log_readers.get(server_id)
+            if readers is not None:
+                readers.discard(asyncio.current_task())
 
     async def start_server(self, server_id: str, config: ServerConfig) -> bool:
         """Start a llama.cpp server subprocess."""
@@ -363,6 +381,7 @@ class LlamaServerManager:
             self.servers[server_id] = proc
             self.configs[server_id] = config
             self.start_times[server_id] = time.time()
+            self._start_log_readers(server_id)
 
             await self._wait_for_server(server_id, config.port)
             self.healthy_servers.add(server_id)
@@ -531,7 +550,8 @@ class LlamaServerManager:
         from_stderr: int = 0,
     ) -> tuple[list[str], list[str], int, int]:
         """Drain pipes and return (stdout_lines, stderr_lines, new_stdout_pos, new_stderr_pos)."""
-        self._drain_pipes(server_id)
+        if not self._log_forwarding_started:
+            self._drain_pipes(server_id)
 
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []

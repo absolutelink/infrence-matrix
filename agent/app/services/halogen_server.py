@@ -46,7 +46,8 @@ class HalogenServerManager:
         self._health_failures: dict[str, int] = {}
         self.start_times: dict[str, float] = {}
         self._health_task: asyncio.Task | None = None
-        self._log_task: asyncio.Task | None = None
+        self._log_readers: dict[str, asyncio.Task] = {}
+        self._log_forwarding_started = False
         self._logs: dict[str, list[str]] = {}
 
     @property
@@ -112,31 +113,46 @@ class HalogenServerManager:
             self._health_task = None
 
     def start_log_forwarding(self) -> None:
-        if self._log_task is None or self._log_task.done():
-            self._log_task = asyncio.create_task(self._log_loop())
+        self._log_forwarding_started = True
+        for server_id in self.servers:
+            self._start_log_reader(server_id)
 
-    async def _log_loop(self) -> None:
-        while True:
-            await asyncio.sleep(settings.LOG_FORWARD_INTERVAL)
-            for server_id, process in list(self.servers.items()):
-                if process.stdout is None:
-                    continue
-                try:
-                    line = await asyncio.to_thread(process.stdout.readline)
-                except Exception:
-                    continue
-                if line:
-                    text = line.rstrip()
-                    self._logs.setdefault(server_id, []).append(text)
-                    self._logs[server_id] = self._logs[server_id][-64:]
-                    logger.info("%s %s: %s", self.PROCESS_LABEL, server_id[:8], text)
-                    publish_event(
-                        "log.lines",
-                        {
-                            "server_id": server_id,
-                            "lines": [{"stream": "stdout", "line": text}],
-                        },
-                    )
+    def _start_log_reader(self, server_id: str) -> None:
+        if (
+            self._log_forwarding_started
+            and server_id not in self._log_readers
+            and server_id in self.servers
+        ):
+            self._log_readers[server_id] = asyncio.create_task(
+                self._read_log_lines(server_id)
+            )
+
+    async def _read_log_lines(self, server_id: str) -> None:
+        process = self.servers.get(server_id)
+        if process is None or process.stdout is None:
+            return
+        try:
+            while process.poll() is None:
+                line = await asyncio.to_thread(process.stdout.readline)
+                if not line:
+                    break
+                text = line.rstrip()
+                self._logs.setdefault(server_id, []).append(text)
+                self._logs[server_id] = self._logs[server_id][-64:]
+                logger.info("%s %s: %s", self.PROCESS_LABEL, server_id[:8], text)
+                publish_event(
+                    "log.lines",
+                    {
+                        "server_id": server_id,
+                        "lines": [{"stream": "stdout", "line": text}],
+                    },
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Log reader failed for server %s", server_id)
+        finally:
+            self._log_readers.pop(server_id, None)
 
     async def start_server(self, server_id: str, config: HalogenServerConfig) -> bool:
         if server_id in self.servers:
@@ -199,6 +215,7 @@ class HalogenServerManager:
         self.servers[server_id] = process
         self.configs[server_id] = config
         self.start_times[server_id] = time.time()
+        self._start_log_reader(server_id)
         try:
             await self._wait_for_health(server_id, config.api_port)
         except Exception:
@@ -272,6 +289,9 @@ class HalogenServerManager:
     def _remove(self, server_id: str) -> None:
         self.servers.pop(server_id, None)
         self.configs.pop(server_id, None)
+        reader = self._log_readers.pop(server_id, None)
+        if reader is not None:
+            reader.cancel()
         self.healthy_servers.discard(server_id)
         self.server_health.pop(server_id, None)
         self._health_failures.pop(server_id, None)
