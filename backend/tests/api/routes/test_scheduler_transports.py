@@ -70,6 +70,7 @@ class FakeLease:
         self.upstream_started = True
 
     async def guard(self, awaitable, *, cancelled=None):
+        self.upstream_started = True
         return await awaitable
 
     async def release(self) -> None:

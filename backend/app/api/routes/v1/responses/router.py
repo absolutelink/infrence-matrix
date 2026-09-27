@@ -5,7 +5,6 @@ function tools via llama.cpp native tool calling, reasoning passthrough.
 """
 
 import asyncio
-import contextlib
 import json
 import logging
 import time
@@ -50,7 +49,6 @@ from app.models import Model, ResponseRecord, ServerInstance
 from app.services.agent_manager import agent_manager
 from app.services.inference_scheduler import (
     InferenceLeaseHandle,
-    InferenceLeaseLost,
     inference_scheduler,
 )
 from app.services.inference_target import resolve_inference_target
@@ -413,40 +411,25 @@ async def _upstream_lines_with_keepalive(
 ) -> AsyncIterator[str | None]:
     """Read upstream SSE lines while emitting comments during idle periods."""
     lines = upstream.aiter_lines()
-    if lease is not None:
-        lease.mark_upstream_started()
-    pending = asyncio.create_task(anext(lines))
-    lease_lost = asyncio.create_task(lease.lost.wait()) if lease is not None else None
-    try:
-        while True:
-            waiting = {pending}
-            if lease_lost is not None:
-                waiting.add(lease_lost)
-            done, _ = await asyncio.wait(
-                waiting,
-                timeout=SSE_KEEPALIVE_INTERVAL_SECONDS,
-            )
-            if lease_lost is not None and lease_lost in done:
-                raise InferenceLeaseLost("Inference lease ownership was lost")
-            if not done:
-                yield None
-                continue
-
-            try:
-                line = pending.result()
-            except StopAsyncIteration:
-                return
-            pending = asyncio.create_task(anext(lines))
-            yield line
-    finally:
-        if not pending.done():
-            pending.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await pending
-        if lease_lost is not None:
-            lease_lost.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await lease_lost
+    while True:
+        try:
+            next_line = anext(lines)
+            if lease is not None:
+                line = await asyncio.wait_for(
+                    lease.guard(next_line),
+                    timeout=SSE_KEEPALIVE_INTERVAL_SECONDS,
+                )
+            else:
+                line = await asyncio.wait_for(
+                    next_line,
+                    timeout=SSE_KEEPALIVE_INTERVAL_SECONDS,
+                )
+        except TimeoutError:
+            yield None
+            continue
+        except StopAsyncIteration:
+            return
+        yield line
 
 
 async def _stream_events(
