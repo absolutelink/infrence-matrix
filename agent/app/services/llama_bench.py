@@ -13,6 +13,7 @@ from typing import Any
 from app.core.config import settings
 from app.core.logging import logger
 from app.services.event_bus import publish_event
+from app.services.log_buffers import CursorLogRing
 
 _NUMBER = re.compile(r"[-+]?\d+(?:\.\d+)?")
 
@@ -122,8 +123,11 @@ def resolve_executable() -> str:
 class LlamaBenchManager:
     """Own the single llama-bench process allowed on an agent."""
 
+    LOG_BUFFER_LINES: int = 5000
+
     def __init__(self) -> None:
         self.runs: dict[str, dict[str, Any]] = {}
+        self._log_rings: dict[str, CursorLogRing] = {}
         self._process: asyncio.subprocess.Process | None = None
         self._task: asyncio.Task | None = None
         self._stop_requested = False
@@ -155,20 +159,29 @@ class LlamaBenchManager:
             "stderr": [],
         }
         self.runs[run_id] = run
+        self._log_rings[run_id] = CursorLogRing(self.LOG_BUFFER_LINES)
         self._stop_requested = False
         self._task = asyncio.create_task(self._execute(run))
         publish_event("benchmark.started", {"run_id": run_id, "command": command})
         return self.status(run_id)
 
     async def _read_stream(self, run: dict[str, Any], stream: Any, name: str) -> None:
+        ring = self._log_rings[run["run_id"]]
         async for raw_line in stream:
             line = raw_line.decode(errors="replace").rstrip("\r\n")
             run[name].append(line)
+            entry = ring.append(name, line)
             log_fn = logger.warning if name == "stderr" else logger.info
             log_fn("llama-bench %s: %s", run["run_id"], line)
             publish_event(
                 "benchmark.log",
-                {"run_id": run["run_id"], "stream": name, "line": line},
+                {
+                    "run_id": run["run_id"],
+                    "stream": name,
+                    "line": line,
+                    "seq_start": entry.seq,
+                    "seq_end": entry.seq + 1,
+                },
             )
 
     async def _execute(self, run: dict[str, Any]) -> None:
@@ -234,6 +247,37 @@ class LlamaBenchManager:
         run = self.runs[run_id]
         return {
             key: value for key, value in run.items() if key not in {"stdout", "stderr"}
+        }
+
+    def get_logs(
+        self, run_id: str, lines: int = 500, after: int | None = None
+    ) -> dict[str, Any]:
+        """Cursor-addressable benchmark log history.
+
+        With ``after``, returns only lines with ``seq >= after`` plus
+        ``next_cursor``; otherwise the last ``lines`` plus the cursor just
+        past them.
+        """
+        if run_id not in self.runs:
+            raise KeyError(run_id)
+        run = self.runs[run_id]
+        ring = self._log_rings.get(run_id, CursorLogRing())
+        if after is not None:
+            entries, gap = ring.after(after)
+            return {
+                "run_id": run_id,
+                "status": run["status"],
+                "lines": [e.to_dict() for e in entries],
+                "next_cursor": entries[-1].seq + 1 if entries else after,
+                "gap": gap,
+            }
+        tail = ring.tail(lines)
+        return {
+            "run_id": run_id,
+            "status": run["status"],
+            "lines": [e.to_dict() for e in tail],
+            "next_cursor": ring.last_cursor,
+            "gap": False,
         }
 
 

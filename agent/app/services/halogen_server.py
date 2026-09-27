@@ -13,6 +13,7 @@ import httpx
 from app.core.config import settings
 from app.core.logging import logger
 from app.services.event_bus import publish_event
+from app.services.log_buffers import CursorLogRing
 from app.services.model_manager import model_manager
 
 HALOGEN_REPO_ID = "peonist-ai/halogen-qwen3.8-27b"
@@ -52,7 +53,14 @@ class HalogenServerManager:
         self._start_locks: dict[str, asyncio.Lock] = {}
         self._log_readers: dict[str, asyncio.Task] = {}
         self._log_forwarding_started = False
-        self._logs: dict[str, list[str]] = {}
+        self._log_buffers: dict[str, CursorLogRing] = {}
+
+    LOG_BUFFER_LINES = 2000
+
+    def _get_ring(self, server_id: str) -> CursorLogRing:
+        return self._log_buffers.setdefault(
+            server_id, CursorLogRing(self.LOG_BUFFER_LINES)
+        )
 
     @property
     def ServerConfig(self) -> type[HalogenServerConfig]:  # noqa: N802
@@ -159,14 +167,15 @@ class HalogenServerManager:
                 if not line:
                     break
                 text = line.rstrip()
-                self._logs.setdefault(server_id, []).append(text)
-                self._logs[server_id] = self._logs[server_id][-64:]
+                entry = self._get_ring(server_id).append("stdout", text)
                 logger.info("%s %s: %s", self.PROCESS_LABEL, server_id[:8], text)
                 publish_event(
                     "log.lines",
                     {
                         "server_id": server_id,
-                        "lines": [{"stream": "stdout", "line": text}],
+                        "seq_start": entry.seq,
+                        "seq_end": entry.seq + 1,
+                        "lines": [{"stream": entry.stream, "line": entry.line}],
                     },
                 )
         except asyncio.CancelledError:
@@ -339,7 +348,7 @@ class HalogenServerManager:
         return True
 
     def delete_server(self, server_id: str) -> None:
-        self._logs.pop(server_id, None)
+        self._log_buffers.pop(server_id, None)
 
     def _remove(self, server_id: str) -> None:
         self.servers.pop(server_id, None)
@@ -391,12 +400,38 @@ class HalogenServerManager:
             "effective_capacity": self.get_effective_capacity(server_id),
         }
 
-    def get_server_logs(self, server_id: str, lines: int = 100) -> dict:
+    def get_server_logs(
+        self, server_id: str, lines: int = 100, after: int | None = None
+    ) -> dict:
+        """Cursor-addressable merged stdout/stderr log history for a server."""
+        ring = self._log_buffers.get(server_id)
+        if ring is None:
+            return {
+                "server_id": server_id,
+                "status": "running" if server_id in self.servers else "stopped",
+                "stdout": [],
+                "stderr": [],
+                "next_cursor": 0,
+                "gap": False,
+            }
+        if after is not None:
+            entries, gap = ring.after(after)
+            return {
+                "server_id": server_id,
+                "status": "running" if server_id in self.servers else "stopped",
+                "stdout": [e.line for e in entries if e.stream == "stdout"],
+                "stderr": [e.line for e in entries if e.stream == "stderr"],
+                "next_cursor": entries[-1].seq + 1 if entries else after,
+                "gap": gap,
+            }
+        tail = ring.tail(lines)
         return {
             "server_id": server_id,
             "status": "running" if server_id in self.servers else "stopped",
-            "stdout": [],
-            "stderr": self._logs.get(server_id, [])[-lines:],
+            "stdout": [e.line for e in tail if e.stream == "stdout"],
+            "stderr": [e.line for e in tail if e.stream == "stderr"],
+            "next_cursor": ring.last_cursor,
+            "gap": False,
         }
 
 

@@ -455,9 +455,15 @@ async def get_server_metadata(server_id: str) -> dict:
 
 
 @router.get("/logs/{server_id}")
-async def get_server_logs(server_id: str, lines: int = 100) -> dict:
-    """Get recent logs from a llama.cpp server."""
-    return server_manager.get_server_logs(server_id, lines)
+async def get_server_logs(
+    server_id: str, lines: int = 100, after: int | None = None
+) -> dict:
+    """Get recent logs from a managed server.
+
+    ``after`` is a cursor (from ``next_cursor`` or a log.lines ``seq_end``);
+    when provided, only newer lines are returned.
+    """
+    return server_manager.get_server_logs(server_id, lines=lines, after=after)
 
 
 @router.post("/delete")

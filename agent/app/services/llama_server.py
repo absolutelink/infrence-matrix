@@ -14,6 +14,7 @@ import httpx
 from app.core.config import settings
 from app.core.logging import logger
 from app.services.event_bus import publish_event
+from app.services.log_buffers import CursorLogRing
 
 
 @dataclass
@@ -43,8 +44,8 @@ class LlamaServerManager:
 
     ServerConfig = ServerConfig
 
-    # Number of raw log chunks (per stream) kept in memory per server
-    LOG_BUFFER_CHUNKS: int = 64
+    # Number of log lines kept in memory per server (cursor ring)
+    LOG_BUFFER_LINES: int = 2000
     HEALTH_CHECK_INTERVAL: float = 30.0
     HEALTH_CHECK_TIMEOUT: float = 5.0
     HEALTH_FAILURE_THRESHOLD: int = 3
@@ -63,8 +64,8 @@ class LlamaServerManager:
         # server_id -> lock serializing concurrent /servers/start calls for
         # the same instance (e.g. re-registration during a long download)
         self._start_locks: dict[str, asyncio.Lock] = {}
-        # server_id -> list of (stream_key, raw_chunk) in order
-        self._log_buffers: dict[str, list[tuple[str, str]]] = {}
+        # server_id -> cursor ring of (seq, stream_key, line)
+        self._log_buffers: dict[str, CursorLogRing] = {}
         self._log_readers: dict[str, set[asyncio.Task]] = {}
         self._log_forwarding_started = False
         self._health_task: asyncio.Task | None = None
@@ -211,6 +212,31 @@ class LlamaServerManager:
             )
             readers.add(reader)
 
+    def _get_ring(self, server_id: str) -> CursorLogRing:
+        return self._log_buffers.setdefault(
+            server_id, CursorLogRing(self.LOG_BUFFER_LINES)
+        )
+
+    def _append_log(self, server_id: str, stream_name: str, text: str) -> None:
+        """Store one line in the cursor ring and publish it as a log.lines event."""
+        entry = self._get_ring(server_id).append(stream_name, text)
+        log_fn = logger.error if stream_name == "stderr" else logger.info
+        log_fn(
+            "llama-server %s [%s]: %s",
+            server_id[:8],
+            stream_name,
+            text,
+        )
+        publish_event(
+            "log.lines",
+            {
+                "server_id": server_id,
+                "seq_start": entry.seq,
+                "seq_end": entry.seq + 1,
+                "lines": [{"stream": entry.stream, "line": entry.line}],
+            },
+        )
+
     async def _read_log_lines(self, server_id: str, stream, stream_name: str) -> None:
         process = self.servers.get(server_id)
         try:
@@ -218,24 +244,7 @@ class LlamaServerManager:
                 line = await asyncio.to_thread(stream.readline)
                 if not line:
                     break
-                self._log_buffers.setdefault(server_id, []).append((stream_name, line))
-                if len(self._log_buffers[server_id]) > self.LOG_BUFFER_CHUNKS:
-                    self._log_buffers[server_id].pop(0)
-                text = line.rstrip()
-                log_fn = logger.error if stream_name == "stderr" else logger.info
-                log_fn(
-                    "llama-server %s [%s]: %s",
-                    server_id[:8],
-                    stream_name,
-                    text,
-                )
-                publish_event(
-                    "log.lines",
-                    {
-                        "server_id": server_id,
-                        "lines": [{"stream": stream_name, "line": text}],
-                    },
-                )
+                self._append_log(server_id, stream_name, line.rstrip())
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -498,7 +507,12 @@ class LlamaServerManager:
                 exit_code = process.poll()
                 if exit_code is not None:
                     self._drain_pipes(server_id)
-                    _, stderr_lines, _, _ = self._collect_logs(server_id)
+                    ring = self._log_buffers.get(server_id)
+                    stderr_lines = (
+                        [e.line for e in ring.tail(100) if e.stream == "stderr"]
+                        if ring
+                        else []
+                    )
                     detail = "\n".join(stderr_lines[-5:])
                     message = f"Server {server_id} exited with code {exit_code}"
                     if detail:
@@ -569,72 +583,58 @@ class LlamaServerManager:
                 finally:
                     fcntl.fcntl(fd, fcntl.F_SETFL, orig)
                 if raw:
-                    self._log_buffers.setdefault(server_id, []).append((key, raw))
-                    if len(self._log_buffers[server_id]) > self.LOG_BUFFER_CHUNKS:
-                        self._log_buffers[server_id].pop(0)
+                    self._get_ring(server_id).extend(key, raw)
             except TypeError:
                 # Nonblocking read with no data returns None in text mode
                 continue
             except Exception as e:
                 logger.debug(f"Log drain error for {server_id}/{key}: {e}")
 
-    def _collect_logs(
-        self,
-        server_id: str,
-        from_stdout: int = 0,
-        from_stderr: int = 0,
-    ) -> tuple[list[str], list[str], int, int]:
-        """Drain pipes and return (stdout_lines, stderr_lines, new_stdout_pos, new_stderr_pos)."""
-        if not self._log_forwarding_started:
-            self._drain_pipes(server_id)
+    def get_server_logs(
+        self, server_id: str, lines: int = 100, after: int | None = None
+    ) -> dict:
+        """Get recent stdout/stderr output from a llama.cpp server.
 
-        stdout_lines: list[str] = []
-        stderr_lines: list[str] = []
-
-        for stream_key, from_pos, collected in (
-            ("stdout", from_stdout, stdout_lines),
-            ("stderr", from_stderr, stderr_lines),
-        ):
-            pos = 0
-            for chunk_key, chunk in self._log_buffers.get(server_id, []):
-                if chunk_key != stream_key:
-                    continue
-                lines = chunk.splitlines()
-                chunk_end = pos + len(lines)
-                if chunk_end > from_pos:
-                    collected.extend(lines[max(from_pos - pos, 0) :])
-                pos = chunk_end
-
-        total_stdout = sum(
-            len(c.splitlines())
-            for k, c in self._log_buffers.get(server_id, [])
-            if k == "stdout"
-        )
-        total_stderr = sum(
-            len(c.splitlines())
-            for k, c in self._log_buffers.get(server_id, [])
-            if k == "stderr"
-        )
-
-        return stdout_lines, stderr_lines, total_stdout, total_stderr
-
-    def get_server_logs(self, server_id: str, lines: int = 100) -> dict:
-        """Get recent stdout/stderr output from a llama.cpp server."""
+        With ``after`` (a cursor from a previous response or log.lines
+        event), returns only lines with ``seq >= after`` plus ``next_cursor``.
+        Without it, returns the last ``lines`` of each stream and the
+        cursor just past them.
+        """
         if server_id not in self.servers and server_id not in self._log_buffers:
             return {
                 "server_id": server_id,
                 "status": "stopped",
                 "stdout": [],
                 "stderr": [],
+                "next_cursor": 0,
+                "gap": False,
             }
 
-        stdout_lines, stderr_lines, _, _ = self._collect_logs(server_id)
+        if not self._log_forwarding_started:
+            self._drain_pipes(server_id)
+        ring = self._log_buffers.get(server_id)
+        if ring is None:
+            ring = self._get_ring(server_id)
 
+        if after is not None:
+            entries, gap = ring.after(after)
+            return {
+                "server_id": server_id,
+                "status": "running" if server_id in self.servers else "error",
+                "stdout": [e.line for e in entries if e.stream == "stdout"],
+                "stderr": [e.line for e in entries if e.stream == "stderr"],
+                "next_cursor": entries[-1].seq + 1 if entries else after,
+                "gap": gap,
+            }
+
+        tail = ring.tail(lines * 2)
         return {
             "server_id": server_id,
             "status": "running" if server_id in self.servers else "error",
-            "stdout": stdout_lines[-lines:],
-            "stderr": stderr_lines[-lines:],
+            "stdout": [e.line for e in tail if e.stream == "stdout"],
+            "stderr": [e.line for e in tail if e.stream == "stderr"],
+            "next_cursor": ring.last_cursor,
+            "gap": False,
         }
 
     def list_servers(self) -> list[dict]:

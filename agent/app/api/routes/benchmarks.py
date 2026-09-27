@@ -67,6 +67,17 @@ async def benchmark_status(run_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Benchmark run not found") from exc
 
 
+@router.get("/logs/{run_id}")
+async def benchmark_logs(
+    run_id: str, lines: int = 500, after: int | None = None
+) -> dict:
+    """Benchmark run logs; ``after`` enables cursor-based incremental polling."""
+    try:
+        return llama_bench_manager.get_logs(run_id, lines=lines, after=after)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Benchmark run not found") from exc
+
+
 @router.get("/status")
 async def active_benchmark_status() -> dict:
     run_id = llama_bench_manager.active_run_id

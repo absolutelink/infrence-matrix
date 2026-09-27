@@ -7,7 +7,13 @@ os.environ["FRONTEND_URL"] = "http://test:8000"
 
 from types import SimpleNamespace
 
-from app.services.llama_bench import _parse_cases, _summary, build_command
+from app.services.llama_bench import (
+    LlamaBenchManager,
+    _parse_cases,
+    _summary,
+    build_command,
+)
+from app.services.log_buffers import CursorLogRing
 
 
 def test_parse_markdown_output() -> None:
@@ -57,3 +63,39 @@ def test_build_command_uses_bench_options() -> None:
         "-fa",
         "on",
     ]
+
+
+def test_benchmark_logs_are_cursor_addressable() -> None:
+    import asyncio
+
+    async def case() -> None:
+        manager = LlamaBenchManager()
+
+        class FakeStream:
+            def __init__(self, lines: list[bytes]) -> None:
+                self._lines = lines
+
+            def __aiter__(self):
+                return self._next()
+
+            async def _next(self):
+                for line in self._lines:
+                    yield line
+
+        run = {"run_id": "run-1", "status": "running", "stdout": [], "stderr": []}
+        manager.runs["run-1"] = run
+        manager._log_rings["run-1"] = CursorLogRing(10)
+
+        await manager._read_stream(run, FakeStream([b"one\n", b"two\n"]), "stdout")
+        await manager._read_stream(run, FakeStream([b"boom\n"]), "stderr")
+
+        tail = manager.get_logs("run-1")
+        assert tail["next_cursor"] == 3
+        assert [entry["line"] for entry in tail["lines"]] == ["one", "two", "boom"]
+
+        incremental = manager.get_logs("run-1", after=2)
+        assert [entry["line"] for entry in incremental["lines"]] == ["boom"]
+        assert incremental["next_cursor"] == 3
+        assert incremental["gap"] is False
+
+    asyncio.run(case())

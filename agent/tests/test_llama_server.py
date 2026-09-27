@@ -377,21 +377,53 @@ class TestLlamaServerManager:
     async def test_wait_for_server_fails_immediately_when_process_exits(self):
         manager = LlamaServerManager()
         manager.servers["test-server"] = Mock(poll=Mock(return_value=1))
-        manager._log_buffers["test-server"] = [("stderr", "fatal startup error\n")]
+        manager._append_log("test-server", "stderr", "fatal startup error")
 
         with pytest.raises(RuntimeError, match="exited with code 1"):
             await manager._wait_for_server("test-server", 8081, timeout=60)
 
     def test_failed_server_logs_remain_available(self):
         manager = LlamaServerManager()
-        manager._log_buffers["test-server"] = [
-            ("stderr", "fatal startup error\n"),
-        ]
+        manager._append_log("test-server", "stderr", "fatal startup error")
 
         logs = manager.get_server_logs("test-server")
 
         assert logs["status"] == "error"
         assert logs["stderr"] == ["fatal startup error"]
+        assert logs["next_cursor"] == 1
+
+    def test_log_cursor_incremental_fetch(self):
+        manager = LlamaServerManager()
+        with patch("app.services.llama_server.publish_event"):
+            for i in range(5):
+                manager._append_log("test-server", "stdout", f"line {i}")
+
+            logs = manager.get_server_logs("test-server", after=2)
+
+        assert logs["stdout"] == ["line 2", "line 3", "line 4"]
+        assert logs["stderr"] == []
+        assert logs["next_cursor"] == 5
+        assert logs["gap"] is False
+
+    def test_log_cursor_reports_gap_after_eviction(self):
+        manager = LlamaServerManager()
+        manager.LOG_BUFFER_LINES = 3
+        with patch("app.services.llama_server.publish_event"):
+            for i in range(5):
+                manager._append_log("test-server", "stdout", f"line {i}")
+            logs = manager.get_server_logs("test-server", after=0)
+        assert logs["gap"] is True
+        assert logs["stdout"] == ["line 2", "line 3", "line 4"]
+
+    def test_log_events_carry_sequence_numbers(self):
+        manager = LlamaServerManager()
+        with patch("app.services.llama_server.publish_event") as mock_publish:
+            manager._append_log("test-server", "stdout", "hello")
+            manager._append_log("test-server", "stderr", "oops")
+        first = mock_publish.call_args_list[0].args[1]
+        second = mock_publish.call_args_list[1].args[1]
+        assert first["seq_start"] == 0 and first["seq_end"] == 1
+        assert second["seq_start"] == 1 and second["seq_end"] == 2
 
     def test_effective_capacity_matches_launch_options(self):
         manager = LlamaServerManager()
