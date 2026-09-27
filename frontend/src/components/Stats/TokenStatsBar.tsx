@@ -49,7 +49,7 @@ export function TokenStatsBar() {
         </span>
         <span
           className="flex items-center gap-1.5"
-          title="Tokens in the last 24 hours"
+          title="New (uncached) input + generated output tokens in the last 24 hours"
         >
           <Coins className="h-3.5 w-3.5 text-amber-500" />
           {formatTokens(day.prompt_tokens)} in /{" "}

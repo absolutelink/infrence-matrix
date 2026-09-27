@@ -203,12 +203,12 @@ async def test_snapshot_aggregates_windows_and_rates(db: Session) -> None:
     # live prefill excludes cached tokens: (1000 - 400) / 2 s
     assert glob["live"]["prefill_tokens_per_second"] == 300.0
 
-    assert glob["last_24h"]["prompt_tokens"] == 1507
+    assert glob["last_24h"]["prompt_tokens"] == 1107
     assert glob["last_24h"]["completion_tokens"] == 157
-    assert glob["last_24h"]["total_tokens"] == 1664
+    assert glob["last_24h"]["total_tokens"] == 1264
 
-    assert glob["last_7d"]["prompt_tokens"] == 1507
-    assert glob["last_30d"]["prompt_tokens"] == 1807
+    assert glob["last_7d"]["prompt_tokens"] == 1107
+    assert glob["last_30d"]["prompt_tokens"] == 1407
     assert glob["last_30d"]["completion_tokens"] == 187
 
     servers = snapshot["servers"]
@@ -217,7 +217,7 @@ async def test_snapshot_aggregates_windows_and_rates(db: Session) -> None:
     assert servers[0]["alias"] == server_a.alias
     assert servers[0]["decode_tokens_per_second"] == 50.0
     assert servers[0]["prefill_tokens_per_second"] == 300.0
-    assert servers[0]["last_7d"]["total_tokens"] == 1650
+    assert servers[0]["last_7d"]["total_tokens"] == 1250
     assert servers[1]["last_7d"]["total_tokens"] == 0
     assert servers[1]["last_30d"]["total_tokens"] == 330
     assert servers[1]["decode_tokens_per_second"] is None

@@ -123,9 +123,11 @@ async def token_stats_snapshot() -> dict[str, Any]:
 
     Rates use a rolling ``LIVE_WINDOW_SECONDS`` window over completed
     requests: ``sum(tokens) / sum(duration)`` so concurrent requests on a
-    multi-slot server aggregate correctly. Prefill counts only
-    non-cached tokens, because llama.cpp's ``prompt_ms`` excludes the
-    work for cache hits.
+    multi-slot server aggregate correctly. Input counts exclude cached
+    tokens (``prompt_tokens - cached_tokens``): a resent prompt-cache hit
+    is not new work and would otherwise multiply the same context across
+    every turn of a chat. Prefill rates use the same uncached count
+    because llama.cpp's ``prompt_ms`` only covers non-cached processing.
     """
     async with AsyncSessionMaker() as session:
         rows = (
@@ -136,19 +138,19 @@ async def token_stats_snapshot() -> dict[str, Any]:
                         SELECT
                             s.id AS server_id,
                             s.alias AS alias,
-                            coalesce(sum(t.prompt_tokens) FILTER (
+                            coalesce(sum(t.prompt_tokens - t.cached_tokens) FILTER (
                                 WHERE t.created_at >= now() - make_interval(hours => 24)
                             ), 0) AS prompt_24h,
                             coalesce(sum(t.completion_tokens) FILTER (
                                 WHERE t.created_at >= now() - make_interval(hours => 24)
                             ), 0) AS completion_24h,
-                            coalesce(sum(t.prompt_tokens) FILTER (
+                            coalesce(sum(t.prompt_tokens - t.cached_tokens) FILTER (
                                 WHERE t.created_at >= now() - make_interval(days => 7)
                             ), 0) AS prompt_7d,
                             coalesce(sum(t.completion_tokens) FILTER (
                                 WHERE t.created_at >= now() - make_interval(days => 7)
                             ), 0) AS completion_7d,
-                            coalesce(sum(t.prompt_tokens) FILTER (
+                            coalesce(sum(t.prompt_tokens - t.cached_tokens) FILTER (
                                 WHERE t.created_at >= now() - make_interval(days => 30)
                             ), 0) AS prompt_30d,
                             coalesce(sum(t.completion_tokens) FILTER (
