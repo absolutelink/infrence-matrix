@@ -1,6 +1,9 @@
-import { useEffect, useRef, useState } from "react"
+import { RefreshCw } from "lucide-react"
+import { useEffect, useRef } from "react"
+
 import { Badge } from "@/components/ui/badge"
-import { useAgentEvents } from "@/hook/useAgentEvents"
+import { Button } from "@/components/ui/button"
+import { useLogFeed } from "@/hook/useLogFeed"
 
 interface Props {
   isOpen: boolean
@@ -9,26 +12,14 @@ interface Props {
 
 export function BenchmarkLogs({ isOpen, instance }: Props) {
   const logRef = useRef<HTMLDivElement>(null)
-  const [lines, setLines] = useState<Array<{ stream: string; line: string }>>(
-    [],
-  )
-  const { events, connected } = useAgentEvents(instance.agent_id, isOpen)
+  const runId = instance.run_id ?? instance.id
 
-  useEffect(() => {
-    const next: Array<{ stream: string; line: string }> = []
-    for (const event of events) {
-      if (
-        event.event !== "benchmark.log" ||
-        event.data.run_id !== (instance.run_id ?? instance.id)
-      )
-        continue
-      next.push({
-        stream: String(event.data.stream ?? "stdout"),
-        line: String(event.data.line ?? ""),
-      })
-    }
-    setLines(next.slice(-500))
-  }, [events, instance.id, instance.run_id])
+  const { lines, connected, refetch } = useLogFeed({
+    agentId: instance.agent_id,
+    feedId: runId,
+    kind: "benchmark",
+    enabled: isOpen,
+  })
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
@@ -39,8 +30,16 @@ export function BenchmarkLogs({ isOpen, instance }: Props) {
       <div className="flex items-center gap-2 pb-2 font-semibold">
         Benchmark logs{" "}
         <Badge variant={connected ? "default" : "secondary"}>
-          {connected ? "Live" : "Disconnected"}
+          {connected ? "Live" : "Polling"}
         </Badge>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6"
+          onClick={() => refetch()}
+        >
+          <RefreshCw className="h-4 w-4" />
+        </Button>
       </div>
       <div
         ref={logRef}
@@ -50,12 +49,12 @@ export function BenchmarkLogs({ isOpen, instance }: Props) {
           <div className="text-muted-foreground">
             {connected
               ? "Connected - waiting for benchmark output..."
-              : "No live log connection."}
+              : "Loading benchmark logs..."}
           </div>
         )}
-        {lines.map((entry, index) => (
+        {lines.map((entry) => (
           <div
-            key={`${index}-${entry.line.slice(0, 12)}`}
+            key={entry.seq}
             className={
               entry.stream === "stderr"
                 ? "whitespace-pre-wrap text-red-400"

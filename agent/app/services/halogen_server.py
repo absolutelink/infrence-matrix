@@ -421,6 +421,7 @@ class HalogenServerManager:
                 "status": "running" if server_id in self.servers else "stopped",
                 "stdout": [e.line for e in entries if e.stream == "stdout"],
                 "stderr": [e.line for e in entries if e.stream == "stderr"],
+                "entries": [e.to_dict() for e in entries],
                 "next_cursor": entries[-1].seq + 1 if entries else after,
                 "gap": gap,
             }
@@ -430,6 +431,7 @@ class HalogenServerManager:
             "status": "running" if server_id in self.servers else "stopped",
             "stdout": [e.line for e in tail if e.stream == "stdout"],
             "stderr": [e.line for e in tail if e.stream == "stderr"],
+            "entries": [e.to_dict() for e in tail],
             "next_cursor": ring.last_cursor,
             "gap": False,
         }

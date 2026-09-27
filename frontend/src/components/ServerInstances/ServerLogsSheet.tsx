@@ -1,11 +1,9 @@
-import { useQuery } from "@tanstack/react-query"
 import { RefreshCw } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 
-import { AgentsService } from "@/client"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { useAgentEvents } from "@/hook/useAgentEvents"
+import { useLogFeed } from "@/hook/useLogFeed"
 
 interface ServerLogsSheetProps {
   isOpen: boolean
@@ -19,152 +17,22 @@ interface ServerLogsSheetProps {
   }
 }
 
-type LogLine = { stream: "stdout" | "stderr"; line: string }
-
-const MAX_TAIL_LINES = 500
-
-function mergeHistory(existing: LogLine[], history: LogLine[]): LogLine[] {
-  if (existing.length === 0) return history
-
-  const maxOverlap = Math.min(existing.length, history.length)
-  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
-    const historySuffix = history.slice(-overlap)
-    const existingPrefix = existing.slice(0, overlap)
-    if (
-      historySuffix.every(
-        (line, index) =>
-          line.stream === existingPrefix[index].stream &&
-          line.line === existingPrefix[index].line,
-      )
-    ) {
-      return [...history, ...existing.slice(overlap)]
-    }
-  }
-
-  return [...history, ...existing]
-}
-
 export function ServerLogsSheet({ isOpen, instance }: ServerLogsSheetProps) {
   const logRef = useRef<HTMLDivElement>(null)
   const [autoScroll, setAutoScroll] = useState(true)
 
-  // Live tail via the agent event stream
-  const { events, connected } = useAgentEvents(instance.agent_id, isOpen)
-  const [tail, setTail] = useState<LogLine[]>([])
-  // Marks which historical lines are already seeded from the poll so live
-  // lines are only appended once.
-  const [seeded, setSeeded] = useState(false)
-  const historyKeyRef = useRef("")
-  // Highest event seq already merged into the tail (events is cumulative)
-  const processedSeqRef = useRef(-1)
-
-  useEffect(() => {
-    setTail([])
-    setSeeded(false)
-    historyKeyRef.current = ""
-    processedSeqRef.current = -1
-  }, [])
-
-  useEffect(() => {
-    const newLines: LogLine[] = []
-    for (const event of events) {
-      // Skip events already merged into the tail — events is cumulative
-      if (event.seq <= processedSeqRef.current) {
-        continue
-      }
-      processedSeqRef.current = event.seq
-      if (
-        event.event === "log.lines" &&
-        (event.data as { server_id?: string }).server_id === instance.id
-      ) {
-        const lines = ((event.data as { lines?: LogLine[] }).lines ??
-          []) as LogLine[]
-        newLines.push(...lines)
-      }
-    }
-    if (newLines.length > 0) {
-      setTail((prev) => {
-        const merged = [...prev, ...newLines]
-        return merged.length > MAX_TAIL_LINES
-          ? merged.slice(-MAX_TAIL_LINES)
-          : merged
-      })
-    }
-  }, [events, instance.id])
-
-  // History: fetch the last 100 lines from the agent's buffer and seed the
-  // tail before (or alongside) live lines.
-  const historyQuery = useQuery({
-    queryKey: ["server-logs-history", instance.id],
-    queryFn: async () => {
-      const response = await AgentsService.sendCommand({
-        path: { agent_id: instance.agent_id },
-        body: {
-          method: "GET",
-          path: `/servers/logs/${instance.id}?lines=100`,
-        },
-      })
-      return response.data as {
-        status?: string
-        stdout?: string[]
-        stderr?: string[]
-      }
-    },
-    enabled: isOpen && Boolean(instance.agent_id),
-    refetchOnWindowFocus: false,
-    refetchInterval: 5000,
+  const { lines, connected, refetch } = useLogFeed({
+    agentId: instance.agent_id,
+    feedId: instance.id,
+    kind: "server",
+    enabled: isOpen,
   })
 
   useEffect(() => {
-    if (!historyQuery.data || !connected) {
-      return
-    }
-    const history: LogLine[] = [
-      ...(historyQuery.data.stdout ?? []).map((line) => ({
-        stream: "stdout" as const,
-        line,
-      })),
-      ...(historyQuery.data.stderr ?? []).map((line) => ({
-        stream: "stderr" as const,
-        line,
-      })),
-    ]
-    const historyKey = history
-      .map((entry) => `${entry.stream}\u0000${entry.line}`)
-      .join("\u0001")
-    if (historyKey === historyKeyRef.current) {
-      return
-    }
-    historyKeyRef.current = historyKey
-    setTail((prev) => {
-      const merged = mergeHistory(prev, history)
-      return merged.length > MAX_TAIL_LINES
-        ? merged.slice(-MAX_TAIL_LINES)
-        : merged
-    })
-    setSeeded(true)
-  }, [historyQuery.data, connected])
-
-  const fallbackLines: LogLine[] = connected
-    ? []
-    : [
-        ...(historyQuery.data?.stdout ?? []).map((line) => ({
-          stream: "stdout" as const,
-          line,
-        })),
-        ...(historyQuery.data?.stderr ?? []).map((line) => ({
-          stream: "stderr" as const,
-          line,
-        })),
-      ]
-
-  const displayLines = connected ? tail : fallbackLines
-
-  useEffect(() => {
-    if (logRef.current && autoScroll && displayLines.length > 0) {
+    if (logRef.current && autoScroll && lines.length > 0) {
       logRef.current.scrollTop = logRef.current.scrollHeight
     }
-  }, [autoScroll, displayLines.length])
+  }, [autoScroll, lines.length])
 
   return (
     <div className="flex h-full min-h-0 flex-col p-3">
@@ -178,8 +46,7 @@ export function ServerLogsSheet({ isOpen, instance }: ServerLogsSheetProps) {
             variant="ghost"
             size="icon"
             className="h-6 w-6"
-            onClick={() => historyQuery.refetch()}
-            disabled={historyQuery.isFetching}
+            onClick={() => refetch()}
           >
             <RefreshCw className="h-4 w-4" />
           </Button>
@@ -203,23 +70,17 @@ export function ServerLogsSheet({ isOpen, instance }: ServerLogsSheetProps) {
         ref={logRef}
         className="flex-1 overflow-y-auto rounded-md bg-black p-4 font-mono text-xs leading-relaxed text-green-400"
       >
-        {displayLines.length === 0 && (
+        {lines.length === 0 && (
           <div className="text-muted-foreground">
             {connected
               ? "Connected - waiting for log output..."
-              : "No logs available yet."}
+              : "Loading log history..."}
           </div>
         )}
 
-        {connected && seeded && tail.length > 0 && (
-          <div className="text-muted-foreground mb-2 text-[10px] uppercase tracking-wider border-b border-muted-foreground/20 pb-1">
-            Last {Math.min(tail.length, 100)} lines before attaching live
-          </div>
-        )}
-
-        {displayLines.map((entry, i) => (
+        {lines.map((entry) => (
           <div
-            key={`${i}-${entry.line.slice(0, 12)}`}
+            key={entry.seq}
             className={
               entry.stream === "stderr"
                 ? "whitespace-pre-wrap text-red-400"
