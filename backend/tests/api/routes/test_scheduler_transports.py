@@ -64,6 +64,10 @@ class FakeLease:
         self.server = server
         self.lost = asyncio.Event()
         self.events = events
+        self.upstream_started = False
+
+    def mark_upstream_started(self) -> None:
+        self.upstream_started = True
 
     async def guard(self, awaitable, *, cancelled=None):
         return await awaitable
@@ -149,7 +153,7 @@ async def test_responses_sse_releases_before_terminal_event_and_persistence(
     events: list[str] = []
     upstream = FakeStreamResponse(
         [
-            "data: "
+            "data:"
             + json.dumps(
                 {
                     "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}],
@@ -198,6 +202,7 @@ async def test_responses_sse_releases_before_terminal_event_and_persistence(
         frames.append(frame)
 
     assert events == ["released", "terminal", "persisted"]
+    assert lease.upstream_started
     assert frames[-1] == "data: [DONE]\n\n"
     assert client.stream_calls[0]["headers"] == {"X-Inference-Slot-Generation": "23"}
 

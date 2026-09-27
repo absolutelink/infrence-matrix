@@ -102,7 +102,7 @@ class UsageInfo(BaseModel):
     completion_tokens: int
     total_tokens: int
     prompt_tokens_details: dict[str, int] | None = None
-    completion_tokens_details: dict[str, int] | None = None
+    completion_tokens_details: dict[str, Any] | None = None
 
     @classmethod
     def build(cls, prompt_tokens: int, completion_tokens: int) -> UsageInfo:

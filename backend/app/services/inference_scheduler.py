@@ -62,6 +62,10 @@ class InferenceLeaseHandle:
         if self._renewal_task is None:
             self._renewal_task = asyncio.create_task(self._renew_loop())
 
+    def mark_upstream_started(self) -> None:
+        """Allow the renewal loop to renew a stream owned outside ``guard``."""
+        self._upstream_started.set()
+
     async def guard(
         self,
         awaitable: Awaitable[Any],

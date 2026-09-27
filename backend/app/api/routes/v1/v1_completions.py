@@ -5,6 +5,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -60,7 +61,7 @@ class UsageInfo(BaseModel):
     completion_tokens: int
     total_tokens: int
     prompt_tokens_details: dict[str, int] | None = None
-    completion_tokens_details: dict[str, int] | None = None
+    completion_tokens_details: dict[str, Any] | None = None
 
     @classmethod
     def build(cls, prompt_tokens: int, completion_tokens: int) -> UsageInfo:

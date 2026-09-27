@@ -411,6 +411,8 @@ async def _upstream_lines_with_keepalive(
 ) -> AsyncIterator[str | None]:
     """Read upstream SSE lines while emitting comments during idle periods."""
     lines = upstream.aiter_lines()
+    if lease is not None:
+        lease.mark_upstream_started()
     pending = asyncio.create_task(anext(lines))
     lease_lost = asyncio.create_task(lease.lost.wait()) if lease is not None else None
     try:
