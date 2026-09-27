@@ -84,7 +84,6 @@ Last Updated: September 27, 2026
 
 ## 🚧 In Progress
 
-- [~] **Reliable log streaming** - reconnect state + non-duplicating history merge (see Medium Priority)
 - [~] **Audio transcription** - UI wired, backend is a stub
 
 ---
@@ -232,12 +231,14 @@ Key llama.cpp facts (researched):
   - [ ] Frontend benchmark tests (none in repo)
 
 #### Server and Log Panel Improvements
-- [~] **Reliable log streaming** — partially done
-  - [ ] Preserve an explicit connected/disconnected/**reconnecting** state per stream (frontend only has a boolean `connected`)
-  - [x] Auto-reconnect after WebSocket failures without losing the visible tail (5s retry in `useAgentEvents`)
-  - [~] Poll history while disconnected — history/live merge only runs while connected, and suffix↔suffix overlap can duplicate lines (`ServerLogsSheet.mergeHistory`)
+- [x] **Reliable log streaming** — ✅ implemented
+  - [x] Explicit connected/disconnected/**reconnecting** state per stream (`StreamStatus` in `agentEventStream.ts`, yellow pulse indicator while reconnecting)
+  - [x] Auto-reconnect with exponential backoff (1s→15s) without losing the visible tail
+  - [x] One shared, refcounted WebSocket per agent across all consumers (tab indicators, sheets)
+  - [x] Cursor-based merging: agent log rings assign monotonic per-feed sequence numbers; live events carry `seq_start`/`seq_end`; history endpoints accept `?after=<cursor>` and report `gap` on eviction — no content-suffix matching, no duplicate lines
+  - [x] Poll history while disconnected; immediate cursor catch-up on reconnect; bootstrap union handles live events arriving mid-fetch
   - [x] Green/red connected indicator in every log tab title, including inactive tabs
-  - [ ] Benchmark log tabs have no history/polling (live only)
+  - [x] Benchmark log tabs have history + polling (`/benchmarks/logs/{run_id}` cursor ring)
 - [~] **Log panel layout** — partially done
   - [x] Reserve main-content space for the open bottom panel instead of overlaying inputs (`_layout.tsx` padding)
   - [x] Reserved space updates while resized or collapsed
@@ -418,7 +419,7 @@ API_URL=https://matrix.thelink.family
 
 1. ~~OpenResponses API~~ ✅ implemented + conformance pass (see Inference Features section)
 2. ~~Benchmarking~~ ✅ implemented (definitions, queue, isolation, results, history)
-3. **Reliable log streaming** - explicit reconnecting state, non-duplicating history merge, shared socket per agent, benchmark log history
+3. ~~Reliable log streaming~~ ✅ implemented (cursor log rings, shared per-agent WS, reconnecting state, benchmark history)
 4. **Log panel layout** - reflow Responses/Completions/Embeddings/Audio to the reserved panel height
 5. **Observability producers** - feed the Prometheus metrics, increment server usage counters, persist chat/completions token usage
 6. **Audio transcription** - replace the `/v1/audio/*` stubs with real whisper.cpp plumbing on the agent
@@ -429,6 +430,15 @@ API_URL=https://matrix.thelink.family
 ---
 
 ## 📝 Recent Changes
+
+### September 27, 2026 (reliable log streaming)
+- ✅ Cursor-addressable log rings in the agent (`log_buffers.py`): every llama-server, halogen, and llama-bench line gets a monotonic per-feed sequence number; `log.lines` and `benchmark.log` events carry `seq_start`/`seq_end`; `GET /servers/logs/{id}?after=<cursor>` and `GET /benchmarks/logs/{run_id}?after=<cursor>` return incremental lines plus `gap` on eviction
+- ✅ Shared, refcounted WebSocket per agent in the frontend (`agentEventStream.ts`): one socket no matter how many components subscribe; exponential-backoff reconnect (1s→15s); sequence numbers stay continuous across reconnects
+- ✅ Tri-state stream status (`connecting` / `connected` / `reconnecting`) surfaced in every log tab indicator and events sheet badge
+- ✅ `useLogFeed` merges live events and polled history purely by cursor — no content-suffix matching, so repeated log lines can never duplicate; the visible tail survives disconnects, catch-up runs immediately on reconnect, and the bootstrap unions live events that arrive mid-fetch
+- ✅ Benchmark log tabs now seed history and poll while disconnected (were live-only)
+- ✅ Halogen merged diagnostics standardized to `stdout` (live and history no longer disagree on stream color)
+- ✅ Tests: agent ring/cursor/eviction tests, benchmark cursor log test, frontend `bun test` for the pure merge helpers
 
 ### September 26-27, 2026 (scheduling hardening + streaming fixes)
 - ✅ Hardened inference scheduling and server lifecycle: immutable terminal leases, fenced forced stops, `server_stream_closed` releases the lease even when the client keeps its SSE connection open
