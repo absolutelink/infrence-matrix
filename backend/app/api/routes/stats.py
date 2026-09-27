@@ -9,7 +9,7 @@ router = APIRouter(prefix="/stats", tags=["stats"])
 
 
 class LiveRates(BaseModel):
-    window_seconds: int
+    runs: int
     decode_tokens_per_second: float | None = None
     prefill_tokens_per_second: float | None = None
 

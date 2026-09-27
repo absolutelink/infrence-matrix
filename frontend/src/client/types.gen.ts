@@ -1059,9 +1059,9 @@ export type JsonSchemaResponseFormat = {
  */
 export type LiveRates = {
     /**
-     * Window Seconds
+     * Runs
      */
-    window_seconds: number;
+    runs: number;
     /**
      * Decode Tokens Per Second
      */

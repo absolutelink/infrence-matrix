@@ -115,19 +115,20 @@ def record_usage(
 # Retention: keep ~35 days so the 30-day window always has full coverage.
 TOKEN_SAMPLE_RETENTION_DAYS = 35
 PRUNE_INTERVAL_SECONDS = 6 * 60 * 60
-LIVE_WINDOW_SECONDS = 60
+LIVE_RUNS = 10
 
 
 async def token_stats_snapshot() -> dict[str, Any]:
     """Aggregate token usage for the status bar and popover.
 
-    Rates use a rolling ``LIVE_WINDOW_SECONDS`` window over completed
-    requests: ``sum(tokens) / sum(duration)`` so concurrent requests on a
-    multi-slot server aggregate correctly. Input counts exclude cached
-    tokens (``prompt_tokens - cached_tokens``): a resent prompt-cache hit
-    is not new work and would otherwise multiply the same context across
-    every turn of a chat. Prefill rates use the same uncached count
-    because llama.cpp's ``prompt_ms`` only covers non-cached processing.
+    Live rates are the mean per-run rate over each server's last
+    ``LIVE_RUNS`` completed requests: decode = completion_tokens /
+    predicted_ms, prefill = uncached prompt tokens / prompt_ms. Input
+    counts exclude cached tokens (``prompt_tokens - cached_tokens``): a
+    resent prompt-cache hit is not new work and would otherwise multiply
+    the same context across every turn of a chat. Prefill rates use the
+    same uncached count because llama.cpp's ``prompt_ms`` only covers
+    non-cached processing.
     """
     async with AsyncSessionMaker() as session:
         rows = (
@@ -155,37 +156,63 @@ async def token_stats_snapshot() -> dict[str, Any]:
                             ), 0) AS prompt_30d,
                             coalesce(sum(t.completion_tokens) FILTER (
                                 WHERE t.created_at >= now() - make_interval(days => 30)
-                            ), 0) AS completion_30d,
-                            coalesce(sum(t.prompt_tokens - t.cached_tokens) FILTER (
-                                WHERE t.created_at >= now()
-                                      - make_interval(secs => CAST(:live_seconds AS double precision))
-                                      AND t.prompt_ms > 0
-                            ), 0) AS live_prefill_tokens,
-                            coalesce(sum(t.prompt_ms) FILTER (
-                                WHERE t.created_at >= now()
-                                      - make_interval(secs => CAST(:live_seconds AS double precision))
-                            ), 0) AS live_prompt_ms,
-                            coalesce(sum(t.completion_tokens) FILTER (
-                                WHERE t.created_at >= now()
-                                      - make_interval(secs => CAST(:live_seconds AS double precision))
-                                      AND t.predicted_ms > 0
-                            ), 0) AS live_completion_tokens,
-                            coalesce(sum(t.predicted_ms) FILTER (
-                                WHERE t.created_at >= now()
-                                      - make_interval(secs => CAST(:live_seconds AS double precision))
-                            ), 0) AS live_predicted_ms
+                            ), 0) AS completion_30d
                         FROM token_usage_samples t
                         LEFT JOIN server_instances s ON s.id = t.server_instance_id
                         WHERE t.created_at >= now() - make_interval(days => 30)
                         GROUP BY s.id, s.alias
                         """
                     ),
-                    {"live_seconds": LIVE_WINDOW_SECONDS},
                 )
             )
             .mappings()
             .all()
         )
+
+        live_rows = (
+            (
+                await session.execute(
+                    text(
+                        """
+                        WITH ranked AS (
+                            SELECT
+                                t.server_instance_id,
+                                CASE WHEN t.predicted_ms > 0
+                                    THEN t.completion_tokens
+                                         / (t.predicted_ms / 1000.0)
+                                END AS decode_tps,
+                                CASE WHEN t.prompt_ms > 0
+                                    THEN (t.prompt_tokens - t.cached_tokens)
+                                         / (t.prompt_ms / 1000.0)
+                                END AS prefill_tps,
+                                row_number() OVER (
+                                    PARTITION BY t.server_instance_id
+                                    ORDER BY t.created_at DESC, t.id DESC
+                                ) AS rn
+                            FROM token_usage_samples t
+                            WHERE t.created_at >= now() - make_interval(days => 30)
+                        )
+                        SELECT
+                            server_instance_id AS server_id,
+                            avg(decode_tps) AS decode_tps,
+                            count(decode_tps) AS decode_runs,
+                            avg(prefill_tps) AS prefill_tps,
+                            count(prefill_tps) AS prefill_runs
+                        FROM ranked
+                        WHERE rn <= :live_runs
+                        GROUP BY server_instance_id
+                        """
+                    ),
+                    {"live_runs": LIVE_RUNS},
+                )
+            )
+            .mappings()
+            .all()
+        )
+
+    live_by_server: dict[Any, dict[str, Any]] = {
+        row["server_id"]: row for row in live_rows
+    }
 
     window_totals: dict[str, dict[str, int]] = {
         "last_24h": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
@@ -213,15 +240,16 @@ async def token_stats_snapshot() -> dict[str, Any]:
 
         if row["server_id"] is None:
             continue
+        live = live_by_server.get(row["server_id"])
         servers.append(
             {
                 "id": str(row["server_id"]),
                 "alias": row["alias"] or "unknown",
-                "decode_tokens_per_second": _rate(
-                    int(row["live_completion_tokens"]), float(row["live_predicted_ms"])
+                "decode_tokens_per_second": (
+                    float(live["decode_tps"]) if live and live["decode_tps"] else None
                 ),
-                "prefill_tokens_per_second": _rate(
-                    int(row["live_prefill_tokens"]), float(row["live_prompt_ms"])
+                "prefill_tokens_per_second": (
+                    float(live["prefill_tps"]) if live and live["prefill_tps"] else None
                 ),
                 "last_7d": {
                     "prompt_tokens": prompt_7d,
@@ -236,10 +264,19 @@ async def token_stats_snapshot() -> dict[str, Any]:
             }
         )
 
-    live_decode = sum(int(row["live_completion_tokens"]) for row in rows)
-    live_predicted_ms = sum(float(row["live_predicted_ms"]) for row in rows)
-    live_prefill = sum(int(row["live_prefill_tokens"]) for row in rows)
-    live_prompt_ms = sum(float(row["live_prompt_ms"]) for row in rows)
+    # Global live rates: run-weighted mean of per-server averages over
+    # each server's last LIVE_RUNS runs.
+    decode_weighted = 0.0
+    decode_runs = 0
+    prefill_weighted = 0.0
+    prefill_runs = 0
+    for live in live_by_server.values():
+        if live["decode_tps"] is not None and live["decode_runs"]:
+            decode_weighted += float(live["decode_tps"]) * int(live["decode_runs"])
+            decode_runs += int(live["decode_runs"])
+        if live["prefill_tps"] is not None and live["prefill_runs"]:
+            prefill_weighted += float(live["prefill_tps"]) * int(live["prefill_runs"])
+            prefill_runs += int(live["prefill_runs"])
 
     servers.sort(
         key=lambda item: (
@@ -253,9 +290,13 @@ async def token_stats_snapshot() -> dict[str, Any]:
     return {
         "global": {
             "live": {
-                "window_seconds": LIVE_WINDOW_SECONDS,
-                "decode_tokens_per_second": _rate(live_decode, live_predicted_ms),
-                "prefill_tokens_per_second": _rate(live_prefill, live_prompt_ms),
+                "runs": LIVE_RUNS,
+                "decode_tokens_per_second": (
+                    decode_weighted / decode_runs if decode_runs else None
+                ),
+                "prefill_tokens_per_second": (
+                    prefill_weighted / prefill_runs if prefill_runs else None
+                ),
             },
             "last_24h": window_totals["last_24h"],
             "last_7d": window_totals["last_7d"],
@@ -263,13 +304,6 @@ async def token_stats_snapshot() -> dict[str, Any]:
         },
         "servers": servers,
     }
-
-
-def _rate(tokens: float, ms: float) -> float | None:
-    """Tokens per second from a token count and a millisecond duration."""
-    if tokens <= 0 or ms <= 0:
-        return None
-    return tokens / (ms / 1000.0)
 
 
 async def prune_old_samples() -> int:

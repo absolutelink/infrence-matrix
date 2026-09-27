@@ -3,13 +3,14 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlmodel import Session, select
 
 from app.core.db import engine
 from app.db.session import engine as async_engine
 from app.models import Agent, Model, ServerInstance, TokenUsageSample
 from app.services.token_stats import (
-    LIVE_WINDOW_SECONDS,
+    LIVE_RUNS,
     TOKEN_SAMPLE_RETENTION_DAYS,
     extract_usage_fields,
     prune_old_samples,
@@ -197,10 +198,14 @@ async def test_snapshot_aggregates_windows_and_rates(db: Session) -> None:
 
     snapshot = await token_stats_snapshot()
     glob = snapshot["global"]
-    assert glob["live"]["window_seconds"] == LIVE_WINDOW_SECONDS
-    # live decode: only server_a's 10s-old sample: 100 tok / 2 s
-    assert glob["live"]["decode_tokens_per_second"] == 50.0
-    # live prefill excludes cached tokens: (1000 - 400) / 2 s
+    assert glob["live"]["runs"] == LIVE_RUNS
+    # server_a live: mean of per-run rates over its 2 recent runs
+    # decode: (100/2s + 50/5s) / 2 = 30
+    # prefill: ((1000-400)/2s + 500/1s) / 2 = 400
+    # global: run-weighted across servers:
+    # decode: (30*2 + 5*1) / 3 = 21.666...
+    # prefill: (400*2 + 100*1) / 3 = 300
+    assert glob["live"]["decode_tokens_per_second"] == pytest.approx(65 / 3)
     assert glob["live"]["prefill_tokens_per_second"] == 300.0
 
     assert glob["last_24h"]["prompt_tokens"] == 1107
@@ -215,12 +220,15 @@ async def test_snapshot_aggregates_windows_and_rates(db: Session) -> None:
     # orphan excluded; server_a first (only one with a live rate)
     assert [s["id"] for s in servers] == [str(server_a.id), str(server_b.id)]
     assert servers[0]["alias"] == server_a.alias
-    assert servers[0]["decode_tokens_per_second"] == 50.0
-    assert servers[0]["prefill_tokens_per_second"] == 300.0
+    assert servers[0]["decode_tokens_per_second"] == 30.0
+    assert servers[0]["prefill_tokens_per_second"] == 400.0
     assert servers[0]["last_7d"]["total_tokens"] == 1250
     assert servers[1]["last_7d"]["total_tokens"] == 0
     assert servers[1]["last_30d"]["total_tokens"] == 330
-    assert servers[1]["decode_tokens_per_second"] is None
+    # "last N runs" is per server regardless of recency, so server_b's
+    # 8-day-old sample still yields a rate: 30 tok / 6 s and 300 / 3 s
+    assert servers[1]["decode_tokens_per_second"] == 5.0
+    assert servers[1]["prefill_tokens_per_second"] == 100.0
 
 
 async def test_prune_removes_old_samples() -> None:

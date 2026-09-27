@@ -35,14 +35,14 @@ export function TokenStatsBar() {
       <summary className="flex cursor-pointer list-none items-center gap-3 rounded-md px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
         <span
           className="flex items-center gap-1.5"
-          title="Decode tokens/sec (last 60s)"
+          title={`Decode tokens/sec (avg of last ${live.runs} runs)`}
         >
           <Zap className="h-3.5 w-3.5 text-emerald-500" />
           {formatRate(live.decode_tokens_per_second)} tok/s
         </span>
         <span
           className="flex items-center gap-1.5"
-          title="Prefill tokens/sec (last 60s)"
+          title={`Prefill tokens/sec (avg of last ${live.runs} runs)`}
         >
           <Rocket className="h-3.5 w-3.5 text-sky-500" />
           {formatRate(live.prefill_tokens_per_second)} tok/s
@@ -62,7 +62,7 @@ export function TokenStatsBar() {
           <div>
             <p className="text-sm font-medium">Token throughput</p>
             <p className="text-xs text-muted-foreground">
-              Live rates over the last {live.window_seconds}s of completed
+              Rates averaged over each server's last {live.runs} completed
               requests
             </p>
           </div>
