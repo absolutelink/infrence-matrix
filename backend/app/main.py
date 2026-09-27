@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -28,6 +29,7 @@ from app.services.request_activity import (
     request_finished,
     request_started,
 )
+from app.services.token_stats import token_stats_prune_loop
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
 logger = logging.getLogger(__name__)
@@ -43,9 +45,14 @@ async def lifespan(_app: FastAPI):
         )
     inference_scheduler.start_reconciliation()
     start_queue_worker()
-    yield
-    await inference_scheduler.stop_reconciliation()
-    await stop_queue_worker()
+    prune_task = asyncio.create_task(token_stats_prune_loop())
+    try:
+        yield
+    finally:
+        prune_task.cancel()
+        await asyncio.gather(prune_task, return_exceptions=True)
+        await inference_scheduler.stop_reconciliation()
+        await stop_queue_worker()
 
 
 def custom_generate_unique_id(route: APIRoute) -> str:

@@ -18,6 +18,7 @@ from app.models import (
     PromptCache,
     ResponseRecord,
     ServerInstance,
+    TokenUsageSample,
 )
 
 
@@ -32,6 +33,7 @@ def _clean_db() -> None:
     """Remove test data between tests so each test starts from a known state."""
     with Session(engine) as session:
         for model in (
+            TokenUsageSample,
             PromptCache,
             InferenceLease,
             AudioJob,

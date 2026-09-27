@@ -18,6 +18,7 @@ from app.api.routes.v1.v1_chat_completions import _get_or_create_server
 from app.services.agent_manager import agent_manager
 from app.services.inference_scheduler import InferenceLeaseHandle, inference_scheduler
 from app.services.inference_target import resolve_inference_target
+from app.services.token_stats import record_usage
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +178,7 @@ async def _stream_completion_via_agent(
     )
     fallback_completion_chars = 0
     final_usage: UsageInfo | None = None
+    final_timings: dict = {}
 
     try:
         agent = await agent_manager.get_agent(agent_id)
@@ -213,6 +215,7 @@ async def _stream_completion_via_agent(
                             chunk_usage = _extract_completion_usage(chunk_data)
                             if chunk_usage is not None:
                                 final_usage = chunk_usage
+                                final_timings = chunk_data.get("timings") or {}
 
                             text = _extract_chunk_text(chunk_data)
                             fallback_completion_chars += len(text)
@@ -237,6 +240,8 @@ async def _stream_completion_via_agent(
                             logger.warning(f"Invalid JSON in stream: {data}")
                             continue
 
+        if final_usage is not None:
+            record_usage(lease.server, final_usage.model_dump(), final_timings)
         await lease.release()
 
         if include_usage:
@@ -428,6 +433,10 @@ async def create_completion(
                     "audio_tokens": 0,
                 }
             }
+        )
+
+        record_usage(
+            lease.server, normalized_usage.model_dump(), response.get("timings")
         )
 
         return CompletionResponse(

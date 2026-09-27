@@ -58,6 +58,7 @@ from app.services.server_startup import (
     find_alias_instance,
     metadata_capability,
 )
+from app.services.token_stats import record_usage
 
 logger = logging.getLogger(__name__)
 
@@ -326,6 +327,7 @@ async def _complete(
 
     incomplete = finish_reason == "length"
     usage = _build_usage(usage_data, len(content), state.reasoning_tokens)
+    record_usage(lease.server, usage, usage_data.get("timings"))
 
     result = build_response_resource(
         request,
@@ -551,6 +553,7 @@ async def _stream_events(
                     for frame in seq.drain_frames():
                         yield frame
 
+        sample_server = lease.server if lease is not None else None
         if lease is not None:
             await lease.release()
             lease = None
@@ -565,6 +568,7 @@ async def _stream_events(
             yield frame
 
         usage = _build_usage(final_usage_data, fallback_chars, state.reasoning_tokens)
+        record_usage(sample_server, usage, final_usage_data.get("timings"))
 
         if finish_reason == "length":
             response.status = "incomplete"

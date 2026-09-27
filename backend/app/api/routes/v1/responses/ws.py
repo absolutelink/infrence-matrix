@@ -51,6 +51,7 @@ from app.api.routes.v1.responses.translator import (
 from app.core.db import engine
 from app.services.agent_manager import agent_manager
 from app.services.inference_scheduler import inference_scheduler
+from app.services.token_stats import record_usage
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +245,7 @@ async def _stream_to_ws(
         await _send_events(websocket, seq.drain_events())
 
         usage = _build_usage(final_usage, fallback_chars, state.reasoning_tokens)
+        record_usage(server, usage, final_usage.get("timings"))
         if finish_reason == "length":
             resource.status = "incomplete"
             resource.incomplete_details = IncompleteDetails(reason="max_output_tokens")

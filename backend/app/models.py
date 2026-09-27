@@ -512,6 +512,52 @@ class InferenceLease(SQLModel, table=True):
 
 
 # ============================================================================
+# TokenUsageSample - Per-request token usage for live statistics
+# ============================================================================
+class TokenUsageSample(SQLModel, table=True):
+    __tablename__ = "token_usage_samples"
+    __table_args__ = (
+        Index(
+            "idx_token_usage_samples_server_created", "server_instance_id", "created_at"
+        ),
+        Index("idx_token_usage_samples_created_at", "created_at"),
+    )
+
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        primary_key=True,
+        sa_type=UUID(as_uuid=True),  # type: ignore[call-arg,arg-type]
+    )
+    server_instance_id: uuid.UUID | None = Field(
+        default=None,
+        foreign_key="server_instances.id",
+        ondelete="SET NULL",
+    )
+    agent_id: uuid.UUID | None = Field(
+        default=None,
+        foreign_key="agents.id",
+        ondelete="SET NULL",
+    )
+    model_id: uuid.UUID | None = Field(
+        default=None,
+        foreign_key="models.id",
+        ondelete="SET NULL",
+    )
+
+    prompt_tokens: int = 0
+    cached_tokens: int = 0
+    completion_tokens: int = 0
+
+    # llama.cpp stage durations in milliseconds (0 = engine did not report)
+    prompt_ms: float = 0.0
+    predicted_ms: float = 0.0
+
+    created_at: datetime = Field(
+        default_factory=get_datetime_utc, sa_type=DateTime(timezone=True)
+    )
+
+
+# ============================================================================
 # BenchmarkDefinition - Persisted llama-bench configuration
 # ============================================================================
 class BenchmarkDefinition(SQLModel, table=True):

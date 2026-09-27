@@ -28,6 +28,7 @@ from app.services.server_startup import (
     ensure_server_ready,
     metadata_capability,
 )
+from app.services.token_stats import record_usage
 
 logger = logging.getLogger(__name__)
 
@@ -347,6 +348,7 @@ async def _stream_completion_via_agent(
     # Fallback accounting when the server does not send usage chunks
     fallback_completion_chars = 0
     final_usage: UsageInfo | None = None
+    final_timings: dict = {}
 
     try:
         # Hold the client connection while a cold start completes so the
@@ -388,6 +390,7 @@ async def _stream_completion_via_agent(
                             chunk_usage = _extract_usage(chunk_data)
                             if chunk_usage is not None:
                                 final_usage = chunk_usage
+                                final_timings = chunk_data.get("timings") or {}
 
                             delta_content = _extract_delta_content(chunk_data)
                             delta_reasoning = _extract_delta_reasoning(chunk_data)
@@ -426,6 +429,8 @@ async def _stream_completion_via_agent(
                             logger.warning(f"Invalid JSON in stream: {data}")
                             continue
 
+        if final_usage is not None:
+            record_usage(lease.server, final_usage.model_dump(), final_timings)
         # The upstream slot is free as soon as its response stream closes.
         # Do not wait for a slow or disconnected downstream consumer to finish
         # draining the already-produced SSE response.
@@ -731,6 +736,15 @@ async def create_chat_completion(
             prompt_details.get("cached_tokens")
             or (response.get("timings") or {}).get("cache_n")
             or 0
+        )
+        record_usage(
+            lease.server,
+            {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "prompt_tokens_details": {"cached_tokens": cached_tokens},
+            },
+            response.get("timings"),
         )
 
         return ChatCompletionResponse(
