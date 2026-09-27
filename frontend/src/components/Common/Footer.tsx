@@ -19,7 +19,7 @@ export function Footer() {
   const currentYear = new Date().getFullYear()
 
   return (
-    <footer className="border-t py-4 px-6">
+    <footer className="border-t py-4 px-6 pb-[calc(1rem+var(--log-panel-h,0px))]">
       <div className="flex flex-col items-center justify-between gap-4 sm:flex-row">
         <p className="text-muted-foreground text-sm">
           Full Stack FastAPI Template - {currentYear}

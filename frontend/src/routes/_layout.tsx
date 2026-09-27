@@ -32,7 +32,13 @@ function LayoutContent() {
   return (
     <SidebarProvider>
       <AppSidebar />
-      <SidebarInset>
+      <SidebarInset
+        style={
+          {
+            "--log-panel-h": isOpen ? `${height}px` : "0px",
+          } as React.CSSProperties
+        }
+      >
         <header className="sticky top-0 z-10 flex h-16 shrink-0 items-center gap-2 border-b bg-background px-4">
           <SidebarTrigger className="-ml-1 text-muted-foreground" />
           <div className="flex flex-1 items-center justify-center">
@@ -40,10 +46,7 @@ function LayoutContent() {
           </div>
           <QueueStatusBar />
         </header>
-        <main
-          className="min-h-0 flex-1 overflow-y-auto p-6 md:p-8"
-          style={{ paddingBottom: isOpen ? height + 24 : undefined }}
-        >
+        <main className="min-h-0 flex-1 overflow-y-auto p-6 pb-[calc(1.5rem+var(--log-panel-h))] md:p-8 md:pb-[calc(2rem+var(--log-panel-h))]">
           <div className="mx-auto h-full max-w-7xl">
             <Outlet />
           </div>

@@ -66,7 +66,7 @@ function Embeddings() {
   const dimension = result?.data[0]?.embedding.length ?? 0
 
   return (
-    <div className="flex flex-col h-[calc(100vh-8rem)]">
+    <div className="flex h-[calc(100vh-8rem-var(--log-panel-h,0px))] min-h-[480px] flex-col">
       <div className="flex items-center justify-between mb-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Embeddings</h1>

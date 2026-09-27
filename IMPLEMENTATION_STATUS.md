@@ -242,7 +242,7 @@ Key llama.cpp facts (researched):
 - [~] **Log panel layout** — partially done
   - [x] Reserve main-content space for the open bottom panel instead of overlaying inputs (`_layout.tsx` padding)
   - [x] Reserved space updates while resized or collapsed
-  - [ ] Responses, Completions, Embeddings, and Audio still use fixed `h-[calc(100vh-8rem)]`, so their forms are not reflowed to the reserved height; footer remains overlaid
+  - [x] Responses, Completions, Embeddings, and Audio reflow to the reserved height via `--log-panel-h` (published on `SidebarInset`); footer padding accounts for the panel
 
 #### Prompts Library
 - [ ] Saved prompts
@@ -420,7 +420,7 @@ API_URL=https://matrix.thelink.family
 1. ~~OpenResponses API~~ ✅ implemented + conformance pass (see Inference Features section)
 2. ~~Benchmarking~~ ✅ implemented (definitions, queue, isolation, results, history)
 3. ~~Reliable log streaming~~ ✅ implemented (cursor log rings, shared per-agent WS, reconnecting state, benchmark history)
-4. **Log panel layout** - reflow Responses/Completions/Embeddings/Audio to the reserved panel height
+4. ~~Log panel layout~~ ✅ reflowed via `--log-panel-h` CSS variable
 5. **Observability producers** - feed the Prometheus metrics, increment server usage counters, persist chat/completions token usage
 6. **Audio transcription** - replace the `/v1/audio/*` stubs with real whisper.cpp plumbing on the agent
 7. **Batch executor** - JSONL parsing, request fan-out, output files, plus a UI
