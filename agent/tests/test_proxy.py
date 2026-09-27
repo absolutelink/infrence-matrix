@@ -20,6 +20,7 @@ from app.services.proxy import ServerProxy
 async def test_proxy_request_retries_connection_failures():
     manager = Mock(configs={"server-1": Mock(port=8091)}, _active_connections={})
     proxy = ServerProxy(manager)
+    assert proxy.client.timeout.connect == 10.0
     response = Mock()
     proxy.client.request = AsyncMock(
         side_effect=[httpx.ConnectError("not ready"), response]

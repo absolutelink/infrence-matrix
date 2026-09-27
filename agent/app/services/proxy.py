@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator
 import httpx
 
 CONNECT_RETRY_DELAYS = (0.5, 1.0, 2.0, 4.0, 8.0, 8.0)
+UPSTREAM_CONNECT_TIMEOUT_SECONDS = 10.0
 
 
 class ServerProxy:
@@ -13,7 +14,9 @@ class ServerProxy:
 
     def __init__(self, server_manager) -> None:
         self.server_manager = server_manager
-        self.client = httpx.AsyncClient(timeout=300.0)
+        self.client = httpx.AsyncClient(
+            timeout=httpx.Timeout(300.0, connect=UPSTREAM_CONNECT_TIMEOUT_SECONDS)
+        )
 
     def _get_server_port(self, server_id: str) -> int:
         """Get server port from server manager."""

@@ -15,6 +15,8 @@ from app.core.logging import logger
 from app.db.session import AsyncSessionMaker
 from app.models import Agent, InferenceLease
 
+AGENT_CONNECT_TIMEOUT_SECONDS = 10.0
+
 
 class AgentConnectionLost(ConnectionError):
     """Raised when an established agent WebSocket closes unexpectedly."""
@@ -679,7 +681,11 @@ class AgentManager:
         # with no /api prefix.
         url = f"http://{agent.host}:{agent.port}{path}"
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        request_timeout = httpx.Timeout(
+            timeout,
+            connect=min(timeout, AGENT_CONNECT_TIMEOUT_SECONDS),
+        )
+        async with httpx.AsyncClient(timeout=request_timeout) as client:
             try:
                 response = await client.request(
                     method=method,
