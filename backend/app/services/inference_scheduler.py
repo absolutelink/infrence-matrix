@@ -189,6 +189,30 @@ class InferenceLeaseHandle:
             await asyncio.shield(release_task)
             raise
 
+    async def cancel(self) -> None:
+        """Cancel an active lease when its client disconnects before dispatch."""
+
+        if self._renewal_task is not None:
+            self._renewal_task.cancel()
+            await asyncio.gather(self._renewal_task, return_exceptions=True)
+            self._renewal_task = None
+
+        async with AsyncSessionMaker() as session:
+            await session.execute(
+                update(InferenceLease)
+                .where(
+                    InferenceLease.id == self.lease_id,
+                    InferenceLease.status == "active",
+                    InferenceLease.slot_generation == self.slot_generation,
+                )
+                .values(
+                    status="cancelled",
+                    terminal_reason="client_disconnected",
+                    released_at=datetime.now(UTC),
+                )
+            )
+            await session.commit()
+
 
 class InferenceRequestCancelled(asyncio.CancelledError):
     """Raised when a queued request no longer has a client waiting for it."""
@@ -769,6 +793,12 @@ class InferenceScheduler:
                 for server, capacity, _active in scored:
                     lease = await self._claim(queued.id, server, capacity)
                     if lease:
+                        # A disconnect can race the atomic queue claim. Do not
+                        # return an active lease that the response will never
+                        # consume.
+                        if is_cancelled is not None and await is_cancelled():
+                            await lease.cancel()
+                            raise InferenceRequestCancelled
                         claimed = True
                         return lease
 
@@ -792,6 +822,12 @@ class InferenceScheduler:
                         queued.id, prepared, server_capacity(prepared)
                     )
                     if lease:
+                        # A disconnect can race the atomic queue claim. Do not
+                        # return an active lease that the streaming response
+                        # will never consume.
+                        if is_cancelled is not None and await is_cancelled():
+                            await lease.cancel()
+                            raise InferenceRequestCancelled
                         claimed = True
                         return lease
                 if asyncio.get_running_loop().time() >= deadline:

@@ -11,6 +11,7 @@ from app.models import Agent, InferenceLease, Model, ServerInstance
 from app.services.inference_scheduler import (
     InferenceLeaseHandle,
     InferenceLeaseLost,
+    InferenceRequestCancelled,
     InferenceScheduler,
     _vram_requirements_fit,
     server_capacity,
@@ -220,6 +221,33 @@ async def test_unexpected_acquisition_exception_terminalizes_queued_lease(db):
     assert lease.status == "failed"
     assert lease.terminal_reason == "admission_error"
     assert lease.released_at is not None
+
+
+@pytest.mark.asyncio
+async def test_disconnect_after_claim_cancels_before_returning_lease():
+    scheduler = InferenceScheduler()
+    queued = SimpleNamespace(id=uuid.uuid4())
+    server = SimpleNamespace(id=uuid.uuid4(), status="running", health_status="healthy")
+    lease = SimpleNamespace(cancel=AsyncMock())
+    is_cancelled = AsyncMock(side_effect=[False, True])
+
+    with (
+        patch.object(scheduler, "_queue", new=AsyncMock(return_value=queued)),
+        patch.object(scheduler, "_ensure_queued", new=AsyncMock()),
+        patch.object(scheduler, "_admission_open", new=AsyncMock(return_value=True)),
+        patch.object(scheduler, "_candidates", new=AsyncMock(return_value=[server])),
+        patch.object(scheduler, "_active_leases", new=AsyncMock(return_value=0)),
+        patch.object(scheduler, "_claim", new=AsyncMock(return_value=lease)),
+        patch.object(scheduler, "_finish_queued", new=AsyncMock()),
+    ):
+        with pytest.raises(InferenceRequestCancelled):
+            await scheduler.acquire(
+                uuid.uuid4(),
+                "disconnected-before-dispatch",
+                is_cancelled=is_cancelled,
+            )
+
+    lease.cancel.assert_awaited_once()
 
 
 async def test_compatible_fifo_does_not_block_unrelated_models(db):
