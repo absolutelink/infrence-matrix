@@ -201,6 +201,8 @@ def _llama_payload(
         payload["presence_penalty"] = request.presence_penalty
     if request.frequency_penalty is not None:
         payload["frequency_penalty"] = request.frequency_penalty
+    if request.reasoning and request.reasoning.effort is not None:
+        payload["reasoning_effort"] = request.reasoning.effort
     payload["max_tokens"] = (
         request.max_output_tokens
         if request.max_output_tokens is not None

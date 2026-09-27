@@ -104,6 +104,19 @@ async def test_guard_cancels_upstream_when_client_disconnects() -> None:
     assert operation_cancelled.is_set()
 
 
+def test_responses_reasoning_effort_reaches_upstream_payload() -> None:
+    request = CreateResponseBody(
+        model="model",
+        input="hello",
+        reasoning={"effort": "none"},
+        stream=True,
+    )
+
+    payload = responses_router._llama_payload(request, [], stream=True)
+
+    assert payload["reasoning_effort"] == "none"
+
+
 @pytest.mark.asyncio
 async def test_legacy_completion_releases_before_usage_and_done(
     monkeypatch: pytest.MonkeyPatch,
