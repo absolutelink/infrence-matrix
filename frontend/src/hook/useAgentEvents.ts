@@ -1,86 +1,60 @@
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 
-export type AgentEvent = {
-  event: string
-  data: Record<string, unknown>
-  timestamp: string
-  /** Monotonic per-hook sequence for consumers to dedupe processed events */
-  seq: number
-}
+import {
+  type AgentEvent,
+  acquireStream,
+  type StreamStatus,
+} from "@/hook/agentEventStream"
 
-const MAX_EVENTS = 200
+export type { AgentEvent, StreamStatus }
 
 /**
  * Subscribe to an agent's live event stream via the backend WebSocket
- * (mounted at /api/ws/agents/{agent_id}).
+ * (mounted at /api/ws/events/{agent_id}).
+ *
+ * The underlying socket is shared per agent across all consumers and
+ * reconnects with exponential backoff. `status` distinguishes the initial
+ * connect from a reconnect so UIs can show a "reconnecting" state.
  */
 export function useAgentEvents(agentId: string, enabled: boolean) {
   const [events, setEvents] = useState<AgentEvent[]>([])
-  const [connected, setConnected] = useState(false)
-  const wsRef = useRef<WebSocket | null>(null)
-  const seqRef = useRef(0)
+  const [status, setStatus] = useState<StreamStatus>("connecting")
+  const [attempt, setAttempt] = useState(0)
+
+  const handleBatch = useCallback((batch: AgentEvent[]) => {
+    if (batch.length === 0) return
+    setEvents((prev) => [...prev, ...batch].slice(-500))
+  }, [])
+
+  const handleStatus = useCallback(
+    (nextStatus: StreamStatus, nextAttempt: number) => {
+      setStatus(nextStatus)
+      setAttempt(nextAttempt)
+    },
+    [],
+  )
 
   useEffect(() => {
-    if (!enabled || !agentId) {
-      return
-    }
+    if (!enabled || !agentId) return
 
-    const baseUrl =
-      (window as any).APP_CONFIG?.API_URL ||
-      import.meta.env.VITE_API_URL ||
-      window.location.origin
-    const wsUrl = `${baseUrl.replace(/^http/, "ws")}/api/ws/events/${agentId}`
-
-    let ws: WebSocket | null = null
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-    let closed = false
-
-    const connect = () => {
-      if (closed) {
-        return
-      }
-      ws = new WebSocket(wsUrl)
-      wsRef.current = ws
-
-      ws.onopen = () => {
-        setConnected(true)
-      }
-      ws.onmessage = (message) => {
-        try {
-          const parsed = JSON.parse(message.data)
-          if (parsed.event === "heartbeat") {
-            return
-          }
-          setEvents((prev) => [
-            ...prev.slice(-(MAX_EVENTS - 1)),
-            { ...parsed, seq: seqRef.current++ },
-          ])
-        } catch {
-          // ignore malformed messages
-        }
-      }
-      ws.onclose = () => {
-        setConnected(false)
-        if (!closed) {
-          reconnectTimer = setTimeout(connect, 5000)
-        }
-      }
-      ws.onerror = () => {
-        ws?.close()
-      }
-    }
-
-    connect()
+    const { stream, release } = acquireStream(agentId)
+    // Seed from the shared buffer so a newly mounted consumer (or one
+    // remounting after a disconnect) keeps the visible history.
+    setEvents(stream.recentEvents())
+    stream.addListener(handleBatch)
+    stream.addStatusListener(handleStatus)
 
     return () => {
-      closed = true
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer)
-      }
-      ws?.close()
-      wsRef.current = null
+      stream.removeListener(handleBatch)
+      stream.removeStatusListener(handleStatus)
+      release()
     }
-  }, [agentId, enabled])
+  }, [agentId, enabled, handleBatch, handleStatus])
 
-  return { events, connected }
+  return {
+    events,
+    connected: status === "connected",
+    status,
+    attempt,
+  }
 }

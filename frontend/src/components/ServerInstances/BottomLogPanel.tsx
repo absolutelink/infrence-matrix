@@ -7,14 +7,25 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useAgentEvents } from "@/hook/useAgentEvents"
 
 function LogConnectionIndicator({ agentId }: { agentId: string }) {
-  const { connected } = useAgentEvents(agentId, true)
+  const { status } = useAgentEvents(agentId, true)
+  const color =
+    status === "connected"
+      ? "bg-green-500"
+      : status === "reconnecting"
+        ? "animate-pulse bg-yellow-500"
+        : "bg-red-500"
+  const label =
+    status === "connected"
+      ? "Log stream connected"
+      : status === "reconnecting"
+        ? "Log stream reconnecting"
+        : "Log stream disconnected"
   return (
     <span
       role="img"
-      aria-label={
-        connected ? "Log stream connected" : "Log stream disconnected"
-      }
-      className={`h-2 w-2 shrink-0 rounded-full ${connected ? "bg-green-500" : "bg-red-500"}`}
+      aria-label={label}
+      title={label}
+      className={`h-2 w-2 shrink-0 rounded-full ${color}`}
     />
   )
 }

@@ -65,7 +65,14 @@ export function AgentEventsSheet({
   agentId,
   agentName,
 }: AgentEventsSheetProps) {
-  const { events, connected } = useAgentEvents(agentId, isOpen)
+  const { events, connected, status } = useAgentEvents(agentId, isOpen)
+
+  const badgeLabel =
+    status === "connected"
+      ? "Live"
+      : status === "reconnecting"
+        ? "Reconnecting..."
+        : "Connecting..."
 
   return (
     <Sheet open={isOpen} onOpenChange={(open) => !open && onClose()}>
@@ -74,7 +81,7 @@ export function AgentEventsSheet({
           <SheetTitle className="flex items-center gap-2">
             Events - {agentName}
             <Badge variant={connected ? "default" : "secondary"}>
-              {connected ? "Live" : "Connecting..."}
+              {badgeLabel}
             </Badge>
           </SheetTitle>
           <SheetDescription>
