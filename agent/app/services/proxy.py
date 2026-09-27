@@ -69,7 +69,10 @@ class ServerProxy:
                 try:
                     self._check_generation(server_id, expected_slot_generation)
                     async with self.client.stream(
-                        method=method, url=url, json=json
+                        method=method,
+                        url=url,
+                        json=json,
+                        headers={"Accept": "text/event-stream"},
                     ) as response:
                         connected = True
                         async for chunk in response.aiter_bytes():

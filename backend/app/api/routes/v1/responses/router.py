@@ -515,9 +515,9 @@ async def _stream_events(
                     if line is None:
                         yield ": keep-alive\n\n"
                         continue
-                    if not line.startswith("data: "):
+                    if not line.startswith("data:"):
                         continue
-                    data = line[6:]
+                    data = line[5:].lstrip()
                     if data.strip() == "[DONE]":
                         break
                     try:

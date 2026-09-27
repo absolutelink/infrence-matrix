@@ -201,8 +201,8 @@ async def _stream_completion_via_agent(
                         line = await lease.guard(anext(lines))
                     except StopAsyncIteration:
                         break
-                    if line.startswith("data: "):
-                        data = line[6:]
+                    if line.startswith("data:"):
+                        data = line[5:].lstrip()
                         if data.strip() == "[DONE]":
                             break
 

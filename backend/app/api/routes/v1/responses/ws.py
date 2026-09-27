@@ -196,9 +196,9 @@ async def _stream_to_ws(
                         line = await lease.guard(anext(lines), cancelled=disconnected)
                     except StopAsyncIteration:
                         break
-                    if not line.startswith("data: "):
+                    if not line.startswith("data:"):
                         continue
-                    data = line[6:]
+                    data = line[5:].lstrip()
                     if data.strip() == "[DONE]":
                         break
                     try:
