@@ -1,6 +1,6 @@
 # Inference Matrix - Implementation Status
 
-Last Updated: September 24, 2026
+Last Updated: September 27, 2026
 
 ## ✅ Completed Features
 
@@ -84,8 +84,8 @@ Last Updated: September 24, 2026
 
 ## 🚧 In Progress
 
-- [x] **Chat Page** - UI complete with backend streaming integration
-- [x] **Server instance lifecycle** - start/stop via UI, events, live logs (see below)
+- [~] **Reliable log streaming** - reconnect state + non-duplicating history merge (see Medium Priority)
+- [~] **Audio transcription** - UI wired, backend is a stub
 
 ---
 
@@ -120,7 +120,9 @@ Last Updated: September 24, 2026
 - [x] Per-server llama.cpp logs sheet in UI (live tail, auto-scroll, stderr highlight)
 - [x] Stale instance cleanup: agents report running_server_ids on registration; backend marks unreported instances stopped
 - [x] Server health monitoring (periodic health checks, transition events, crash detection)
-- [ ] Server configuration editing (in-place)
+- [x] Server configuration editing (in-place, `PUT /api/v1/server-instances/{id}` with restart flag, active-lease and benchmark guards)
+- [x] Scrollable settings side sheets (Start + Edit are right-side `Sheet`s with sticky header/footer)
+- [ ] Engine switching on an existing instance (deliberately rejected)
 - [ ] Connection testing
 
 #### Real-time Event Streaming
@@ -132,13 +134,44 @@ Last Updated: September 24, 2026
 - [x] Download progress events with speed_mbps (tqdm shim for hf_hub)
 - [x] Real GPU metrics via nvidia-smi sampling + periodic gpu.usage emission
 
+#### Inference Scheduling & Queueing (`backend/app/services/inference_scheduler.py`)
+- [x] Postgres-backed `InferenceLease` rows (queued/active/terminal + `terminal_reason`, `slot_generation`)
+- [x] VRAM-aware FIFO admission (`FOR UPDATE SKIP LOCKED`, oldest-first, configured `vram_required_bytes` else model + mmproj + dflash size vs agent `vram_total`)
+- [x] Capacity from agent-reported effective slots (llama.cpp `parallel`, Halogen `kv_slots`) — not llama `/slots` telemetry polling
+- [x] Lease TTL (90s) + renewal loop gated on healthy server and matching slot generation
+- [x] Guard cancels upstream work when the lease is lost; `release()` shielded from ASGI cancellation
+- [x] Stale-lease reconciliation loop (30s) + startup reconciliation of persisted leases
+- [x] Queued-past-deadline → `expired`; active lease on stopped/unhealthy/missing server → `failed` + fenced forced stop
+- [x] Idle-server eviction to make room (LRU by `last_request_at`, skips active leases), matched across co-located agents by host + GPU id
+- [x] Cold-start serialization via per-resource advisory lock (`host:gpu_id`)
+- [x] Disconnected-request cancellation wired into every `/v1` entrypoint (ASGI `CancelledError` treated as authoritative)
+- [x] Queue clearing: `POST /api/v1/queue/clear` (queued only) + "Clear queue" UI
+- [x] Live queue status: `/api/ws/queue-status` pushed every 2s → `QueueStatusBar` (running/queued/GPU/VRAM, per-server booting/ready)
+- [x] `server_stream_closed` releases the lease even when the client keeps its SSE connection open
+
+#### Halogen / halogen-flash Engine Support
+- [x] Platform registry: `AGENT_PLATFORM` ∈ `llamacpp | halogen | halogen-flash`, validated on agent registration
+- [x] Halogen ROCm engine driver (env-var driven startup, fixed entrypoint, no CLI flags)
+- [x] halogen-flash driver: ~30 mapped env options incl. KV pool, sampling, reasoning effort, composable context
+- [x] Two private ports per server (api + engine); only the agent port is published
+- [x] Health probes on the API port with 900s startup grace and transient-failure tolerance
+- [x] Merged stdout/stderr log forwarding (blocking readline in a thread) into `log.lines`
+- [x] Configurable disk prompt caching (`HALOGEN_CACHE_DIR`, `cache_disk_gib`, `cache_prune_old`)
+- [x] Vision tower toggle (halogen-flash) + typed `HalogenServerOptions` / `HalogenFlashServerOptions` (`extra="forbid"`)
+- [x] Process-group cleanup (`start_new_session` + `killpg` SIGTERM→SIGKILL)
+- [x] Proxy path allowlist + slot-generation fencing for halogen-flash
+- [x] Payload compat: null-optional omission, cached-token usage mapping, streaming token delivery
+- [x] Engine picker + per-engine settings fields in Start/Edit dialogs
+- [x] Recipes: `halogen-rocm`, `halogen-flash`, `llama-cpp-q38rocm`, `llama-cpp-vulkan`
+- [ ] Engine migration/upgrade path for existing instances
+
 #### Inference Features
 - [x] Chat completion UI (OpenAI-compatible `/v1/chat/completions` via agent proxy)
-- [ ] Text completion UI
-- [ ] Embeddings generator
-- [ ] File upload for processing
-- [ ] Batch job management
-- [ ] Audio transcription UI
+- [x] Text completion UI (`/v1/completions`, streaming + non-streaming)
+- [x] Embeddings generator (`/v1/embeddings`, `supports_embeddings` gating)
+- [~] File upload for processing — backend OpenAI file API complete (upload/list/get/content/delete + checksum); no standalone Files UI page
+- [~] Batch job management — API shell only (`validating` status, no executor, no output files, no UI)
+- [ ] Audio transcription UI — page exists but backend is a stub (`v1_audio.py` returns placeholder text; no whisper.cpp wiring)
 
 #### OpenResponses API (`/v1/responses`) — ✅ implemented (core scope + conformance)
 Target: [Open Responses spec v2026-04-24](https://www.openresponses.org/specification) (full core scope incl. WebSocket transport + `/responses/compact`; `service_tier` accepted, maps to default).
@@ -168,56 +201,47 @@ Key llama.cpp facts (researched):
 
 #### Dashboard Improvements
 - [x] System metrics dashboard cards (models, agents, servers, requests, GPU, VRAM)
-- [ ] Model usage statistics
-- [ ] Recent activity feed
-- [ ] Quick actions panel
-- [ ] Resource usage charts
+- [x] Live queue metrics + bottom status bar (GPU utilization/VRAM, deduplicated across agents sharing a GPU)
+- [ ] Model usage statistics (`ServerInstance.total_requests`/`total_tokens_generated`/`average_response_time_ms` are read but never incremented)
+- [~] Recent activity feed (renders server instances with static counters, not a timestamped event feed)
+- [ ] Quick actions panel (only "Clear queue" exists in the status bar)
+- [ ] Resource usage charts (numeric cards only; no charting library installed)
 
 ### 🔧 Medium Priority
 
-#### Benchmarking
-- [ ] **Benchmark definitions**
-  - Persist benchmark definitions with CRUD support
-  - Select an existing server definition and retain a configuration snapshot for reproducibility
-  - Reuse server definition add/edit/delete UI patterns
-  - Configure core `llama-bench` options, including prompt/context sizes, batch sizes, repetitions, GPU layers, and flash attention
-  - Soft-copy source settings while retaining the source definition reference
-- [ ] **Benchmark execution**
-  - Run `llama-bench` directly on the agent instead of starting a `llama-server`
-  - Configure the `llama-bench` executable path per agent, with a PATH-based default
-  - Queue runs until the selected agent and model are available
-  - Execute all selected prompt/context combinations in a run
-  - Parse and persist per-case results and aggregate summary metrics
-  - Persist run history, raw output, errors, timestamps, and status transitions until explicitly deleted
-- [ ] **Benchmark server isolation**
-  - Allow only one active benchmark globally and process queued runs FIFO
-  - Wait for all running servers to become idle before stopping them
-  - Prompt on idle timeout to abort or force-stop
-  - Force-stop terminates active requests before proceeding
-  - Keep all servers stopped while a benchmark is running
-  - Block server starts/restarts during benchmark execution
-  - Leave automatically stopped servers stopped after the run
-- [ ] **Benchmark UI and history**
-  - Add a dedicated Benchmarks page with definitions, queue, active runs, history, and result details
-  - Add benchmark actions and latest result summaries to server definitions
-  - Open a dedicated log tab automatically when a run starts
-  - Identify log tabs by benchmark run
-- [ ] **Benchmark tests**
-  - Definition CRUD, snapshots, deletion, and validation
-  - Queueing, idle detection, timeout prompts, force-stop, and cleanup
-  - Agent subprocess execution, command construction, output parsing, and failures
-  - Result persistence and frontend benchmark workflows
+#### Benchmarking — ✅ implemented (`0737fa1`, `74df892`)
+- [x] **Benchmark definitions**
+  - Persisted `BenchmarkDefinition` + `BenchmarkRun` with CRUD (`backend/app/api/routes/benchmarks.py`)
+  - Copy-from-server-instance dialog retains a config snapshot + source reference
+  - Core `llama-bench` options: prompt/generation sizes, repetitions, batch/ubatch, GPU layers, flash attention
+  - dflash draft model support (`--spec-type draft-dflash -md`)
+- [x] **Benchmark execution**
+  - Runs `llama-bench` directly on the agent (`agent/app/services/llama_bench.py`), `LLAMA_BENCH_PATH` per recipe
+  - Queues until the agent/model is available; downloads missing models first
+  - All prompt/context combinations in one run; Markdown/CSV/bare-table parsing + aggregate summary
+  - Run history, raw output, errors, timestamps, status transitions persisted until deleted
+- [x] **Benchmark server isolation**
+  - One active benchmark globally via Postgres advisory lock; FIFO queue
+  - Waits for idle (persisted active leases) then force-stops all starting/running servers
+  - Idle timeout with abort/force-stop resolution in the UI
+  - Starts/restarts/edits blocked while a benchmark runs; scheduler admission denied
+  - Automatically stopped servers stay stopped after the run
+- [x] **Benchmark UI and history** — `/benchmarks` page (definitions + queue/history tabs, 5s refresh, results viewer); log tab auto-opens and is labeled by run
+  - [ ] Benchmark actions and latest-result summaries on server definition rows (not implemented)
+- [x] **Benchmark tests** — backend CRUD/snapshot, scheduler isolation, agent parse/command construction
+  - [ ] Frontend benchmark tests (none in repo)
 
 #### Server and Log Panel Improvements
-- [ ] **Reliable log streaming**
-  - Preserve an explicit connected/disconnected/reconnecting state for every log stream
-  - Automatically reconnect after WebSocket failures without losing the visible tail
-  - Poll log history while disconnected and merge history/live output without duplicates
-  - Show a green connected or red disconnected indicator in every log tab title, including inactive tabs
-- [ ] **Log panel layout**
-  - Reserve main-content space for the open bottom log panel instead of overlaying page inputs
-  - Update reserved space while the panel is resized or collapsed
-  - Verify Responses API, Chat, and Completions forms remain fully accessible with logs open
+- [~] **Reliable log streaming** — partially done
+  - [ ] Preserve an explicit connected/disconnected/**reconnecting** state per stream (frontend only has a boolean `connected`)
+  - [x] Auto-reconnect after WebSocket failures without losing the visible tail (5s retry in `useAgentEvents`)
+  - [~] Poll history while disconnected — history/live merge only runs while connected, and suffix↔suffix overlap can duplicate lines (`ServerLogsSheet.mergeHistory`)
+  - [x] Green/red connected indicator in every log tab title, including inactive tabs
+  - [ ] Benchmark log tabs have no history/polling (live only)
+- [~] **Log panel layout** — partially done
+  - [x] Reserve main-content space for the open bottom panel instead of overlaying inputs (`_layout.tsx` padding)
+  - [x] Reserved space updates while resized or collapsed
+  - [ ] Responses, Completions, Embeddings, and Audio still use fixed `h-[calc(100vh-8rem)]`, so their forms are not reflowed to the reserved height; footer remains overlaid
 
 #### Prompts Library
 - [ ] Saved prompts
@@ -227,9 +251,11 @@ Key llama.cpp facts (researched):
 
 #### Model Enhancements
 - [x] Model download progress (download.progress events with speed_mbps)
+- [x] Repository-structure-preserving model storage (flat vs `/models/{repo}/{file}` resolution)
 - [ ] Model validation checker
 - [ ] Model compatibility test
 - [ ] Model benchmarking (see the Benchmarking implementation plan above)
+- [ ] ModelScope source (backend `download_from_modelscope` exists but is not exposed by any route; agent-side downloads are HuggingFace only)
 
 ### 🌟 Low Priority (Nice to Have)
 
@@ -242,10 +268,10 @@ Key llama.cpp facts (researched):
 - [ ] PWA support
 
 #### Monitoring & Analytics
-- [ ] Request logging
-- [ ] Performance metrics
-- [ ] Error tracking
-- [ ] Usage analytics dashboard
+- [ ] Request logging (per-request `logger` calls only; no request-log table)
+- [~] Performance metrics — `/api/v1/metrics` Prometheus endpoint defined but never fed (`record_inference_request`, `update_agent/server/vram_metrics` have no callers)
+- [~] Error tracking — Sentry init only (DSN-gated); per-entity `error_message` fields surfaced in tables, no aggregation
+- [~] Usage analytics — only `/v1/responses` persists token usage; chat/completions usage is returned but not stored; no aggregation endpoint
 - [ ] Cost tracking
 
 #### Integrations
@@ -391,15 +417,46 @@ API_URL=https://matrix.thelink.family
 ## 🎯 Next Steps
 
 1. ~~OpenResponses API~~ ✅ implemented + conformance pass (see Inference Features section)
-2. **Dashboard Metrics** - Add charts and statistics using the existing `gpu.usage` events
-3. **Server management polish** - in-place configuration editing and connection testing
-4. **Inference UI** - embeddings, audio transcription, and file-processing workflows
-5. **Benchmarking** - definitions, execution queue, isolation, results, and history
-6. **Reliable log streaming** - reconnect state, inactive-tab indicators, and panel layout/accessibility
+2. ~~Benchmarking~~ ✅ implemented (definitions, queue, isolation, results, history)
+3. **Reliable log streaming** - explicit reconnecting state, non-duplicating history merge, shared socket per agent, benchmark log history
+4. **Log panel layout** - reflow Responses/Completions/Embeddings/Audio to the reserved panel height
+5. **Observability producers** - feed the Prometheus metrics, increment server usage counters, persist chat/completions token usage
+6. **Audio transcription** - replace the `/v1/audio/*` stubs with real whisper.cpp plumbing on the agent
+7. **Batch executor** - JSONL parsing, request fan-out, output files, plus a UI
+8. **Server management polish** - connection testing, benchmark result summaries on definition rows
+9. **ModelScope source** - expose the existing `download_from_modelscope` service via a route
 
 ---
 
 ## 📝 Recent Changes
+
+### September 26-27, 2026 (scheduling hardening + streaming fixes)
+- ✅ Hardened inference scheduling and server lifecycle: immutable terminal leases, fenced forced stops, `server_stream_closed` releases the lease even when the client keeps its SSE connection open
+- ✅ Native tool-call history preserved for `/v1/chat/completions`
+- ✅ Responses streaming: restored lease renewal across long streams, handled missing async event iterators, forwarded reasoning controls, reliably drained upstream streams
+- ✅ Halogen streaming token delivery preserved
+- ✅ Agent WebSocket keepalive timeouts prevented (heartbeat/pump decoupled)
+- ✅ Switched capacity accounting from llama `/slots` telemetry polling to active-lease counts
+
+### September 25-26, 2026 (VRAM-aware FIFO scheduling)
+- ✅ `InferenceLease` model + `inference_scheduler.py`: FIFO admission with `FOR UPDATE SKIP LOCKED`, VRAM admission from configured requirements, TTL renewal, reconciliation loops
+- ✅ Idle-server eviction (LRU) including across co-located agents matched by host + GPU id; per-resource advisory lock serializes cold starts
+- ✅ Disconnected requests are cancelled; `POST /api/v1/queue/clear` + UI button
+- ✅ Queue status UI: `/api/ws/queue-status` push + `QueueStatusBar`
+- ✅ Flash slot capacity read from engine options (`kv_slots`), not parallelism defaults
+
+### September 25, 2026 (Halogen + halogen-flash platforms)
+- ✅ Halogen ROCm engine support: env-var driven startup, dual api/engine ports, health probes with startup grace, merged log forwarding, process-group cleanup
+- ✅ halogen-flash platform: `hf_xet` downloads, ~30 mapped engine env options, disk prompt caching, vision tower toggle, proxy allowlist + slot-generation fencing
+- ✅ Recipes: `halogen-rocm`, `halogen-flash`, `llama-cpp-q38rocm` (in addition to `llama-cpp-vulkan`)
+- ✅ Engine picker + typed per-engine options in Start/Edit dialogs; engine mismatch rejected at the agent
+- ✅ Payload compatibility: null-optional omission, cached-token usage mapping, startup/exit fail-fast with captured logs
+
+### September 24-25, 2026 (benchmarking)
+- ✅ `llama-bench` benchmarking: definitions CRUD with config snapshots, copy-from-server-instance, agent execution, result parsing/aggregation, run history
+- ✅ Isolation: one global run via Postgres advisory lock, idle wait, force stop of all servers, blocked starts/edits during runs
+- ✅ `/benchmarks` page with definitions + queue/history tabs and auto-opened run log tabs
+- ✅ dflash draft model support for servers and benchmarks
 
 ### September 25, 2026 (server health monitoring)
 - ✅ Agent-side health monitor checks active llama-server processes every 10s with failure/recovery thresholds
@@ -455,14 +512,14 @@ API_URL=https://matrix.thelink.family
 
 ## 📊 Statistics
 
-- **Frontend Routes**: 9 (dashboard, models, agents, server-instances, chat, responses, completions, embeddings, audio)
-- **API Endpoints**: 30+ implemented (incl. server-instances start/stop/restart, `/v1/responses` + `/responses/compact` + WS transport, models status)
-- **UI Components**: 50+ Shadcn components (incl. new Switch)
-- **Database Models**: 8 SQLModel classes (ResponseRecord replaced Conversation)
+- **Frontend Routes**: 12 (dashboard, models, agents, server-instances, chat, responses, completions, embeddings, audio, benchmarks)
+- **API Endpoints**: 45+ implemented (incl. server-instances start/stop/restart/edit, `/v1/responses` + `/responses/compact` + WS transport, benchmarks CRUD/run/stop/timeout, queue clear, models status)
+- **UI Components**: 55+ Shadcn components (incl. new Switch)
+- **Database Models**: 12 SQLModel classes (adds `InferenceLease`, `BenchmarkDefinition`, `BenchmarkRun`; ResponseRecord replaced Conversation)
 - **Docker Layers**: 2-stage build
 - **Entrypoint Scripts**: 3 modular scripts
-- **Event Types**: 8 agent events + 26 OpenResponses streaming events (incl. dual-name reasoning)
-- **Agent Recipes**: 1 (vulkan on AMD Strix Halo)
+- **Event Types**: 15 agent events (server.*, download.*, gpu.usage, log.lines, model.*, benchmark.*) + 26 OpenResponses streaming events (incl. dual-name reasoning)
+- **Agent Recipes**: 4 (llama-cpp-vulkan, llama-cpp-q38rocm, halogen-rocm, halogen-flash)
 
 ---
 

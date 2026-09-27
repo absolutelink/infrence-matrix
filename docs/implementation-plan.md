@@ -4,9 +4,37 @@
 
 This plan covers implementing the split-service architecture with Frontend Service and Agent Service.
 
-**Status (September 22, 2026):** Phases 1-3 are implemented and deployed. Registration, WebSocket, and command-proxy paths are verified end-to-end. Remaining gaps are listed in "Current Gaps" below.
+**Status (September 27, 2026):** Phases 1-4 are implemented, deployed, and extended well beyond this plan. The MVP gaps listed below are closed; see "Current Gaps" for what actually remains. Halogen/halogen-flash engine support, VRAM-aware FIFO scheduling with Postgres leases, and `llama-bench` benchmarking were added after this document was last written — they are not described in the phases above.
 
 **Estimated Timeline:** 2-3 weeks for MVP
+
+---
+
+## Post-Plan Additions (not covered by the phases above)
+
+### Inference Scheduling (`backend/app/services/inference_scheduler.py`)
+- `InferenceLease` rows (queued/active/terminal + `terminal_reason`, `slot_generation`) with FIFO admission via `SELECT ... FOR UPDATE SKIP LOCKED`.
+- VRAM-aware admission: configured `vram_required_bytes`, else model size + mmproj + dflash, checked against the agent's reported `vram_total`.
+- Capacity comes from agent-reported effective slots (llama.cpp `parallel`, Halogen `kv_slots`), not llama `/slots` telemetry polling.
+- Lease TTL (90s) + renewal gated on a healthy server and matching slot generation; `guard()` cancels upstream work on lease loss; `release()` shielded from ASGI cancellation.
+- Reconciliation loop (30s) + startup reconciliation: queued-past-deadline → `expired`; active lease on a stopped/unhealthy/missing server → `failed` plus a fenced forced stop.
+- Idle-server eviction (LRU by `last_request_at`) across co-located agents matched by host + GPU id; per-resource advisory lock serializes cold starts.
+- Disconnected requests cancelled at every `/v1` entrypoint; `POST /api/v1/queue/clear` clears queued-only.
+- Live queue status pushed over `/api/ws/queue-status` every 2s to the `QueueStatusBar` UI.
+
+### Halogen / halogen-flash Engine Support
+- `AGENT_PLATFORM` ∈ `llamacpp | halogen | halogen-flash`, validated on registration; agents reject mismatched engine requests.
+- Env-var driven startup (fixed entrypoint, no CLI flags), two private ports per server (api + engine; only the agent port is published), health probes with 900s startup grace, merged stdout/stderr log forwarding, process-group cleanup (`start_new_session` + `killpg`).
+- halogen-flash adds ~30 mapped engine options: KV pool, sampling, reasoning effort, composable context, disk prompt caching (`HALOGEN_CACHE_DIR`, `cache_disk_gib`, `cache_prune_old`), vision tower.
+- Typed `HalogenServerOptions` / `HalogenFlashServerOptions` (`extra="forbid"`), engine picker + per-engine fields in the Start/Edit dialogs, proxy path allowlist with slot-generation fencing.
+- Recipes: `halogen-rocm`, `halogen-flash`, `llama-cpp-q38rocm`, `llama-cpp-vulkan`.
+
+### Benchmarking (`llama-bench`)
+- `BenchmarkDefinition` (config snapshot + source reference) and `BenchmarkRun` with CRUD; copy-from-server-instance dialog.
+- Execution on the agent (`agent/app/services/llama_bench.py`, `LLAMA_BENCH_PATH` per recipe), including dflash draft models (`--spec-type draft-dflash -md`); Markdown/CSV/bare-table parsing with aggregate summary.
+- Isolation: one global run via Postgres advisory lock, FIFO queue, idle wait on persisted active leases, force stop of all servers, blocked starts/edits during runs, servers left stopped afterwards.
+- `/benchmarks` page with definitions + queue/history tabs and auto-opened per-run log tabs.
+- Tests: backend CRUD/snapshots, scheduler isolation, agent parse/command construction.
 
 ---
 
@@ -906,13 +934,24 @@ services:
 
 ---
 
-## Current Gaps (September 22, 2026)
+## Current Gaps (September 27, 2026)
 
-1. **Command transport** — `POST /api/v1/agents/{id}/command` proxies over HTTP; the WS command channel (agent `_handle_command` receiving `start_server`/`stop_server`/`update_model`) is connected but not exercised by the backend yet. Server start from the WebUI goes through the HTTP command proxy.
-2. **Agent-side events** — the agent's `/ws/status` endpoint sends heartbeats only; server.started/stopped and gpu.usage events are not emitted yet, so the backend's event handlers are idle.
-3. **Server instance lifecycle** — `server_instances.start_server` records "starting" but does not await confirmation from the agent; `stop_server` only flips the DB status.
-4. **Model download progress** — `download.progress` events not emitted by agent yet.
-5. **Cleanup loop** — `cleanup_offline_agents` exists but is never scheduled (needs a periodic task at startup).
+1. **WS command channel unused** — the agent's `_handle_command` (`start_server`/`stop_server`/`update_model`) is wired and functional, but the backend never sends over the agent WebSocket; `ws_connections` is only used for receiving events. All commands go through the HTTP proxy (`POST /api/v1/agents/{id}/command`).
+2. **Audio transcription is a stub** — `/v1/audio/transcriptions`, `/translations`, and `/speech` return placeholder text/empty files; no whisper.cpp plumbing on the agent.
+3. **Batch jobs have no executor** — `POST /v1/batches` creates rows in `validating`; nothing parses the JSONL, fans out requests, or produces output files. No UI.
+4. **Metrics scaffolding unfed** — the Prometheus endpoint defines latency/token/agent/server/VRAM series, but `record_inference_request` and the `update_*_metrics` helpers are never called; token usage is persisted only for `/v1/responses`.
+5. **Model usage counters never incremented** — `ServerInstance.total_requests` / `total_tokens_generated` / `average_response_time_ms` are read by the dashboard but have no writers.
+6. **Log streaming state machine incomplete** — no explicit `reconnecting` state; history/live merge can duplicate lines on suffix overlap; the accumulated live tail is hidden while disconnected; each log tab opens its own WebSocket; benchmark logs have no history/polling.
+7. **Log panel layout not applied everywhere** — Responses, Completions, Embeddings, and Audio use fixed viewport heights, so their forms are not reflowed to the reserved panel space.
+8. **ModelScope not reachable** — `download_from_modelscope` exists in the backend service but no route exposes it; agent downloads are HuggingFace only.
+9. **Benchmark result summaries missing on server definitions** — no benchmark actions or latest-result column on the Server Instances page.
+10. **Engine switching on an existing instance** is deliberately rejected (must recreate the instance).
+
+### Closed since September 22
+- ✅ Agent `/ws/status` streams real events (`server.started/stopped/error/health`, `download.progress`, `gpu.usage`, `log.lines`) instead of heartbeats only; buffered replay was removed because stale events made instance state flap.
+- ✅ Server lifecycle awaits agent dispatch ack + health; crash detection and health transitions are persisted.
+- ✅ `download.progress` events emitted with `speed_mbps` (tqdm shim).
+- ✅ `cleanup_offline_agents` is scheduled at startup (`agent_manager.start_cleanup_loop()` in the FastAPI lifespan).
 
 ---
 
@@ -925,11 +964,13 @@ services:
 - [x] llama.cpp subprocess management
 - [x] GPU monitoring reports correct data
 - [x] Model download from HuggingFace
-- [ ] Model download from ModelScope
+- [ ] Model download from ModelScope (service method exists; no route exposes it)
 - [x] Proxy forwards requests correctly
 - [x] SSE streaming through proxy
-- [ ] Cache save/load works
-- [ ] Agent reconnects after Frontend restart
+- [~] Cache save/load — engine-managed: halogen-flash disk prompt caching works; llama.cpp `--prompt-cache` is obsolete and must not be reintroduced
+- [x] Agent reconnects after Frontend restart (periodic re-registration heals the event channel)
+- [x] Halogen / halogen-flash process lifecycle, ports, and log forwarding
+- [x] `llama-bench` subprocess execution and output parsing
 
 ### Frontend Service
 - [x] Agent registration endpoint works (UUID PK, upsert on name)
@@ -938,21 +979,26 @@ services:
 - [x] Start server on remote Agent (HTTP command proxy, no /api prefix)
 - [x] Inference requests proxied correctly
 - [x] Streaming responses work
-- [ ] Cache operations through proxy
-- [x] Agent failure detection (max reconnect attempts -> unreachable)
+- [~] Cache operations through proxy — engine-specific (halogen-flash disk cache); no llama.cpp prompt-cache proxying
+- [x] Agent failure detection (supervisor thresholds -> unreachable, leases invalidated)
 - [x] Agent reconnection
-- [ ] Multi-agent model selection
+- [x] Multi-agent model selection (agent picker + alias resolution across instances)
+- [x] VRAM-aware FIFO admission, lease renewal, and stale-lease reconciliation
+- [x] Benchmark run scheduling and isolation
+- [ ] Connection testing from the UI
 
 ### Integration
 - [x] End-to-end inference request (via /v1/chat/completions through agent proxy)
 - [x] Agent registration verified against live Postgres
 - [x] WebSocket round-trip verified (agent client -> backend -> ack)
-- [ ] Multiple Agents running
-- [ ] Agent restart doesn't lose servers
-- [ ] Frontend restart reconnects to Agents
-- [ ] Cache persists across restarts
-- [ ] GPU monitoring accurate
-- [ ] Download progress reported correctly
+- [x] Multiple Agents running (co-located host + GPU id matching)
+- [x] Agent restart doesn't lose servers (running_server_ids reconciliation)
+- [x] Frontend restart reconnects to Agents
+- [~] Cache persists across restarts (halogen-flash disk cache only)
+- [x] GPU monitoring accurate (deduplicated across agents sharing a GPU)
+- [x] Download progress reported correctly
+- [ ] Audio transcription end-to-end (stub)
+- [ ] Batch job execution end-to-end (no executor)
 
 ---
 

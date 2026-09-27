@@ -10,6 +10,9 @@ def test_flash_options_use_flash_names_and_omit_none() -> None:
     assert validate_halogen_flash_options(
         {
             "kv_pool_positions": 524288,
+            "max_tok": 16384,
+            "host_reserve_gib": 20,
+            "rope_yarn": 4,
             "prompt_cache": 2,
             "cache_dir_enabled": True,
             "cache_disk_gib": 64,
@@ -18,6 +21,9 @@ def test_flash_options_use_flash_names_and_omit_none() -> None:
         }
     ) == {
         "kv_pool_positions": 524288,
+        "max_tok": 16384,
+        "host_reserve_gib": 20,
+        "rope_yarn": 4.0,
         "prompt_cache": 2,
         "cache_dir_enabled": True,
         "cache_disk_gib": 64,

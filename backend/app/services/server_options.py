@@ -142,6 +142,9 @@ class HalogenFlashServerOptions(BaseModel):
     host_reserve_gib: int | None = Field(default=None, ge=0)
     ctx: int | None = Field(default=None, ge=256, le=1_048_576)
     max_tok: int | None = Field(default=None, ge=1)
+    rope_yarn: float | None = Field(default=None, gt=0)
+    admit_chunk: int | None = Field(default=None, ge=-1)
+    indexer_budget: int | None = Field(default=None, ge=2048, le=8192)
     max_tokens_cap: int | None = Field(default=None, ge=1)
     max_tokens_default: int | None = Field(default=None, ge=1)
     queue_timeout: int | None = Field(default=None, ge=1)
@@ -156,8 +159,15 @@ class HalogenFlashServerOptions(BaseModel):
     reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] | None = None
     enable_thinking: int | None = Field(default=None, ge=0, le=1)
     max_thinking_tokens: int | None = Field(default=None, ge=0)
+    thinking_answer_room: int | None = Field(default=None, ge=0)
     drafter_default: int | None = Field(default=None, ge=0, le=1)
+    mtp_depth: int | None = Field(default=None, ge=0)
+    pld: str | None = Field(default=None, pattern=r"^\d+,\d+$")
+    spec_adapt: str | None = Field(
+        default=None, pattern=r"^\d+,(?:0|0\.\d+|1)(?:,\d+)$"
+    )
     prompt_cache: int | None = Field(default=None, ge=0, le=2)
+    cache_inplace: int | None = Field(default=None, ge=0, le=1)
     cache_dir_enabled: bool = False
     prefill_chunk: int | None = Field(default=None, ge=1)
     cache_entries: int | None = Field(default=None, ge=1)
@@ -171,6 +181,7 @@ class HalogenFlashServerOptions(BaseModel):
     composable_context_bytes: int | None = Field(default=None, ge=0)
     grammar: int | None = Field(default=None, ge=0, le=1)
     vision_tower: int | None = Field(default=None, ge=0, le=1)
+    vision_max_pixels: int | None = Field(default=None, ge=1)
 
     model_config = ConfigDict(extra="forbid")
 

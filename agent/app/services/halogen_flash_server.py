@@ -97,6 +97,9 @@ class HalogenFlashServerManager(HalogenServerManager):
             "host_reserve_gib": "HALOGEN_HOST_RESERVE_GIB",
             "ctx": "HALOGEN_CTX",
             "max_tok": "HALOGEN_MAX_TOK",
+            "rope_yarn": "HALOGEN_ROPE_YARN",
+            "admit_chunk": "HALOGEN_ADMIT_CHUNK",
+            "indexer_budget": "HALOGEN_INDEXER_BUDGET",
             "max_tokens_cap": "HALOGEN_MAX_TOKENS_CAP",
             "max_tokens_default": "HALOGEN_MAX_TOKENS_DEFAULT",
             "queue_timeout": "HALOGEN_QUEUE_TIMEOUT",
@@ -111,8 +114,13 @@ class HalogenFlashServerManager(HalogenServerManager):
             "reasoning_effort": "HALOGEN_REASONING_EFFORT",
             "enable_thinking": "HALOGEN_ENABLE_THINKING",
             "max_thinking_tokens": "HALOGEN_MAX_THINKING_TOKENS",
+            "thinking_answer_room": "HALOGEN_THINKING_ANSWER_ROOM",
             "drafter_default": "HALOGEN_DRAFTER_DEFAULT",
+            "mtp_depth": "HALOGEN_MTP_DEPTH",
+            "pld": "HALOGEN_PLD",
+            "spec_adapt": "HALOGEN_SPEC_ADAPT",
             "prompt_cache": "HALOGEN_PROMPT_CACHE",
+            "cache_inplace": "HALOGEN_CACHE_INPLACE",
             "prefill_chunk": "HALOGEN_PREFILL_CHUNK",
             "cache_entries": "HALOGEN_CACHE_ENTRIES",
             "cache_branches": "HALOGEN_CACHE_BRANCHES",
@@ -125,6 +133,7 @@ class HalogenFlashServerManager(HalogenServerManager):
             "composable_context_bytes": "HALOGEN_COMPOSABLE_CONTEXT_BYTES",
             "grammar": "HALOGEN_GRAMMAR",
             "vision_tower": "HALOGEN_VISION_TOWER",
+            "vision_max_pixels": "HALOGEN_VISION_MAX_PIXELS",
         }
         for key, variable in mappings.items():
             if config.options.get(key) is not None:

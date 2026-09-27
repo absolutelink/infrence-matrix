@@ -84,7 +84,14 @@ async def test_flash_start_uses_flash_environment_and_two_ports(mock_popen):
         port=8091,
         api_port=8091,
         engine_port=8092,
-        options={"kv_pool_positions": 524288, "prompt_cache": 2, "temperature": None},
+        options={
+            "kv_pool_positions": 524288,
+            "max_tok": 16384,
+            "host_reserve_gib": 20,
+            "rope_yarn": 4,
+            "prompt_cache": 2,
+            "temperature": None,
+        },
     )
 
     with (
@@ -108,6 +115,9 @@ async def test_flash_start_uses_flash_environment_and_two_ports(mock_popen):
     assert environment["HALOGEN_CHECKPOINT"] == HALOGEN_FLASH_CHECKPOINT
     assert environment["HALOGEN_TOKENIZER"] == HALOGEN_FLASH_TOKENIZER
     assert environment["HALOGEN_KV_POOL_POSITIONS"] == "524288"
+    assert environment["HALOGEN_MAX_TOK"] == "16384"
+    assert environment["HALOGEN_HOST_RESERVE_GIB"] == "20"
+    assert environment["HALOGEN_ROPE_YARN"] == "4"
     assert environment["HALOGEN_PROMPT_CACHE"] == "2"
     assert "HALOGEN_TEMPERATURE" not in environment
     assert mock_popen.call_args.kwargs["start_new_session"] is True

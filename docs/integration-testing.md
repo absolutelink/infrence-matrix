@@ -23,6 +23,7 @@ Run 8 (WS continuation verification): 2026-09-25 — **1 passed / 0 failed** (`w
 Run 9 (full-suite regression sweep): 2026-09-25 — **15 passed / 2 failed** (only `websocket-continuation` and `websocket-reconnect-store-false-recovery` timed out under full-suite contention; both pass individually)
 Run 10 (full-suite regression sweep): 2026-09-25 — **10 passed / 7 failed** (HTTP/model-backed tests returned 500s during agent/server restart; WebSocket tests passed)
 Run 11 (full-suite regression sweep): 2026-09-25 — **17 passed / 0 failed**
+Run 12 (full-suite regression sweep with rocinante): 2026-09-27 — **17 passed / 0 failed**
 
 | Test ID | Name | Status | Notes |
 |---|---|---|---|
@@ -87,6 +88,7 @@ Run 11 (full-suite regression sweep): 2026-09-25 — **17 passed / 0 failed**
 | 2026-09-25 | Full-suite regression sweep | 15 | 2 | `websocket-continuation` and `websocket-reconnect-store-false-recovery` timed out under concurrent load; both passed individually. `websocket-failed-continuation-evicts-cache` and `websocket-compact-new-chain` passed |
 | 2026-09-25 | Full-suite regression sweep after restart | 10 | 7 | HTTP/model-backed tests returned 500s while the agent/server was restarting; one compaction request exposed an upstream 503. All WebSocket tests passed |
 | 2026-09-25 | Full-suite regression sweep | 17 | 0 | All compliance tests passed |
+| 2026-09-27 | Full-suite regression sweep with `rocinante` | 17 | 0 | All 17 OpenResponses compliance tests passed |
 | 2026-09-26 | Full-suite regression sweep after cross-agent eviction fix | 12 | 5 | Voyager started successfully after evicting co-located rocinante-tiny; remaining failures were WebSocket 30s contention timeouts |
 | 2026-09-24 | (baseline) | 3 | 14 | Initial full run |
 | 2026-09-24 | serialize_spec fix (pushed) | 10 | 7 | Clusters 1–3 + 5 fixed: spec serializer (`serialize_spec`), `completed_at` at finalize, dropped `reasoning_text.*` event twins. Unblocked: basic-response, system-prompt, tool-calling, streaming-response, assistant-phase, multi-turn, compact-response |
