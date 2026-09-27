@@ -52,6 +52,10 @@ from app.services.inference_scheduler import (
     inference_scheduler,
 )
 from app.services.inference_target import resolve_inference_target
+from app.services.reasoning_metadata import (
+    ReasoningPolicyError,
+    resolve_reasoning_effort,
+)
 from app.services.server_startup import (
     ServerStartupError,
     ensure_server_ready_by_id,
@@ -183,7 +187,10 @@ def _chain_depth(db: Session, previous: ResponseRecord | None) -> int:
 
 
 def _llama_payload(
-    request: CreateResponseBody, history: list[dict[str, Any]], stream: bool
+    request: CreateResponseBody,
+    history: list[dict[str, Any]],
+    stream: bool,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     messages = input_items_to_llama_messages(request, history)
     payload: dict[str, Any] = {
@@ -200,8 +207,8 @@ def _llama_payload(
         payload["presence_penalty"] = request.presence_penalty
     if request.frequency_penalty is not None:
         payload["frequency_penalty"] = request.frequency_penalty
-    if request.reasoning and request.reasoning.effort is not None:
-        payload["reasoning_effort"] = request.reasoning.effort
+    if reasoning_effort is not None:
+        payload["reasoning_effort"] = reasoning_effort
     payload["max_tokens"] = (
         request.max_output_tokens
         if request.max_output_tokens is not None
@@ -282,8 +289,11 @@ async def _complete(
     response_id: str,
     created_at: int,
     lease: InferenceLeaseHandle,
+    reasoning_effort: str | None = None,
 ) -> ResponseResource:
-    payload = _llama_payload(request, history, stream=False)
+    payload = _llama_payload(
+        request, history, stream=False, reasoning_effort=reasoning_effort
+    )
     response = await lease.guard(
         agent_manager.send_to_agent(
             agent_id,
@@ -445,6 +455,7 @@ async def _stream_events(
     instance_agent_id: Any | None = None,
     persist: bool = False,
     lease: InferenceLeaseHandle | None = None,
+    reasoning_effort: str | None = None,
 ) -> AsyncIterator[str]:
     seq = ev.SSEmitter()
     response = build_response_resource(
@@ -476,7 +487,9 @@ async def _stream_events(
     final_usage_data: dict[str, Any] = {}
     finish_reason: str | None = None
 
-    payload = _llama_payload(request, history, stream=True)
+    payload = _llama_payload(
+        request, history, stream=True, reasoning_effort=reasoning_effort
+    )
 
     try:
         # Hold the client connection while any in-flight startup completes
@@ -757,6 +770,17 @@ async def create_response(
             f"Model '{request.model}' does not support tools",
             param="tools",
         )
+    requested_effort = request.reasoning.effort if request.reasoning else None
+    try:
+        reasoning_effort = resolve_reasoning_effort(server, requested_effort)
+    except ReasoningPolicyError as e:
+        return _error_response(
+            400,
+            "invalid_request",
+            "unsupported_capability",
+            str(e),
+            param="reasoning.effort",
+        )
 
     # Chaining context: walk the previous_response_id chain to the root and
     # concatenate each record's input+output in order (full conversation).
@@ -842,6 +866,22 @@ async def create_response(
     except TimeoutError as e:
         return _error_response(503, "too_many_requests", "no_slot", str(e))
 
+    # The lease may land on a different instance of the same model; apply
+    # that instance's reasoning policy to the upstream payload.
+    try:
+        reasoning_effort = resolve_reasoning_effort(
+            server, request.reasoning.effort if request.reasoning else None
+        )
+    except ReasoningPolicyError as e:
+        await lease.release()
+        return _error_response(
+            400,
+            "invalid_request",
+            "unsupported_capability",
+            str(e),
+            param="reasoning.effort",
+        )
+
     if request.stream:
         return StreamingResponse(
             _stream_events(
@@ -855,6 +895,7 @@ async def create_response(
                 instance_agent_id=server.agent_id,
                 persist=request.store,
                 lease=lease,
+                reasoning_effort=reasoning_effort,
             ),
             media_type="text/event-stream",
             headers=SSE_HEADERS,
@@ -869,6 +910,7 @@ async def create_response(
             response_id,
             created_at,
             lease,
+            reasoning_effort=reasoning_effort,
         )
     except TranslationError as e:
         return _error_response(400, "invalid_request", "invalid_input", str(e))

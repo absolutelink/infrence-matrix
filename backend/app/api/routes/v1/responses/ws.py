@@ -51,6 +51,10 @@ from app.api.routes.v1.responses.translator import (
 from app.core.db import engine
 from app.services.agent_manager import agent_manager
 from app.services.inference_scheduler import inference_scheduler
+from app.services.reasoning_metadata import (
+    ReasoningPolicyError,
+    resolve_reasoning_effort,
+)
 from app.services.token_stats import record_usage
 
 logger = logging.getLogger(__name__)
@@ -91,13 +95,17 @@ async def _send_events(websocket: WebSocket, events: list[dict[str, Any]]) -> No
 
 
 def _capped_payload(
-    request: CreateResponseBody, history: list[dict[str, Any]]
+    request: CreateResponseBody,
+    history: list[dict[str, Any]],
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     """WS llama payload with the generation cap applied when the request
     set no max_output_tokens. Bounds turn duration for the harness's 30s
     terminal timer (and UI responsiveness): a thinking model at ~12 tok/s
     blows through that on reasoning alone."""
-    payload = _llama_payload(request, history, stream=True)
+    payload = _llama_payload(
+        request, history, stream=True, reasoning_effort=reasoning_effort
+    )
     if request.max_output_tokens is None:
         payload["max_tokens"] = WS_MAX_TOKENS
     return payload
@@ -175,7 +183,16 @@ async def _stream_to_ws(
 
         state = StreamState(seq, request.model)
         state.assistant_phase = _last_assistant_phase(request)
-        payload = _capped_payload(request, history)
+        try:
+            reasoning_effort = resolve_reasoning_effort(
+                server, request.reasoning.effort if request.reasoning else None
+            )
+        except ReasoningPolicyError as e:
+            await websocket.send_text(
+                _error_event(400, "unsupported_capability", str(e), "reasoning.effort")
+            )
+            return None
+        payload = _capped_payload(request, history, reasoning_effort)
 
         proxy_url = (
             f"http://{agent.host}:{agent.port}/proxy/{server.id}/v1/chat/completions"

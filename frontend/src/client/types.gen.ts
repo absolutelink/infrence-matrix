@@ -371,6 +371,10 @@ export type ChatCompletionRequest = {
         [key: string]: unknown;
     } | null;
     /**
+     * Reasoning Effort
+     */
+    reasoning_effort?: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | null;
+    /**
      * Prompt Cache Options
      */
     prompt_cache_options?: {
@@ -1282,6 +1286,7 @@ export type ModelMetadataUpdate = {
      * Max Context Length
      */
     max_context_length?: number | null;
+    reasoning?: ReasoningMetadata | null;
 };
 
 /**
@@ -1420,6 +1425,26 @@ export type ReasoningItemParam = {
      * Status
      */
     status?: 'in_progress' | 'completed' | 'incomplete' | null;
+};
+
+/**
+ * ReasoningMetadata
+ *
+ * User-editable reasoning support block for a model's metadata.
+ */
+export type ReasoningMetadata = {
+    /**
+     * Supported
+     */
+    supported?: boolean;
+    /**
+     * Efforts
+     */
+    efforts?: Array<'none' | 'low' | 'medium' | 'high' | 'xhigh'>;
+    /**
+     * Default
+     */
+    default?: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | null;
 };
 
 /**

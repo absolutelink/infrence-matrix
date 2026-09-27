@@ -33,6 +33,31 @@ type Message = {
   reasoning?: string
 }
 
+const REASONING_EFFORTS = ["none", "low", "medium", "high", "xhigh"] as const
+type ReasoningEffort = (typeof REASONING_EFFORTS)[number]
+
+function allowedReasoningEfforts(
+  metadata: Record<string, unknown> | undefined,
+): ReasoningEffort[] | null {
+  if (!metadata) return null
+  const block = metadata.reasoning
+  if (block && typeof block === "object") {
+    const value = block as { supported?: boolean; efforts?: unknown }
+    if (value.supported === false) return []
+    if (Array.isArray(value.efforts)) {
+      return value.efforts.filter((e): e is ReasoningEffort =>
+        REASONING_EFFORTS.includes(e as ReasoningEffort),
+      )
+    }
+    return null
+  }
+  const caps = metadata.capabilities as Record<string, unknown> | undefined
+  if (caps?.reasoning === true) {
+    return REASONING_EFFORTS.filter((e) => e !== "none")
+  }
+  return null
+}
+
 type ContentSegment =
   | { type: "text"; content: string }
   | { type: "thinking"; content: string }
@@ -136,12 +161,16 @@ function getServersQueryOptions() {
 function Chat() {
   const { data: servers } = useSuspenseQuery(getServersQueryOptions())
   const [selectedModel, setSelectedModel] = useState<string>("")
+  const [reasoningEffort, setReasoningEffort] = useState<string>("auto")
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState("")
   const [isLoading, setIsLoading] = useState(false)
   const [waitingForCapacity, setWaitingForCapacity] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
   const queueTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const selectedServer = servers.find((s) => s.alias === selectedModel)
+  const allowedEfforts = allowedReasoningEfforts(selectedServer?.model_metadata)
 
   const handleSend = async () => {
     if (!input.trim() || !selectedModel) return
@@ -155,16 +184,21 @@ function Chat() {
     queueTimerRef.current = setTimeout(() => setWaitingForCapacity(true), 1500)
     abortRef.current = new AbortController()
 
+    const body: Record<string, unknown> = {
+      model: selectedModel,
+      messages: history.map((m) => ({ role: m.role, content: m.content })),
+      stream: true,
+    }
+    if (reasoningEffort !== "auto") {
+      body.reasoning_effort = reasoningEffort
+    }
+
     try {
       const response = await fetch("/v1/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: abortRef.current.signal,
-        body: JSON.stringify({
-          model: selectedModel,
-          messages: history.map((m) => ({ role: m.role, content: m.content })),
-          stream: true,
-        }),
+        body: JSON.stringify(body),
       })
 
       if (!response.ok || !response.body) {
@@ -260,7 +294,21 @@ function Chat() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Select value={selectedModel} onValueChange={setSelectedModel}>
+          <Select
+            value={selectedModel}
+            onValueChange={(value) => {
+              setSelectedModel(value)
+              const next = allowedReasoningEfforts(
+                servers.find((s) => s.alias === value)?.model_metadata,
+              )
+              if (
+                reasoningEffort !== "auto" &&
+                !next?.includes(reasoningEffort as ReasoningEffort)
+              ) {
+                setReasoningEffort("auto")
+              }
+            }}
+          >
             <SelectTrigger className="w-[300px]">
               <SelectValue placeholder="Select a server" />
             </SelectTrigger>
@@ -309,6 +357,21 @@ function Chat() {
               )}
             </SelectContent>
           </Select>
+          {allowedEfforts && allowedEfforts.length > 0 && (
+            <Select value={reasoningEffort} onValueChange={setReasoningEffort}>
+              <SelectTrigger className="w-[180px]">
+                <SelectValue placeholder="Reasoning" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="auto">Auto (model default)</SelectItem>
+                {allowedEfforts.map((effort) => (
+                  <SelectItem key={effort} value={effort}>
+                    Reasoning: {effort}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
           <Button
             variant="outline"
             onClick={handleClear}

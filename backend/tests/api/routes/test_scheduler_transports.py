@@ -113,9 +113,19 @@ def test_responses_reasoning_effort_reaches_upstream_payload() -> None:
         stream=True,
     )
 
-    payload = responses_router._llama_payload(request, [], stream=True)
+    payload = responses_router._llama_payload(
+        request, [], stream=True, reasoning_effort="none"
+    )
 
     assert payload["reasoning_effort"] == "none"
+
+
+def test_responses_payload_omits_reasoning_effort_when_none() -> None:
+    request = CreateResponseBody(model="model", input="hello", stream=True)
+
+    payload = responses_router._llama_payload(request, [], stream=True)
+
+    assert "reasoning_effort" not in payload
 
 
 @pytest.mark.asyncio

@@ -23,6 +23,10 @@ from app.services.inference_scheduler import (
     inference_scheduler,
 )
 from app.services.inference_target import resolve_inference_target
+from app.services.reasoning_metadata import (
+    ReasoningPolicyError,
+    resolve_reasoning_effort,
+)
 from app.services.server_startup import (
     ServerStartupError,
     ensure_server_ready,
@@ -83,6 +87,7 @@ class ChatCompletionRequest(BaseModel):
     # OpenAI tools shape: [{"type": "function", "function": {name, description, parameters}}]
     tools: list[Tool] | None = None
     tool_choice: str | dict[str, Any] | None = None
+    reasoning_effort: Literal["none", "low", "medium", "high", "xhigh"] | None = None
     prompt_cache_options: dict[str, Any] | None = None
     # OpenAI-compatible: {"include_usage": true} adds a final usage chunk
     stream_options: StreamOptions | None = None
@@ -335,6 +340,8 @@ async def _stream_completion_via_agent(
         value = getattr(request, key)
         if value is not None:
             payload[key] = value
+    if request.reasoning_effort is not None:
+        payload["reasoning_effort"] = request.reasoning_effort
 
     payload.update(_build_tools_payload(request))
     # Ask the upstream server for a final usage chunk; llama.cpp complies
@@ -617,7 +624,6 @@ async def create_chat_completion(
         if request.tools and metadata_capability(instance, "tools") is False:
             raise HTTPException(400, f"Model '{request.model}' does not support tools")
         server = instance
-        server = instance
     else:
         # Prefer an already-running instance so model-name requests can be
         # load-balanced. Cold-start only when no compatible instance exists.
@@ -666,6 +672,17 @@ async def create_chat_completion(
             is_cancelled=http_request.is_disconnected if http_request else None,
         )
 
+    # Enforce the reasoning capability metadata of the instance that will
+    # actually serve the request.
+    try:
+        reasoning_effort = resolve_reasoning_effort(
+            lease.server, request.reasoning_effort
+        )
+    except ReasoningPolicyError as e:
+        await lease.release()
+        raise HTTPException(400, str(e)) from e
+    request.reasoning_effort = reasoning_effort
+
     if request.stream:
         # Stream response. The generator awaits readiness itself, so the
         # client connection is held during a cold start (invisible retry).
@@ -703,6 +720,8 @@ async def create_chat_completion(
             value = getattr(request, key)
             if value is not None:
                 non_stream_payload[key] = value
+        if request.reasoning_effort is not None:
+            non_stream_payload["reasoning_effort"] = request.reasoning_effort
         non_stream_payload.update(_build_tools_payload(request))
 
         response = await lease.guard(

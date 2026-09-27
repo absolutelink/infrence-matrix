@@ -1,13 +1,36 @@
 """Tests for V1 Chat Completions API endpoint."""
 
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlmodel import Session
 
 from app.api.routes.v1.v1_chat_completions import (
+    ChatCompletionRequest,
     ChatMessage,
     _convert_messages_to_llama_format,
 )
 from app.models import Model
+
+
+def test_reasoning_effort_field_accepts_openai_levels() -> None:
+    for effort in ["none", "low", "medium", "high", "xhigh"]:
+        request = ChatCompletionRequest(
+            model="m", messages=[ChatMessage(role="user", content="hi")],
+            reasoning_effort=effort,
+        )
+        assert request.reasoning_effort == effort
+
+
+def test_reasoning_effort_field_rejects_unknown_level() -> None:
+    try:
+        ChatCompletionRequest(
+            model="m", messages=[ChatMessage(role="user", content="hi")],
+            reasoning_effort="ultra",
+        )
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("unknown reasoning_effort should be rejected")
 
 
 def test_tool_messages_preserve_native_chat_shape() -> None:

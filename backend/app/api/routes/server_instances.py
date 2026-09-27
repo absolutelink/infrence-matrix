@@ -16,6 +16,7 @@ from app.db.session import AsyncSessionMaker
 from app.models import Agent, InferenceLease, Model, ServerInstance
 from app.services.agent_manager import agent_manager
 from app.services.benchmark import is_benchmark_blocking
+from app.services.reasoning_metadata import ReasoningMetadata
 from app.services.server_lifecycle import (
     ServerBusyError,
     request_server_stop,
@@ -159,6 +160,7 @@ class ModelMetadataUpdate(BaseModel):
     owned_by: str | None = None
     capabilities: dict[str, Any] | None = None
     max_context_length: int | None = Field(default=None, ge=1)
+    reasoning: ReasoningMetadata | None = None
 
 
 @router.get("", response_model=ServerInstanceListResponse)

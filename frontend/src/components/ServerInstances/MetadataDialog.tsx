@@ -31,6 +31,51 @@ const capabilityNames = [
   "reasoning",
 ]
 
+const reasoningEfforts = ["none", "low", "medium", "high", "xhigh"] as const
+type ReasoningEffort = (typeof reasoningEfforts)[number]
+
+type ReasoningConfig = {
+  supported: boolean
+  efforts: ReasoningEffort[]
+  default: ReasoningEffort | ""
+}
+
+function readReasoningConfig(
+  metadata: Record<string, unknown>,
+  reasoningEnabled: boolean,
+): ReasoningConfig {
+  const block = metadata.reasoning
+  if (block && typeof block === "object") {
+    const value = block as {
+      supported?: boolean
+      efforts?: unknown
+      default?: unknown
+    }
+    const efforts = Array.isArray(value.efforts)
+      ? value.efforts.filter((e): e is ReasoningEffort =>
+          reasoningEfforts.includes(e as ReasoningEffort),
+        )
+      : []
+    return {
+      supported: value.supported !== false,
+      efforts,
+      default:
+        typeof value.default === "string" &&
+        reasoningEfforts.includes(value.default as ReasoningEffort)
+          ? (value.default as ReasoningEffort)
+          : "",
+    }
+  }
+  // Legacy rows: a bare capability boolean with no level detail.
+  return {
+    supported: reasoningEnabled,
+    efforts: reasoningEnabled
+      ? reasoningEfforts.filter((e) => e !== "none")
+      : [],
+    default: "",
+  }
+}
+
 export function MetadataDialog({
   isOpen,
   onClose,
@@ -46,6 +91,11 @@ export function MetadataDialog({
   const [ownedBy, setOwnedBy] = useState("")
   const [maxContextLength, setMaxContextLength] = useState("")
   const [capabilities, setCapabilities] = useState<Record<string, boolean>>({})
+  const [reasoning, setReasoning] = useState<ReasoningConfig>({
+    supported: false,
+    efforts: [],
+    default: "",
+  })
 
   useEffect(() => {
     if (!isOpen) return
@@ -61,12 +111,44 @@ export function MetadataDialog({
     setMaxContextLength(
       typeof discoveredContext === "number" ? String(discoveredContext) : "",
     )
-    setCapabilities(
-      Object.fromEntries(
-        capabilityNames.map((name) => [name, discovered[name] === true]),
-      ),
+    const caps = Object.fromEntries(
+      capabilityNames.map((name) => [name, discovered[name] === true]),
     )
+    setCapabilities(caps)
+    setReasoning(readReasoningConfig(metadata, caps.reasoning === true))
   }, [isOpen, metadata])
+
+  const toggleReasoning = (enabled: boolean) => {
+    setCapabilities((current) => ({ ...current, reasoning: enabled }))
+    setReasoning((current) => ({
+      ...current,
+      supported: enabled,
+      efforts:
+        enabled && current.efforts.length === 0
+          ? reasoningEfforts.filter((e) => e !== "none")
+          : current.efforts,
+      default: enabled ? current.default : "",
+    }))
+  }
+
+  const toggleEffort = (effort: ReasoningEffort) => {
+    setReasoning((current) => {
+      const has = current.efforts.includes(effort)
+      const efforts = has
+        ? current.efforts.filter((e) => e !== effort)
+        : reasoningEfforts.filter(
+            (e) => e === effort || current.efforts.includes(e),
+          )
+      return {
+        ...current,
+        efforts,
+        default:
+          current.default !== "" && efforts.includes(current.default)
+            ? current.default
+            : "",
+      }
+    })
+  }
 
   const mutation = useMutation({
     mutationFn: () =>
@@ -79,6 +161,14 @@ export function MetadataDialog({
             ? Number(maxContextLength)
             : null,
           capabilities,
+          reasoning: {
+            supported: reasoning.supported,
+            efforts: reasoning.supported ? reasoning.efforts : [],
+            default:
+              reasoning.supported && reasoning.default
+                ? reasoning.default
+                : null,
+          },
         },
       }),
     onSuccess: () => {
@@ -140,10 +230,12 @@ export function MetadataDialog({
                     type="checkbox"
                     checked={capabilities[name] === true}
                     onChange={(event) =>
-                      setCapabilities((current) => ({
-                        ...current,
-                        [name]: event.target.checked,
-                      }))
+                      name === "reasoning"
+                        ? toggleReasoning(event.target.checked)
+                        : setCapabilities((current) => ({
+                            ...current,
+                            [name]: event.target.checked,
+                          }))
                     }
                   />
                   {name}
@@ -151,6 +243,47 @@ export function MetadataDialog({
               ))}
             </div>
           </div>
+          {capabilities.reasoning === true && (
+            <div className="rounded-md border p-3">
+              <Label>Reasoning levels</Label>
+              <p className="text-xs text-muted-foreground mt-1 mb-2">
+                Only the selected levels can be requested for this model.
+              </p>
+              <div className="grid grid-cols-3 gap-2 text-sm">
+                {reasoningEfforts.map((effort) => (
+                  <label key={effort} className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={reasoning.efforts.includes(effort)}
+                      onChange={() => toggleEffort(effort)}
+                    />
+                    {effort}
+                  </label>
+                ))}
+              </div>
+              <div className="mt-3">
+                <Label htmlFor="reasoning-default">Default level</Label>
+                <select
+                  id="reasoning-default"
+                  className="mt-1 w-full rounded-md border bg-background px-3 py-2 text-sm"
+                  value={reasoning.default}
+                  onChange={(event) =>
+                    setReasoning((current) => ({
+                      ...current,
+                      default: event.target.value as ReasoningEffort | "",
+                    }))
+                  }
+                >
+                  <option value="">No default (model default)</option>
+                  {reasoning.efforts.map((effort) => (
+                    <option key={effort} value={effort}>
+                      {effort}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          )}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>
