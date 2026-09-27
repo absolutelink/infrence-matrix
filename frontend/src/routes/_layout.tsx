@@ -8,6 +8,7 @@ import {
   useLogPanel,
 } from "@/components/ServerInstances/LogPanelContext"
 import AppSidebar from "@/components/Sidebar/AppSidebar"
+import { TokenStatsBar } from "@/components/Stats/TokenStatsBar"
 import {
   SidebarInset,
   SidebarProvider,
@@ -34,6 +35,9 @@ function LayoutContent() {
       <SidebarInset>
         <header className="sticky top-0 z-10 flex h-16 shrink-0 items-center gap-2 border-b bg-background px-4">
           <SidebarTrigger className="-ml-1 text-muted-foreground" />
+          <div className="flex flex-1 items-center justify-center">
+            <TokenStatsBar />
+          </div>
           <QueueStatusBar />
         </header>
         <main
