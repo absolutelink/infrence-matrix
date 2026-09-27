@@ -8,6 +8,7 @@ from app.api.routes import (
     models,
     queue,
     server_instances,
+    stats,
     utils,
 )
 
@@ -18,5 +19,6 @@ api_router.include_router(server_instances.router, tags=["server-instances"])
 api_router.include_router(benchmarks.router, tags=["benchmarks"])
 api_router.include_router(models.router, tags=["models"])
 api_router.include_router(queue.router, tags=["queue"])
+api_router.include_router(stats.router, tags=["stats"])
 api_router.include_router(huggingface.router, tags=["huggingface"])
 api_router.include_router(utils.router, tags=["utils"])

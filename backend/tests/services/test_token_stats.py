@@ -9,10 +9,12 @@ from app.core.db import engine
 from app.db.session import engine as async_engine
 from app.models import Agent, Model, ServerInstance, TokenUsageSample
 from app.services.token_stats import (
+    LIVE_WINDOW_SECONDS,
     TOKEN_SAMPLE_RETENTION_DAYS,
     extract_usage_fields,
     prune_old_samples,
     record_usage,
+    token_stats_snapshot,
 )
 
 
@@ -131,6 +133,96 @@ def test_record_usage_never_raises_on_garbage_input() -> None:
     assert _sample_count() == before
 
 
+async def test_snapshot_aggregates_windows_and_rates(db: Session) -> None:
+    server_a = _make_server(db)
+    server_b = _make_server(db)
+    now = datetime.now(UTC)
+
+    with Session(engine) as session:
+        # server_a: fast decode + big prefill, inside the live window
+        session.add(
+            TokenUsageSample(
+                server_instance_id=server_a.id,
+                prompt_tokens=1000,
+                cached_tokens=400,
+                completion_tokens=100,
+                prompt_ms=2000.0,
+                predicted_ms=2000.0,
+                created_at=now - timedelta(seconds=10),
+            )
+        )
+        # server_a: older, outside the live window but inside 24h
+        session.add(
+            TokenUsageSample(
+                server_instance_id=server_a.id,
+                prompt_tokens=500,
+                cached_tokens=0,
+                completion_tokens=50,
+                prompt_ms=1000.0,
+                predicted_ms=5000.0,
+                created_at=now - timedelta(hours=2),
+            )
+        )
+        # server_b: 8 days old (excluded from 7d window, included in 30d)
+        session.add(
+            TokenUsageSample(
+                server_instance_id=server_b.id,
+                prompt_tokens=300,
+                cached_tokens=0,
+                completion_tokens=30,
+                prompt_ms=3000.0,
+                predicted_ms=6000.0,
+                created_at=now - timedelta(days=8),
+            )
+        )
+        # orphan sample with no server row
+        session.add(
+            TokenUsageSample(
+                server_instance_id=None,
+                prompt_tokens=7,
+                completion_tokens=7,
+                created_at=now,
+            )
+        )
+        # ancient sample outside every window
+        session.add(
+            TokenUsageSample(
+                server_instance_id=server_a.id,
+                prompt_tokens=999,
+                completion_tokens=999,
+                created_at=now - timedelta(days=40),
+            )
+        )
+        session.commit()
+
+    snapshot = await token_stats_snapshot()
+    glob = snapshot["global"]
+    assert glob["live"]["window_seconds"] == LIVE_WINDOW_SECONDS
+    # live decode: only server_a's 10s-old sample: 100 tok / 2 s
+    assert glob["live"]["decode_tokens_per_second"] == 50.0
+    # live prefill excludes cached tokens: (1000 - 400) / 2 s
+    assert glob["live"]["prefill_tokens_per_second"] == 300.0
+
+    assert glob["last_24h"]["prompt_tokens"] == 1507
+    assert glob["last_24h"]["completion_tokens"] == 157
+    assert glob["last_24h"]["total_tokens"] == 1664
+
+    assert glob["last_7d"]["prompt_tokens"] == 1507
+    assert glob["last_30d"]["prompt_tokens"] == 1807
+    assert glob["last_30d"]["completion_tokens"] == 187
+
+    servers = snapshot["servers"]
+    # orphan excluded; server_a first (only one with a live rate)
+    assert [s["id"] for s in servers] == [str(server_a.id), str(server_b.id)]
+    assert servers[0]["alias"] == server_a.alias
+    assert servers[0]["decode_tokens_per_second"] == 50.0
+    assert servers[0]["prefill_tokens_per_second"] == 300.0
+    assert servers[0]["last_7d"]["total_tokens"] == 1650
+    assert servers[1]["last_7d"]["total_tokens"] == 0
+    assert servers[1]["last_30d"]["total_tokens"] == 330
+    assert servers[1]["decode_tokens_per_second"] is None
+
+
 async def test_prune_removes_old_samples() -> None:
     cutoff = datetime.now(UTC) - timedelta(days=TOKEN_SAMPLE_RETENTION_DAYS)
     with Session(engine) as session:
@@ -154,7 +246,9 @@ async def test_prune_removes_old_samples() -> None:
     assert removed >= 1
     with Session(engine) as session:
         old = list(
-            session.exec(select(TokenUsageSample).where(TokenUsageSample.created_at < cutoff))
+            session.exec(
+                select(TokenUsageSample).where(TokenUsageSample.created_at < cutoff)
+            )
         )
     assert old == []
     await async_engine.dispose()

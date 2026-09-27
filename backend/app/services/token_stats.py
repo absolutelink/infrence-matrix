@@ -14,6 +14,7 @@ from sqlalchemy import text
 from sqlmodel import Session
 
 from app.core.db import engine
+from app.db.session import AsyncSessionMaker
 from app.db.session import engine as async_engine
 from app.models import ServerInstance, TokenUsageSample
 
@@ -114,6 +115,159 @@ def record_usage(
 # Retention: keep ~35 days so the 30-day window always has full coverage.
 TOKEN_SAMPLE_RETENTION_DAYS = 35
 PRUNE_INTERVAL_SECONDS = 6 * 60 * 60
+LIVE_WINDOW_SECONDS = 60
+
+
+async def token_stats_snapshot() -> dict[str, Any]:
+    """Aggregate token usage for the status bar and popover.
+
+    Rates use a rolling ``LIVE_WINDOW_SECONDS`` window over completed
+    requests: ``sum(tokens) / sum(duration)`` so concurrent requests on a
+    multi-slot server aggregate correctly. Prefill counts only
+    non-cached tokens, because llama.cpp's ``prompt_ms`` excludes the
+    work for cache hits.
+    """
+    async with AsyncSessionMaker() as session:
+        rows = (
+            (
+                await session.execute(
+                    text(
+                        """
+                        SELECT
+                            s.id AS server_id,
+                            s.alias AS alias,
+                            coalesce(sum(t.prompt_tokens) FILTER (
+                                WHERE t.created_at >= now() - make_interval(hours => 24)
+                            ), 0) AS prompt_24h,
+                            coalesce(sum(t.completion_tokens) FILTER (
+                                WHERE t.created_at >= now() - make_interval(hours => 24)
+                            ), 0) AS completion_24h,
+                            coalesce(sum(t.prompt_tokens) FILTER (
+                                WHERE t.created_at >= now() - make_interval(days => 7)
+                            ), 0) AS prompt_7d,
+                            coalesce(sum(t.completion_tokens) FILTER (
+                                WHERE t.created_at >= now() - make_interval(days => 7)
+                            ), 0) AS completion_7d,
+                            coalesce(sum(t.prompt_tokens) FILTER (
+                                WHERE t.created_at >= now() - make_interval(days => 30)
+                            ), 0) AS prompt_30d,
+                            coalesce(sum(t.completion_tokens) FILTER (
+                                WHERE t.created_at >= now() - make_interval(days => 30)
+                            ), 0) AS completion_30d,
+                            coalesce(sum(t.prompt_tokens - t.cached_tokens) FILTER (
+                                WHERE t.created_at >= now()
+                                      - make_interval(secs => CAST(:live_seconds AS double precision))
+                                      AND t.prompt_ms > 0
+                            ), 0) AS live_prefill_tokens,
+                            coalesce(sum(t.prompt_ms) FILTER (
+                                WHERE t.created_at >= now()
+                                      - make_interval(secs => CAST(:live_seconds AS double precision))
+                            ), 0) AS live_prompt_ms,
+                            coalesce(sum(t.completion_tokens) FILTER (
+                                WHERE t.created_at >= now()
+                                      - make_interval(secs => CAST(:live_seconds AS double precision))
+                                      AND t.predicted_ms > 0
+                            ), 0) AS live_completion_tokens,
+                            coalesce(sum(t.predicted_ms) FILTER (
+                                WHERE t.created_at >= now()
+                                      - make_interval(secs => CAST(:live_seconds AS double precision))
+                            ), 0) AS live_predicted_ms
+                        FROM token_usage_samples t
+                        LEFT JOIN server_instances s ON s.id = t.server_instance_id
+                        WHERE t.created_at >= now() - make_interval(days => 30)
+                        GROUP BY s.id, s.alias
+                        """
+                    ),
+                    {"live_seconds": LIVE_WINDOW_SECONDS},
+                )
+            )
+            .mappings()
+            .all()
+        )
+
+    window_totals: dict[str, dict[str, int]] = {
+        "last_24h": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "last_7d": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "last_30d": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+    servers: list[dict[str, Any]] = []
+
+    for row in rows:
+        prompt_24h = int(row["prompt_24h"])
+        completion_24h = int(row["completion_24h"])
+        prompt_7d = int(row["prompt_7d"])
+        completion_7d = int(row["completion_7d"])
+        prompt_30d = int(row["prompt_30d"])
+        completion_30d = int(row["completion_30d"])
+        window_totals["last_24h"]["prompt_tokens"] += prompt_24h
+        window_totals["last_24h"]["completion_tokens"] += completion_24h
+        window_totals["last_24h"]["total_tokens"] += prompt_24h + completion_24h
+        window_totals["last_7d"]["prompt_tokens"] += prompt_7d
+        window_totals["last_7d"]["completion_tokens"] += completion_7d
+        window_totals["last_7d"]["total_tokens"] += prompt_7d + completion_7d
+        window_totals["last_30d"]["prompt_tokens"] += prompt_30d
+        window_totals["last_30d"]["completion_tokens"] += completion_30d
+        window_totals["last_30d"]["total_tokens"] += prompt_30d + completion_30d
+
+        if row["server_id"] is None:
+            continue
+        servers.append(
+            {
+                "id": str(row["server_id"]),
+                "alias": row["alias"] or "unknown",
+                "decode_tokens_per_second": _rate(
+                    int(row["live_completion_tokens"]), float(row["live_predicted_ms"])
+                ),
+                "prefill_tokens_per_second": _rate(
+                    int(row["live_prefill_tokens"]), float(row["live_prompt_ms"])
+                ),
+                "last_7d": {
+                    "prompt_tokens": prompt_7d,
+                    "completion_tokens": completion_7d,
+                    "total_tokens": prompt_7d + completion_7d,
+                },
+                "last_30d": {
+                    "prompt_tokens": prompt_30d,
+                    "completion_tokens": completion_30d,
+                    "total_tokens": prompt_30d + completion_30d,
+                },
+            }
+        )
+
+    live_decode = sum(int(row["live_completion_tokens"]) for row in rows)
+    live_predicted_ms = sum(float(row["live_predicted_ms"]) for row in rows)
+    live_prefill = sum(int(row["live_prefill_tokens"]) for row in rows)
+    live_prompt_ms = sum(float(row["live_prompt_ms"]) for row in rows)
+
+    servers.sort(
+        key=lambda item: (
+            item["decode_tokens_per_second"] or 0.0,
+            item["prefill_tokens_per_second"] or 0.0,
+            item["last_30d"]["total_tokens"],
+        ),
+        reverse=True,
+    )
+
+    return {
+        "global": {
+            "live": {
+                "window_seconds": LIVE_WINDOW_SECONDS,
+                "decode_tokens_per_second": _rate(live_decode, live_predicted_ms),
+                "prefill_tokens_per_second": _rate(live_prefill, live_prompt_ms),
+            },
+            "last_24h": window_totals["last_24h"],
+            "last_7d": window_totals["last_7d"],
+            "last_30d": window_totals["last_30d"],
+        },
+        "servers": servers,
+    }
+
+
+def _rate(tokens: float, ms: float) -> float | None:
+    """Tokens per second from a token count and a millisecond duration."""
+    if tokens <= 0 or ms <= 0:
+        return None
+    return tokens / (ms / 1000.0)
 
 
 async def prune_old_samples() -> int:

@@ -67,44 +67,57 @@ type Props = {
   onChange: (options: HalogenFlashOptions) => void
 }
 
-type NumberField = readonly [
-  keyof HalogenFlashOptions,
-  string,
-  number,
-  string,
-]
+type NumberField = readonly [keyof HalogenFlashOptions, string, number, string]
 
 const descriptions: Record<string, string> = {
   kv_slots: "Maximum number of conversations generating at once.",
-  kv_pool_positions: "Total attention positions reserved across all conversations.",
-  kv_pool_fit: "Automatically lower the KV pool if it does not fit device memory.",
+  kv_pool_positions:
+    "Total attention positions reserved across all conversations.",
+  kv_pool_fit:
+    "Automatically lower the KV pool if it does not fit device memory.",
   host_reserve_gib: "System RAM to leave free when sizing the KV pool.",
   ctx: "Maximum context length for one request.",
-  max_tok: "Largest single prefill call; keep this below the full context size.",
-  rope_yarn: "RoPE scaling factor for contexts beyond the model's native context.",
-  admit_chunk: "Prompt chunk size used while other conversations are generating.",
-  indexer_budget: "Sparse-attention token budget. Higher values improve long-context recall at a cost.",
+  max_tok:
+    "Largest single prefill call; keep this below the full context size.",
+  rope_yarn:
+    "RoPE scaling factor for contexts beyond the model's native context.",
+  admit_chunk:
+    "Prompt chunk size used while other conversations are generating.",
+  indexer_budget:
+    "Sparse-attention token budget. Higher values improve long-context recall at a cost.",
   max_tokens_cap: "Hard upper bound for a request's max_tokens.",
-  max_tokens_default: "Token budget used when a request does not provide max_tokens.",
+  max_tokens_default:
+    "Token budget used when a request does not provide max_tokens.",
   queue_timeout: "Seconds a request may wait in the engine queue.",
   keepalive_timeout: "Seconds an idle HTTP keep-alive connection remains open.",
-  sse_keepalive_s: "Seconds between SSE keepalive comments during quiet streaming.",
-  temperature: "Default sampling temperature when a request does not provide one.",
+  sse_keepalive_s:
+    "Seconds between SSE keepalive comments during quiet streaming.",
+  temperature:
+    "Default sampling temperature when a request does not provide one.",
   top_p: "Default nucleus sampling cutoff.",
-  top_k: "Default number of highest-probability tokens considered; zero disables it.",
+  top_k:
+    "Default number of highest-probability tokens considered; zero disables it.",
   min_p: "Default minimum probability relative to the most likely token.",
-  presence_penalty: "Default penalty for tokens already present in the response.",
-  frequency_penalty: "Default penalty based on how often tokens already appear.",
-  max_thinking_tokens: "Default maximum tokens that may be spent in the thinking block.",
-  thinking_answer_room: "Tokens reserved for the final answer when no thinking budget is supplied.",
+  presence_penalty:
+    "Default penalty for tokens already present in the response.",
+  frequency_penalty:
+    "Default penalty based on how often tokens already appear.",
+  max_thinking_tokens:
+    "Default maximum tokens that may be spent in the thinking block.",
+  thinking_answer_room:
+    "Tokens reserved for the final answer when no thinking budget is supplied.",
   mtp_depth: "Number of tokens proposed by the speculative draft head.",
-  prefill_chunk: "Tokens processed per prefill call and, in cache mode 1, the resume granularity.",
+  prefill_chunk:
+    "Tokens processed per prefill call and, in cache mode 1, the resume granularity.",
   cache_entries: "Number of prompt-cache entries retained using LRU eviction.",
   cache_branches: "Number of resume branches retained for each conversation.",
   cache_disk_gib: "Maximum disk usage for the managed prompt-cache directory.",
-  cache_dir_enabled: "Persist prompt-cache entries under the agent's managed cache directory.",
-  composable_context_floor: "Smallest message size eligible for composable context reuse.",
-  composable_context_bytes: "Host-memory budget for retained composable messages.",
+  cache_dir_enabled:
+    "Persist prompt-cache entries under the agent's managed cache directory.",
+  composable_context_floor:
+    "Smallest message size eligible for composable context reuse.",
+  composable_context_bytes:
+    "Host-memory budget for retained composable messages.",
   pld: "Prompt lookup drafting parameters as N,K; zero disables prompt lookup.",
   spec_adapt: "Adaptive drafting parameters as window,floor,retry-tokens.",
   vision_max_pixels: "Maximum image pixels before downscaling.",
@@ -182,12 +195,14 @@ export function HalogenFlashSettingsFields({ options, onChange }: Props) {
   return (
     <div className="space-y-4 rounded-md border p-4">
       <p className="text-sm text-muted-foreground">
-        Leave fields empty to use the Halogen Flash defaults. Settings are passed
-        as environment variables when the process starts.
+        Leave fields empty to use the Halogen Flash defaults. Settings are
+        passed as environment variables when the process starts.
       </p>
 
       <details open className="rounded-md border px-4">
-        <summary className="cursor-pointer py-3 font-medium">Context and memory</summary>
+        <summary className="cursor-pointer py-3 font-medium">
+          Context and memory
+        </summary>
         <div className="space-y-4 pb-4">
           {numberFields([
             ["kv_slots", "KV slots", 1, "1"],
@@ -204,9 +219,13 @@ export function HalogenFlashSettingsFields({ options, onChange }: Props) {
               <OptionLabel name="kv_pool_fit" label="KV pool fit" />
               <Select
                 value={options.kv_pool_fit?.toString() ?? "default"}
-                onValueChange={(value) => setNumber("kv_pool_fit", value === "default" ? "" : value)}
+                onValueChange={(value) =>
+                  setNumber("kv_pool_fit", value === "default" ? "" : value)
+                }
               >
-                <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
+                <SelectTrigger className="mt-1">
+                  <SelectValue />
+                </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="default">Agent default</SelectItem>
                   <SelectItem value="1">Fit automatically</SelectItem>
@@ -219,7 +238,9 @@ export function HalogenFlashSettingsFields({ options, onChange }: Props) {
       </details>
 
       <details className="rounded-md border px-4">
-        <summary className="cursor-pointer py-3 font-medium">Request defaults</summary>
+        <summary className="cursor-pointer py-3 font-medium">
+          Request defaults
+        </summary>
         <div className="space-y-4 pb-4">
           {numberFields([
             ["max_tokens_cap", "Maximum output tokens", 1, "1"],
@@ -242,15 +263,27 @@ export function HalogenFlashSettingsFields({ options, onChange }: Props) {
             <Select
               value={options.reasoning_effort ?? "default"}
               onValueChange={(value) =>
-                onChange({ ...options, reasoning_effort: value === "default" ? undefined : value as HalogenFlashOptions["reasoning_effort"] })
+                onChange({
+                  ...options,
+                  reasoning_effort:
+                    value === "default"
+                      ? undefined
+                      : (value as HalogenFlashOptions["reasoning_effort"]),
+                })
               }
             >
-              <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="mt-1">
+                <SelectValue />
+              </SelectTrigger>
               <SelectContent>
                 <SelectItem value="default">Agent default</SelectItem>
-                {(["minimal", "low", "medium", "high", "xhigh"] as const).map((value) => (
-                  <SelectItem key={value} value={value}>{value}</SelectItem>
-                ))}
+                {(["minimal", "low", "medium", "high", "xhigh"] as const).map(
+                  (value) => (
+                    <SelectItem key={value} value={value}>
+                      {value}
+                    </SelectItem>
+                  ),
+                )}
               </SelectContent>
             </Select>
           </div>
@@ -262,15 +295,21 @@ export function HalogenFlashSettingsFields({ options, onChange }: Props) {
       </details>
 
       <details className="rounded-md border px-4">
-        <summary className="cursor-pointer py-3 font-medium">Prompt cache</summary>
+        <summary className="cursor-pointer py-3 font-medium">
+          Prompt cache
+        </summary>
         <div className="space-y-4 pb-4">
           <div>
             <OptionLabel name="prompt_cache" label="Prompt cache mode" />
             <Select
               value={options.prompt_cache?.toString() ?? "default"}
-              onValueChange={(value) => setNumber("prompt_cache", value === "default" ? "" : value)}
+              onValueChange={(value) =>
+                setNumber("prompt_cache", value === "default" ? "" : value)
+              }
             >
-              <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="mt-1">
+                <SelectValue />
+              </SelectTrigger>
               <SelectContent>
                 <SelectItem value="default">Agent default</SelectItem>
                 <SelectItem value="0">Off</SelectItem>
@@ -295,7 +334,10 @@ export function HalogenFlashSettingsFields({ options, onChange }: Props) {
                 onChange({ ...options, cache_dir_enabled: checked === true })
               }
             />
-            <OptionLabel name="cache_dir_enabled" label="Persist cache to disk" />
+            <OptionLabel
+              name="cache_dir_enabled"
+              label="Persist cache to disk"
+            />
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             {toggle("cache_snap3", "Cache user-message start")}
@@ -308,11 +350,18 @@ export function HalogenFlashSettingsFields({ options, onChange }: Props) {
       </details>
 
       <details className="rounded-md border px-4">
-        <summary className="cursor-pointer py-3 font-medium">Drafting and vision</summary>
+        <summary className="cursor-pointer py-3 font-medium">
+          Drafting and vision
+        </summary>
         <div className="space-y-4 pb-4">
           {(["pld", "spec_adapt"] as const).map((key) => (
             <div key={key}>
-              <OptionLabel name={key} label={key === "pld" ? "Prompt lookup (N,K)" : "Adaptive drafting"} />
+              <OptionLabel
+                name={key}
+                label={
+                  key === "pld" ? "Prompt lookup (N,K)" : "Adaptive drafting"
+                }
+              />
               <Input
                 id={`halogen-flash-${key}`}
                 value={options[key] ?? ""}
