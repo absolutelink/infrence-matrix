@@ -136,9 +136,14 @@ async def test_release_completes_when_request_task_is_cancelled():
     session_context.__aexit__.return_value = None
 
     handle = InferenceLeaseHandle("request-1", SimpleNamespace(), uuid.uuid4())
-    with patch(
-        "app.services.inference_scheduler.AsyncSessionMaker",
-        return_value=session_context,
+    with (
+        patch(
+            "app.services.inference_scheduler.AsyncSessionMaker",
+            return_value=session_context,
+        ),
+        patch(
+            "app.services.inference_scheduler.UPSTREAM_COMPLETION_COOLDOWN_SECONDS", 0
+        ),
     ):
         release_task = asyncio.create_task(handle.release())
         await commit_started.wait()
@@ -150,6 +155,37 @@ async def test_release_completes_when_request_task_is_cancelled():
 
     session.execute.assert_awaited_once()
     session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_release_keeps_slot_active_during_completion_cooldown():
+    cooldown_started = asyncio.Event()
+    allow_cooldown = asyncio.Event()
+    session = AsyncMock()
+    session.execute.return_value.rowcount = 1
+    session_context = AsyncMock()
+    session_context.__aenter__.return_value = session
+    session_context.__aexit__.return_value = None
+
+    async def sleep(_seconds: float) -> None:
+        cooldown_started.set()
+        await allow_cooldown.wait()
+
+    handle = InferenceLeaseHandle("request-1", SimpleNamespace(), uuid.uuid4())
+    with (
+        patch(
+            "app.services.inference_scheduler.AsyncSessionMaker",
+            return_value=session_context,
+        ),
+        patch("app.services.inference_scheduler.asyncio.sleep", side_effect=sleep),
+    ):
+        release_task = asyncio.create_task(handle.release())
+        await cooldown_started.wait()
+        session.execute.assert_not_awaited()
+        allow_cooldown.set()
+        await release_task
+
+    session.execute.assert_awaited_once()
 
 
 async def test_guard_cancels_upstream_when_lease_is_lost():

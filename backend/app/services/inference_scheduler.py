@@ -27,6 +27,9 @@ SCHEDULER_POLL_SECONDS = 1.0
 TELEMETRY_TIMEOUT_SECONDS = 5.0
 RECONCILIATION_INTERVAL_SECONDS = 30.0
 DEFAULT_SINGLE_REQUEST_CAPACITY = 1
+# Give llama-server a brief settling period before another request claims the
+# slot. The lease stays active during this delay so other workers also wait.
+UPSTREAM_COMPLETION_COOLDOWN_SECONDS = 0.5
 
 
 def _vram_requirements_fit(
@@ -193,6 +196,7 @@ class InferenceLeaseHandle:
                 self._renewal_task.cancel()
                 await asyncio.gather(self._renewal_task, return_exceptions=True)
                 self._renewal_task = None
+            await asyncio.sleep(UPSTREAM_COMPLETION_COOLDOWN_SECONDS)
             async with AsyncSessionMaker() as session:
                 await session.execute(
                     update(InferenceLease)
