@@ -298,7 +298,7 @@ class InferenceScheduler:
                 )
                 if not failed.rowcount:
                     continue
-                if locked.status in {"running", "starting"}:
+                if server_unavailable and locked.status in {"running", "starting"}:
                     locked.status = "stopping"
                     session.add(locked)
                     stops.append((locked.id, locked.agent_id, generation))

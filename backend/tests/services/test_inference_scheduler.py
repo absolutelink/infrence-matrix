@@ -332,6 +332,35 @@ async def test_persisted_reconciliation_preserves_healthy_active_lease(db):
     send_to_agent.assert_not_awaited()
 
 
+async def test_reconciliation_does_not_stop_healthy_server_for_expired_lease(db):
+    model = _make_model(db, "scheduler-expired-healthy.gguf")
+    server = _make_server(db, model, alias="scheduler-expired-healthy-server")
+    lease = _make_lease(
+        db,
+        model,
+        f"expired-healthy-{uuid.uuid4()}",
+        status="active",
+        server=server,
+        expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    scheduler = InferenceScheduler()
+
+    with patch(
+        "app.services.inference_scheduler.agent_manager.send_to_agent",
+        new=AsyncMock(),
+    ) as send_to_agent:
+        reconciled = await scheduler.reconcile_stale_leases()
+
+    db.expire_all()
+    persisted_lease = db.get(InferenceLease, lease.id)
+    persisted_server = db.get(ServerInstance, server.id)
+    assert reconciled == 1
+    assert persisted_lease.status == "failed"
+    assert persisted_lease.terminal_reason == "lease_expired_or_server_unavailable"
+    assert persisted_server.status == "running"
+    send_to_agent.assert_not_awaited()
+
+
 async def test_reconciliation_preserves_a_renewed_healthy_lease(db):
     model = _make_model(db, "scheduler-renewed-active.gguf")
     server = _make_server(db, model, alias="scheduler-renewed-active-server")
