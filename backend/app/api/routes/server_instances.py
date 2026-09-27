@@ -540,7 +540,6 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
             "uninitialized",
             "preparing",
             "metadata_gathering",
-            "initialization_failed",
             "starting",
         }:
             raise HTTPException(

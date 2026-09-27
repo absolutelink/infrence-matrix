@@ -286,7 +286,12 @@ function InstanceActions({ instance }: { instance: ServerInstance }) {
   })
 
   const canStart = ["stopped", "error"].includes(instance.status)
-  const canEdit = ["stopped", "running", "error"].includes(instance.status)
+  const canEdit = [
+    "stopped",
+    "running",
+    "error",
+    "initialization_failed",
+  ].includes(instance.status)
   const canInitialize = [
     "uninitialized",
     "stopped",
