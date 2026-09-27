@@ -49,9 +49,20 @@ READY_POLL_INTERVAL = 1.0
 
 
 async def _send_start_with_gate(
-    agent_id: str, payload: dict[str, Any], timeout: float
+    agent_id: str,
+    payload: dict[str, Any],
+    timeout: float,
+    allowed_statuses: set[str] | None = None,
 ) -> dict:
-    """Prevent process launch while a benchmark owns exclusive admission."""
+    """Prevent process launch while a benchmark owns exclusive admission.
+
+    ``allowed_statuses`` is the set of instance statuses for which the start
+    may still be dispatched. Callers that flip the row to a different status
+    before launching (e.g. initialization's ``metadata_gathering``) must
+    include it, otherwise the short-circuit below silently drops the start
+    and the caller later fails looking for a process that never ran.
+    """
+    permitted = {"starting"} if allowed_statuses is None else allowed_statuses
     async with async_engine.connect() as connection:
         await connection.execute(
             text("SELECT pg_advisory_lock_shared(:key)"),
@@ -68,7 +79,7 @@ async def _send_start_with_gate(
                     )
                     if (
                         server is None
-                        or server.status != "starting"
+                        or server.status not in permitted
                         or server.slot_generation != int(generation)
                     ):
                         return {}
@@ -364,7 +375,12 @@ async def initialize_server(
         )
         await set_status("metadata_gathering")
 
-        await _send_start_with_gate(agent_id, request, START_DISPATCH_TIMEOUT)
+        await _send_start_with_gate(
+            agent_id,
+            request,
+            START_DISPATCH_TIMEOUT,
+            allowed_statuses={"metadata_gathering"},
+        )
         metadata_response = await agent_manager.send_to_agent(
             agent_id,
             "GET",

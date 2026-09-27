@@ -12,6 +12,7 @@ from app.services.server_startup import (
     ServerStartupError,
     build_start_payload,
     ensure_server_ready_by_id,
+    initialize_server,
 )
 
 
@@ -248,3 +249,94 @@ class TestEnsureServerReady:
     async def test_missing_instance_raises(self) -> None:
         with pytest.raises(ServerStartupError):
             await ensure_server_ready_by_id("00000000-0000-0000-0000-000000000000")
+
+
+class TestInitializeServer:
+    """Initialization must actually launch the process to read its metadata.
+
+    Regression: the benchmark gate short-circuits on instance status, and
+    ``initialize_server`` sets ``metadata_gathering`` before dispatching the
+    start, so the start was dropped and metadata lookup 404'd.
+    """
+
+    def _instance(self, db, status: str = "uninitialized") -> ServerInstance:
+        agent = Agent(
+            name=f"init-test-agent-{uuid_module.uuid4().hex[:8]}",
+            host="127.0.0.1",
+            port=8080,
+            status="online",
+        )
+        db.add(agent)
+        db.commit()
+        db.refresh(agent)
+        model = _make_model(db, "init-model.Q4_K_M.gguf")
+        model.source_repo_id = "test-org/init-repo"
+        db.add(model)
+        db.commit()
+        instance = ServerInstance(
+            model_id=model.id,
+            agent_id=agent.id,
+            alias=f"init-alias-{model.id.hex[:8]}",
+            process_command="llama-server",
+            status=status,
+        )
+        db.add(instance)
+        db.commit()
+        db.refresh(instance)
+        return instance
+
+    async def test_dispatches_start_during_metadata_gathering(self, db) -> None:
+        instance = self._instance(db)
+        calls: list[tuple[str, str]] = []
+
+        async def fake_send(_agent_id, method, path, _payload, **_kwargs):
+            calls.append((method, path))
+            if path == "/servers/start":
+                async with AsyncSessionMaker() as session:
+                    row = await session.get(ServerInstance, instance.id)
+                    assert row.status == "metadata_gathering"
+            elif path.endswith(f"/servers/metadata/{instance.id}"):
+                return {"data": [{"id": "init-model"}]}
+            return {}
+
+        with patch(
+            "app.services.server_startup.agent_manager.send_to_agent",
+            new=fake_send,
+        ):
+            await initialize_server(
+                str(instance.agent_id),
+                str(instance.id),
+                {"config": {"id": str(instance.id), "engine": "llamacpp"}},
+            )
+
+        assert ("POST", "/servers/start") in calls
+        assert ("POST", "/servers/stop") in calls
+        async with AsyncSessionMaker() as session:
+            row = await session.get(ServerInstance, instance.id)
+        assert row.status == "stopped"
+        assert row.model_metadata == {"id": "init-model"}
+        assert row.error_message is None
+
+    async def test_initialization_failed_when_metadata_lookup_fails(self, db) -> None:
+        """When metadata cannot be read the row must not look usable."""
+        instance = self._instance(db)
+
+        async def fake_send(_agent_id, _method, path, _payload, **_kwargs):
+            if path == "/servers/metadata" + f"/{instance.id}":
+                raise RuntimeError("Server is not running")
+            return {}
+
+        with patch(
+            "app.services.server_startup.agent_manager.send_to_agent",
+            new=fake_send,
+        ):
+            await initialize_server(
+                str(instance.agent_id),
+                str(instance.id),
+                {"config": {"id": str(instance.id), "engine": "llamacpp"}},
+            )
+
+        async with AsyncSessionMaker() as session:
+            row = await session.get(ServerInstance, instance.id)
+        assert row.status == "initialization_failed"
+        assert not row.model_metadata
