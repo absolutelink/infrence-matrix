@@ -57,6 +57,7 @@ class InferenceLeaseHandle:
     lost: asyncio.Event = field(default_factory=asyncio.Event)
     _upstream_started: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _renewal_task: asyncio.Task[None] | None = field(default=None, init=False)
+    _disconnect_task: asyncio.Task[None] | None = field(default=None, init=False)
 
     def start_renewal(self) -> None:
         if self._renewal_task is None:
@@ -65,6 +66,34 @@ class InferenceLeaseHandle:
     def mark_upstream_started(self) -> None:
         """Allow the renewal loop to renew a stream owned outside ``guard``."""
         self._upstream_started.set()
+
+    def monitor_disconnect(
+        self, is_cancelled: Callable[[], Awaitable[bool]] | None
+    ) -> None:
+        if is_cancelled is not None and self._disconnect_task is None:
+            self._disconnect_task = asyncio.create_task(
+                self._disconnect_loop(is_cancelled)
+            )
+
+    async def _disconnect_loop(
+        self, is_cancelled: Callable[[], Awaitable[bool]]
+    ) -> None:
+        try:
+            while True:
+                if await is_cancelled():
+                    self.lost.set()
+                    await self._mark_cancelled()
+                    return
+                await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            raise
+
+    async def _stop_disconnect_monitor(self) -> None:
+        if self._disconnect_task is not None:
+            if self._disconnect_task is not asyncio.current_task():
+                self._disconnect_task.cancel()
+                await asyncio.gather(self._disconnect_task, return_exceptions=True)
+            self._disconnect_task = None
 
     async def guard(
         self,
@@ -158,12 +187,12 @@ class InferenceLeaseHandle:
     async def release(self) -> None:
         """Release the lease in a short, independent transaction."""
 
-        if self._renewal_task is not None:
-            self._renewal_task.cancel()
-            await asyncio.gather(self._renewal_task, return_exceptions=True)
-            self._renewal_task = None
-
         async def _release() -> None:
+            await self._stop_disconnect_monitor()
+            if self._renewal_task is not None:
+                self._renewal_task.cancel()
+                await asyncio.gather(self._renewal_task, return_exceptions=True)
+                self._renewal_task = None
             async with AsyncSessionMaker() as session:
                 await session.execute(
                     update(InferenceLease)
@@ -192,11 +221,36 @@ class InferenceLeaseHandle:
     async def cancel(self) -> None:
         """Cancel an active lease when its client disconnects before dispatch."""
 
-        if self._renewal_task is not None:
-            self._renewal_task.cancel()
-            await asyncio.gather(self._renewal_task, return_exceptions=True)
-            self._renewal_task = None
+        async def _cancel() -> None:
+            await self._stop_disconnect_monitor()
+            if self._renewal_task is not None:
+                self._renewal_task.cancel()
+                await asyncio.gather(self._renewal_task, return_exceptions=True)
+                self._renewal_task = None
+            async with AsyncSessionMaker() as session:
+                await session.execute(
+                    update(InferenceLease)
+                    .where(
+                        InferenceLease.id == self.lease_id,
+                        InferenceLease.status == "active",
+                        InferenceLease.slot_generation == self.slot_generation,
+                    )
+                    .values(
+                        status="cancelled",
+                        terminal_reason="client_disconnected",
+                        released_at=datetime.now(UTC),
+                    )
+                )
+                await session.commit()
 
+        cancel_task = asyncio.create_task(_cancel())
+        try:
+            await asyncio.shield(cancel_task)
+        except asyncio.CancelledError:
+            await asyncio.shield(cancel_task)
+            raise
+
+    async def _mark_cancelled(self) -> None:
         async with AsyncSessionMaker() as session:
             await session.execute(
                 update(InferenceLease)
@@ -716,6 +770,21 @@ class InferenceScheduler:
     async def _cancel(self, lease_id: uuid.UUID) -> None:
         await self._finish_queued(lease_id, "cancelled", "client_disconnected")
 
+    async def _cancel_when_disconnected(
+        self,
+        lease_id: uuid.UUID,
+        is_cancelled: Callable[[], Awaitable[bool]],
+    ) -> None:
+        """Remove a queued request even while the scheduler is starting a model."""
+        try:
+            while True:
+                if await is_cancelled():
+                    await self._cancel(lease_id)
+                    return
+                await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            raise
+
     async def clear_queue(self) -> int:
         """Cancel every queued request without interrupting active inference."""
         async with AsyncSessionMaker() as session:
@@ -760,6 +829,11 @@ class InferenceScheduler:
             required_agent_id,
         )
         claimed = False
+        disconnect_task = (
+            asyncio.create_task(self._cancel_when_disconnected(queued.id, is_cancelled))
+            if is_cancelled is not None
+            else None
+        )
         try:
             while True:
                 if is_cancelled is not None and await is_cancelled():
@@ -799,6 +873,7 @@ class InferenceScheduler:
                         if is_cancelled is not None and await is_cancelled():
                             await lease.cancel()
                             raise InferenceRequestCancelled
+                        lease.monitor_disconnect(is_cancelled)
                         claimed = True
                         return lease
 
@@ -828,6 +903,7 @@ class InferenceScheduler:
                         if is_cancelled is not None and await is_cancelled():
                             await lease.cancel()
                             raise InferenceRequestCancelled
+                        lease.monitor_disconnect(is_cancelled)
                         claimed = True
                         return lease
                 if asyncio.get_running_loop().time() >= deadline:
@@ -857,6 +933,9 @@ class InferenceScheduler:
             await self._finish_queued(queued.id, "failed", "admission_error")
             raise
         finally:
+            if disconnect_task is not None:
+                disconnect_task.cancel()
+                await asyncio.gather(disconnect_task, return_exceptions=True)
             if not claimed:
                 # This is intentionally conditional so a concurrent claim or
                 # queue clear cannot be overwritten by late request cleanup.

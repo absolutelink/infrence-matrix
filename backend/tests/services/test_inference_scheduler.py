@@ -228,8 +228,15 @@ async def test_disconnect_after_claim_cancels_before_returning_lease():
     scheduler = InferenceScheduler()
     queued = SimpleNamespace(id=uuid.uuid4())
     server = SimpleNamespace(id=uuid.uuid4(), status="running", health_status="healthy")
-    lease = SimpleNamespace(cancel=AsyncMock())
-    is_cancelled = AsyncMock(side_effect=[False, True])
+    lease = SimpleNamespace(cancel=AsyncMock(), monitor_disconnect=Mock())
+    disconnected = asyncio.Event()
+
+    async def is_cancelled() -> bool:
+        return disconnected.is_set()
+
+    async def claim(*_args):
+        disconnected.set()
+        return lease
 
     with (
         patch.object(scheduler, "_queue", new=AsyncMock(return_value=queued)),
@@ -237,7 +244,7 @@ async def test_disconnect_after_claim_cancels_before_returning_lease():
         patch.object(scheduler, "_admission_open", new=AsyncMock(return_value=True)),
         patch.object(scheduler, "_candidates", new=AsyncMock(return_value=[server])),
         patch.object(scheduler, "_active_leases", new=AsyncMock(return_value=0)),
-        patch.object(scheduler, "_claim", new=AsyncMock(return_value=lease)),
+        patch.object(scheduler, "_claim", new=claim),
         patch.object(scheduler, "_finish_queued", new=AsyncMock()),
     ):
         with pytest.raises(InferenceRequestCancelled):
@@ -248,6 +255,42 @@ async def test_disconnect_after_claim_cancels_before_returning_lease():
             )
 
     lease.cancel.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_watcher_removes_queued_lease():
+    scheduler = InferenceScheduler()
+    disconnected = asyncio.Event()
+
+    async def is_cancelled() -> bool:
+        return disconnected.is_set()
+
+    with patch.object(scheduler, "_cancel", new=AsyncMock()) as cancel:
+        watcher = asyncio.create_task(
+            scheduler._cancel_when_disconnected(uuid.uuid4(), is_cancelled)
+        )
+        disconnected.set()
+        await watcher
+
+    cancel.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_active_disconnect_marks_lease_lost():
+    handle = InferenceLeaseHandle("request-1", SimpleNamespace(), uuid.uuid4())
+    disconnected = asyncio.Event()
+
+    async def is_cancelled() -> bool:
+        return disconnected.is_set()
+
+    with patch.object(handle, "_mark_cancelled", new=AsyncMock()) as mark_cancelled:
+        handle.monitor_disconnect(is_cancelled)
+        disconnected.set()
+        await asyncio.sleep(0.11)
+
+    assert handle.lost.is_set()
+    mark_cancelled.assert_awaited_once()
+    await handle._stop_disconnect_monitor()
 
 
 async def test_compatible_fifo_does_not_block_unrelated_models(db):
