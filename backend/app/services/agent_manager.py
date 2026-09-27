@@ -141,11 +141,13 @@ class AgentManager:
                         )
                     session.add(server)
             else:
-                # Generation-zero agents use the legacy ID-only snapshot.
+                # The registration snapshot is authoritative for servers that
+                # are currently running. Keep the generation-zero restriction
+                # only on legacy promotion; stale cleanup must also cover
+                # newer rows after an agent restart.
                 conditions = [
                     col(ServerInstance.agent_id) == agent.id,
                     col(ServerInstance.status).in_(["starting", "running"]),
-                    col(ServerInstance.slot_generation) == 0,
                 ]
                 if running_ids:
                     conditions.append(col(ServerInstance.id).not_in(running_ids))

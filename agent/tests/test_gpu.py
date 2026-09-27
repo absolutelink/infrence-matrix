@@ -11,7 +11,7 @@ os.environ["MODELS_PATH"] = "/tmp/models"
 
 from app.api.routes.gpu import get_gpu_info
 from app.services.frontend_client import FrontendClient
-from app.services.gpu_monitor import aggregate_gpu_info
+from app.services.gpu_monitor import _parse_nvidia_output, aggregate_gpu_info
 
 SAMPLE = {
     "gpus": [
@@ -48,6 +48,16 @@ def test_aggregate_gpu_info_keeps_legacy_fields_and_totals_all_devices():
     assert info["vram_free"] == 21
     assert info["gpu_count"] == 2
     assert info["gpus"] == SAMPLE["gpus"]
+
+
+def test_nvidia_parser_preserves_hardware_uuid():
+    info = _parse_nvidia_output(
+        "0, GPU-abc, NVIDIA Test, 1024, 128, 25, 45"
+    )
+
+    assert info is not None
+    assert info["gpus"][0]["uuid"] == "GPU-abc"
+    assert info["gpus"][0]["vram_total"] == 1024 * 1024 * 1024
 
 
 @pytest.mark.asyncio

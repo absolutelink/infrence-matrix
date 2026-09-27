@@ -29,7 +29,7 @@ def _query_nvidia_smi(query: str) -> str | None:
 def _sample_gpu() -> dict | None:
     """Sample GPU metrics from NVIDIA or AMD device telemetry."""
     output = _query_nvidia_smi(
-        "index,name,memory.total,memory.used,utilization.gpu,temperature.gpu"
+        "index,uuid,name,memory.total,memory.used,utilization.gpu,temperature.gpu"
     )
     if output:
         return _parse_nvidia_output(output)
@@ -70,19 +70,20 @@ def _parse_nvidia_output(output: str) -> dict | None:
     gpus = []
     for line in output.splitlines():
         parts = [p.strip() for p in line.split(",")]
-        if len(parts) < 6:
+        if len(parts) < 7:
             continue
         try:
             gpus.append(
                 {
                     "id": int(parts[0]),
-                    "name": parts[1],
-                    "vram_total": int(float(parts[2])) * 1024 * 1024,
-                    "vram_used": int(float(parts[3])) * 1024 * 1024,
-                    "vram_free": int(float(parts[2])) * 1024 * 1024
-                    - int(float(parts[3])) * 1024 * 1024,
-                    "utilization": float(parts[4]),
-                    "temperature": float(parts[5]),
+                    "uuid": parts[1],
+                    "name": parts[2],
+                    "vram_total": int(float(parts[3])) * 1024 * 1024,
+                    "vram_used": int(float(parts[4])) * 1024 * 1024,
+                    "vram_free": int(float(parts[3])) * 1024 * 1024
+                    - int(float(parts[4])) * 1024 * 1024,
+                    "utilization": float(parts[5]),
+                    "temperature": float(parts[6]),
                     "backend": "cuda",
                 }
             )

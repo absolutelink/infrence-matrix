@@ -325,6 +325,8 @@ class TestAgentManagerStartingPromotion:
 
         # Only lookup + stale queries ran — no promotion or start update.
         assert session.execute.await_count == 2
+        stale_query = session.execute.call_args_list[1].args[0]
+        assert "slot_generation" not in str(stale_query)
 
     @pytest.mark.asyncio
     @patch("app.services.agent_manager.AsyncSessionMaker")
