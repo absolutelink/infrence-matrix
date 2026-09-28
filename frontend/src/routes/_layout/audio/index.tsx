@@ -1,12 +1,14 @@
 import { useMutation, useSuspenseQuery } from "@tanstack/react-query"
 import { createFileRoute } from "@tanstack/react-router"
-import { AudioLines, FileAudio, Upload } from "lucide-react"
+import { AudioLines, FileAudio, Terminal, Upload } from "lucide-react"
 import { useRef, useState } from "react"
 import {
   ModelsService,
+  ServerInstancesService,
   type TranscriptionResponse,
   V1AudioService,
 } from "@/client"
+import { useLogPanel } from "@/components/ServerInstances/LogPanelContext"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -37,15 +39,38 @@ function getModelsQueryOptions() {
   }
 }
 
+function getServerInstancesQueryOptions() {
+  return {
+    queryFn: async () => {
+      const response =
+        await ServerInstancesService.instancesListServerInstances()
+      return response.data.server_instances || []
+    },
+    queryKey: ["servers-audio"],
+    refetchInterval: 5000,
+  }
+}
+
 function AudioTranscription() {
   const { showSuccessToast, showErrorToast } = useCustomToast()
   const { data: models } = useSuspenseQuery(getModelsQueryOptions())
+  const { data: instances } = useSuspenseQuery(getServerInstancesQueryOptions())
   const [selectedModel, setSelectedModel] = useState<string>("")
   const [file, setFile] = useState<File | null>(null)
   const [language, setLanguage] = useState("")
   const [responseFormat, setResponseFormat] = useState<"json" | "text">("json")
   const [result, setResult] = useState<TranscriptionResponse | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const { openLogs } = useLogPanel()
+  const selectedServer =
+    instances?.find(
+      (s) =>
+        (s.model_name === selectedModel || s.alias === selectedModel) &&
+        s.status === "running",
+    ) ??
+    instances?.find(
+      (s) => s.model_name === selectedModel || s.alias === selectedModel,
+    )
 
   const transcribeMutation = useMutation({
     mutationFn: async () => {
@@ -86,18 +111,30 @@ function AudioTranscription() {
             Transcribe audio files with speech models
           </p>
         </div>
-        <Select value={selectedModel} onValueChange={setSelectedModel}>
-          <SelectTrigger className="w-[300px]">
-            <SelectValue placeholder="Select a speech model" />
-          </SelectTrigger>
-          <SelectContent>
-            {models?.map((model) => (
-              <SelectItem key={model.id} value={model.name}>
-                {model.name || "Unknown"}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <div className="flex items-center gap-2">
+          <Select value={selectedModel} onValueChange={setSelectedModel}>
+            <SelectTrigger className="w-[300px]">
+              <SelectValue placeholder="Select a speech model" />
+            </SelectTrigger>
+            <SelectContent>
+              {models?.map((model) => (
+                <SelectItem key={model.id} value={model.name}>
+                  {model.name || "Unknown"}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button
+            variant="outline"
+            size="icon"
+            className="h-9 w-9"
+            title="View logs"
+            disabled={!selectedServer}
+            onClick={() => selectedServer && openLogs(selectedServer)}
+          >
+            <Terminal className="h-4 w-4" />
+          </Button>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-4 flex-1 min-h-0">

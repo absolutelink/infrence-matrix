@@ -7,10 +7,12 @@ import {
   Plus,
   Send,
   Square,
+  Terminal,
   Wrench,
 } from "lucide-react"
 import { useRef, useState } from "react"
 import { ServerInstancesService, V15 } from "@/client"
+import { useLogPanel } from "@/components/ServerInstances/LogPanelContext"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import {
@@ -171,6 +173,8 @@ function ResponsesPage() {
   const [lastUsage, setLastUsage] = useState<string | null>(null)
   const [showEvents, setShowEvents] = useState(false)
   const [rawEvents, setRawEvents] = useState<RawEvent[]>([])
+  const { openLogs } = useLogPanel()
+  const selectedServer = servers.find((s) => s.alias === selectedModel)
 
   const handleNewConversation = () => {
     setEntries([])
@@ -493,6 +497,16 @@ function ResponsesPage() {
               )}
             </SelectContent>
           </Select>
+          <Button
+            variant="outline"
+            size="icon"
+            className="h-9 w-9"
+            title="View logs"
+            disabled={!selectedServer}
+            onClick={() => selectedServer && openLogs(selectedServer)}
+          >
+            <Terminal className="h-4 w-4" />
+          </Button>
         </div>
       </div>
 

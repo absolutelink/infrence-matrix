@@ -1,8 +1,9 @@
 import { useSuspenseQuery } from "@tanstack/react-query"
 import { createFileRoute } from "@tanstack/react-router"
-import { Send, Sparkles, Square } from "lucide-react"
+import { Send, Sparkles, Square, Terminal } from "lucide-react"
 import { useRef, useState } from "react"
 import { ServerInstancesService, V1CompletionsService } from "@/client"
+import { useLogPanel } from "@/components/ServerInstances/LogPanelContext"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import {
@@ -55,6 +56,8 @@ function TextCompletion() {
   const [stream, setStream] = useState(true)
   const [isLoading, setIsLoading] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
+  const { openLogs } = useLogPanel()
+  const selectedServer = servers.find((s) => s.alias === selectedModel)
 
   const handleGenerate = async () => {
     if (!prompt.trim() || !selectedModel) return
@@ -198,6 +201,16 @@ function TextCompletion() {
               )}
             </SelectContent>
           </Select>
+          <Button
+            variant="outline"
+            size="icon"
+            className="h-9 w-9"
+            title="View logs"
+            disabled={!selectedServer}
+            onClick={() => selectedServer && openLogs(selectedServer)}
+          >
+            <Terminal className="h-4 w-4" />
+          </Button>
         </div>
       </div>
 

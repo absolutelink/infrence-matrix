@@ -1,12 +1,14 @@
 import { useMutation, useSuspenseQuery } from "@tanstack/react-query"
 import { createFileRoute } from "@tanstack/react-router"
-import { Braces, Copy, Plus, Trash2 } from "lucide-react"
+import { Braces, Copy, Plus, Terminal, Trash2 } from "lucide-react"
 import { useState } from "react"
 import {
   type EmbeddingResponse,
   ModelsService,
+  ServerInstancesService,
   V1EmbeddingsService,
 } from "@/client"
+import { useLogPanel } from "@/components/ServerInstances/LogPanelContext"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -34,12 +36,35 @@ function getModelsQueryOptions() {
   }
 }
 
+function getServerInstancesQueryOptions() {
+  return {
+    queryFn: async () => {
+      const response =
+        await ServerInstancesService.instancesListServerInstances()
+      return response.data.server_instances || []
+    },
+    queryKey: ["servers-embeddings"],
+    refetchInterval: 5000,
+  }
+}
+
 function Embeddings() {
   const { showSuccessToast, showErrorToast } = useCustomToast()
   const { data: models } = useSuspenseQuery(getModelsQueryOptions())
+  const { data: instances } = useSuspenseQuery(getServerInstancesQueryOptions())
   const [selectedModel, setSelectedModel] = useState<string>("")
   const [inputs, setInputs] = useState<string[]>([""])
   const [result, setResult] = useState<EmbeddingResponse | null>(null)
+  const { openLogs } = useLogPanel()
+  const selectedServer =
+    instances?.find(
+      (s) =>
+        (s.model_name === selectedModel || s.alias === selectedModel) &&
+        s.status === "running",
+    ) ??
+    instances?.find(
+      (s) => s.model_name === selectedModel || s.alias === selectedModel,
+    )
 
   const embedMutation = useMutation({
     mutationFn: async () => {
@@ -74,18 +99,30 @@ function Embeddings() {
             Generate vector embeddings for text
           </p>
         </div>
-        <Select value={selectedModel} onValueChange={setSelectedModel}>
-          <SelectTrigger className="w-[300px]">
-            <SelectValue placeholder="Select an embedding model" />
-          </SelectTrigger>
-          <SelectContent>
-            {models?.map((model) => (
-              <SelectItem key={model.id} value={model.name}>
-                {model.name || "Unknown"}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <div className="flex items-center gap-2">
+          <Select value={selectedModel} onValueChange={setSelectedModel}>
+            <SelectTrigger className="w-[300px]">
+              <SelectValue placeholder="Select an embedding model" />
+            </SelectTrigger>
+            <SelectContent>
+              {models?.map((model) => (
+                <SelectItem key={model.id} value={model.name}>
+                  {model.name || "Unknown"}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button
+            variant="outline"
+            size="icon"
+            className="h-9 w-9"
+            title="View logs"
+            disabled={!selectedServer}
+            onClick={() => selectedServer && openLogs(selectedServer)}
+          >
+            <Terminal className="h-4 w-4" />
+          </Button>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-4 flex-1 min-h-0">

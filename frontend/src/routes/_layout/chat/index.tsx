@@ -1,8 +1,9 @@
 import { useSuspenseQuery } from "@tanstack/react-query"
 import { createFileRoute } from "@tanstack/react-router"
-import { Send, Sparkles, Square } from "lucide-react"
+import { Send, Sparkles, Square, Terminal } from "lucide-react"
 import { useRef, useState } from "react"
 import { ServerInstancesService } from "@/client"
+import { useLogPanel } from "@/components/ServerInstances/LogPanelContext"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import {
@@ -171,6 +172,7 @@ function Chat() {
 
   const selectedServer = servers.find((s) => s.alias === selectedModel)
   const allowedEfforts = allowedReasoningEfforts(selectedServer?.model_metadata)
+  const { openLogs } = useLogPanel()
 
   const handleSend = async () => {
     if (!input.trim() || !selectedModel) return
@@ -357,6 +359,16 @@ function Chat() {
               )}
             </SelectContent>
           </Select>
+          <Button
+            variant="outline"
+            size="icon"
+            className="h-9 w-9"
+            title="View logs"
+            disabled={!selectedServer}
+            onClick={() => selectedServer && openLogs(selectedServer)}
+          >
+            <Terminal className="h-4 w-4" />
+          </Button>
           {allowedEfforts && allowedEfforts.length > 0 && (
             <Select value={reasoningEffort} onValueChange={setReasoningEffort}>
               <SelectTrigger className="w-[180px]">
