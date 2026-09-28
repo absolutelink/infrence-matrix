@@ -57,19 +57,24 @@ def extract_usage_fields(
     )
     prompt_ms = _as_float(timings.get("prompt_ms") or usage.get("prompt_ms"))
     predicted_ms = _as_float(timings.get("predicted_ms") or usage.get("predicted_ms"))
+    # Engine-reported rates, prefer them over recomputation so live figures
+    # match llama-server's own logs (which count cached prompt tokens in
+    # the prompt rate and cover the whole stage). Derive only when missing.
+    prompt_per_second = _as_float(
+        timings.get("prompt_per_second") or usage.get("prompt_per_second")
+    )
+    predicted_per_second = _as_float(
+        timings.get("predicted_per_second") or usage.get("predicted_per_second")
+    )
     # Some engines report only rates; derive durations so window math works.
-    if not prompt_ms and prompt_tokens:
-        rate = _as_float(
-            timings.get("prompt_per_second") or usage.get("prompt_per_second")
-        )
-        if rate:
-            prompt_ms = prompt_tokens / rate * 1000.0
-    if not predicted_ms and completion_tokens:
-        rate = _as_float(
-            timings.get("predicted_per_second") or usage.get("predicted_per_second")
-        )
-        if rate:
-            predicted_ms = completion_tokens / rate * 1000.0
+    if not prompt_ms and prompt_per_second:
+        prompt_ms = prompt_tokens / prompt_per_second * 1000.0
+    if not predicted_ms and predicted_per_second:
+        predicted_ms = completion_tokens / predicted_per_second * 1000.0
+    if not prompt_per_second and prompt_ms and prompt_tokens:
+        prompt_per_second = prompt_tokens / (prompt_ms / 1000.0)
+    if not predicted_per_second and predicted_ms and completion_tokens:
+        predicted_per_second = completion_tokens / (predicted_ms / 1000.0)
     return {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
@@ -80,6 +85,8 @@ def extract_usage_fields(
         ),
         "prompt_ms": prompt_ms,
         "predicted_ms": predicted_ms,
+        "prompt_per_second": prompt_per_second,
+        "predicted_per_second": predicted_per_second,
     }
 
 
@@ -198,14 +205,12 @@ LIVE_RUNS = 10
 async def token_stats_snapshot() -> dict[str, Any]:
     """Aggregate token usage for the status bar and popover.
 
-    Live rates are the mean per-run rate over each server's last
-    ``LIVE_RUNS`` completed requests: decode = completion_tokens /
-    predicted_ms, prefill = uncached prompt tokens / prompt_ms. Input
-    counts exclude cached tokens (``prompt_tokens - cached_tokens``): a
-    resent prompt-cache hit is not new work and would otherwise multiply
-    the same context across every turn of a chat. Prefill rates use the
-    same uncached count because llama.cpp's ``prompt_ms`` only covers
-    non-cached processing.
+    Live rates are the mean of each server's last ``LIVE_RUNS`` completed
+    requests as reported by the engine: decode = ``predicted_per_second``,
+    prefill = ``prompt_per_second``. These are taken directly from
+    llama.cpp's timings rather than recomputed from token counts and
+    durations (which undercount prefill because ``prompt_ms`` covers only
+    uncached work while the engine's rate covers the whole stage).
     """
     async with AsyncSessionMaker() as session:
         rows = (
@@ -254,13 +259,11 @@ async def token_stats_snapshot() -> dict[str, Any]:
                         WITH ranked AS (
                             SELECT
                                 t.server_instance_id,
-                                CASE WHEN t.predicted_ms > 0
-                                    THEN t.completion_tokens
-                                         / (t.predicted_ms / 1000.0)
+                                CASE WHEN t.predicted_per_second > 0
+                                    THEN t.predicted_per_second
                                 END AS decode_tps,
-                                CASE WHEN t.prompt_ms > 0
-                                    THEN (t.prompt_tokens - t.cached_tokens)
-                                         / (t.prompt_ms / 1000.0)
+                                CASE WHEN t.prompt_per_second > 0
+                                    THEN t.prompt_per_second
                                 END AS prefill_tps,
                                 row_number() OVER (
                                     PARTITION BY t.server_instance_id

@@ -552,6 +552,12 @@ class TokenUsageSample(SQLModel, table=True):
     prompt_ms: float = 0.0
     predicted_ms: float = 0.0
 
+    # llama.cpp-reported stage rates in tokens/second (0 = engine did not
+    # report). Surfaced directly so live rates match the server logs
+    # instead of being recomputed from token counts and durations.
+    prompt_per_second: float = 0.0
+    predicted_per_second: float = 0.0
+
     created_at: datetime = Field(
         default_factory=get_datetime_utc, sa_type=DateTime(timezone=True)
     )

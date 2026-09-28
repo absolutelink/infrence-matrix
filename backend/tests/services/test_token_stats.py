@@ -70,6 +70,8 @@ def test_extract_openai_style_usage_with_timings() -> None:
         "cached_tokens": 64,
         "prompt_ms": 500.0,
         "predicted_ms": 1050.0,
+        "prompt_per_second": 200.0,
+        "predicted_per_second": 40.0,
     }
 
 
@@ -251,7 +253,10 @@ async def test_snapshot_aggregates_windows_and_rates(db: Session) -> None:
     now = datetime.now(UTC)
 
     with Session(engine) as session:
-        # server_a: fast decode + big prefill, inside the live window
+        # server_a: fast decode + big prefill, inside the live window.
+        # Engine rates cover the whole prompt stage (cached included),
+        # so prompt_per_second = prompt_tokens / prompt_ms, not the
+        # uncached-only count.
         session.add(
             TokenUsageSample(
                 server_instance_id=server_a.id,
@@ -260,6 +265,8 @@ async def test_snapshot_aggregates_windows_and_rates(db: Session) -> None:
                 completion_tokens=100,
                 prompt_ms=2000.0,
                 predicted_ms=2000.0,
+                prompt_per_second=500.0,
+                predicted_per_second=50.0,
                 created_at=now - timedelta(seconds=10),
             )
         )
@@ -272,6 +279,8 @@ async def test_snapshot_aggregates_windows_and_rates(db: Session) -> None:
                 completion_tokens=50,
                 prompt_ms=1000.0,
                 predicted_ms=5000.0,
+                prompt_per_second=500.0,
+                predicted_per_second=10.0,
                 created_at=now - timedelta(hours=2),
             )
         )
@@ -284,6 +293,8 @@ async def test_snapshot_aggregates_windows_and_rates(db: Session) -> None:
                 completion_tokens=30,
                 prompt_ms=3000.0,
                 predicted_ms=6000.0,
+                prompt_per_second=100.0,
+                predicted_per_second=5.0,
                 created_at=now - timedelta(days=8),
             )
         )
@@ -310,14 +321,14 @@ async def test_snapshot_aggregates_windows_and_rates(db: Session) -> None:
     snapshot = await token_stats_snapshot()
     glob = snapshot["global"]
     assert glob["live"]["runs"] == LIVE_RUNS
-    # server_a live: mean of per-run rates over its 2 recent runs
-    # decode: (100/2s + 50/5s) / 2 = 30
-    # prefill: ((1000-400)/2s + 500/1s) / 2 = 400
+    # server_a live: mean of engine-reported per-run rates over its 2 runs
+    # decode: (50 + 10) / 2 = 30
+    # prefill: (500 + 500) / 2 = 500  (whole-prompt rate, not uncached)
     # global: run-weighted across servers:
     # decode: (30*2 + 5*1) / 3 = 21.666...
-    # prefill: (400*2 + 100*1) / 3 = 300
+    # prefill: (500*2 + 100*1) / 3 = 400
     assert glob["live"]["decode_tokens_per_second"] == pytest.approx(65 / 3)
-    assert glob["live"]["prefill_tokens_per_second"] == 300.0
+    assert glob["live"]["prefill_tokens_per_second"] == pytest.approx(1100 / 3)
 
     assert glob["last_24h"]["prompt_tokens"] == 1107
     assert glob["last_24h"]["completion_tokens"] == 157
@@ -332,12 +343,12 @@ async def test_snapshot_aggregates_windows_and_rates(db: Session) -> None:
     assert [s["id"] for s in servers] == [str(server_a.id), str(server_b.id)]
     assert servers[0]["alias"] == server_a.alias
     assert servers[0]["decode_tokens_per_second"] == 30.0
-    assert servers[0]["prefill_tokens_per_second"] == 400.0
+    assert servers[0]["prefill_tokens_per_second"] == 500.0
     assert servers[0]["last_7d"]["total_tokens"] == 1250
     assert servers[1]["last_7d"]["total_tokens"] == 0
     assert servers[1]["last_30d"]["total_tokens"] == 330
     # "last N runs" is per server regardless of recency, so server_b's
-    # 8-day-old sample still yields a rate: 30 tok / 6 s and 300 / 3 s
+    # 8-day-old sample still yields a rate from its engine timings.
     assert servers[1]["decode_tokens_per_second"] == 5.0
     assert servers[1]["prefill_tokens_per_second"] == 100.0
 
