@@ -163,6 +163,39 @@ export function ServerSettingsFields({
     </div>
   )
 
+  const triToggles = (
+    fields: ReadonlyArray<readonly [keyof ServerOptions, string]>,
+  ) => (
+    <div className="grid grid-cols-2 gap-4">
+      {fields.map(([key, label]) => (
+        <div key={key}>
+          <Label>{label}</Label>
+          <Select
+            value={
+              options[key] === undefined
+                ? "default"
+                : options[key]
+                  ? "on"
+                  : "off"
+            }
+            onValueChange={(value) =>
+              set(key, value === "default" ? "" : value === "on")
+            }
+          >
+            <SelectTrigger className="mt-1">
+              <SelectValue placeholder="Use llama.cpp default" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="default">Use llama.cpp default</SelectItem>
+              <SelectItem value="on">On</SelectItem>
+              <SelectItem value="off">Off</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      ))}
+    </div>
+  )
+
   return (
     <div className="space-y-3 border-t pt-4">
       <details className="rounded-md border px-4">
@@ -304,9 +337,9 @@ export function ServerSettingsFields({
           </div>
           {toggles([
             ["cache_prompt", "Prompt caching"],
-            ["kv_offload", "KV cache offload"],
             ["no_cache_idle_slots", "Disable idle-slot cache"],
           ])}
+          {triToggles([["kv_offload", "KV cache offload"]])}
         </div>
       </details>
 
