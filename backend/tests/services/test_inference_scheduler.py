@@ -312,6 +312,20 @@ async def test_disconnect_watcher_removes_queued_lease():
 
 
 @pytest.mark.asyncio
+async def test_disconnect_cancels_target_startup():
+    scheduler = InferenceScheduler()
+    disconnected = asyncio.Event()
+
+    async def is_cancelled() -> bool:
+        return disconnected.is_set()
+
+    waiter = asyncio.create_task(scheduler._wait_for_disconnect(is_cancelled))
+    disconnected.set()
+    await waiter
+    assert waiter.done()
+
+
+@pytest.mark.asyncio
 async def test_active_disconnect_marks_lease_lost():
     handle = InferenceLeaseHandle("request-1", SimpleNamespace(), uuid.uuid4())
     disconnected = asyncio.Event()

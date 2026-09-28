@@ -789,6 +789,22 @@ class InferenceScheduler:
         except asyncio.CancelledError:
             raise
 
+    async def _wait_for_disconnect(
+        self, is_cancelled: Callable[[], Awaitable[bool]]
+    ) -> None:
+        while not await is_cancelled():
+            await asyncio.sleep(0.1)
+
+    async def _wait_for_cancel_or_poll(
+        self,
+        is_cancelled: Callable[[], Awaitable[bool]],
+        interval: float,
+    ) -> None:
+        while True:
+            if await is_cancelled():
+                return
+            await asyncio.sleep(interval)
+
     async def clear_queue(self) -> int:
         """Cancel every queued request without interrupting active inference."""
         async with AsyncSessionMaker() as session:
@@ -892,7 +908,36 @@ class InferenceScheduler:
                 target = starting or stopped
                 if target is not None:
                     async with self._agent_lock(target.agent_id):
-                        prepared = await self._prepare_target(target, deadline)
+                        prepare_task = asyncio.create_task(
+                            self._prepare_target(target, deadline)
+                        )
+                        disconnect_waiter = (
+                            asyncio.create_task(
+                                self._wait_for_disconnect(is_cancelled)
+                            )
+                            if is_cancelled is not None
+                            else None
+                        )
+                        try:
+                            wait_for = {prepare_task}
+                            if disconnect_waiter is not None:
+                                wait_for.add(disconnect_waiter)
+                            done, _ = await asyncio.wait(
+                                wait_for, return_when=asyncio.FIRST_COMPLETED
+                            )
+                            if disconnect_waiter is not None and disconnect_waiter in done:
+                                prepare_task.cancel()
+                                await asyncio.gather(
+                                    prepare_task, return_exceptions=True
+                                )
+                                raise InferenceRequestCancelled
+                            prepared = await prepare_task
+                        finally:
+                            if disconnect_waiter is not None:
+                                disconnect_waiter.cancel()
+                                await asyncio.gather(
+                                    disconnect_waiter, return_exceptions=True
+                                )
                     if is_cancelled is not None and await is_cancelled():
                         await self._cancel(queued.id)
                         raise InferenceRequestCancelled
