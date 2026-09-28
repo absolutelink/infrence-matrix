@@ -30,6 +30,7 @@ DEFAULT_SINGLE_REQUEST_CAPACITY = 1
 # Give llama-server a brief settling period before another request claims the
 # slot. The lease stays active during this delay so other workers also wait.
 UPSTREAM_COMPLETION_COOLDOWN_SECONDS = 0.5
+SERVER_READY_COOLDOWN_SECONDS = 3.0
 
 
 def _vram_requirements_fit(
@@ -676,6 +677,13 @@ class InferenceScheduler:
                 or locked.health_status != "healthy"
             ):
                 return None
+            if locked.started_at is not None:
+                ready_at = locked.started_at
+                if ready_at.tzinfo is None:
+                    ready_at = ready_at.replace(tzinfo=UTC)
+                ready_for = (now - ready_at).total_seconds()
+                if 0 <= ready_for < SERVER_READY_COOLDOWN_SECONDS:
+                    return None
             oldest_compatible = (
                 await session.execute(
                     select(InferenceLease)

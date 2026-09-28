@@ -360,6 +360,26 @@ async def test_compatible_fifo_does_not_block_unrelated_models(db):
         await handle.release()
 
 
+async def test_newly_ready_server_waits_before_claiming(db):
+    model = _make_model(db, "scheduler-ready-cooldown.gguf")
+    server = _make_server(db, model, alias="scheduler-ready-cooldown-server")
+    lease = _make_lease(db, model, f"cooldown-{uuid.uuid4()}")
+    server.started_at = datetime.now(UTC) - timedelta(seconds=1)
+    db.add(server)
+    db.commit()
+
+    scheduler = InferenceScheduler()
+    assert await scheduler._claim(lease.id, server, capacity=1) is None
+
+    server.started_at = datetime.now(UTC) - timedelta(seconds=4)
+    db.add(server)
+    db.commit()
+    handle = await scheduler._claim(lease.id, server, capacity=1)
+
+    assert handle is not None
+    await handle.release()
+
+
 async def test_only_one_concurrent_claim_gets_capacity_one_server(db):
     model = _make_model(db, "scheduler-concurrent-model.gguf")
     server = _make_server(db, model, alias="scheduler-capacity-one-server")

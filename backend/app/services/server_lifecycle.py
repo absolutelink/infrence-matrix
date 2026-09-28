@@ -32,6 +32,7 @@ async def reserve_server_start(server_id: uuid.UUID) -> ServerInstance:
         server.slot_generation += 1
         server.status = "starting"
         server.health_status = "unknown"
+        server.started_at = None
         server.error_message = None
         session.add(server)
         await session.commit()

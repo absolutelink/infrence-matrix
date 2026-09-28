@@ -554,6 +554,7 @@ async def ensure_server_ready(
             fresh.slot_generation += 1
             fresh.status = "starting"
             fresh.health_status = "unknown"
+            fresh.started_at = None
             fresh.error_message = None
             session.add(fresh)
             await session.commit()
