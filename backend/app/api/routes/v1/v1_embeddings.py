@@ -73,6 +73,7 @@ async def create_embedding(
         raise HTTPException(404, str(e)) from e
     instance = target.server
     server: ServerInstance | None = instance
+    db.close()
 
     if instance is not None:
         if metadata_capability(instance, "embeddings") is False:

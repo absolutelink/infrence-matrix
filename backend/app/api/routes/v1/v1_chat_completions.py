@@ -659,6 +659,7 @@ async def create_chat_completion(
         raise HTTPException(404, str(e)) from e
     model = target.model
     instance = target.server
+    db.close()
 
     if instance is not None:
         if request.tools and metadata_capability(instance, "tools") is False:

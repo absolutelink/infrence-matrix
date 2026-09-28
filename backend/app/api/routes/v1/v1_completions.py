@@ -379,6 +379,7 @@ async def create_completion(
         raise HTTPException(404, str(e)) from e
     model = target.model
     server = target.server
+    db.close()
     if server is None:
         try:
             server = await _get_or_create_server(model, request.agent_id, start=False)

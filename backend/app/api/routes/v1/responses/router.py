@@ -819,6 +819,9 @@ async def create_response(
             param="previous_response_id",
         )
 
+    # Target resolution may start a server and wait on the agent. Do not keep
+    # the synchronous request session's read transaction open across that await.
+    db.close()
     try:
         server, model, lease_preference = await resolve_target(request.model)
     except TargetError as e:
@@ -923,6 +926,9 @@ async def create_response(
     created_at = int(time.time())
     created_at_mono = time.monotonic()
 
+    # Admission can wait for another request or a server slot. Release the
+    # dependency session before entering that potentially long async wait.
+    db.close()
     try:
         lease = await inference_scheduler.acquire(
             model.id,
@@ -1062,6 +1068,9 @@ async def compact_response(
     Stateless: results are not persisted; chain from them by passing the
     compacted output as input on a fresh response.
     """
+    # Server resolution may wait on an agent; do not hold the dependency
+    # session across that await.
+    db.close()
     try:
         # Resolve server exactly like POST /responses (alias auto-start
         # or model name/id fallback).
@@ -1117,6 +1126,7 @@ async def compact_response(
         "stream": False,
     }
 
+    db.close()
     agent = await agent_manager.get_agent(str(server.agent_id))
     if not agent:
         return _error_response(
