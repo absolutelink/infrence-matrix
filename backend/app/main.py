@@ -46,11 +46,15 @@ async def lifespan(_app: FastAPI):
     inference_scheduler.start_reconciliation()
     start_queue_worker()
     prune_task = asyncio.create_task(token_stats_prune_loop())
+    from app.api.routes.metrics import metrics_snapshot_loop
+
+    metrics_task = asyncio.create_task(metrics_snapshot_loop())
     try:
         yield
     finally:
+        metrics_task.cancel()
         prune_task.cancel()
-        await asyncio.gather(prune_task, return_exceptions=True)
+        await asyncio.gather(prune_task, metrics_task, return_exceptions=True)
         await inference_scheduler.stop_reconciliation()
         await stop_queue_worker()
 

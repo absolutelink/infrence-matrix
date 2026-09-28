@@ -1,5 +1,6 @@
 """V1 Completions endpoint - OpenAI-compatible legacy completions API via Agent proxy."""
 
+import asyncio
 import json
 import logging
 import time
@@ -18,7 +19,7 @@ from app.api.routes.v1.v1_chat_completions import _get_or_create_server
 from app.services.agent_manager import agent_manager
 from app.services.inference_scheduler import InferenceLeaseHandle, inference_scheduler
 from app.services.inference_target import resolve_inference_target
-from app.services.token_stats import record_usage
+from app.services.token_stats import record_request_telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -173,12 +174,14 @@ async def _stream_completion_via_agent(
     """Stream completion via Agent proxy."""
     payload = _build_payload(request, stream=True)
     created = int(time.time())
+    started = time.monotonic()
     include_usage = not (
         request.stream_options and not request.stream_options.include_usage
     )
     fallback_completion_chars = 0
     final_usage: UsageInfo | None = None
     final_timings: dict = {}
+    telemetry_recorded = False
 
     try:
         agent = await agent_manager.get_agent(agent_id)
@@ -240,31 +243,54 @@ async def _stream_completion_via_agent(
                             logger.warning(f"Invalid JSON in stream: {data}")
                             continue
 
-        if final_usage is not None:
-            record_usage(lease.server, final_usage.model_dump(), final_timings)
+        if final_usage is None:
+            # Fallback: estimate from prompt length + streamed chars
+            prompt = _convert_prompt_to_llama_format(request.prompt)
+            final_usage = UsageInfo.build(
+                prompt_tokens=len(prompt) // 4,
+                completion_tokens=fallback_completion_chars // 4,
+            )
+        record_request_telemetry(
+            lease.server,
+            final_usage.model_dump(),
+            final_timings,
+            latency_ms=(time.monotonic() - started) * 1000.0,
+            status="success",
+        )
+        telemetry_recorded = True
         await lease.release()
 
         if include_usage:
-            usage = final_usage
-            if usage is None:
-                # Fallback: estimate from prompt length + streamed chars
-                prompt = _convert_prompt_to_llama_format(request.prompt)
-                usage = UsageInfo.build(
-                    prompt_tokens=len(prompt) // 4,
-                    completion_tokens=fallback_completion_chars // 4,
-                )
             final_chunk = CompletionChunk(
                 id=request_id,
                 created=created,
                 model=request.model,
                 choices=[],
-                usage=usage,
+                usage=final_usage,
             )
             yield f"data: {final_chunk.model_dump_json()}\n\n"
 
         yield "data: [DONE]\n\n"
 
+    except asyncio.CancelledError:
+        if not telemetry_recorded:
+            record_request_telemetry(
+                lease.server,
+                None,
+                None,
+                latency_ms=(time.monotonic() - started) * 1000.0,
+                status="cancelled",
+            )
+        raise
     except Exception as e:
+        if not telemetry_recorded:
+            record_request_telemetry(
+                lease.server,
+                None,
+                None,
+                latency_ms=(time.monotonic() - started) * 1000.0,
+                status="error",
+            )
         logger.error(f"Streaming error: {e}")
         error_chunk = {"error": {"message": str(e), "type": "server_error"}}
         yield f"data: {json.dumps(error_chunk)}\n\n"
@@ -340,6 +366,7 @@ async def create_completion(
     """Create a completion (legacy GPT-3 style endpoint) via Agent proxy."""
     request_id = f"cmpl-{uuid.uuid4()}"
     created = int(time.time())
+    started = time.monotonic()
 
     # Resolve model field: a server alias routes to that server directly;
     # otherwise it is a model name/id and a server is found or started.
@@ -371,6 +398,7 @@ async def create_completion(
     server = lease.server
 
     if request.stream:
+        db.close()
         return StreamingResponse(
             _stream_completion_via_agent(
                 str(server.agent_id),
@@ -435,8 +463,12 @@ async def create_completion(
             }
         )
 
-        record_usage(
-            lease.server, normalized_usage.model_dump(), response.get("timings")
+        record_request_telemetry(
+            lease.server,
+            normalized_usage.model_dump(),
+            response.get("timings"),
+            latency_ms=(time.monotonic() - started) * 1000.0,
+            status="success",
         )
 
         return CompletionResponse(
@@ -454,6 +486,13 @@ async def create_completion(
         )
 
     except Exception as e:
+        record_request_telemetry(
+            lease.server,
+            None,
+            None,
+            latency_ms=(time.monotonic() - started) * 1000.0,
+            status="error",
+        )
         logger.error(f"Completion error: {e}")
         raise HTTPException(500, f"Inference failed: {e}")
     finally:

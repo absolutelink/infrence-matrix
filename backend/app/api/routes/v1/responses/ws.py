@@ -55,7 +55,7 @@ from app.services.reasoning_metadata import (
     ReasoningPolicyError,
     resolve_reasoning_effort,
 )
-from app.services.token_stats import record_usage
+from app.services.token_stats import record_request_telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +143,8 @@ async def _stream_to_ws(
     (after sending response.failed).
     """
     lease = None
+    started = time.monotonic()
+    telemetry_recorded = False
     seq = ev.SSEmitter()
     try:
         server, model, preferred_server_id = await resolve_target(request.model)
@@ -262,7 +264,14 @@ async def _stream_to_ws(
         await _send_events(websocket, seq.drain_events())
 
         usage = _build_usage(final_usage, fallback_chars, state.reasoning_tokens)
-        record_usage(server, usage, final_usage.get("timings"))
+        record_request_telemetry(
+            server,
+            usage,
+            final_usage.get("timings"),
+            latency_ms=(time.monotonic() - started) * 1000.0,
+            status="success",
+        )
+        telemetry_recorded = True
         if finish_reason == "length":
             resource.status = "incomplete"
             resource.incomplete_details = IncompleteDetails(reason="max_output_tokens")
@@ -301,7 +310,25 @@ async def _stream_to_ws(
                 "responses %s: stored (chain continues from this turn)", response_id
             )
         return serialized
+    except asyncio.CancelledError:
+        if not telemetry_recorded:
+            record_request_telemetry(
+                lease.server if lease is not None else None,
+                None,
+                None,
+                latency_ms=(time.monotonic() - started) * 1000.0,
+                status="cancelled",
+            )
+        raise
     except TargetError as e:
+        if not telemetry_recorded:
+            record_request_telemetry(
+                lease.server if lease is not None else None,
+                None,
+                None,
+                latency_ms=(time.monotonic() - started) * 1000.0,
+                status="error",
+            )
         await websocket.send_text(
             _error_event(
                 503 if e.status >= 500 else e.status, e.code, e.message, "model"
@@ -309,6 +336,14 @@ async def _stream_to_ws(
         )
         return None
     except Exception as e:
+        if not telemetry_recorded:
+            record_request_telemetry(
+                lease.server if lease is not None else None,
+                None,
+                None,
+                latency_ms=(time.monotonic() - started) * 1000.0,
+                status="error",
+            )
         logger.error(f"responses WS turn failed: {e}")
         seq = ev.SSEmitter()
         failed = build_response_resource(request, new_id("resp"), int(time.time()))

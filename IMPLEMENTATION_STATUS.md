@@ -201,7 +201,7 @@ Key llama.cpp facts (researched):
 #### Dashboard Improvements
 - [x] System metrics dashboard cards (models, agents, servers, requests, GPU, VRAM)
 - [x] Live queue metrics + bottom status bar (GPU utilization/VRAM, deduplicated across agents sharing a GPU)
-- [ ] Model usage statistics (`ServerInstance.total_requests`/`total_tokens_generated`/`average_response_time_ms` are read but never incremented)
+- [ ] Model usage statistics — ✅ implemented (`total_requests`/`total_tokens_generated`/`average_response_time_ms` incremented per successful request via SQL-side running average)
 - [~] Recent activity feed (renders server instances with static counters, not a timestamped event feed)
 - [ ] Quick actions panel (only "Clear queue" exists in the status bar)
 - [ ] Resource usage charts (numeric cards only; no charting library installed)
@@ -270,9 +270,9 @@ Key llama.cpp facts (researched):
 
 #### Monitoring & Analytics
 - [ ] Request logging (per-request `logger` calls only; no request-log table)
-- [~] Performance metrics — `/api/v1/metrics` Prometheus endpoint defined but never fed (`record_inference_request`, `update_agent/server/vram_metrics` have no callers)
+- [x] Performance metrics — ✅ implemented: Prometheus `/api/v1/metrics` fed from `record_request_telemetry` (request counter/latency histogram/tokens per model+agent), `gpu.usage` events → VRAM gauge, 15s DB snapshot loop for agent/server gauges (stale labels cleared)
 - [~] Error tracking — Sentry init only (DSN-gated); per-entity `error_message` fields surfaced in tables, no aggregation
-- [~] Usage analytics — only `/v1/responses` persists token usage; chat/completions usage is returned but not stored; no aggregation endpoint
+- [x] Usage analytics — all inference paths (chat/completions/embeddings/responses HTTP+WS) persist `TokenUsageSample` rows via `record_request_telemetry`; aggregation at `/api/v1/stats/tokens`
 - [ ] Cost tracking
 
 #### Integrations
@@ -421,7 +421,7 @@ API_URL=https://matrix.thelink.family
 2. ~~Benchmarking~~ ✅ implemented (definitions, queue, isolation, results, history)
 3. ~~Reliable log streaming~~ ✅ implemented (cursor log rings, shared per-agent WS, reconnecting state, benchmark history)
 4. ~~Log panel layout~~ ✅ reflowed via `--log-panel-h` CSS variable
-5. **Observability producers** - feed the Prometheus metrics, increment server usage counters, persist chat/completions token usage
+5. ~~Observability producers~~ ✅ implemented (Prometheus metrics fed, server usage counters incremented, all inference paths persist token usage samples)
 6. **Audio transcription** - replace the `/v1/audio/*` stubs with real whisper.cpp plumbing on the agent
 7. **Batch executor** - JSONL parsing, request fan-out, output files, plus a UI
 8. **Server management polish** - connection testing, benchmark result summaries on definition rows
@@ -430,6 +430,14 @@ API_URL=https://matrix.thelink.family
 ---
 
 ## 📝 Recent Changes
+
+### September 27, 2026 (observability producers)
+- ✅ New `record_request_telemetry()` in `token_stats.py`: single choke point called by every inference path — persists the `TokenUsageSample`, records Prometheus request/latency/token metrics, and increments the serving `ServerInstance`'s `total_requests`/`total_tokens_generated`/`average_response_time_ms` with a SQL-side running average (no read-modify-write races)
+- ✅ Wired into all 9 inference call sites: chat completions (stream + non-stream), completions (stream + non-stream), embeddings, responses HTTP (`_complete` + `_stream_events`), responses WS — with `success`/`error`/`cancelled` status from `time.monotonic()` request timers; `telemetry_recorded` guards prevent double-counting when cancellation races the success record
+- ✅ Prometheus gauges now snapshot correctly: `update_agent_metrics`/`update_server_metrics` clear stale label sets before repopulating (previously deleted servers froze their series); server counts aggregate per (agent, status) instead of `set(1)` per row
+- ✅ `metrics_snapshot_loop()` (15s, started in the FastAPI lifespan) refreshes agent/server gauges from the DB; `agent_manager._handle_gpu_usage` now feeds `inference_matrix_vram_usage_bytes` per device from `gpu.usage` events (falls back to the aggregate on gpu_id 0)
+- ✅ Telemetry is best-effort everywhere: attribute/metric failures are swallowed and logged, never breaking inference (verified against SimpleNamespace-based transport tests)
+- ✅ Tests: `tests/api/test_metrics.py` (stale-label clearing, per-agent/status counts, VRAM gauge, DB snapshot), 5 new `record_request_telemetry` cases in `test_token_stats.py` (counters, running average, error non-increment, Prometheus deltas, detached-server safety), 2 gpu.usage gauge tests in `test_agent_manager.py` — 211 backend tests green
 
 ### September 27, 2026 (reliable log streaming)
 - ✅ Cursor-addressable log rings in the agent (`log_buffers.py`): every llama-server, halogen, and llama-bench line gets a monotonic per-feed sequence number; `log.lines` and `benchmark.log` events carry `seq_start`/`seq_end`; `GET /servers/logs/{id}?after=<cursor>` and `GET /benchmarks/logs/{run_id}?after=<cursor>` return incremental lines plus `gap` on eviction

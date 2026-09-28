@@ -627,6 +627,22 @@ class AgentManager:
             agent.gpu_info = gpu_info
             agent.last_seen = datetime.now(UTC)
 
+        try:
+            from app.api.routes.metrics import update_vram_metrics
+
+            gpus = data.get("gpus") or []
+            if gpus:
+                for gpu in gpus:
+                    update_vram_metrics(
+                        agent_id,
+                        gpu.get("id", 0),
+                        int(gpu.get("vram_used", 0)),
+                    )
+            elif data.get("vram_used") is not None:
+                update_vram_metrics(agent_id, 0, int(data["vram_used"]))
+        except Exception:
+            logger.debug("Failed to update VRAM metrics", exc_info=True)
+
     async def _handle_download_progress(self, agent_id: str, data: dict) -> None:
         """Handle download.progress event."""
         # Update DownloadJob in database

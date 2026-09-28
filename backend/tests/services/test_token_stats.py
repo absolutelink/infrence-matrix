@@ -14,6 +14,7 @@ from app.services.token_stats import (
     TOKEN_SAMPLE_RETENTION_DAYS,
     extract_usage_fields,
     prune_old_samples,
+    record_request_telemetry,
     record_usage,
     token_stats_snapshot,
 )
@@ -132,6 +133,116 @@ def test_record_usage_never_raises_on_garbage_input() -> None:
     before = _sample_count()
     record_usage(None, {"prompt_tokens": "not-a-number"})
     assert _sample_count() == before
+
+
+def test_record_request_telemetry_increments_server_counters(db: Session) -> None:
+    server = _make_server(db)
+
+    record_request_telemetry(
+        server,
+        {"prompt_tokens": 10, "completion_tokens": 25},
+        {"prompt_ms": 40.0, "predicted_ms": 160.0},
+        latency_ms=500.0,
+        status="success",
+    )
+
+    db.expire_all()
+    db.refresh(server)
+    assert server.total_requests == 1
+    assert server.total_tokens_generated == 35
+    assert server.average_response_time_ms == pytest.approx(500.0)
+
+
+def test_record_request_telemetry_running_average(db: Session) -> None:
+    server = _make_server(db)
+
+    record_request_telemetry(
+        server,
+        {"prompt_tokens": 1, "completion_tokens": 1},
+        latency_ms=100.0,
+        status="success",
+    )
+    record_request_telemetry(
+        server,
+        {"prompt_tokens": 1, "completion_tokens": 1},
+        latency_ms=300.0,
+        status="success",
+    )
+
+    db.expire_all()
+    db.refresh(server)
+    assert server.total_requests == 2
+    assert server.total_tokens_generated == 4
+    # (100 * 1 + 300) / 2 == 200
+    assert server.average_response_time_ms == pytest.approx(200.0)
+
+
+def test_record_request_telemetry_error_does_not_increment_counters(
+    db: Session,
+) -> None:
+    server = _make_server(db)
+
+    record_request_telemetry(
+        server,
+        None,
+        None,
+        latency_ms=250.0,
+        status="error",
+    )
+
+    db.expire_all()
+    db.refresh(server)
+    assert server.total_requests == 0
+    assert server.total_tokens_generated == 0
+    assert server.average_response_time_ms == 0.0
+
+
+def test_record_request_telemetry_updates_prometheus(db: Session) -> None:
+    from prometheus_client import REGISTRY
+
+    server = _make_server(db)
+    label = {
+        "model": server.alias,
+        "agent_id": str(server.agent_id),
+        "status": "success",
+    }
+    before = REGISTRY.get_sample_value(
+        "inference_matrix_inference_requests_total", label
+    )
+    before_tokens = REGISTRY.get_sample_value(
+        "inference_matrix_tokens_generated_total",
+        {"model": server.alias, "agent_id": str(server.agent_id)},
+    )
+
+    record_request_telemetry(
+        server,
+        {"prompt_tokens": 4, "completion_tokens": 6},
+        latency_ms=25.0,
+        status="success",
+    )
+
+    after = REGISTRY.get_sample_value(
+        "inference_matrix_inference_requests_total", label
+    )
+    after_tokens = REGISTRY.get_sample_value(
+        "inference_matrix_tokens_generated_total",
+        {"model": server.alias, "agent_id": str(server.agent_id)},
+    )
+    assert (after or 0) - (before or 0) == 1
+    assert (after_tokens or 0) - (before_tokens or 0) == 10
+
+
+def test_record_request_telemetry_never_raises_without_server() -> None:
+    before = _sample_count()
+    record_request_telemetry(
+        None,
+        {"prompt_tokens": 3, "completion_tokens": 3},
+        latency_ms=10.0,
+        status="success",
+        model_name="detached-model",
+        agent_id="detached-agent",
+    )
+    assert _sample_count() == before + 1
 
 
 async def test_snapshot_aggregates_windows_and_rates(db: Session) -> None:

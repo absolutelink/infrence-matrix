@@ -112,6 +112,80 @@ def record_usage(
         logger.warning("Failed to record token usage sample", exc_info=True)
 
 
+def record_request_telemetry(
+    server: ServerInstance | None,
+    usage: dict[str, Any] | None,
+    timings: dict[str, Any] | None = None,
+    latency_ms: float = 0.0,
+    status: str = "success",
+    model_name: str | None = None,
+    agent_id: str | None = None,
+) -> None:
+    """Record one finished inference request: usage sample, Prometheus
+    metrics, and lifetime counters on the serving ServerInstance.
+
+    ``latency_ms`` is wall-clock request latency; ``status`` is
+    ``success``/``error``/``cancelled``. Best-effort: never raises.
+    """
+    record_usage(server, usage, timings)
+    try:
+        fields = extract_usage_fields(usage, timings)
+        total_tokens = fields["prompt_tokens"] + fields["completion_tokens"]
+
+        resolved_model = model_name
+        resolved_agent = agent_id
+        if server is not None:
+            if resolved_model is None:
+                resolved_model = getattr(server, "alias", None) or str(
+                    getattr(server, "model_id", "unknown")
+                )
+            if resolved_agent is None:
+                resolved_agent = str(getattr(server, "agent_id", "unknown"))
+        resolved_model = resolved_model or "unknown"
+        resolved_agent = resolved_agent or "unknown"
+
+        from app.api.routes.metrics import record_inference_request
+
+        record_inference_request(
+            model=resolved_model,
+            agent_id=resolved_agent,
+            status=status,
+            latency=max(latency_ms, 0.0) / 1000.0,
+            tokens=total_tokens if status == "success" else 0,
+        )
+    except Exception:
+        logger.warning("Failed to record inference metrics", exc_info=True)
+        return
+
+    if server is None or getattr(server, "id", None) is None or status != "success":
+        return
+    try:
+        # SQL-side increments avoid read-modify-write races between
+        # concurrent requests on the same server row.
+        with Session(engine) as session:
+            session.execute(
+                text(
+                    """
+                    UPDATE server_instances
+                    SET total_requests = total_requests + 1,
+                        total_tokens_generated = total_tokens_generated + :tokens,
+                        average_response_time_ms =
+                            (average_response_time_ms * total_requests
+                             + :latency_ms) / (total_requests + 1)
+                    WHERE id = :server_id
+                    """
+                ),
+                {
+                    "tokens": total_tokens,
+                    "latency_ms": max(latency_ms, 0.0),
+                    "server_id": server.id,
+                },
+            )
+            session.commit()
+    except Exception:
+        logger.warning("Failed to update server usage counters", exc_info=True)
+
+
 # Retention: keep ~35 days so the 30-day window always has full coverage.
 TOKEN_SAMPLE_RETENTION_DAYS = 35
 PRUNE_INTERVAL_SECONDS = 6 * 60 * 60

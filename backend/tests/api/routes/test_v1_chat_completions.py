@@ -15,7 +15,8 @@ from app.models import Model
 def test_reasoning_effort_field_accepts_openai_levels() -> None:
     for effort in ["none", "low", "medium", "high", "xhigh"]:
         request = ChatCompletionRequest(
-            model="m", messages=[ChatMessage(role="user", content="hi")],
+            model="m",
+            messages=[ChatMessage(role="user", content="hi")],
             reasoning_effort=effort,
         )
         assert request.reasoning_effort == effort
@@ -24,13 +25,26 @@ def test_reasoning_effort_field_accepts_openai_levels() -> None:
 def test_reasoning_effort_field_rejects_unknown_level() -> None:
     try:
         ChatCompletionRequest(
-            model="m", messages=[ChatMessage(role="user", content="hi")],
+            model="m",
+            messages=[ChatMessage(role="user", content="hi")],
             reasoning_effort="ultra",
         )
     except ValidationError:
         pass
     else:
         raise AssertionError("unknown reasoning_effort should be rejected")
+
+
+def test_text_content_parts_are_accepted_and_flattened() -> None:
+    message = ChatMessage(
+        role="user",
+        content=[
+            {"type": "text", "text": "Do a @code-reviewer "},
+            {"type": "text", "text": "Use the task tool"},
+        ],
+    )
+
+    assert message.llama_content() == "Do a @code-reviewer Use the task tool"
 
 
 def test_tool_messages_preserve_native_chat_shape() -> None:

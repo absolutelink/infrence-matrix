@@ -800,3 +800,67 @@ class TestServerLeaseInvalidation:
         await manager._invalidate_server_leases(session, "server-id")
 
         session.execute.assert_awaited_once()
+
+
+class TestGpuUsageMetrics:
+    @pytest.mark.asyncio
+    async def test_gpu_usage_event_updates_vram_gauge_per_device(self):
+        from types import SimpleNamespace
+
+        from prometheus_client import REGISTRY
+
+        manager = AgentManager()
+        agent_id = "vram-test-agent"
+        manager.agents[agent_id] = SimpleNamespace(gpu_info={}, last_seen=None)
+
+        await manager._handle_gpu_usage(
+            agent_id,
+            {
+                "vram_used": 8000,
+                "vram_free": 4000,
+                "utilization": 42.0,
+                "gpus": [
+                    {"id": 0, "vram_used": 5000},
+                    {"id": 1, "vram_used": 3000},
+                ],
+            },
+        )
+
+        assert (
+            REGISTRY.get_sample_value(
+                "inference_matrix_vram_usage_bytes",
+                {"agent_id": agent_id, "gpu_id": "0"},
+            )
+            == 5000
+        )
+        assert (
+            REGISTRY.get_sample_value(
+                "inference_matrix_vram_usage_bytes",
+                {"agent_id": agent_id, "gpu_id": "1"},
+            )
+            == 3000
+        )
+        assert manager.agents[agent_id].gpu_info["vram_used"] == 8000
+
+    @pytest.mark.asyncio
+    async def test_gpu_usage_event_without_device_list_falls_back(self):
+        from types import SimpleNamespace
+
+        from prometheus_client import REGISTRY
+
+        manager = AgentManager()
+        agent_id = "vram-fallback-agent"
+        manager.agents[agent_id] = SimpleNamespace(gpu_info={}, last_seen=None)
+
+        await manager._handle_gpu_usage(
+            agent_id,
+            {"vram_used": 7777, "vram_free": 111, "utilization": 5.0},
+        )
+
+        assert (
+            REGISTRY.get_sample_value(
+                "inference_matrix_vram_usage_bytes",
+                {"agent_id": agent_id, "gpu_id": "0"},
+            )
+            == 7777
+        )

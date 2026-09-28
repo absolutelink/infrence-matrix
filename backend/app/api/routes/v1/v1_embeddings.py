@@ -1,6 +1,8 @@
 """V1 Embeddings endpoint - OpenAI-compatible embeddings API via Agent proxy."""
 
+import asyncio
 import logging
+import time
 import uuid
 from typing import Literal
 
@@ -15,7 +17,7 @@ from app.services.agent_manager import agent_manager
 from app.services.inference_scheduler import InferenceLeaseHandle, inference_scheduler
 from app.services.inference_target import resolve_inference_target
 from app.services.server_startup import metadata_capability
-from app.services.token_stats import record_usage
+from app.services.token_stats import record_request_telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +64,7 @@ async def create_embedding(
     http_request: Request = None,
 ) -> EmbeddingResponse:
     """Create embeddings for the given input text via Agent proxy."""
+    started = time.monotonic()
     # Resolve model field: a server alias routes to that server directly;
     # otherwise it is a model name/id and a server is found or started.
     try:
@@ -118,9 +121,32 @@ async def create_embedding(
                 headers={"X-Inference-Slot-Generation": str(lease.slot_generation)},
             )
         )
+    except asyncio.CancelledError:
+        record_request_telemetry(
+            server,
+            None,
+            None,
+            latency_ms=(time.monotonic() - started) * 1000.0,
+            status="cancelled",
+        )
+        raise
     except TimeoutError as e:
+        record_request_telemetry(
+            server,
+            None,
+            None,
+            latency_ms=(time.monotonic() - started) * 1000.0,
+            status="error",
+        )
         raise HTTPException(503, str(e)) from e
     except Exception as e:
+        record_request_telemetry(
+            server,
+            None,
+            None,
+            latency_ms=(time.monotonic() - started) * 1000.0,
+            status="error",
+        )
         logger.error(f"Embedding error: {e}")
         raise HTTPException(500, f"Failed to create embeddings: {e}")
     finally:
@@ -140,7 +166,13 @@ async def create_embedding(
 
     usage = response.get("usage", {})
     total_tokens = usage.get("prompt_tokens", usage.get("total_tokens", len(inputs)))
-    record_usage(server, {"prompt_tokens": total_tokens}, response.get("timings"))
+    record_request_telemetry(
+        server,
+        {"prompt_tokens": total_tokens},
+        response.get("timings"),
+        latency_ms=(time.monotonic() - started) * 1000.0,
+        status="success",
+    )
 
     return EmbeddingResponse(
         data=embeddings_data,

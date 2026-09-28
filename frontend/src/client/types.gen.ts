@@ -386,7 +386,7 @@ export type ChatCompletionRequest = {
 /**
  * ChatMessage
  *
- * Chat message (content may be null for assistant tool-call turns).
+ * Chat message with OpenAI-compatible text content.
  */
 export type ChatMessage = {
     /**
@@ -396,7 +396,9 @@ export type ChatMessage = {
     /**
      * Content
      */
-    content?: string | null;
+    content?: string | Array<{
+        [key: string]: unknown;
+    }> | null;
     /**
      * Reasoning Content
      */

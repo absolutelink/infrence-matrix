@@ -1,5 +1,6 @@
 """V1 Chat Completions endpoint - OpenAI-compatible chat API with Agent support."""
 
+import asyncio
 import json
 import logging
 import time
@@ -32,7 +33,7 @@ from app.services.server_startup import (
     ensure_server_ready,
     metadata_capability,
 )
-from app.services.token_stats import record_usage
+from app.services.token_stats import record_request_telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +41,10 @@ router = APIRouter()
 
 
 class ChatMessage(BaseModel):
-    """Chat message (content may be null for assistant tool-call turns)."""
+    """Chat message with OpenAI-compatible text content."""
 
     role: Literal["system", "user", "assistant", "developer", "tool"]
-    content: str | None = None
+    content: str | list[dict[str, Any]] | None = None
     # Thinking models: raw reasoning text (assistant responses only)
     reasoning_content: str | None = None
     name: str | None = None
@@ -51,8 +52,16 @@ class ChatMessage(BaseModel):
     tool_calls: list[dict[str, Any]] | None = None
 
     def llama_content(self) -> str:
-        """Content as llama.cpp expects it (null -> empty string)."""
-        return self.content if self.content is not None else ""
+        """Flatten OpenAI text parts into the string llama.cpp expects."""
+        if self.content is None:
+            return ""
+        if isinstance(self.content, str):
+            return self.content
+        return "".join(
+            part.get("text", "")
+            for part in self.content
+            if part.get("type") == "text" and isinstance(part.get("text"), str)
+        )
 
 
 class ToolFunction(BaseModel):
@@ -349,6 +358,7 @@ async def _stream_completion_via_agent(
     payload["stream_options"] = {"include_usage": True}
 
     created = int(time.time())
+    started = time.monotonic()
     include_usage = not (
         request.stream_options and not request.stream_options.include_usage
     )
@@ -356,6 +366,7 @@ async def _stream_completion_via_agent(
     fallback_completion_chars = 0
     final_usage: UsageInfo | None = None
     final_timings: dict = {}
+    telemetry_recorded = False
 
     try:
         # Hold the client connection while a cold start completes so the
@@ -436,36 +447,61 @@ async def _stream_completion_via_agent(
                             logger.warning(f"Invalid JSON in stream: {data}")
                             continue
 
-        if final_usage is not None:
-            record_usage(lease.server, final_usage.model_dump(), final_timings)
+        if final_usage is None:
+            # Fallback: estimate tokens from content length.
+            # ~4 chars/token heuristic for prompt; completion
+            # counts actual streamed characters.
+            prompt_chars = sum(len(m["content"]) for m in messages)
+            final_usage = UsageInfo.build(
+                prompt_tokens=max(prompt_chars // 4, 0),
+                completion_tokens=fallback_completion_chars // 4,
+            )
+        # Record before yielding: latency is upstream production time,
+        # not downstream consumption time.
+        record_request_telemetry(
+            lease.server,
+            final_usage.model_dump(),
+            final_timings,
+            latency_ms=(time.monotonic() - started) * 1000.0,
+            status="success",
+        )
+        telemetry_recorded = True
         # The upstream slot is free as soon as its response stream closes.
         # Do not wait for a slow or disconnected downstream consumer to finish
         # draining the already-produced SSE response.
         await lease.release()
 
         if include_usage:
-            usage = final_usage
-            if usage is None:
-                # Fallback: estimate tokens from content length.
-                # ~4 chars/token heuristic for prompt; completion
-                # counts actual streamed characters.
-                prompt_chars = sum(len(m["content"]) for m in messages)
-                usage = UsageInfo.build(
-                    prompt_tokens=max(prompt_chars // 4, 0),
-                    completion_tokens=fallback_completion_chars // 4,
-                )
             final_chunk = ChatCompletionChunk(
                 id=request_id,
                 created=created,
                 model=request.model,
                 choices=[],
-                usage=usage,
+                usage=final_usage,
             )
             yield f"data: {final_chunk.model_dump_json()}\n\n"
 
         yield "data: [DONE]\n\n"
 
+    except asyncio.CancelledError:
+        if not telemetry_recorded:
+            record_request_telemetry(
+                lease.server,
+                None,
+                None,
+                latency_ms=(time.monotonic() - started) * 1000.0,
+                status="cancelled",
+            )
+        raise
     except Exception as e:
+        if not telemetry_recorded:
+            record_request_telemetry(
+                lease.server,
+                None,
+                None,
+                latency_ms=(time.monotonic() - started) * 1000.0,
+                status="error",
+            )
         logger.error(f"Streaming error: {e}")
         error_chunk = {"error": {"message": str(e), "type": "server_error"}}
         yield f"data: {json.dumps(error_chunk)}\n\n"
@@ -594,6 +630,7 @@ async def create_chat_completion(
     """
     request_id = f"chatcmpl-{uuid.uuid4()}"
     created = int(time.time())
+    started = time.monotonic()
     required_agent_id = uuid.UUID(request.agent_id) if request.agent_id else None
 
     # Debug visibility: what the client actually sent (tools present? which?)
@@ -686,6 +723,7 @@ async def create_chat_completion(
     if request.stream:
         # Stream response. The generator awaits readiness itself, so the
         # client connection is held during a cold start (invisible retry).
+        db.close()
         return StreamingResponse(
             _stream_completion_via_agent(
                 str(server.agent_id),
@@ -756,7 +794,7 @@ async def create_chat_completion(
             or (response.get("timings") or {}).get("cache_n")
             or 0
         )
-        record_usage(
+        record_request_telemetry(
             lease.server,
             {
                 "prompt_tokens": prompt_tokens,
@@ -764,6 +802,8 @@ async def create_chat_completion(
                 "prompt_tokens_details": {"cached_tokens": cached_tokens},
             },
             response.get("timings"),
+            latency_ms=(time.monotonic() - started) * 1000.0,
+            status="success",
         )
 
         return ChatCompletionResponse(
@@ -796,6 +836,13 @@ async def create_chat_completion(
         )
 
     except Exception as e:
+        record_request_telemetry(
+            lease.server,
+            None,
+            None,
+            latency_ms=(time.monotonic() - started) * 1000.0,
+            status="error",
+        )
         logger.error(f"Completion error: {e}")
         raise HTTPException(500, f"Inference failed: {e}")
     finally:

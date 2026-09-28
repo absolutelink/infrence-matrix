@@ -62,7 +62,7 @@ from app.services.server_startup import (
     find_alias_instance,
     metadata_capability,
 )
-from app.services.token_stats import record_usage
+from app.services.token_stats import record_request_telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -290,10 +290,12 @@ async def _complete(
     created_at: int,
     lease: InferenceLeaseHandle,
     reasoning_effort: str | None = None,
+    started_mono: float | None = None,
 ) -> ResponseResource:
     payload = _llama_payload(
         request, history, stream=False, reasoning_effort=reasoning_effort
     )
+    started = started_mono if started_mono is not None else time.monotonic()
     response = await lease.guard(
         agent_manager.send_to_agent(
             agent_id,
@@ -337,7 +339,13 @@ async def _complete(
 
     incomplete = finish_reason == "length"
     usage = _build_usage(usage_data, len(content), state.reasoning_tokens)
-    record_usage(lease.server, usage, usage_data.get("timings"))
+    record_request_telemetry(
+        lease.server,
+        usage,
+        usage_data.get("timings"),
+        latency_ms=(time.monotonic() - started) * 1000.0,
+        status="success",
+    )
 
     result = build_response_resource(
         request,
@@ -456,7 +464,10 @@ async def _stream_events(
     persist: bool = False,
     lease: InferenceLeaseHandle | None = None,
     reasoning_effort: str | None = None,
+    started_mono: float | None = None,
 ) -> AsyncIterator[str]:
+    started = started_mono if started_mono is not None else time.monotonic()
+    telemetry_recorded = False
     seq = ev.SSEmitter()
     response = build_response_resource(
         request,
@@ -581,7 +592,14 @@ async def _stream_events(
             yield frame
 
         usage = _build_usage(final_usage_data, fallback_chars, state.reasoning_tokens)
-        record_usage(sample_server, usage, final_usage_data.get("timings"))
+        record_request_telemetry(
+            sample_server,
+            usage,
+            final_usage_data.get("timings"),
+            latency_ms=(time.monotonic() - started) * 1000.0,
+            status="success",
+        )
+        telemetry_recorded = True
 
         if finish_reason == "length":
             response.status = "incomplete"
@@ -635,7 +653,25 @@ async def _stream_events(
         else:
             logger.info("responses %s: not stored (store=false)", response_id)
 
+    except asyncio.CancelledError:
+        if not telemetry_recorded:
+            record_request_telemetry(
+                lease.server if lease is not None else None,
+                None,
+                None,
+                latency_ms=(time.monotonic() - started) * 1000.0,
+                status="cancelled",
+            )
+        raise
     except Exception as e:
+        if not telemetry_recorded:
+            record_request_telemetry(
+                lease.server if lease is not None else None,
+                None,
+                None,
+                latency_ms=(time.monotonic() - started) * 1000.0,
+                status="error",
+            )
         logger.error(f"Responses streaming error: {e}")
         response.status = "failed"
         response.error = Error(code="server_error", message=str(e))
@@ -854,6 +890,7 @@ async def create_response(
 
     response_id = new_id("resp")
     created_at = int(time.time())
+    created_at_mono = time.monotonic()
 
     try:
         lease = await inference_scheduler.acquire(
@@ -883,6 +920,10 @@ async def create_response(
         )
 
     if request.stream:
+        # The synchronous dependency session is no longer needed once the
+        # response has been resolved. Close it before handing control to the
+        # long-lived SSE generator so it cannot hold a DB transaction open.
+        db.close()
         return StreamingResponse(
             _stream_events(
                 request,
@@ -896,6 +937,7 @@ async def create_response(
                 persist=request.store,
                 lease=lease,
                 reasoning_effort=reasoning_effort,
+                started_mono=created_at_mono,
             ),
             media_type="text/event-stream",
             headers=SSE_HEADERS,
@@ -911,10 +953,34 @@ async def create_response(
             created_at,
             lease,
             reasoning_effort=reasoning_effort,
+            started_mono=created_at_mono,
         )
+    except asyncio.CancelledError:
+        record_request_telemetry(
+            lease.server,
+            None,
+            None,
+            latency_ms=(time.monotonic() - created_at_mono) * 1000.0,
+            status="cancelled",
+        )
+        raise
     except TranslationError as e:
+        record_request_telemetry(
+            lease.server,
+            None,
+            None,
+            latency_ms=(time.monotonic() - created_at_mono) * 1000.0,
+            status="error",
+        )
         return _error_response(400, "invalid_request", "invalid_input", str(e))
     except Exception as e:
+        record_request_telemetry(
+            lease.server,
+            None,
+            None,
+            latency_ms=(time.monotonic() - created_at_mono) * 1000.0,
+            status="error",
+        )
         logger.error(f"Responses completion error: {e}")
         return _error_response(500, "model_error", "model_error", str(e))
     finally:
