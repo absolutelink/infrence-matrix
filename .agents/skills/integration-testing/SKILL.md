@@ -15,7 +15,7 @@ suite, tracking results, or fixing failing tests via commit → CI → deploy cy
    ```bash
    cd /workspaces/openresponses
    bun run test:compliance --base-url https://matrix.thelink.family/v1 \
-     --api-key none --model voyager
+     --api-key none --model rocinante
    ```
 
    - Add `--filter <test-id>` to run a single test (repeatable/comma-separated).

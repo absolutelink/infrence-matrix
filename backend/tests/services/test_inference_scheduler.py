@@ -272,6 +272,7 @@ async def test_disconnect_after_claim_cancels_before_returning_lease():
 
     async def claim(*_args):
         disconnected.set()
+        await asyncio.sleep(0.11)
         return lease
 
     with (
@@ -302,27 +303,17 @@ async def test_disconnect_watcher_removes_queued_lease():
         return disconnected.is_set()
 
     with patch.object(scheduler, "_cancel", new=AsyncMock()) as cancel:
+        disconnected_event = asyncio.Event()
         watcher = asyncio.create_task(
-            scheduler._cancel_when_disconnected(uuid.uuid4(), is_cancelled)
+            scheduler._cancel_when_disconnected(
+                uuid.uuid4(), is_cancelled, disconnected_event
+            )
         )
         disconnected.set()
         await watcher
 
     cancel.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_disconnect_cancels_target_startup():
-    scheduler = InferenceScheduler()
-    disconnected = asyncio.Event()
-
-    async def is_cancelled() -> bool:
-        return disconnected.is_set()
-
-    waiter = asyncio.create_task(scheduler._wait_for_disconnect(is_cancelled))
-    disconnected.set()
-    await waiter
-    assert waiter.done()
+    assert disconnected_event.is_set()
 
 
 @pytest.mark.asyncio
