@@ -912,9 +912,7 @@ class InferenceScheduler:
                             self._prepare_target(target, deadline)
                         )
                         disconnect_waiter = (
-                            asyncio.create_task(
-                                self._wait_for_disconnect(is_cancelled)
-                            )
+                            asyncio.create_task(self._wait_for_disconnect(is_cancelled))
                             if is_cancelled is not None
                             else None
                         )
@@ -925,7 +923,10 @@ class InferenceScheduler:
                             done, _ = await asyncio.wait(
                                 wait_for, return_when=asyncio.FIRST_COMPLETED
                             )
-                            if disconnect_waiter is not None and disconnect_waiter in done:
+                            if (
+                                disconnect_waiter is not None
+                                and disconnect_waiter in done
+                            ):
                                 prepare_task.cancel()
                                 await asyncio.gather(
                                     prepare_task, return_exceptions=True
