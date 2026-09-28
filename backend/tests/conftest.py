@@ -50,6 +50,20 @@ def _clean_db() -> None:
         session.commit()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _quiet_metrics_loop() -> Generator[None]:
+    """Keep the lifespan metrics snapshot loop from racing gauge assertions.
+
+    The loop reads the interval constant at each cycle; pushing it far out
+    means no background snapshot clears/repopulates gauges mid-test.
+    Session scope avoids a restore window between tests.
+    """
+    from app.api.routes import metrics as metrics_module
+
+    metrics_module.METRICS_SNAPSHOT_INTERVAL_SECONDS = 100_000
+    yield
+
+
 @pytest.fixture(scope="module")
 def client() -> Generator[TestClient]:
     with TestClient(app) as c:

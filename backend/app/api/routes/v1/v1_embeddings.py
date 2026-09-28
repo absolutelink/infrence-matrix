@@ -121,6 +121,49 @@ async def create_embedding(
                 headers={"X-Inference-Slot-Generation": str(lease.slot_generation)},
             )
         )
+        # Capture before the finally's release cooldown contaminates it.
+        success_latency_ms = (time.monotonic() - started) * 1000.0
+
+        if not isinstance(response, dict) or "data" not in response:
+            raise HTTPException(500, "Invalid embedding response from server")
+
+        embeddings_data = [
+            EmbeddingData(
+                embedding=item["embedding"],
+                index=item.get("index", i),
+            )
+            for i, item in enumerate(response["data"])
+        ]
+
+        usage = response.get("usage", {})
+        total_tokens = usage.get(
+            "prompt_tokens", usage.get("total_tokens", len(inputs))
+        )
+        result = EmbeddingResponse(
+            data=embeddings_data,
+            model=request.model,
+            usage=EmbeddingUsage(
+                prompt_tokens=total_tokens,
+                total_tokens=total_tokens,
+            ),
+        )
+        record_request_telemetry(
+            server,
+            {"prompt_tokens": total_tokens},
+            response.get("timings"),
+            latency_ms=success_latency_ms,
+            status="success",
+        )
+        return result
+    except HTTPException:
+        record_request_telemetry(
+            server,
+            None,
+            None,
+            latency_ms=(time.monotonic() - started) * 1000.0,
+            status="error",
+        )
+        raise
     except asyncio.CancelledError:
         record_request_telemetry(
             server,
@@ -152,33 +195,3 @@ async def create_embedding(
     finally:
         if lease is not None:
             await lease.release()
-
-    if not isinstance(response, dict) or "data" not in response:
-        raise HTTPException(500, "Invalid embedding response from server")
-
-    embeddings_data = [
-        EmbeddingData(
-            embedding=item["embedding"],
-            index=item.get("index", i),
-        )
-        for i, item in enumerate(response["data"])
-    ]
-
-    usage = response.get("usage", {})
-    total_tokens = usage.get("prompt_tokens", usage.get("total_tokens", len(inputs)))
-    record_request_telemetry(
-        server,
-        {"prompt_tokens": total_tokens},
-        response.get("timings"),
-        latency_ms=(time.monotonic() - started) * 1000.0,
-        status="success",
-    )
-
-    return EmbeddingResponse(
-        data=embeddings_data,
-        model=request.model,
-        usage=EmbeddingUsage(
-            prompt_tokens=total_tokens,
-            total_tokens=total_tokens,
-        ),
-    )

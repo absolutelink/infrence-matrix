@@ -339,13 +339,6 @@ async def _complete(
 
     incomplete = finish_reason == "length"
     usage = _build_usage(usage_data, len(content), state.reasoning_tokens)
-    record_request_telemetry(
-        lease.server,
-        usage,
-        usage_data.get("timings"),
-        latency_ms=(time.monotonic() - started) * 1000.0,
-        status="success",
-    )
 
     result = build_response_resource(
         request,
@@ -358,6 +351,15 @@ async def _complete(
     result.completed_at = int(time.time())
     if incomplete:
         result.incomplete_details = IncompleteDetails(reason="max_output_tokens")
+    # Record last: any failure above surfaces as an error from the route's
+    # except handler instead of double-counting this request as success+error.
+    record_request_telemetry(
+        lease.server,
+        usage,
+        usage_data.get("timings"),
+        latency_ms=(time.monotonic() - started) * 1000.0,
+        status="success",
+    )
     return result
 
 
@@ -468,6 +470,9 @@ async def _stream_events(
 ) -> AsyncIterator[str]:
     started = started_mono if started_mono is not None else time.monotonic()
     telemetry_recorded = False
+    # Stash the serving server up front: the mid-body release sets the
+    # lease to None, and later except handlers must keep attribution.
+    sample_server = lease.server if lease is not None else None
     seq = ev.SSEmitter()
     response = build_response_resource(
         request,
@@ -487,22 +492,45 @@ async def _stream_events(
         for frame in seq.drain_frames():
             yield frame
         initial_frames_sent = True
-    finally:
+    except GeneratorExit, asyncio.CancelledError:
+        # Early-close window: the later try/finally has not started, so
+        # release here and label the failure by its real kind.
         if not initial_frames_sent and lease is not None:
+            record_request_telemetry(
+                lease.server,
+                None,
+                None,
+                latency_ms=(time.monotonic() - started) * 1000.0,
+                status="cancelled",
+            )
             await lease.release()
-
-    state = StreamState(seq, request.model)
-    state.assistant_phase = _last_assistant_phase(request)
-    allowed = allowed_tool_names(request)
-    fallback_chars = 0
-    final_usage_data: dict[str, Any] = {}
-    finish_reason: str | None = None
-
-    payload = _llama_payload(
-        request, history, stream=True, reasoning_effort=reasoning_effort
-    )
+            lease = None
+        raise
+    except Exception:
+        if not initial_frames_sent and lease is not None:
+            record_request_telemetry(
+                lease.server,
+                None,
+                None,
+                latency_ms=(time.monotonic() - started) * 1000.0,
+                status="error",
+            )
+            await lease.release()
+            lease = None
+        raise
 
     try:
+        state = StreamState(seq, request.model)
+        state.assistant_phase = _last_assistant_phase(request)
+        allowed = allowed_tool_names(request)
+        fallback_chars = 0
+        final_usage_data: dict[str, Any] = {}
+        finish_reason: str | None = None
+
+        payload = _llama_payload(
+            request, history, stream=True, reasoning_effort=reasoning_effort
+        )
+
         # Hold the client connection while any in-flight startup completes
         # so the first event arrives as soon as the server is healthy.
         fresh_server = await ensure_server_ready_by_id(server_id)
@@ -577,7 +605,20 @@ async def _stream_events(
                     for frame in seq.drain_frames():
                         yield frame
 
-        sample_server = lease.server if lease is not None else None
+        # Record before release() and the close-out yields: the upstream
+        # work is complete at this point, so a cancel during release or the
+        # final sends must not downgrade a finished inference to cancelled.
+        success_latency_ms = (time.monotonic() - started) * 1000.0
+        usage = _build_usage(final_usage_data, fallback_chars, state.reasoning_tokens)
+        record_request_telemetry(
+            sample_server,
+            usage,
+            final_usage_data.get("timings"),
+            latency_ms=success_latency_ms,
+            status="success",
+        )
+        telemetry_recorded = True
+
         if lease is not None:
             await lease.release()
             lease = None
@@ -590,16 +631,6 @@ async def _stream_events(
         # Drain the final close-out events (arguments done, item done, etc.)
         for frame in seq.drain_frames():
             yield frame
-
-        usage = _build_usage(final_usage_data, fallback_chars, state.reasoning_tokens)
-        record_request_telemetry(
-            sample_server,
-            usage,
-            final_usage_data.get("timings"),
-            latency_ms=(time.monotonic() - started) * 1000.0,
-            status="success",
-        )
-        telemetry_recorded = True
 
         if finish_reason == "length":
             response.status = "incomplete"
@@ -656,7 +687,7 @@ async def _stream_events(
     except asyncio.CancelledError:
         if not telemetry_recorded:
             record_request_telemetry(
-                lease.server if lease is not None else None,
+                sample_server,
                 None,
                 None,
                 latency_ms=(time.monotonic() - started) * 1000.0,
@@ -666,7 +697,7 @@ async def _stream_events(
     except Exception as e:
         if not telemetry_recorded:
             record_request_telemetry(
-                lease.server if lease is not None else None,
+                sample_server,
                 None,
                 None,
                 latency_ms=(time.monotonic() - started) * 1000.0,

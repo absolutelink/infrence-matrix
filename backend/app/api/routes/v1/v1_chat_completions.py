@@ -367,6 +367,7 @@ async def _stream_completion_via_agent(
     final_usage: UsageInfo | None = None
     final_timings: dict = {}
     telemetry_recorded = False
+    lease_released = False
 
     try:
         # Hold the client connection while a cold start completes so the
@@ -470,6 +471,7 @@ async def _stream_completion_via_agent(
         # Do not wait for a slow or disconnected downstream consumer to finish
         # draining the already-produced SSE response.
         await lease.release()
+        lease_released = True
 
         if include_usage:
             final_chunk = ChatCompletionChunk(
@@ -506,7 +508,8 @@ async def _stream_completion_via_agent(
         error_chunk = {"error": {"message": str(e), "type": "server_error"}}
         yield f"data: {json.dumps(error_chunk)}\n\n"
     finally:
-        await lease.release()
+        if not lease_released:
+            await lease.release()
 
 
 def _find_existing_server(
@@ -794,19 +797,7 @@ async def create_chat_completion(
             or (response.get("timings") or {}).get("cache_n")
             or 0
         )
-        record_request_telemetry(
-            lease.server,
-            {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "prompt_tokens_details": {"cached_tokens": cached_tokens},
-            },
-            response.get("timings"),
-            latency_ms=(time.monotonic() - started) * 1000.0,
-            status="success",
-        )
-
-        return ChatCompletionResponse(
+        result = ChatCompletionResponse(
             id=request_id,
             created=created,
             model=request.model,
@@ -834,7 +825,30 @@ async def create_chat_completion(
                 }
             ),
         )
+        # Record after the response object is built: a construction
+        # failure must count as an error, not success + error.
+        record_request_telemetry(
+            lease.server,
+            {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "prompt_tokens_details": {"cached_tokens": cached_tokens},
+            },
+            response.get("timings"),
+            latency_ms=(time.monotonic() - started) * 1000.0,
+            status="success",
+        )
+        return result
 
+    except asyncio.CancelledError:
+        record_request_telemetry(
+            lease.server,
+            None,
+            None,
+            latency_ms=(time.monotonic() - started) * 1000.0,
+            status="cancelled",
+        )
+        raise
     except Exception as e:
         record_request_telemetry(
             lease.server,

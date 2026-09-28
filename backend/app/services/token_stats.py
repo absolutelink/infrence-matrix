@@ -143,7 +143,11 @@ def record_request_telemetry(
                 resolved_agent = str(getattr(server, "agent_id", "unknown"))
         resolved_model = resolved_model or "unknown"
         resolved_agent = resolved_agent or "unknown"
+    except Exception:
+        logger.warning("Failed to extract telemetry fields", exc_info=True)
+        return
 
+    try:
         from app.api.routes.metrics import record_inference_request
 
         record_inference_request(
@@ -155,7 +159,6 @@ def record_request_telemetry(
         )
     except Exception:
         logger.warning("Failed to record inference metrics", exc_info=True)
-        return
 
     if server is None or getattr(server, "id", None) is None or status != "success":
         return

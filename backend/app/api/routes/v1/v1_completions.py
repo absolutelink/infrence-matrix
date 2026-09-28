@@ -182,6 +182,7 @@ async def _stream_completion_via_agent(
     final_usage: UsageInfo | None = None
     final_timings: dict = {}
     telemetry_recorded = False
+    lease_released = False
 
     try:
         agent = await agent_manager.get_agent(agent_id)
@@ -259,6 +260,7 @@ async def _stream_completion_via_agent(
         )
         telemetry_recorded = True
         await lease.release()
+        lease_released = True
 
         if include_usage:
             final_chunk = CompletionChunk(
@@ -295,7 +297,8 @@ async def _stream_completion_via_agent(
         error_chunk = {"error": {"message": str(e), "type": "server_error"}}
         yield f"data: {json.dumps(error_chunk)}\n\n"
     finally:
-        await lease.release()
+        if not lease_released:
+            await lease.release()
 
 
 def _extract_completion_usage(chunk_data: dict) -> UsageInfo | None:
@@ -463,15 +466,7 @@ async def create_completion(
             }
         )
 
-        record_request_telemetry(
-            lease.server,
-            normalized_usage.model_dump(),
-            response.get("timings"),
-            latency_ms=(time.monotonic() - started) * 1000.0,
-            status="success",
-        )
-
-        return CompletionResponse(
+        result = CompletionResponse(
             id=request_id,
             created=created,
             model=request.model,
@@ -484,7 +479,26 @@ async def create_completion(
             ],
             usage=normalized_usage,
         )
+        # Record after the response object is built: a construction
+        # failure must count as an error, not success + error.
+        record_request_telemetry(
+            lease.server,
+            normalized_usage.model_dump(),
+            response.get("timings"),
+            latency_ms=(time.monotonic() - started) * 1000.0,
+            status="success",
+        )
+        return result
 
+    except asyncio.CancelledError:
+        record_request_telemetry(
+            lease.server,
+            None,
+            None,
+            latency_ms=(time.monotonic() - started) * 1000.0,
+            status="cancelled",
+        )
+        raise
     except Exception as e:
         record_request_telemetry(
             lease.server,

@@ -143,6 +143,7 @@ async def _stream_to_ws(
     (after sending response.failed).
     """
     lease = None
+    server = None
     started = time.monotonic()
     telemetry_recorded = False
     seq = ev.SSEmitter()
@@ -255,6 +256,20 @@ async def _stream_to_ws(
                         state.add_tool_call_delta(tc.get("index", 0), tc)
                     await _send_events(websocket, seq.drain_events())
 
+        # Record before release() and the close-out yields: the upstream
+        # work is complete at this point, so a cancel during release or the
+        # final sends must not downgrade a finished inference to cancelled.
+        success_latency_ms = (time.monotonic() - started) * 1000.0
+        usage = _build_usage(final_usage, fallback_chars, state.reasoning_tokens)
+        record_request_telemetry(
+            server,
+            usage,
+            final_usage.get("timings"),
+            latency_ms=success_latency_ms,
+            status="success",
+        )
+        telemetry_recorded = True
+
         await lease.release()
         lease = None
 
@@ -263,15 +278,6 @@ async def _stream_to_ws(
         state.finish_message()
         await _send_events(websocket, seq.drain_events())
 
-        usage = _build_usage(final_usage, fallback_chars, state.reasoning_tokens)
-        record_request_telemetry(
-            server,
-            usage,
-            final_usage.get("timings"),
-            latency_ms=(time.monotonic() - started) * 1000.0,
-            status="success",
-        )
-        telemetry_recorded = True
         if finish_reason == "length":
             resource.status = "incomplete"
             resource.incomplete_details = IncompleteDetails(reason="max_output_tokens")
@@ -313,7 +319,7 @@ async def _stream_to_ws(
     except asyncio.CancelledError:
         if not telemetry_recorded:
             record_request_telemetry(
-                lease.server if lease is not None else None,
+                server,
                 None,
                 None,
                 latency_ms=(time.monotonic() - started) * 1000.0,
@@ -323,7 +329,7 @@ async def _stream_to_ws(
     except TargetError as e:
         if not telemetry_recorded:
             record_request_telemetry(
-                lease.server if lease is not None else None,
+                server,
                 None,
                 None,
                 latency_ms=(time.monotonic() - started) * 1000.0,
@@ -338,7 +344,7 @@ async def _stream_to_ws(
     except Exception as e:
         if not telemetry_recorded:
             record_request_telemetry(
-                lease.server if lease is not None else None,
+                server,
                 None,
                 None,
                 latency_ms=(time.monotonic() - started) * 1000.0,
