@@ -36,8 +36,8 @@ class Settings(BaseSettings):
     POSTGRES_DB: str = "inference_matrix"
     POSTGRES_HOST: str = "postgres"
     POSTGRES_PORT: int = 5432
-    DB_POOL_SIZE: int = Field(default=10, ge=1)
-    DB_MAX_OVERFLOW: int = Field(default=20, ge=0)
+    DB_POOL_SIZE: int = Field(default=100, ge=1)
+    DB_MAX_OVERFLOW: int = Field(default=200, ge=0)
     DB_POOL_TIMEOUT: float = Field(default=30.0, gt=0)
 
     @computed_field  # type: ignore[prop-decorator]
