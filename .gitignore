@@ -11,3 +11,5 @@ backend/app/frontend/
 __pycache__/
 *.pyc
 AGENTS.md
+
+.devcontainer/additional-services/opencode/
