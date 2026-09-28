@@ -20,7 +20,10 @@ from app.models import (
     ServerInstance,
 )
 from app.services.agent_manager import agent_manager
-from app.services.scheduler_locks import BENCHMARK_ADVISORY_LOCK_KEY
+from app.services.scheduler_locks import (
+    BENCHMARK_ADVISORY_LOCK_KEY,
+    release_session_advisory_lock,
+)
 from app.services.server_lifecycle import request_server_stop
 
 logger = logging.getLogger(__name__)
@@ -215,150 +218,163 @@ async def _execute(run_id: str) -> None:
             resume_status = "waiting_for_idle"
 
     async with async_engine.connect() as gate_connection:
-        gate_acquired = bool(
-            (
-                await gate_connection.execute(
-                    text("SELECT pg_try_advisory_lock(:key)"),
-                    {"key": BENCHMARK_ADVISORY_LOCK_KEY},
-                )
-            ).scalar_one()
-        )
-        await gate_connection.commit()
-        if not gate_acquired:
-            if resume_status == "waiting_for_idle":
-                await _set_run(run_id, status="queued")
-            _run_tasks.pop(run_id, None)
-            return
+        # The try begins before the gate lock can be observed as held so no
+        # cancellation window can leave the session-level advisory lock
+        # attached to the pooled connection. The shielded unlock in the
+        # finally is a safe no-op when the lock was never acquired.
         try:
-            async with AsyncSessionMaker() as session:
-                run = await session.get(BenchmarkRun, uuid_module.UUID(run_id))
-                if not run:
-                    return
-                definition = await session.get(BenchmarkDefinition, run.definition_id)
-                if not definition:
-                    await _set_run(
-                        run_id,
-                        status="failed",
-                        error="Benchmark definition was deleted",
-                        finished_at=datetime.now(UTC),
+            gate_acquired = bool(
+                (
+                    await gate_connection.execute(
+                        text("SELECT pg_try_advisory_lock(:key)"),
+                        {"key": BENCHMARK_ADVISORY_LOCK_KEY},
                     )
-                    return
-                source = (
-                    await session.get(
-                        ServerInstance, definition.source_server_instance_id
-                    )
-                    if definition.source_server_instance_id
-                    else None
-                )
-                config = definition.config or {}
-                model_id = config.get("model_id") or (
-                    source.model_id if source else None
-                )
-                agent_id = config.get("agent_id") or (
-                    source.agent_id if source else None
-                )
-                model = await session.get(Model, model_id) if model_id else None
-                agent = await session.get(Agent, agent_id) if agent_id else None
-                dflash_model = None
-                dflash_model_id = config.get("dflash_model_id")
-                if dflash_model_id:
-                    dflash_model = await session.get(Model, dflash_model_id)
-                    if not dflash_model or dflash_model.model_type != "dflash":
-                        raise RuntimeError("Benchmark dflash model not found")
-            if not model or not agent:
-                raise RuntimeError("Benchmark source server, model, or agent not found")
-
-            if resume_status == "running":
-                await _monitor_agent_run(run_id, str(agent.id))
-                return
-
-            if resume_status == "waiting_for_idle" and not await _wait_for_idle(run_id):
-                async with AsyncSessionMaker() as session:
-                    current = await session.get(BenchmarkRun, uuid_module.UUID(run_id))
-                if current is not None and current.status != "cancelled":
-                    await _set_run(
-                        run_id,
-                        status="cancelled",
-                        error="Idle timeout exceeded",
-                        finished_at=datetime.now(UTC),
-                    )
-                return
-
-            if resume_status != "stopping_servers":
-                await _set_run(run_id, status="stopping_servers")
-            await _stop_servers()
-
-            while agent.status != "online":
-                await asyncio.sleep(settings.BENCHMARK_IDLE_POLL_INTERVAL)
-                async with AsyncSessionMaker() as session:
-                    refreshed = await session.get(Agent, agent.id)
-                    if refreshed:
-                        agent = refreshed
-
-            request = {
-                "run_id": run_id,
-                "model_path": config.get("model_path", model.path),
-                "source": (
-                    {
-                        "source": model.source,
-                        "repo_id": model.source_repo_id or "",
-                        "filename": model.source_file or model.path.rsplit("/", 1)[-1],
-                    }
-                    if model.source_repo_id
-                    else None
-                ),
-                "prompt_sizes": config.get("prompt_sizes", [512]),
-                "generation_sizes": config.get("generation_sizes", [128]),
-                "repetitions": config.get("repetitions", 3),
-                "batch_size": config.get("batch_size", 512),
-                "ubatch_size": config.get("ubatch_size"),
-                "context_size": config.get("context_size"),
-                "gpu_layers": config.get("gpu_layers", 35),
-                "flash_attn": config.get("flash_attn", True),
-                "draft_model_path": config.get("draft_model_path"),
-                "draft_source": (
-                    {
-                        "source": dflash_model.source,
-                        "repo_id": dflash_model.source_repo_id or "",
-                        "filename": dflash_model.source_file
-                        or dflash_model.path.rsplit("/", 1)[-1],
-                    }
-                    if dflash_model and dflash_model.source_repo_id
-                    else None
-                ),
-            }
-            response = await agent_manager.send_to_agent(
-                str(agent.id),
-                "POST",
-                "/benchmarks/run",
-                request,
-                timeout=900,
-            )
-            await _set_run(
-                run_id,
-                status="running",
-                agent_id=agent.id,
-                server_instance_id=source.id if source else None,
-                command=response.get("command", []),
-                started_at=datetime.now(UTC),
-            )
-            await _monitor_agent_run(run_id, str(agent.id))
-        except Exception as exc:  # noqa: BLE001 - persist worker failures
-            logger.exception("Benchmark %s failed", run_id)
-            await _set_run(
-                run_id,
-                status="failed",
-                error=str(exc),
-                finished_at=datetime.now(UTC),
-            )
-        finally:
-            await gate_connection.execute(
-                text("SELECT pg_advisory_unlock(:key)"),
-                {"key": BENCHMARK_ADVISORY_LOCK_KEY},
+                ).scalar_one()
             )
             await gate_connection.commit()
-            _run_tasks.pop(run_id, None)
-            _run_controls.pop(run_id, None)
+            if not gate_acquired:
+                if resume_status == "waiting_for_idle":
+                    await _set_run(run_id, status="queued")
+                _run_tasks.pop(run_id, None)
+                return
+            try:
+                async with AsyncSessionMaker() as session:
+                    run = await session.get(BenchmarkRun, uuid_module.UUID(run_id))
+                    if not run:
+                        return
+                    definition = await session.get(
+                        BenchmarkDefinition, run.definition_id
+                    )
+                    if not definition:
+                        await _set_run(
+                            run_id,
+                            status="failed",
+                            error="Benchmark definition was deleted",
+                            finished_at=datetime.now(UTC),
+                        )
+                        return
+                    source = (
+                        await session.get(
+                            ServerInstance, definition.source_server_instance_id
+                        )
+                        if definition.source_server_instance_id
+                        else None
+                    )
+                    config = definition.config or {}
+                    model_id = config.get("model_id") or (
+                        source.model_id if source else None
+                    )
+                    agent_id = config.get("agent_id") or (
+                        source.agent_id if source else None
+                    )
+                    model = await session.get(Model, model_id) if model_id else None
+                    agent = await session.get(Agent, agent_id) if agent_id else None
+                    dflash_model = None
+                    dflash_model_id = config.get("dflash_model_id")
+                    if dflash_model_id:
+                        dflash_model = await session.get(Model, dflash_model_id)
+                        if not dflash_model or dflash_model.model_type != "dflash":
+                            raise RuntimeError("Benchmark dflash model not found")
+                if not model or not agent:
+                    raise RuntimeError(
+                        "Benchmark source server, model, or agent not found"
+                    )
+
+                if resume_status == "running":
+                    await _monitor_agent_run(run_id, str(agent.id))
+                    return
+
+                if resume_status == "waiting_for_idle" and not await _wait_for_idle(
+                    run_id
+                ):
+                    async with AsyncSessionMaker() as session:
+                        current = await session.get(
+                            BenchmarkRun, uuid_module.UUID(run_id)
+                        )
+                    if current is not None and current.status != "cancelled":
+                        await _set_run(
+                            run_id,
+                            status="cancelled",
+                            error="Idle timeout exceeded",
+                            finished_at=datetime.now(UTC),
+                        )
+                    return
+
+                if resume_status != "stopping_servers":
+                    await _set_run(run_id, status="stopping_servers")
+                await _stop_servers()
+
+                while agent.status != "online":
+                    await asyncio.sleep(settings.BENCHMARK_IDLE_POLL_INTERVAL)
+                    async with AsyncSessionMaker() as session:
+                        refreshed = await session.get(Agent, agent.id)
+                        if refreshed:
+                            agent = refreshed
+
+                request = {
+                    "run_id": run_id,
+                    "model_path": config.get("model_path", model.path),
+                    "source": (
+                        {
+                            "source": model.source,
+                            "repo_id": model.source_repo_id or "",
+                            "filename": model.source_file
+                            or model.path.rsplit("/", 1)[-1],
+                        }
+                        if model.source_repo_id
+                        else None
+                    ),
+                    "prompt_sizes": config.get("prompt_sizes", [512]),
+                    "generation_sizes": config.get("generation_sizes", [128]),
+                    "repetitions": config.get("repetitions", 3),
+                    "batch_size": config.get("batch_size", 512),
+                    "ubatch_size": config.get("ubatch_size"),
+                    "context_size": config.get("context_size"),
+                    "gpu_layers": config.get("gpu_layers", 35),
+                    "flash_attn": config.get("flash_attn", True),
+                    "draft_model_path": config.get("draft_model_path"),
+                    "draft_source": (
+                        {
+                            "source": dflash_model.source,
+                            "repo_id": dflash_model.source_repo_id or "",
+                            "filename": dflash_model.source_file
+                            or dflash_model.path.rsplit("/", 1)[-1],
+                        }
+                        if dflash_model and dflash_model.source_repo_id
+                        else None
+                    ),
+                }
+                response = await agent_manager.send_to_agent(
+                    str(agent.id),
+                    "POST",
+                    "/benchmarks/run",
+                    request,
+                    timeout=900,
+                )
+                await _set_run(
+                    run_id,
+                    status="running",
+                    agent_id=agent.id,
+                    server_instance_id=source.id if source else None,
+                    command=response.get("command", []),
+                    started_at=datetime.now(UTC),
+                )
+                await _monitor_agent_run(run_id, str(agent.id))
+            except Exception as exc:  # noqa: BLE001 - persist worker failures
+                logger.exception("Benchmark %s failed", run_id)
+                await _set_run(
+                    run_id,
+                    status="failed",
+                    error=str(exc),
+                    finished_at=datetime.now(UTC),
+                )
+            finally:
+                _run_tasks.pop(run_id, None)
+                _run_controls.pop(run_id, None)
+        finally:
+            await release_session_advisory_lock(
+                gate_connection, BENCHMARK_ADVISORY_LOCK_KEY
+            )
 
 
 def schedule_run(run_id: str) -> None:

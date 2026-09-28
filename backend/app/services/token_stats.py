@@ -385,18 +385,26 @@ async def token_stats_snapshot() -> dict[str, Any]:
 
 async def prune_old_samples() -> int:
     """Delete samples past the retention window. One worker at a time."""
-    from app.services.scheduler_locks import TOKEN_STATS_PRUNE_LOCK_KEY
+    from app.services.scheduler_locks import (
+        TOKEN_STATS_PRUNE_LOCK_KEY,
+        release_session_advisory_lock,
+    )
 
     async with async_engine.connect() as connection:
-        locked = (
-            await connection.execute(
-                text("SELECT pg_try_advisory_lock(:key)"),
-                {"key": TOKEN_STATS_PRUNE_LOCK_KEY},
-            )
-        ).scalar_one()
-        if not locked:
-            return 0
+        # The try begins before the lock can be observed as held so no
+        # cancellation window can leave the session-level advisory lock
+        # attached to the pooled connection. The shielded unlock in the
+        # finally is a safe no-op when the lock was never acquired.
         try:
+            locked = (
+                await connection.execute(
+                    text("SELECT pg_try_advisory_lock(:key)"),
+                    {"key": TOKEN_STATS_PRUNE_LOCK_KEY},
+                )
+            ).scalar_one()
+            await connection.commit()
+            if not locked:
+                return 0
             result = await connection.execute(
                 text(
                     "DELETE FROM token_usage_samples "
@@ -408,11 +416,7 @@ async def prune_old_samples() -> int:
             await connection.commit()
             return int(result.rowcount or 0)
         finally:
-            await connection.execute(
-                text("SELECT pg_advisory_unlock(:key)"),
-                {"key": TOKEN_STATS_PRUNE_LOCK_KEY},
-            )
-            await connection.commit()
+            await release_session_advisory_lock(connection, TOKEN_STATS_PRUNE_LOCK_KEY)
 
 
 async def token_stats_prune_loop() -> None:

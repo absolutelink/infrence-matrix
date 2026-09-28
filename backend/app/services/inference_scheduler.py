@@ -16,7 +16,10 @@ from app.db.session import AsyncSessionMaker
 from app.db.session import engine as async_engine
 from app.models import Agent, InferenceLease, Model, ServerInstance
 from app.services.agent_manager import agent_manager
-from app.services.scheduler_locks import BENCHMARK_ADVISORY_LOCK_KEY
+from app.services.scheduler_locks import (
+    BENCHMARK_ADVISORY_LOCK_KEY,
+    release_session_advisory_lock,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -564,25 +567,29 @@ class InferenceScheduler:
         ) & ((1 << 63) - 1)
 
         async with async_engine.connect() as connection:
-            locked = False
-            while not locked:
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    raise TimeoutError(
-                        "Inference queue deadline elapsed during startup"
-                    )
-                locked = bool(
-                    (
-                        await connection.execute(
-                            text("SELECT pg_try_advisory_lock(:key)"),
-                            {"key": resource_key},
-                        )
-                    ).scalar_one()
-                )
-                await connection.commit()
-                if not locked:
-                    await asyncio.sleep(min(SCHEDULER_POLL_SECONDS, remaining))
+            # The try begins before the lock can be observed as held so there is
+            # no await window where a cancellation could leave the session-level
+            # advisory lock attached to the pooled connection. The helper's
+            # unlock is shielded and a no-op when the lock was never acquired.
             try:
+                locked = False
+                while not locked:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        raise TimeoutError(
+                            "Inference queue deadline elapsed during startup"
+                        )
+                    locked = bool(
+                        (
+                            await connection.execute(
+                                text("SELECT pg_try_advisory_lock(:key)"),
+                                {"key": resource_key},
+                            )
+                        ).scalar_one()
+                    )
+                    await connection.commit()
+                    if not locked:
+                        await asyncio.sleep(min(SCHEDULER_POLL_SECONDS, remaining))
                 async with AsyncSessionMaker() as session:
                     current = await session.get(ServerInstance, server.id)
                 if current is None:
@@ -600,11 +607,7 @@ class InferenceScheduler:
                     )
                 return current
             finally:
-                await connection.execute(
-                    text("SELECT pg_advisory_unlock(:key)"),
-                    {"key": resource_key},
-                )
-                await connection.commit()
+                await release_session_advisory_lock(connection, resource_key)
 
     async def _candidates(
         self,

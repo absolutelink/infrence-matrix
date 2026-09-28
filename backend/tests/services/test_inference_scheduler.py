@@ -1,12 +1,15 @@
 import asyncio
+import hashlib
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from sqlalchemy import text
 from sqlmodel import select
 
+from app.db.session import engine as async_engine
 from app.models import Agent, InferenceLease, Model, ServerInstance
 from app.services.inference_scheduler import (
     InferenceLeaseHandle,
@@ -16,6 +19,7 @@ from app.services.inference_scheduler import (
     _vram_requirements_fit,
     server_capacity,
 )
+from app.services.scheduler_locks import release_session_advisory_lock
 
 
 def _make_model(db, name: str) -> Model:
@@ -84,6 +88,44 @@ def _make_lease(
     db.commit()
     db.refresh(lease)
     return lease
+
+
+def _resource_key(host: str, gpu_id: object) -> int:
+    resource_name = f"{host}:{gpu_id}"
+    return int.from_bytes(
+        hashlib.blake2b(resource_name.encode(), digest_size=8).digest(),
+        "big",
+    ) & ((1 << 63) - 1)
+
+
+async def _advisory_lock_pids(key: int) -> list[int]:
+    async with async_engine.connect() as connection:
+        rows = (
+            await connection.execute(
+                text(
+                    "SELECT pid FROM pg_locks WHERE locktype = 'advisory' "
+                    "AND ((classid::bigint << 32) | "
+                    "(objid::bigint & 4294967295)) = :key"
+                ),
+                {"key": key},
+            )
+        ).all()
+        await connection.commit()
+    return [int(row[0]) for row in rows]
+
+
+async def _try_advisory_lock_elsewhere(key: int) -> bool:
+    async with async_engine.connect() as connection:
+        acquired = bool(
+            (
+                await connection.execute(
+                    text("SELECT pg_try_advisory_lock(:key)"), {"key": key}
+                )
+            ).scalar_one()
+        )
+        await connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": key})
+        await connection.commit()
+    return acquired
 
 
 def test_server_capacity_uses_effective_capacity():
@@ -532,3 +574,213 @@ async def test_reconciliation_expires_queued_lease_past_deadline(db):
     assert persisted.status == "expired"
     assert persisted.terminal_reason == "queue_timeout"
     assert persisted.released_at is not None
+
+
+def _make_stopped_target(db, name: str, gpu_id: str) -> ServerInstance:
+    model = _make_model(db, f"{name}.gguf")
+    server = _make_server(db, model, alias=f"{name}-server")
+    agent = db.get(Agent, server.agent_id)
+    agent.gpu_info = {"id": gpu_id}
+    db.add(agent)
+    server.status = "stopped"
+    db.add(server)
+    db.commit()
+    db.refresh(server)
+    return server
+
+
+class _ScalarResult:
+    def __init__(self, value: bool) -> None:
+        self._value = value
+
+    def scalar_one(self) -> bool:
+        return self._value
+
+
+class _CommitHangsAfterAcquire:
+    """Connection proxy that hangs inside the commit right after the lock is granted.
+
+    Models a client disconnect landing in the await window between acquiring the
+    session-level advisory lock and the commit that follows it.
+    """
+
+    def __init__(self, connection) -> None:
+        self._connection = connection
+        self._armed = False
+        self._hung = False
+        self.commit_hanging = asyncio.Event()
+
+    async def execute(self, statement, parameters=None):
+        result = await self._connection.execute(statement, parameters)
+        if "pg_try_advisory_lock" in str(statement):
+            acquired = bool(result.scalar_one())
+            if acquired:
+                self._armed = True
+            return _ScalarResult(acquired)
+        return result
+
+    async def commit(self) -> None:
+        if self._armed and not self._hung:
+            self._armed = False
+            self._hung = True
+            self.commit_hanging.set()
+            await asyncio.Event().wait()
+        await self._connection.commit()
+
+    async def close(self) -> None:
+        await self._connection.close()
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+
+class _ConnectContext:
+    def __init__(self, connection) -> None:
+        self._connection = connection
+
+    async def __aenter__(self):
+        return self._connection
+
+    async def __aexit__(self, *exc_info):
+        await self._connection.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_post_acquire_commit_releases_advisory_lock(db):
+    server = _make_stopped_target(db, "scheduler-commit-window", "gpu-commit")
+    key = _resource_key("127.0.0.1", "gpu-commit")
+
+    async with async_engine.connect() as inner:
+        proxy = _CommitHangsAfterAcquire(inner)
+        engine = SimpleNamespace(connect=lambda: _ConnectContext(proxy))
+        with patch("app.services.inference_scheduler.async_engine", engine):
+            task = asyncio.create_task(
+                InferenceScheduler()._prepare_target(
+                    server, asyncio.get_running_loop().time() + 30
+                )
+            )
+            await asyncio.wait_for(proxy.commit_hanging.wait(), timeout=10)
+            assert await _advisory_lock_pids(key)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    assert await _advisory_lock_pids(key) == []
+    assert await _try_advisory_lock_elsewhere(key)
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_lock_acquisition_releases_advisory_lock(db):
+    server = _make_stopped_target(db, "scheduler-lock-leak", "gpu-leak")
+    key = _resource_key("127.0.0.1", "gpu-leak")
+
+    entered = asyncio.Event()
+    hang = asyncio.Event()
+
+    async def make_room(*_args, **_kwargs) -> None:
+        entered.set()
+        await hang.wait()
+
+    scheduler = InferenceScheduler()
+    with patch.object(scheduler, "_make_room", new=make_room):
+        task = asyncio.create_task(
+            scheduler._prepare_target(server, asyncio.get_running_loop().time() + 30)
+        )
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        assert await _advisory_lock_pids(key)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert await _advisory_lock_pids(key) == []
+    assert await _try_advisory_lock_elsewhere(key)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_preparer_does_not_stall_next_preparer(db):
+    server = _make_stopped_target(db, "scheduler-lock-handoff", "gpu-handoff")
+    key = _resource_key("127.0.0.1", "gpu-handoff")
+
+    entered = asyncio.Event()
+    hang = asyncio.Event()
+
+    async def make_room(*_args, **_kwargs) -> None:
+        entered.set()
+        await hang.wait()
+
+    async def make_room_now(*_args, **_kwargs) -> None:
+        return None
+
+    async def ready(current, **_kwargs):
+        return current
+
+    blocked = InferenceScheduler()
+    second = InferenceScheduler()
+    with (
+        patch.object(blocked, "_make_room", new=make_room),
+        patch("app.services.server_startup.ensure_server_ready", new=ready),
+    ):
+        first = asyncio.create_task(
+            blocked._prepare_target(server, asyncio.get_running_loop().time() + 30)
+        )
+        await asyncio.wait_for(entered.wait(), timeout=10)
+
+        with patch.object(second, "_make_room", new=make_room_now):
+            handoff = asyncio.create_task(
+                second._prepare_target(server, asyncio.get_running_loop().time() + 30)
+            )
+            await asyncio.sleep(0.2)
+            assert len(await _advisory_lock_pids(key)) == 1
+
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+
+            await asyncio.wait_for(handoff, timeout=15)
+            assert len(await _advisory_lock_pids(key)) == 0
+
+
+@pytest.mark.asyncio
+async def test_prepare_target_deadline_raises_timeout_without_holding_lock(db):
+    server = _make_stopped_target(db, "scheduler-lock-timeout", "gpu-timeout")
+    key = _resource_key("127.0.0.1", "gpu-timeout")
+    scheduler = InferenceScheduler()
+
+    with pytest.raises(TimeoutError):
+        await scheduler._prepare_target(server, asyncio.get_running_loop().time() - 1)
+
+    assert await _advisory_lock_pids(key) == []
+
+
+@pytest.mark.asyncio
+async def test_release_helper_unlocks_even_when_caller_cancelled():
+    key = _resource_key("127.0.0.1", "gpu-helper")
+    connection = await async_engine.connect()
+    acquired = (
+        await connection.execute(
+            text("SELECT pg_try_advisory_lock(:key)"), {"key": key}
+        )
+    ).scalar_one()
+    assert acquired
+    await connection.commit()
+    assert await _advisory_lock_pids(key)
+
+    task = asyncio.create_task(release_session_advisory_lock(connection, key))
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert await _advisory_lock_pids(key) == []
+    assert await _try_advisory_lock_elsewhere(key)
+
+
+@pytest.mark.asyncio
+async def test_release_helper_is_noop_when_lock_never_held():
+    key = _resource_key("127.0.0.1", "gpu-noop")
+    connection = await async_engine.connect()
+
+    await release_session_advisory_lock(connection, key)
+
+    assert connection.closed
+    assert await _advisory_lock_pids(key) == []
