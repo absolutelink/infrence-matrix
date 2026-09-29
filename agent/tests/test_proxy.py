@@ -78,6 +78,8 @@ async def test_inference_proxy_admission_is_atomic_and_released_on_completion():
         )
     )
     await entered_upstream.wait()
+    # A reserved slot need not have an established upstream connection yet.
+    assert manager._active_connections == {}
 
     second = asyncio.create_task(
         proxy.proxy_request(
@@ -92,6 +94,7 @@ async def test_inference_proxy_admission_is_atomic_and_released_on_completion():
     await asyncio.sleep(0.02)
     assert not second_entered.is_set()
     assert manager._active_inference_requests == {"server-1": 1}
+    assert manager._active_connections == {}
 
     finish_upstream.set()
     await first
@@ -267,6 +270,148 @@ async def test_stream_cancellation_after_slot_acquire_releases_exactly_once(capl
     assert status["status"] == "cancelled"
     assert "inference_stream_close" in caplog.text
     assert "close_reason=downstream_cancelled_before_llm_connect" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_cancel_operation_racing_with_reservation_never_dispatches():
+    manager = Mock(
+        configs={"server-1": Mock(port=8091, slot_generation=11)},
+        _active_connections={},
+        _active_inference_requests={},
+        _inference_slot_conditions={},
+        _inference_operations={},
+        get_effective_capacity=Mock(return_value=1),
+    )
+    proxy = ServerProxy(manager)
+    acquired = asyncio.Event()
+    resume = asyncio.Event()
+    original = proxy._connection_started
+
+    async def delayed(*args, **kwargs):
+        await original(*args, **kwargs)
+        acquired.set()
+        await resume.wait()
+
+    proxy._connection_started = delayed
+    proxy.client.stream = Mock(side_effect=AssertionError("must not dispatch"))
+    stream = proxy.proxy_stream(
+        "server-1",
+        "POST",
+        "/v1/chat/completions",
+        json={"stream": True},
+        expected_slot_generation=11,
+        enforce_capacity=True,
+        operation_id="cancel-race-11",
+    )
+    consumer = asyncio.create_task(anext(stream))
+    await acquired.wait()
+    assert cancel_operation(manager, "cancel-race-11", "server-1")
+    resume.set()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+    assert manager._active_inference_requests == {}
+    assert manager._active_connections == {}
+    assert get_operation(manager, "cancel-race-11", "server-1")["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_reserved_and_open_counts_diverge_until_upstream_eof(caplog):
+    caplog.set_level(logging.INFO)
+    manager = Mock(
+        configs={"server-1": Mock(port=8091, slot_generation=3)},
+        _active_connections={},
+        _active_inference_requests={},
+        _inference_slot_conditions={},
+        _inference_operations={},
+        get_effective_capacity=Mock(return_value=1),
+    )
+    proxy = ServerProxy(manager)
+    finish = asyncio.Event()
+    opened = asyncio.Event()
+
+    class Upstream:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def aiter_bytes(self):
+            opened.set()
+            yield b"data: [DONE]\n\n"
+            await finish.wait()
+
+    proxy.client.stream = Mock(return_value=Upstream())
+    stream = proxy.proxy_stream(
+        "server-1",
+        "POST",
+        "/v1/chat/completions",
+        json={"stream": True},
+        expected_slot_generation=3,
+        enforce_capacity=True,
+        operation_id="upstream-eof-3",
+    )
+    assert await anext(stream) == b"data: [DONE]\n\n"
+    await opened.wait()
+    assert manager._active_inference_requests == {"server-1": 1}
+    assert manager._active_connections == {"server-1": 1}
+    finish.set()
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+    assert manager._active_inference_requests == {}
+    assert manager._active_connections == {}
+    assert get_operation(manager, "upstream-eof-3", "server-1")["status"] == "completed"
+    assert "operation_id=upstream-eof-3" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_upstream_eof_releases_slot_while_downstream_stops_reading():
+    manager = Mock(
+        configs={"server-1": Mock(port=8091, slot_generation=12)},
+        _active_connections={},
+        _active_inference_requests={},
+        _inference_slot_conditions={},
+        _inference_operations={},
+        get_effective_capacity=Mock(return_value=1),
+    )
+    proxy = ServerProxy(manager)
+    finished = asyncio.Event()
+
+    class Upstream:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            finished.set()
+
+        async def aiter_bytes(self):
+            yield b"data: first\n\n"
+            yield b"data: [DONE]\n\n"
+
+    proxy.client.stream = Mock(return_value=Upstream())
+    downstream = proxy.proxy_stream_background(
+        "server-1",
+        "POST",
+        "/v1/chat/completions",
+        json={"stream": True},
+        expected_slot_generation=12,
+        enforce_capacity=True,
+        operation_id="stalled-client-12",
+    )
+    assert await anext(downstream) == b"data: first\n\n"
+    await asyncio.wait_for(finished.wait(), 1)
+    # The consumer has not requested the second chunk yet.
+    await asyncio.sleep(0)
+    assert manager._active_connections == {}
+    assert manager._active_inference_requests == {}
+    assert (
+        get_operation(manager, "stalled-client-12", "server-1")["status"] == "completed"
+    )
+    await downstream.aclose()
 
 
 @pytest.mark.asyncio

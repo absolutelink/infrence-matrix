@@ -61,6 +61,7 @@ class InferenceLeaseHandle:
     server: ServerInstance
     lease_id: uuid.UUID
     slot_generation: int | None = None
+    legacy_capacity: bool = False
     lost: asyncio.Event = field(default_factory=asyncio.Event)
     _upstream_started: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _renewal_task: asyncio.Task[None] | None = field(default=None, init=False)
@@ -209,7 +210,8 @@ class InferenceLeaseHandle:
                 self._renewal_task.cancel()
                 await asyncio.gather(self._renewal_task, return_exceptions=True)
                 self._renewal_task = None
-            await asyncio.sleep(UPSTREAM_COMPLETION_COOLDOWN_SECONDS)
+            if self.legacy_capacity:
+                await asyncio.sleep(UPSTREAM_COMPLETION_COOLDOWN_SECONDS)
             async with AsyncSessionMaker() as session:
                 result = await session.execute(
                     update(InferenceLease)
@@ -241,7 +243,17 @@ class InferenceLeaseHandle:
                 (asyncio.get_running_loop().time() - started_at) * 1000.0,
             )
         except asyncio.CancelledError:
-            updated = await asyncio.shield(release_task)
+            try:
+                updated = await asyncio.shield(release_task)
+            except Exception:
+                logger.exception(
+                    "inference_lease_release_error request_id=%s lease_id=%s server_id=%s duration_ms=%.1f request_cancelled=true",
+                    self.request_id,
+                    self.lease_id,
+                    server_id,
+                    (asyncio.get_running_loop().time() - started_at) * 1000.0,
+                )
+                raise
             logger.info(
                 "inference_lease_release_complete request_id=%s lease_id=%s server_id=%s updated=%s duration_ms=%.1f request_cancelled=true",
                 self.request_id,
@@ -443,6 +455,7 @@ class InferenceScheduler:
                 if (
                     not isinstance(response, dict)
                     or response.get("complete") is not True
+                    or not isinstance(response.get("operations"), list)
                 ):
                     deferred_operation_ids.update(lease.id for lease in leases)
                     return
@@ -999,7 +1012,11 @@ class InferenceScheduler:
             await session.commit()
             await session.refresh(lease)
             handle = InferenceLeaseHandle(
-                lease.request_id, locked, lease.id, lease.slot_generation
+                lease.request_id,
+                locked,
+                lease.id,
+                lease.slot_generation,
+                legacy_capacity=int(protocol or 0) < 1,
             )
             handle.start_renewal()
             return handle

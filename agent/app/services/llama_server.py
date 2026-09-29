@@ -98,6 +98,9 @@ class LlamaServerManager:
         if exit_code is not None:
             error = f"llama-server exited with code {exit_code}"
             slot_generation = config.slot_generation
+            from app.services.inference_operations import stop_server_operations
+
+            await stop_server_operations(self, server_id)
             self._remove_server_state(server_id, preserve_logs=True)
             publish_event(
                 "server.error",
@@ -423,6 +426,9 @@ class LlamaServerManager:
                     "active_inference_requests": getattr(
                         self, "_active_inference_requests", {}
                     ).get(server_id, 0),
+                    "open_upstream_connections": getattr(
+                        self, "_active_connections", {}
+                    ).get(server_id, 0),
                 },
             )
 
@@ -463,6 +469,10 @@ class LlamaServerManager:
         config = self.configs[server_id]
         if slot_generation is not None and slot_generation != config.slot_generation:
             return False
+
+        from app.services.inference_operations import stop_server_operations
+
+        await stop_server_operations(self, server_id)
 
         proc = self.servers[server_id]
 
@@ -680,6 +690,9 @@ class LlamaServerManager:
             "active_inference_requests": getattr(
                 self, "_active_inference_requests", {}
             ).get(server_id, 0),
+            "open_upstream_connections": getattr(self, "_active_connections", {}).get(
+                server_id, 0
+            ),
         }
 
 

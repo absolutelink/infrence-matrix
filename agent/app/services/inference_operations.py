@@ -109,3 +109,25 @@ def cancel_operation(manager, request_id: str, server_id: str) -> bool:
     operation["status"] = "cancelling"
     task.cancel()
     return True
+
+
+async def stop_server_operations(manager, server_id: str) -> None:
+    """Fence reservations and wake waiters when a server stops or restarts."""
+    for operation in list(_operations(manager).values()):
+        if operation["server_id"] != server_id or operation["status"] not in {
+            "queued",
+            "active",
+            "cancelling",
+        }:
+            continue
+        task = operation.get("task")
+        operation["status"] = "failed"
+        operation["finished_at"] = time.time()
+        operation["task"] = None
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+    getattr(manager, "_active_inference_requests", {}).pop(server_id, None)
+    condition = getattr(manager, "_inference_slot_conditions", {}).get(server_id)
+    if condition is not None:
+        async with condition:
+            condition.notify_all()

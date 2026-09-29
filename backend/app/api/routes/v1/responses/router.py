@@ -666,6 +666,7 @@ async def _stream_events(
             final_usage_data.get("timings"),
             latency_ms=success_latency_ms,
             status="success",
+            request_id=request_id,
         )
         telemetry_recorded = True
 
@@ -712,7 +713,8 @@ async def _stream_events(
         )
 
         if persist:
-            _persist_response(
+            await asyncio.to_thread(
+                _persist_response,
                 request=request,
                 model_id=model_id,
                 agent_id=instance_agent_id,
@@ -807,7 +809,8 @@ async def _stream_events(
             yield frame
 
         if persist:
-            _persist_response(
+            await asyncio.to_thread(
+                _persist_response,
                 request=request,
                 model_id=model_id,
                 agent_id=instance_agent_id,
@@ -915,8 +918,12 @@ async def create_response(
             param="previous_response_id",
         )
 
-    # Target resolution may start a server and wait on the agent. Do not keep
-    # the synchronous request session's read transaction open across that await.
+    # Materialize all chain data before the first async wait. Closing the
+    # dependency session and then reading the chain reopens an idle transaction
+    # that can hold server-row locks for the entire inference request.
+    history: list[dict[str, Any]] = _build_chain_history(db, previous)
+    chain_depth = _chain_depth(db, previous)
+    # Target resolution may start a server and wait on the agent.
     db.close()
     try:
         server, model, lease_preference = await resolve_target(request.model)
@@ -948,10 +955,6 @@ async def create_response(
             param="reasoning.effort",
         )
 
-    # Chaining context: walk the previous_response_id chain to the root and
-    # concatenate each record's input+output in order (full conversation).
-    history: list[dict[str, Any]] = _build_chain_history(db, previous)
-
     # Log the actual message list sent to llama.cpp (request input + chain
     # history) — this is the ground truth for context debugging.
     try:
@@ -976,7 +979,7 @@ async def create_response(
         request.stream,
         request.store,
         request.previous_response_id or "none",
-        _chain_depth(db, previous),
+        chain_depth,
         len(history),
         sum(len(json.dumps(item)) for item in history),
         len(llama_messages),

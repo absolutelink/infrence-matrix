@@ -113,7 +113,7 @@ async def proxy_request(
 
     if path.startswith("stream") or (body and body.get("stream")):
         return StreamingResponse(
-            proxy.proxy_stream(
+            proxy.proxy_stream_background(
                 server_id,
                 request.method,
                 f"/{path}",

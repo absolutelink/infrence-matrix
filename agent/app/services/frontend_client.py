@@ -66,6 +66,9 @@ class FrontendClient:
                     "active_inference_requests": getattr(
                         server_manager, "_active_inference_requests", {}
                     ).get(server_id, 0),
+                    "open_upstream_connections": getattr(
+                        server_manager, "_active_connections", {}
+                    ).get(server_id, 0),
                 }
                 for server_id, config in server_manager.configs.items()
                 if server_id in server_manager.servers

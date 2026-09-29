@@ -96,6 +96,7 @@ def record_usage(
     server: ServerInstance | None,
     usage: dict[str, Any] | None,
     timings: dict[str, Any] | None = None,
+    request_id: str | None = None,
 ) -> None:
     """Persist one token usage sample. Never raises."""
     try:
@@ -118,7 +119,11 @@ def record_usage(
             )
             session.commit()
     except Exception:
-        logger.warning("Failed to record token usage sample", exc_info=True)
+        logger.warning(
+            "Failed to record token usage sample request_id=%s",
+            request_id or "-",
+            exc_info=True,
+        )
 
 
 def record_request_telemetry(
@@ -129,6 +134,7 @@ def record_request_telemetry(
     status: str = "success",
     model_name: str | None = None,
     agent_id: str | None = None,
+    request_id: str | None = None,
 ) -> None:
     """Record one finished inference request: usage sample, Prometheus
     metrics, and lifetime counters on the serving ServerInstance.
@@ -142,7 +148,7 @@ def record_request_telemetry(
         loop = asyncio.get_running_loop()
     except RuntimeError:
         _record_request_telemetry_sync(
-            server, usage, timings, latency_ms, status, model_name, agent_id
+            server, usage, timings, latency_ms, status, model_name, agent_id, request_id
         )
         return
 
@@ -164,20 +170,25 @@ def record_request_telemetry(
             status,
             model_name,
             agent_id,
+            request_id,
         )
     )
     _telemetry_tasks.add(task)
-    task.add_done_callback(_telemetry_task_done)
+    task.add_done_callback(lambda finished: _telemetry_task_done(finished, request_id))
 
 
-def _telemetry_task_done(task: asyncio.Task[None]) -> None:
+def _telemetry_task_done(task: asyncio.Task[None], request_id: str | None) -> None:
     _telemetry_tasks.discard(task)
     if task.cancelled():
         return
     try:
         task.result()
     except Exception:
-        logger.warning("Background request telemetry task failed", exc_info=True)
+        logger.warning(
+            "Background request telemetry task failed request_id=%s",
+            request_id or "-",
+            exc_info=True,
+        )
 
 
 def _record_request_telemetry_sync(
@@ -188,8 +199,9 @@ def _record_request_telemetry_sync(
     status: str,
     model_name: str | None,
     agent_id: str | None,
+    request_id: str | None = None,
 ) -> None:
-    record_usage(server, usage, timings)
+    record_usage(server, usage, timings, request_id)
     try:
         fields = extract_usage_fields(usage, timings)
         total_tokens = fields["prompt_tokens"] + fields["completion_tokens"]
@@ -206,7 +218,11 @@ def _record_request_telemetry_sync(
         resolved_model = resolved_model or "unknown"
         resolved_agent = resolved_agent or "unknown"
     except Exception:
-        logger.warning("Failed to extract telemetry fields", exc_info=True)
+        logger.warning(
+            "Failed to extract telemetry fields request_id=%s",
+            request_id or "-",
+            exc_info=True,
+        )
         return
 
     try:
@@ -220,7 +236,11 @@ def _record_request_telemetry_sync(
             tokens=total_tokens if status == "success" else 0,
         )
     except Exception:
-        logger.warning("Failed to record inference metrics", exc_info=True)
+        logger.warning(
+            "Failed to record inference metrics request_id=%s",
+            request_id or "-",
+            exc_info=True,
+        )
 
     if server is None or getattr(server, "id", None) is None or status != "success":
         return
@@ -248,7 +268,11 @@ def _record_request_telemetry_sync(
             )
             session.commit()
     except Exception:
-        logger.warning("Failed to update server usage counters", exc_info=True)
+        logger.warning(
+            "Failed to update server usage counters request_id=%s",
+            request_id or "-",
+            exc_info=True,
+        )
 
 
 # Retention: keep ~35 days so the 30-day window always has full coverage.

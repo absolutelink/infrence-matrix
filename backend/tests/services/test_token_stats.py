@@ -4,6 +4,8 @@ import asyncio
 import threading
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import text
@@ -14,6 +16,7 @@ from app.core.db import engine
 from app.db.session import AsyncSessionMaker
 from app.db.session import engine as async_engine
 from app.models import Agent, Model, ServerInstance, TokenUsageSample
+from app.services.inference_scheduler import InferenceLeaseHandle
 from app.services.token_stats import (
     LIVE_RUNS,
     TOKEN_SAMPLE_RETENTION_DAYS,
@@ -55,6 +58,47 @@ async def test_async_request_telemetry_does_not_block_event_loop(monkeypatch):
     release_timer.cancel()
 
     assert elapsed < 0.1
+
+
+@pytest.mark.asyncio
+async def test_blocked_telemetry_persistence_does_not_delay_lease_release(monkeypatch):
+    from app.services import token_stats
+
+    started = threading.Event()
+    unblock = threading.Event()
+
+    def blocked_write(*_args):
+        started.set()
+        unblock.wait(timeout=3)
+
+    monkeypatch.setattr(token_stats, "_record_request_telemetry_sync", blocked_write)
+    session = AsyncMock()
+    session.execute.return_value.rowcount = 1
+    context = AsyncMock()
+    context.__aenter__.return_value = session
+    handle = InferenceLeaseHandle(
+        "telemetry-blocked-id", SimpleNamespace(), uuid.uuid4()
+    )
+    try:
+        record_request_telemetry(
+            None, {"prompt_tokens": 1}, request_id=handle.request_id
+        )
+        assert await asyncio.to_thread(started.wait, 1)
+        with (
+            patch(
+                "app.services.inference_scheduler.AsyncSessionMaker",
+                return_value=context,
+            ),
+            patch(
+                "app.services.inference_scheduler.UPSTREAM_COMPLETION_COOLDOWN_SECONDS",
+                0,
+            ),
+        ):
+            await asyncio.wait_for(handle.release(), timeout=0.5)
+        session.commit.assert_awaited_once()
+        assert not unblock.is_set()
+    finally:
+        unblock.set()
 
 
 def _make_server(db: Session) -> ServerInstance:

@@ -85,6 +85,9 @@ class HalogenServerManager:
         exit_code = process.poll()
         if exit_code is not None:
             slot_generation = config.slot_generation
+            from app.services.inference_operations import stop_server_operations
+
+            await stop_server_operations(self, server_id)
             self._remove(server_id)
             publish_event(
                 "server.error",
@@ -282,6 +285,9 @@ class HalogenServerManager:
                 "active_inference_requests": getattr(
                     self, "_active_inference_requests", {}
                 ).get(server_id, 0),
+                "open_upstream_connections": getattr(
+                    self, "_active_connections", {}
+                ).get(server_id, 0),
             },
         )
         return True
@@ -325,6 +331,9 @@ class HalogenServerManager:
         config = self.configs[server_id]
         if slot_generation is not None and slot_generation != config.slot_generation:
             return False
+        from app.services.inference_operations import stop_server_operations
+
+        await stop_server_operations(self, server_id)
         try:
             os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
         except ProcessLookupError:
@@ -404,6 +413,9 @@ class HalogenServerManager:
             "active_inference_requests": getattr(
                 self, "_active_inference_requests", {}
             ).get(server_id, 0),
+            "open_upstream_connections": getattr(self, "_active_connections", {}).get(
+                server_id, 0
+            ),
         }
 
     def get_server_logs(

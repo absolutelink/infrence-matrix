@@ -224,7 +224,9 @@ async def test_release_keeps_slot_active_during_completion_cooldown():
         cooldown_started.set()
         await allow_cooldown.wait()
 
-    handle = InferenceLeaseHandle("request-1", SimpleNamespace(), uuid.uuid4())
+    handle = InferenceLeaseHandle(
+        "request-1", SimpleNamespace(), uuid.uuid4(), legacy_capacity=True
+    )
     with (
         patch(
             "app.services.inference_scheduler.AsyncSessionMaker",
@@ -504,8 +506,9 @@ async def test_cross_server_claim_waits_for_older_locked_compatible_request(db):
     await connection.execute(
         select(InferenceLease.id).where(InferenceLease.id == older.id).with_for_update()
     )
-    scheduler = InferenceScheduler()
-    newer_on_b = asyncio.create_task(scheduler._claim(newer.id, server_b))
+    worker_a = InferenceScheduler()
+    worker_b = InferenceScheduler()
+    newer_on_b = asyncio.create_task(worker_b._claim(newer.id, server_b))
     try:
         await asyncio.sleep(0.05)
         assert not newer_on_b.done()
@@ -514,11 +517,35 @@ async def test_cross_server_claim_waits_for_older_locked_compatible_request(db):
         await connection.close()
 
     assert await newer_on_b is None
-    older_on_a = await scheduler._claim(older.id, server_a)
-    newer_on_b = await scheduler._claim(newer.id, server_b)
+    older_on_a = await worker_a._claim(older.id, server_a)
+    newer_on_b = await worker_b._claim(newer.id, server_b)
     assert older_on_a is not None
     assert newer_on_b is not None
     await asyncio.gather(older_on_a.release(), newer_on_b.release())
+
+
+async def test_protocol_one_claim_never_waits_on_server_row_capacity_lock(db):
+    model = _make_model(db, f"scheduler-agent-lock-{uuid.uuid4().hex}")
+    server = _make_server(db, model, alias=f"agent-lock-{uuid.uuid4().hex}")
+    queued = _make_lease(db, model, f"agent-lock-request-{uuid.uuid4()}")
+    assert db.get(Agent, server.agent_id).inference_slot_protocol == 1
+
+    connection = await async_engine.connect()
+    transaction = await connection.begin()
+    await connection.execute(
+        select(ServerInstance.id)
+        .where(ServerInstance.id == server.id)
+        .with_for_update(key_share=True)
+    )
+    try:
+        handle = await asyncio.wait_for(
+            InferenceScheduler()._claim(queued.id, server), timeout=1.0
+        )
+        assert handle is not None
+    finally:
+        await transaction.rollback()
+        await connection.close()
+    await handle.release()
 
 
 async def test_legacy_agent_uses_database_capacity_fallback(db):
@@ -638,7 +665,14 @@ async def test_reconciliation_does_not_stop_healthy_server_for_expired_lease(db)
     )
 
 
-async def test_reconciliation_defers_lease_for_incomplete_agent_snapshot(db):
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        {"complete": False, "operations": []},
+        {"complete": True, "operations": None},
+    ],
+)
+async def test_reconciliation_defers_lease_for_incomplete_agent_snapshot(db, snapshot):
     model = _make_model(db, f"scheduler-incomplete-agent-snapshot-{uuid.uuid4().hex}")
     server = _make_server(
         db, model, alias=f"scheduler-incomplete-agent-snapshot-{uuid.uuid4().hex}"
@@ -654,7 +688,7 @@ async def test_reconciliation_defers_lease_for_incomplete_agent_snapshot(db):
 
     with patch(
         "app.services.inference_scheduler.agent_manager.send_to_agent",
-        new=AsyncMock(return_value={"complete": False, "operations": []}),
+        new=AsyncMock(return_value=snapshot),
     ):
         reconciled = await InferenceScheduler().reconcile_stale_leases()
 

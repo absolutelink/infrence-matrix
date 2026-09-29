@@ -11,6 +11,7 @@ from app.services.inference_operations import (
     activate_operation,
     bind_operation_task,
     finish_operation,
+    get_operation,
     operation_exists,
     start_operation,
 )
@@ -27,6 +28,7 @@ class ProxyOperationExists(Exception):
 class _SlotReservation:
     acquired: bool = False
     released: bool = False
+    generation: int | None = None
 
 
 class ServerProxy:
@@ -45,6 +47,39 @@ class ServerProxy:
             raise ValueError(f"Server {server_id} not found")
         return config.port
 
+    async def proxy_stream_background(
+        self, *args, **kwargs
+    ) -> AsyncGenerator[bytes, None]:
+        """Drain the LLM independently of downstream SSE backpressure.
+
+        The producer owns the slot and closes it at upstream EOF, even when a
+        client has stopped reading a frame already queued for delivery.
+        """
+        frames: asyncio.Queue[bytes | BaseException | None] = asyncio.Queue()
+
+        async def drain() -> None:
+            try:
+                async for frame in self.proxy_stream(*args, **kwargs):
+                    frames.put_nowait(frame)
+            except BaseException as exc:
+                frames.put_nowait(exc)
+            finally:
+                frames.put_nowait(None)
+
+        producer = asyncio.create_task(drain())
+        try:
+            while True:
+                item = await frames.get()
+                if item is None:
+                    return
+                if isinstance(item, BaseException):
+                    raise item
+                yield item
+        finally:
+            if not producer.done():
+                producer.cancel()
+            await asyncio.gather(producer, return_exceptions=True)
+
     async def proxy_request(
         self,
         server_id: str,
@@ -58,12 +93,15 @@ class ServerProxy:
         operation_id: str | None = None,
     ) -> httpx.Response:
         """Proxy HTTP request to llama.cpp."""
-        reservation = _SlotReservation(acquired=capacity_reserved)
+        reservation = _SlotReservation(
+            acquired=capacity_reserved, generation=expected_slot_generation
+        )
         outcome = "failed"
         close_reason = "proxy_error"
         started_at = asyncio.get_running_loop().time()
         upstream_status: int | None = None
         response_bytes = 0
+        upstream_opened = False
         try:
             self._check_generation(server_id, expected_slot_generation)
             url = self._get_server_url(server_id, path)
@@ -81,6 +119,8 @@ class ServerProxy:
                     response = await self.client.request(
                         method=method, url=url, headers=headers, json=json
                     )
+                    self._upstream_opened(server_id)
+                    upstream_opened = True
                     status_code = getattr(response, "status_code", None)
                     upstream_status = (
                         status_code if isinstance(status_code, int) else None
@@ -119,6 +159,8 @@ class ServerProxy:
             )
             raise
         finally:
+            if upstream_opened:
+                self._upstream_closed(server_id)
             if enforce_capacity or operation_id is not None:
                 logger.info(
                     "inference_proxy_http_close operation_id=%s server_id=%s generation=%s outcome=%s close_reason=%s upstream_status=%s response_bytes=%d duration_ms=%.1f",
@@ -147,12 +189,15 @@ class ServerProxy:
         operation_id: str | None = None,
     ) -> AsyncGenerator[bytes, None]:
         """Proxy streaming request (SSE) to llama.cpp."""
-        reservation = _SlotReservation(acquired=capacity_reserved)
+        reservation = _SlotReservation(
+            acquired=capacity_reserved, generation=expected_slot_generation
+        )
         outcome = "failed"
         close_reason = "proxy_error"
         started_at = asyncio.get_running_loop().time()
         upstream_status: int | None = None
         upstream_opened = False
+        connection_open = False
         chunks = 0
         bytes_sent = 0
         done_marker_seen = False
@@ -179,6 +224,12 @@ class ServerProxy:
                     except TimeoutError:
                         yield b": inference slot queued\n\n"
                 await reservation_task
+                if operation_id is not None:
+                    operation = get_operation(
+                        self.server_manager, operation_id, server_id
+                    )
+                    if operation is None or operation["status"] != "active":
+                        raise asyncio.CancelledError
                 bind_operation_task(self.server_manager, operation_id)
             for delay in (*CONNECT_RETRY_DELAYS, None):
                 connected = False
@@ -192,6 +243,8 @@ class ServerProxy:
                     ) as response:
                         connected = True
                         upstream_opened = True
+                        self._upstream_opened(server_id)
+                        connection_open = True
                         upstream_status = response.status_code
                         logger.info(
                             "inference_stream_open operation_id=%s server_id=%s generation=%s upstream_status=%s",
@@ -208,6 +261,9 @@ class ServerProxy:
                                 done_marker_seen = b"[DONE]" in scan
                                 done_marker_tail = scan[-16:]
                             yield chunk
+                    if connection_open:
+                        self._upstream_closed(server_id)
+                        connection_open = False
                     if upstream_status is not None and upstream_status >= 400:
                         outcome = "failed"
                         close_reason = "llm_http_error"
@@ -260,6 +316,8 @@ class ServerProxy:
             )
             raise
         finally:
+            if connection_open:
+                self._upstream_closed(server_id)
             if reservation_task is not None and not reservation_task.done():
                 reservation_task.cancel()
                 await asyncio.gather(reservation_task, return_exceptions=True)
@@ -290,11 +348,7 @@ class ServerProxy:
         expected_generation: int | None = None,
         reservation: _SlotReservation | None = None,
     ) -> None:
-        connections = getattr(self.server_manager, "_active_connections", None)
-        if connections is None:
-            connections = self.server_manager._active_connections = {}
         if not enforce_capacity:
-            connections[server_id] = connections.get(server_id, 0) + 1
             if reservation is not None:
                 reservation.acquired = True
             return
@@ -356,9 +410,9 @@ class ServerProxy:
                     if active.get(server_id, 0) < capacity:
                         activate_operation(self.server_manager, operation_id)
                         active[server_id] = active.get(server_id, 0) + 1
-                        connections[server_id] = connections.get(server_id, 0) + 1
                         if reservation is not None:
                             reservation.acquired = True
+                            reservation.generation = config.slot_generation
                         return
                     await condition.wait()
         except asyncio.CancelledError:
@@ -384,54 +438,44 @@ class ServerProxy:
         enforce_capacity: bool,
         operation_id: str | None = None,
         outcome: str = "completed",
+        generation: int | None = None,
     ) -> None:
-        connections = getattr(self.server_manager, "_active_connections", None)
         if not enforce_capacity:
-            if connections and server_id in connections:
-                connections[server_id] -= 1
-                if connections[server_id] <= 0:
-                    del connections[server_id]
             return
         active = getattr(self.server_manager, "_active_inference_requests", None)
         conditions = getattr(self.server_manager, "_inference_slot_conditions", None)
-        if active is None or conditions is None:
-            if connections and server_id in connections:
-                connections[server_id] -= 1
-                if connections[server_id] <= 0:
-                    del connections[server_id]
-            if active is not None:
+        condition = conditions.get(server_id) if conditions else None
+        if condition is None:
+            condition = asyncio.Condition()
+        async with condition:
+            config = self.server_manager.configs.get(server_id)
+            if (
+                active is not None
+                and config is not None
+                and (generation is None or config.slot_generation == generation)
+            ):
                 remaining = active.get(server_id, 0) - 1
                 if remaining > 0:
                     active[server_id] = remaining
                 else:
                     active.pop(server_id, None)
             finish_operation(self.server_manager, operation_id, outcome)
-            return
-        condition = conditions.get(server_id)
-        if condition is None:
-            if connections and server_id in connections:
-                connections[server_id] -= 1
-                if connections[server_id] <= 0:
-                    del connections[server_id]
-            remaining = active.get(server_id, 0) - 1
-            if remaining > 0:
-                active[server_id] = remaining
-            else:
-                active.pop(server_id, None)
-            finish_operation(self.server_manager, operation_id, outcome)
-            return
-        async with condition:
-            if connections and server_id in connections:
-                connections[server_id] -= 1
-                if connections[server_id] <= 0:
-                    del connections[server_id]
-            remaining = active.get(server_id, 0) - 1
-            if remaining > 0:
-                active[server_id] = remaining
-            else:
-                active.pop(server_id, None)
-            finish_operation(self.server_manager, operation_id, outcome)
             condition.notify_all()
+
+    def _upstream_opened(self, server_id: str) -> None:
+        connections = getattr(self.server_manager, "_active_connections", None)
+        if connections is None:
+            connections = self.server_manager._active_connections = {}
+        connections[server_id] = connections.get(server_id, 0) + 1
+
+    def _upstream_closed(self, server_id: str) -> None:
+        connections = getattr(self.server_manager, "_active_connections", None)
+        if connections and server_id in connections:
+            remaining = connections[server_id] - 1
+            if remaining > 0:
+                connections[server_id] = remaining
+            else:
+                del connections[server_id]
 
     async def _release_reservation(
         self,
@@ -446,7 +490,11 @@ class ServerProxy:
         reservation.released = True
         release_task = asyncio.create_task(
             self._connection_finished(
-                server_id, enforce_capacity, operation_id, outcome
+                server_id,
+                enforce_capacity,
+                operation_id,
+                outcome,
+                reservation.generation,
             )
         )
         try:
