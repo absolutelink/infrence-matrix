@@ -3,7 +3,7 @@ ARG AGENT_IMAGE=ghcr.io/absolutelink/agent:main
 
 FROM ${AGENT_IMAGE} AS agent
 
-FROM ghcr.io/peonist-ai/halogen-flash-server:0.13.8
+FROM ghcr.io/peonist-ai/halogen-flash-server:0.15.0
 
 USER root
 

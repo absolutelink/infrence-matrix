@@ -84,6 +84,284 @@ def _install_client(monkeypatch: pytest.MonkeyPatch, module: Any, client: FakeCl
     monkeypatch.setattr(module.httpx, "AsyncClient", lambda **_kwargs: client)
 
 
+def _responses_stream(lease: Any):
+    return responses_router._stream_events(
+        CreateResponseBody(model="model", input="hello", stream=True, store=False),
+        "server-id",
+        "agent-id",
+        [],
+        "resp-1",
+        1,
+        lease=lease,
+    )
+
+
+async def _initial_responses_frames(stream: Any) -> None:
+    assert (await anext(stream)).startswith("event: response.created")
+    assert (await anext(stream)).startswith("event: response.in_progress")
+
+
+def _text_upstream() -> FakeStreamResponse:
+    return FakeStreamResponse(
+        [
+            'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}',
+            "data: [DONE]",
+        ],
+    )
+
+
+def _has_text_delta(frames: list[str]) -> bool:
+    return any(
+        json.loads(frame.split("data: ", 1)[1])["delta"] == "ok"
+        for frame in frames
+        if frame.startswith("event: response.output_text.delta")
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked_phase", ["readiness", "headers"])
+async def test_responses_keepalive_before_setup_completes(
+    monkeypatch: pytest.MonkeyPatch, blocked_phase: str
+) -> None:
+    gate = asyncio.Event()
+    entered = asyncio.Event()
+    events: list[str] = []
+
+    class DelayedResponse(FakeStreamResponse):
+        async def __aenter__(self) -> FakeStreamResponse:
+            entered.set()
+            if blocked_phase == "headers":
+                await gate.wait()
+            return self
+
+    async def ready(_server_id: str) -> SimpleNamespace:
+        entered.set()
+        if blocked_phase == "readiness":
+            await gate.wait()
+        return SimpleNamespace(agent_id="agent-id")
+
+    upstream = DelayedResponse(_text_upstream().lines, events)
+    client = FakeClient(upstream)
+    _install_client(monkeypatch, responses_router, client)
+    monkeypatch.setattr(responses_router, "SSE_KEEPALIVE_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(responses_router, "ensure_server_ready_by_id", ready)
+    monkeypatch.setattr(
+        responses_router.agent_manager,
+        "get_agent",
+        AsyncMock(return_value=SimpleNamespace(host="agent", port=8080)),
+    )
+    lease = FakeLease(events)
+    stream = _responses_stream(lease)
+    try:
+        await _initial_responses_frames(stream)
+        pending = asyncio.create_task(anext(stream))
+        await asyncio.wait_for(entered.wait(), 1)
+        assert await asyncio.wait_for(pending, 1) == ": keep-alive\n\n"
+        assert not gate.is_set()
+        gate.set()
+        frames = [frame async for frame in stream]
+        assert _has_text_delta(frames)
+        assert any(frame.startswith("event: response.completed") for frame in frames)
+        assert frames[-1] == "data: [DONE]\n\n"
+        assert events == ["upstream_closed", "released"]
+        assert len(client.stream_calls) == 1
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_responses_discarded_lines_do_not_suppress_keepalive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = asyncio.Event()
+    comments_seen = asyncio.Event()
+    comments_finished = asyncio.Event()
+    events: list[str] = []
+
+    class NoisyResponse(FakeStreamResponse):
+        def aiter_lines(self):
+            async def iterate():
+                for _ in range(20):
+                    yield ": upstream queued"
+                    yield ""
+                    comments_seen.set()
+                    await asyncio.sleep(0.003)
+                comments_finished.set()
+                await gate.wait()
+                for line in self.lines:
+                    yield line
+
+            return iterate()
+
+    client = FakeClient(NoisyResponse(_text_upstream().lines, events))
+    _install_client(monkeypatch, responses_router, client)
+    monkeypatch.setattr(responses_router, "SSE_KEEPALIVE_INTERVAL_SECONDS", 0.012)
+    monkeypatch.setattr(
+        responses_router,
+        "ensure_server_ready_by_id",
+        AsyncMock(return_value=SimpleNamespace(agent_id="agent-id")),
+    )
+    monkeypatch.setattr(
+        responses_router.agent_manager,
+        "get_agent",
+        AsyncMock(return_value=SimpleNamespace(host="agent", port=8080)),
+    )
+    stream = _responses_stream(FakeLease(events))
+    try:
+        await _initial_responses_frames(stream)
+        pending = asyncio.create_task(anext(stream))
+        await asyncio.wait_for(comments_seen.wait(), 1)
+        assert await asyncio.wait_for(pending, 1) == ": keep-alive\n\n"
+        assert not comments_finished.is_set()
+        assert not gate.is_set()
+        gate.set()
+        frames = [frame async for frame in stream]
+        assert _has_text_delta(frames)
+        assert any(frame.startswith("event: response.completed") for frame in frames)
+        assert events == ["upstream_closed", "released"]
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close_reason", ["downstream", "lease_lost"])
+async def test_responses_blocked_headers_cleanup(
+    monkeypatch: pytest.MonkeyPatch, close_reason: str
+) -> None:
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+    events: list[str] = []
+
+    class BlockedResponse(FakeStreamResponse):
+        async def __aenter__(self) -> FakeStreamResponse:
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+    class ClosedClient(FakeClient):
+        async def __aexit__(self, *args: object) -> None:
+            events.append("client_closed")
+
+    client = ClosedClient(BlockedResponse([], events))
+    _install_client(monkeypatch, responses_router, client)
+    monkeypatch.setattr(responses_router, "SSE_KEEPALIVE_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(
+        responses_router,
+        "ensure_server_ready_by_id",
+        AsyncMock(return_value=SimpleNamespace(agent_id="agent-id")),
+    )
+    monkeypatch.setattr(
+        responses_router.agent_manager,
+        "get_agent",
+        AsyncMock(return_value=SimpleNamespace(host="agent", port=8080)),
+    )
+    lease = InferenceLeaseHandle("request-id", SimpleNamespace(), uuid.uuid4())
+    lease.release = AsyncMock(side_effect=lambda: events.append("released"))
+    stream = _responses_stream(lease)
+    await _initial_responses_frames(stream)
+    pending = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(entered.wait(), 1)
+    assert await asyncio.wait_for(pending, 1) == ": keep-alive\n\n"
+    if close_reason == "lease_lost":
+        lease.lost.set()
+        frames = [frame async for frame in stream]
+        assert any(frame.startswith("event: response.failed") for frame in frames)
+    else:
+        await stream.aclose()
+    await asyncio.wait_for(cancelled.wait(), 1)
+    assert events == ["client_closed", "released"]
+    lease.release.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_responses_cancel_task_while_waiting_for_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+    events: list[str] = []
+
+    class BlockedResponse(FakeStreamResponse):
+        async def __aenter__(self) -> FakeStreamResponse:
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+    class ClosedClient(FakeClient):
+        async def __aexit__(self, *args: object) -> None:
+            events.append("client_closed")
+
+    client = ClosedClient(BlockedResponse([], events))
+    _install_client(monkeypatch, responses_router, client)
+    monkeypatch.setattr(
+        responses_router,
+        "ensure_server_ready_by_id",
+        AsyncMock(return_value=SimpleNamespace(agent_id="agent-id")),
+    )
+    monkeypatch.setattr(
+        responses_router.agent_manager,
+        "get_agent",
+        AsyncMock(return_value=SimpleNamespace(host="agent", port=8080)),
+    )
+    lease = InferenceLeaseHandle("request-id", SimpleNamespace(), uuid.uuid4())
+    lease.release = AsyncMock(side_effect=lambda: events.append("released"))
+    stream = _responses_stream(lease)
+    await _initial_responses_frames(stream)
+    pending = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(entered.wait(), 1)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(pending, 1)
+    assert cancelled.is_set()
+    assert events == ["client_closed", "released"]
+    lease.release.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_responses_headers_arriving_at_disconnect_are_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = asyncio.Event()
+    headers_arrived = asyncio.Event()
+    events: list[str] = []
+
+    class DelayedResponse(FakeStreamResponse):
+        async def __aenter__(self) -> FakeStreamResponse:
+            await gate.wait()
+            headers_arrived.set()
+            return self
+
+    class ClosedClient(FakeClient):
+        async def __aexit__(self, *args: object) -> None:
+            events.append("client_closed")
+
+    client = ClosedClient(DelayedResponse([], events))
+    _install_client(monkeypatch, responses_router, client)
+    monkeypatch.setattr(responses_router, "SSE_KEEPALIVE_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(
+        responses_router,
+        "ensure_server_ready_by_id",
+        AsyncMock(return_value=SimpleNamespace(agent_id="agent-id")),
+    )
+    monkeypatch.setattr(
+        responses_router.agent_manager,
+        "get_agent",
+        AsyncMock(return_value=SimpleNamespace(host="agent", port=8080)),
+    )
+    lease = FakeLease(events)
+    stream = _responses_stream(lease)
+    await _initial_responses_frames(stream)
+    assert await asyncio.wait_for(anext(stream), 1) == ": keep-alive\n\n"
+    gate.set()
+    await asyncio.wait_for(headers_arrived.wait(), 1)
+    await stream.aclose()
+    assert events == ["upstream_closed", "client_closed", "released"]
+
+
 @pytest.mark.asyncio
 async def test_guard_cancels_upstream_when_client_disconnects() -> None:
     started = asyncio.Event()

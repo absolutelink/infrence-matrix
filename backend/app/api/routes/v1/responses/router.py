@@ -438,6 +438,7 @@ def _persist_response(
 async def _upstream_lines_with_keepalive(
     upstream: httpx.Response,
     lease: InferenceLeaseHandle | None = None,
+    deadline: list[float] | None = None,
 ) -> AsyncIterator[str | None]:
     """Read upstream SSE lines while emitting comments during idle periods.
 
@@ -449,6 +450,8 @@ async def _upstream_lines_with_keepalive(
     "emit a keepalive comment now" and ``str`` for an upstream line.
     """
     queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=1)
+    if deadline is None:
+        deadline = [time.monotonic() + SSE_KEEPALIVE_INTERVAL_SECONDS]
     shutting_down = False
 
     async def reader() -> None:
@@ -479,12 +482,18 @@ async def _upstream_lines_with_keepalive(
     task = asyncio.create_task(reader())
     try:
         while True:
+            # Transport lines are not client-visible. Even a steady stream of
+            # discarded comments must not extend the downstream idle window.
+            remaining = deadline[0] - time.monotonic()
+            if remaining <= 0:
+                yield None
+                deadline[0] = time.monotonic() + SSE_KEEPALIVE_INTERVAL_SECONDS
+                continue
             try:
-                item = await asyncio.wait_for(
-                    queue.get(), timeout=SSE_KEEPALIVE_INTERVAL_SECONDS
-                )
+                item = await asyncio.wait_for(queue.get(), timeout=remaining)
             except TimeoutError:
                 yield None
+                deadline[0] = time.monotonic() + SSE_KEEPALIVE_INTERVAL_SECONDS
                 continue
             if item is _STREAM_END:
                 return
@@ -496,6 +505,34 @@ async def _upstream_lines_with_keepalive(
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def _setup_keepalives(
+    ready: asyncio.Future[Any],
+    deadline: list[float],
+    worker: asyncio.Task[Any] | None = None,
+) -> AsyncIterator[None]:
+    """Keep the same visible idle clock running while setup is pending.
+
+    Waiting on task completion via asyncio.wait never cancels the owned work.
+    The caller owns cancellation/join of the worker on every exit path.
+    """
+    while not ready.done():
+        if worker is not None and worker.done():
+            await worker  # propagate a failed header acquisition
+        remaining = deadline[0] - time.monotonic()
+        if remaining <= 0:
+            yield None
+            deadline[0] = time.monotonic() + SSE_KEEPALIVE_INTERVAL_SECONDS
+            continue
+        await asyncio.wait(
+            {ready, worker} if worker is not None else {ready},
+            timeout=remaining,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    if worker is not None and worker.done():
+        await worker
+    await ready
 
 
 async def _stream_events(
@@ -536,11 +573,13 @@ async def _stream_events(
     upstream_lines = 0
     emitted_frames = 0
     done_marker_seen = False
+    deadline = [time.monotonic() + SSE_KEEPALIVE_INTERVAL_SECONDS]
     try:
         ev.response_created(seq, response)
         ev.response_in_progress(seq, response)
         for frame in seq.drain_frames():
             yield frame
+            deadline[0] = time.monotonic() + SSE_KEEPALIVE_INTERVAL_SECONDS
         initial_frames_sent = True
     except GeneratorExit, asyncio.CancelledError:
         logger.info(
@@ -590,29 +629,68 @@ async def _stream_events(
 
         # Hold the client connection while any in-flight startup completes
         # so the first event arrives as soon as the server is healthy.
-        fresh_server = await ensure_server_ready_by_id(server_id)
-        agent_id = str(fresh_server.agent_id)
+        async def prepare_agent() -> tuple[str, Any]:
+            fresh_server = await ensure_server_ready_by_id(server_id)
+            fresh_agent_id = str(fresh_server.agent_id)
+            agent = await agent_manager.get_agent(fresh_agent_id)
+            if not agent:
+                raise ValueError(f"Agent {fresh_agent_id} not found")
+            return fresh_agent_id, agent
 
-        agent = await agent_manager.get_agent(agent_id)
-        if not agent:
-            raise ValueError(f"Agent {agent_id} not found")
+        readiness = asyncio.create_task(
+            lease.guard(prepare_agent()) if lease is not None else prepare_agent()
+        )
+        try:
+            async with aclosing(_setup_keepalives(readiness, deadline)) as ticks:
+                async for _ in ticks:
+                    yield ": keep-alive\n\n"
+            agent_id, agent = await readiness
+        finally:
+            if not readiness.done():
+                readiness.cancel()
+            await asyncio.gather(readiness, return_exceptions=True)
         proxy_url = (
             f"http://{agent.host}:{agent.port}/proxy/{server_id}/v1/chat/completions"
         )
         if lease is not None:
             lease.mark_upstream_started()
         async with httpx.AsyncClient(timeout=300.0) as client:
-            async with client.stream(
-                "POST",
-                proxy_url,
-                json=payload,
-                headers={
-                    "X-Inference-Slot-Generation": str(lease.slot_generation),
-                    "X-Inference-Request-ID": lease.request_id,
-                }
+            # The worker owns the response context from header acquisition to
+            # body close. If cancellation races with headers arriving, its
+            # async-with still closes the response before the client closes.
+            opened: asyncio.Future[httpx.Response] = (
+                asyncio.get_running_loop().create_future()
+            )
+            close_upstream = asyncio.Event()
+
+            async def upstream_context() -> None:
+                async with client.stream(
+                    "POST",
+                    proxy_url,
+                    json=payload,
+                    headers={
+                        "X-Inference-Slot-Generation": str(lease.slot_generation),
+                        "X-Inference-Request-ID": lease.request_id,
+                    }
+                    if lease is not None
+                    else None,
+                ) as response_stream:
+                    opened.set_result(response_stream)
+                    await close_upstream.wait()
+
+            worker = asyncio.create_task(
+                lease.guard(upstream_context())
                 if lease is not None
-                else None,
-            ) as upstream:
+                else upstream_context()
+            )
+            finished_body = False
+            try:
+                async with aclosing(
+                    _setup_keepalives(opened, deadline, worker)
+                ) as ticks:
+                    async for _ in ticks:
+                        yield ": keep-alive\n\n"
+                upstream = opened.result()
                 upstream_opened = True
                 upstream_status = upstream.status_code
                 logger.info(
@@ -625,7 +703,7 @@ async def _stream_events(
                 )
                 upstream.raise_for_status()
                 async with aclosing(
-                    _upstream_lines_with_keepalive(upstream, lease)
+                    _upstream_lines_with_keepalive(upstream, lease, deadline)
                 ) as upstream_stream:
                     async for line in upstream_stream:
                         if line is None:
@@ -682,6 +760,18 @@ async def _stream_events(
                         for frame in seq.drain_frames():
                             emitted_frames += 1
                             yield frame
+                            deadline[0] = (
+                                time.monotonic() + SSE_KEEPALIVE_INTERVAL_SECONDS
+                            )
+                finished_body = True
+            finally:
+                close_upstream.set()
+                if not finished_body and not worker.done():
+                    worker.cancel()
+                if finished_body:
+                    await worker
+                else:
+                    await asyncio.gather(worker, return_exceptions=True)
 
         logger.info(
             "responses_stream_upstream_close request_id=%s response_id=%s server_id=%s outcome=%s close_reason=%s upstream_status=%s upstream_opened=%s done_marker=%s upstream_lines=%d emitted_frames=%d duration_ms=%.1f",
