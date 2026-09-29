@@ -37,6 +37,13 @@ class Settings(BaseSettings):
     # Maximum pause while waiting for upstream headers or the next response byte.
     UPSTREAM_IDLE_TIMEOUT_SECONDS: float = Field(default=120.0, gt=0)
 
+    # Shared upstream proxy connection pool. The agent reuses one AsyncClient so
+    # keep-alive connections are pooled instead of squatting a descriptor per
+    # request; these bounds keep the pool from exhausting the fd budget.
+    PROXY_MAX_CONNECTIONS: int = Field(default=200, gt=0)
+    PROXY_MAX_KEEPALIVE_CONNECTIONS: int = Field(default=50, gt=0)
+    PROXY_KEEPALIVE_EXPIRY_SECONDS: float = Field(default=30.0, gt=0)
+
     # GPU
     GPU_BACKEND: str = "auto"
 

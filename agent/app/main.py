@@ -75,6 +75,11 @@ def create_app() -> FastAPI:
         logger.info("Shutting down Inference Matrix Agent services...")
         await server_manager.stop_health_monitoring()
         await frontend_client.close()
+        try:
+            await proxy.close_proxy()
+            logger.info("Closed shared upstream proxy client")
+        except Exception as e:  # noqa: BLE001 - shutdown must not crash on cleanup
+            logger.error(f"Failed to close shared upstream proxy client: {e}")
         logger.info("Agent shutdown complete")
 
     return app

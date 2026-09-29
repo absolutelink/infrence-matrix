@@ -16,6 +16,19 @@ from app.services.proxy import ProxyOperationExists, ServerProxy
 
 router = APIRouter(prefix="/proxy", tags=["proxy"])
 
+# One shared proxy (and therefore one bounded connection pool) for the whole
+# agent process. Per-request clients leaked a socket per call, and halogen-flash
+# keeps HTTP/1.1 connections alive, so the leaked sockets eventually starved
+# new inference dispatch of a descriptor against the single upstream listener.
+proxy = ServerProxy(server_manager)
+
+
+async def close_proxy() -> None:
+    """Release the shared proxy's pooled sockets at shutdown."""
+    if not proxy.client.is_closed:
+        await proxy.aclose()
+
+
 # llama.cpp error bodies carry their own {"error": {...}} envelope; return
 # them with the upstream status so clients can distinguish failures instead
 # of parsing an error object as a completion (which yields empty output).
@@ -91,7 +104,6 @@ async def proxy_request(
                 "Endpoint is not supported by halogen-flash-server",
             )
 
-    proxy = ServerProxy(server_manager)
     inference_request = path in {
         "v1/chat/completions",
         "v1/completions",

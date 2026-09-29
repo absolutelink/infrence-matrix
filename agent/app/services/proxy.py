@@ -34,13 +34,29 @@ class _SlotReservation:
 
 
 class ServerProxy:
-    """Proxies requests to llama.cpp servers."""
+    """Proxies requests to llama.cpp servers.
+
+    All mutable state lives on the injected ``server_manager``, so a single
+    shared instance can serve every request. The underlying ``httpx`` client
+    owns a bounded connection pool and must be closed at shutdown via
+    :meth:`aclose`; constructing one per request leaks a socket (and its
+    file descriptor) for every keep-alive upstream connection.
+    """
 
     def __init__(self, server_manager) -> None:
         self.server_manager = server_manager
         self.client = httpx.AsyncClient(
-            timeout=httpx.Timeout(300.0, connect=UPSTREAM_CONNECT_TIMEOUT_SECONDS)
+            timeout=httpx.Timeout(300.0, connect=UPSTREAM_CONNECT_TIMEOUT_SECONDS),
+            limits=httpx.Limits(
+                max_connections=settings.PROXY_MAX_CONNECTIONS,
+                max_keepalive_connections=settings.PROXY_MAX_KEEPALIVE_CONNECTIONS,
+                keepalive_expiry=settings.PROXY_KEEPALIVE_EXPIRY_SECONDS,
+            ),
         )
+
+    async def aclose(self) -> None:
+        """Close the shared upstream client and release pooled sockets."""
+        await self.client.aclose()
 
     def _get_server_port(self, server_id: str) -> int:
         """Get server port from server manager."""

@@ -1,8 +1,11 @@
 """Tests for transient upstream connection handling."""
 
 import asyncio
+import gc
 import logging
 import os
+import subprocess
+import sys
 from unittest.mock import AsyncMock, Mock, patch
 
 os.environ["AGENT_ID"] = "test-agent"
@@ -1026,9 +1029,11 @@ async def test_metrics_are_returned_as_prometheus_text(monkeypatch):
         model_path="/models/test.gguf", port=8091, slot_generation=3
     )
     response = Mock(is_error=False, text="requests_processing 2\n")
-    proxy = Mock()
-    proxy.proxy_request = AsyncMock(return_value=response)
-    monkeypatch.setattr(proxy_route, "ServerProxy", Mock(return_value=proxy))
+    # The route uses the module-level shared proxy, so patch its method rather
+    # than the ServerProxy class.
+    monkeypatch.setattr(
+        proxy_route.proxy, "proxy_request", AsyncMock(return_value=response)
+    )
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
@@ -1094,3 +1099,234 @@ async def test_operation_status_route_does_not_fall_through_to_proxy():
     assert operation_list.json()["complete"] is True
     assert operation_list.json()["operations"][0]["request_id"] == "operation-123"
     del proxy_route.server_manager._inference_operations
+
+
+def _counting_async_client_factory(counter: list, handler):
+    """Return an AsyncClient subclass that records every construction.
+
+    The transport is forced so a leaked per-request client cannot touch the
+    network; the test measures only how many clients were built.
+    """
+
+    class CountingAsyncClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            super().__init__(*args, **kwargs)
+            counter.append(self)
+
+    return CountingAsyncClient
+
+
+@pytest.mark.asyncio
+async def test_proxy_route_reuses_shared_client_no_per_request_leak(monkeypatch):
+    """Request handling must not build a new httpx.AsyncClient per request."""
+    from app.api.routes import proxy as proxy_route
+
+    # The route must expose one module-level shared proxy created at import.
+    shared_proxy = proxy_route.proxy
+    assert isinstance(shared_proxy, ServerProxy)
+
+    server_id = "shared-client-server"
+    proxy_route.server_manager.servers[server_id] = Mock()
+    proxy_route.server_manager.configs[server_id] = ServerConfig(
+        model_path="/models/test.gguf", port=8091, slot_generation=4
+    )
+    proxied = []
+
+    def handler(request):
+        proxied.append(request)
+        return httpx.Response(200, json={"model": "test"}, request=request)
+
+    # Point the shared proxy at a mock transport so the real proxy_request path
+    # runs without a live llama-server. Built before the counting window opens.
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(shared_proxy, "client", mock_client)
+
+    constructed: list = []
+    counter = _counting_async_client_factory(constructed, handler)
+    asgi_client = AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+    try:
+        # Any client built inside this window is a per-request leak.
+        with patch("app.services.proxy.httpx.AsyncClient", counter):
+            for _ in range(3):
+                result = await asgi_client.get(f"/proxy/{server_id}/v1/models")
+                assert result.status_code == 200
+    finally:
+        await asgi_client.aclose()
+        await mock_client.aclose()
+
+    assert constructed == []
+    assert proxy_route.proxy is shared_proxy
+    assert len(proxied) == 3
+
+    del proxy_route.server_manager.servers[server_id]
+    del proxy_route.server_manager.configs[server_id]
+
+
+_KEEPALIVE_SERVER_SCRIPT = r"""
+import socket
+import sys
+import threading
+import time
+
+
+def handle(conn):
+    buf = b""
+    try:
+        while True:
+            try:
+                data = conn.recv(65536)
+            except OSError:
+                break
+            if not data:
+                break
+            buf += data
+            while b"\r\n\r\n" in buf:
+                head, buf = buf.split(b"\r\n\r\n", 1)
+                length = 0
+                for line in head.split(b"\r\n")[1:]:
+                    if line.lower().startswith(b"content-length:"):
+                        length = int(line.split(b":", 1)[1].strip())
+                while len(buf) < length:
+                    more = conn.recv(65536)
+                    if not more:
+                        return
+                    buf += more
+                # Hold briefly so concurrent requests need distinct pooled
+                # connections instead of being strictly serialized.
+                time.sleep(0.02)
+                body = b'{"ok":true}'
+                conn.sendall(
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Type: application/json\r\n"
+                    b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                    b"Connection: keep-alive\r\n\r\n" + body
+                )
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
+listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+listener.bind(("127.0.0.1", 0))
+listener.listen(128)
+print(listener.getsockname()[1], flush=True)
+while True:
+    try:
+        conn, _ = listener.accept()
+    except OSError:
+        break
+    threading.Thread(target=handle, args=(conn,), daemon=True).start()
+"""
+
+
+class _KeepAliveUpstream:
+    """Real HTTP/1.1 keep-alive server in a child process.
+
+    Running it out of process keeps the server-side accepted sockets out of
+    ``/proc/self/fd`` so the measurement reflects only agent-side descriptors.
+    """
+
+    def __init__(self):
+        self._process = subprocess.Popen(
+            [sys.executable, "-c", _KEEPALIVE_SERVER_SCRIPT],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        line = self._process.stdout.readline().strip()
+        if not line:
+            raise RuntimeError("keep-alive upstream failed to start")
+        self.port = int(line)
+
+    def stop(self):
+        try:
+            self._process.terminate()
+            self._process.wait(timeout=5)
+        except Exception:  # noqa: BLE001 - best-effort teardown
+            self._process.kill()
+
+
+def _fd_count() -> int | None:
+    try:
+        return len(os.listdir("/proc/self/fd"))
+    except OSError:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_shared_proxy_bounded_fds_under_keepalive(monkeypatch):
+    """Descriptors must be capped by the pool bound, not by the request count."""
+    from app.api.routes import proxy as proxy_route
+
+    baseline = _fd_count()
+    if baseline is None:
+        pytest.skip("/proc/self/fd is unavailable")
+
+    upstream = _KeepAliveUpstream()
+    server_id = "keepalive-server"
+    manager = proxy_route.server_manager
+    manager.servers[server_id] = Mock()
+    manager.configs[server_id] = ServerConfig(
+        model_path="/models/test.gguf", port=upstream.port, slot_generation=1
+    )
+    shared_proxy = proxy_route.proxy
+    # Tight bounds: 30 leaked per-request clients would blow straight past this.
+    monkeypatch.setattr(settings, "PROXY_MAX_CONNECTIONS", 4)
+    monkeypatch.setattr(settings, "PROXY_MAX_KEEPALIVE_CONNECTIONS", 4)
+    bounded_proxy = ServerProxy(manager)
+    original_client = shared_proxy.client
+    monkeypatch.setattr(shared_proxy, "client", bounded_proxy.client)
+    n_requests = 30
+    try:
+        before = _fd_count()
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            results = await asyncio.gather(
+                *(
+                    client.get(f"/proxy/{server_id}/v1/models")
+                    for _ in range(n_requests)
+                )
+            )
+        assert all(r.status_code == 200 for r in results)
+        after = _fd_count()
+        assert after - before <= settings.PROXY_MAX_KEEPALIVE_CONNECTIONS + 2, (
+            f"fd delta {after - before} exceeded the keepalive pool bound"
+        )
+        assert not shared_proxy.client.is_closed
+    finally:
+        monkeypatch.setattr(shared_proxy, "client", original_client)
+        await bounded_proxy.aclose()
+        upstream.stop()
+        manager.servers.pop(server_id, None)
+        manager.configs.pop(server_id, None)
+
+    gc.collect()
+    settled = _fd_count()
+    assert settled - before <= 2, (
+        f"closing the proxy did not release pooled sockets: delta {settled - before}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_shutdown_closes_shared_proxy():
+    """The app shutdown handler must close the shared upstream client."""
+    from app.api.routes import proxy as proxy_route
+
+    assert callable(proxy_route.close_proxy)
+    assert not proxy_route.proxy.client.is_closed
+
+    try:
+        for handler in app.router.on_shutdown:
+            await handler()
+        assert proxy_route.proxy.client.is_closed
+        # Closing again is a no-op, not an error.
+        await proxy_route.close_proxy()
+        assert proxy_route.proxy.client.is_closed
+    finally:
+        proxy_route.proxy = ServerProxy(proxy_route.server_manager)
+        assert not proxy_route.proxy.client.is_closed
