@@ -28,25 +28,28 @@ Run 13 (full-suite run with rocinante): 2026-09-29 — **3 passed / 14 failed / 
 Run 13 post-check (00:38 UTC): **2 active / 9 queued** test leases remained; all registered agents reported `inference_slot_protocol=0`. With user approval, those 11 run-generated leases were terminalized as `integration_test_cleanup`; a follow-up DB check showed **0 active / 0 queued**. Protocol-capable agents still need to be deployed before validating agent-owned admission.
 Run 14 (full-suite run with rocinante, after warm-up): 2026-09-29 — **3 passed / 14 failed / 17 total**. Agent and backend close logs show two timed-out Responses requests ended upstream with HTTP 200 and `[DONE]`; their backend leases did not release. PostgreSQL shows an idle-in-transaction `server_instances` read blocking a lock convoy. Agents still report protocol 0.
 Run 14 post-check: with user approval, the 2 active and 9 queued Run 14 leases were terminalized as `integration_test_cleanup`; a follow-up DB check showed **0 active / 0 queued**.
+Run 15 (post-Responses keepalive follow-up, `90361e0`): 2026-09-29 — **17 passed / 0 failed / 17 total** against `rocinante`. The separate long-prefill SSE probe saw 2 keepalives followed by output text and `response.completed`. Prior Run 13/14 lock contention was not observed in this run; this result alone does not establish its root cause was fixed.
+
+The table shows the latest run's status; notes retain earlier failure context.
 
 | Test ID | Name | Status | Notes |
 |---|---|---|---|
-| `basic-response` | Basic Text Response | ⚠️ TIMEOUT (Run 13/14) | Run 13 overlapped cold start; Run 14 stalled after connection contention; passed Run 12 |
-| `assistant-phase` | Assistant Message Phase | ⚠️ TIMEOUT (Run 13/14) | Run 13 overlapped cold start; Run 14 stalled after connection contention; passed Run 12 |
+| `basic-response` | Basic Text Response | ✅ PASS (Run 15) | Run 13 overlapped cold start; Run 14 stalled after connection contention; passed Run 12 |
+| `assistant-phase` | Assistant Message Phase | ✅ PASS (Run 15) | Run 13 overlapped cold start; Run 14 stalled after connection contention; passed Run 12 |
 | `response-output-phase-schema` | Response Output Phase Schema | ✅ PASS | local schema fixture, no HTTP |
-| `streaming-response` | Streaming Response | ⚠️ TIMEOUT (Run 13/14) | Run 13 overlapped cold start; Run 14 timed out under queue/DB lock contention; passed Run 12 |
-| `websocket-response` | WebSocket Response | ⚠️ TIMEOUT (Run 13/14) | Terminal event not received within 30s; Run 14 upstream logged HTTP 200 + `[DONE]`; passed Run 12 |
-| `websocket-sequential-responses` | WebSocket Sequential Responses | ⚠️ TIMEOUT (Run 13/14) | Terminal event not received within 30s; passed Run 12 |
-| `websocket-continuation` | WebSocket Continuation | ⚠️ TIMEOUT (Run 13/14) | Terminal event not received within 30s; passed Run 12 |
-| `websocket-reconnect-store-false-recovery` | WebSocket Store False Reconnect Recovery | ⚠️ TIMEOUT (Run 13/14) | Terminal event not received within 30s; passed Run 12 |
+| `streaming-response` | Streaming Response | ✅ PASS (Run 15) | Run 13 overlapped cold start; Run 14 timed out under queue/DB lock contention; passed Run 12 |
+| `websocket-response` | WebSocket Response | ✅ PASS (Run 15) | Terminal event not received within 30s; Run 14 upstream logged HTTP 200 + `[DONE]`; passed Run 12 |
+| `websocket-sequential-responses` | WebSocket Sequential Responses | ✅ PASS (Run 15) | Terminal event not received within 30s; passed Run 12 |
+| `websocket-continuation` | WebSocket Continuation | ✅ PASS (Run 15) | Terminal event not received within 30s; passed Run 12 |
+| `websocket-reconnect-store-false-recovery` | WebSocket Store False Reconnect Recovery | ✅ PASS (Run 15) | Terminal event not received within 30s; passed Run 12 |
 | `websocket-previous-response-not-found` | WebSocket Missing Previous Response | ✅ PASS | |
-| `websocket-failed-continuation-evicts-cache` | WebSocket Failed Continuation Evicts Cache | ⚠️ TIMEOUT (Run 13/14) | Terminal event not received within 30s; passed Run 12 after call-ID validation |
-| `websocket-compact-new-chain` | WebSocket Compact New Chain | ⚠️ TIMEOUT (Run 13/14) | Request timed out during queue/DB lock contention; passed Run 12 |
-| `system-prompt` | System Prompt | ⚠️ TIMEOUT (Run 13/14) | Request timed out during queue/DB lock contention; passed Run 12 |
-| `tool-calling` | Tool Calling | ⚠️ TIMEOUT (Run 13/14) | Request timed out during queue/DB lock contention; passed Run 12 |
-| `image-input` | Image Input | ⚠️ TIMEOUT (Run 13/14) | Request timed out during queue/DB lock contention; passed Run 12 |
-| `multi-turn` | Multi-turn Conversation | ⚠️ TIMEOUT (Run 13/14) | Request timed out during queue/DB lock contention; passed Run 12 |
-| `compact-response` | Compaction Endpoint | ⚠️ TIMEOUT (Run 13/14) | Request timed out during queue/DB lock contention; passed Run 12 |
+| `websocket-failed-continuation-evicts-cache` | WebSocket Failed Continuation Evicts Cache | ✅ PASS (Run 15) | Terminal event not received within 30s; passed Run 12 after call-ID validation |
+| `websocket-compact-new-chain` | WebSocket Compact New Chain | ✅ PASS (Run 15) | Request timed out during queue/DB lock contention; passed Run 12 |
+| `system-prompt` | System Prompt | ✅ PASS (Run 15) | Request timed out during queue/DB lock contention; passed Run 12 |
+| `tool-calling` | Tool Calling | ✅ PASS (Run 15) | Request timed out during queue/DB lock contention; passed Run 12 |
+| `image-input` | Image Input | ✅ PASS (Run 15) | Request timed out during queue/DB lock contention; passed Run 12 |
+| `multi-turn` | Multi-turn Conversation | ✅ PASS (Run 15) | Request timed out during queue/DB lock contention; passed Run 12 |
+| `compact-response` | Compaction Endpoint | ✅ PASS (Run 15) | Request timed out during queue/DB lock contention; passed Run 12 |
 | `compact-missing-model` | Compaction Missing Required Model | ✅ PASS | |
 
 ## Failure clusters
@@ -60,7 +63,7 @@ Run 14 post-check: with user approval, the 2 active and 9 queued Run 14 leases w
 7. ~~**WS turns not persisted**~~ — FIXED (_persist_response in _stream_to_ws)
 8. ~~**Deploy deadlock: instance rows stuck "starting"**~~ — FIXED (registration promotes
    starting rows the agent reports running; heals 900s wait_until_ready deadlock)
-9. **WS 30s contention timeout (ACCEPTED as environment-bound)** — voyager streams
+9. **WS 30s contention timeout (intermittent; not observed Run 15)** — voyager streams
    15–40s of reasoning per turn at 7–12 tok/s; the harness arms a hard 30s timer per
    WS turn AND fires ~10 HTTP tests concurrently vs 4 llama-server slots. A WS
    generation cap (768 tokens, `WS_MAX_TOKENS` in `ws.py`) bounds generation, but
@@ -103,6 +106,11 @@ Run 14 post-check: with user approval, the 2 active and 9 queued Run 14 leases w
     processing blocked by the DB lock convoy, not the LLM dropping the stream. The deployed
     agents still reported `inference_slot_protocol=0`. With user approval, the 11 test
     leases were terminalized as `integration_test_cleanup`; active/queued count returned to 0.
+16. ~~**Responses client-visible idle after initial SSE events**~~ — FIXED in `90361e0`:
+    keepalives now span readiness, agent response headers, and discarded upstream lines.
+    A post-deploy long-prefill probe observed 2 keepalives followed by output and a
+    terminal event. Run 15 passed all 17 compliance tests. The separate Run 14 DB
+    lock convoy was not reproduced, but is not proven resolved by this change.
 
 ## History
 
@@ -124,3 +132,4 @@ Run 14 post-check: with user approval, the 2 active and 9 queued Run 14 leases w
 | 2026-09-24 | WS persist + registration heal (pushed) | 10 | 7 | WS persistence fixed; deploy deadlock (instance stuck "starting" → 900s wait_until_ready) healed by registration promotion. All non-WS tests pass. Remaining: WS contention timeouts (30s timer vs 15–40s thinking-model turns under load), image-input (no mmproj + swallowed upstream 500), WS persist serialization bug (`resource.output` dicts → model_dump crash; fix in `_coerced_output_items` pending deploy), compact 500 (agent proxy ReadTimeout under contention) |
 | 2026-09-24 | mmproj resolve + error relay (pushed) | 11 | 6 | image-input FIXED: mmproj-F16.gguf downloaded+loaded (`--mmproj` correct after mmproj_source always sent); agent proxy relays upstream 500s (was 200+empty output). WS persist serialization verified end-to-end. Regression sweep (basic-response, compact-response, websocket-response standalone) all pass. Remaining 6: WS contention timeouts only |
 | 2026-09-24 | WS generation cap (pushed) | 11 | 6 | Cap (768 tokens) bounds WS generation but turns still queue behind 4 busy slots (HTTP image turn held one 124s). **Accepted as environment-bound** — every test passes standalone. Final conformance state: 11/17 full-suite, 17/17 individually runnable. Future lever: `--parallel N` slots on llama-server |
+| 2026-09-29 | `90361e0` Responses SSE keepalives across setup and upstream parsing | 17 | 0 | Full suite against `rocinante`; no failures. The separate long-prefill probe saw 2 keepalives and output after the gap. Run 14 lock contention was not reproduced. |

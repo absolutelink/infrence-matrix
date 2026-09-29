@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from app.api.routes.v1 import v1_completions
@@ -317,6 +318,41 @@ async def test_responses_cancel_task_while_waiting_for_headers(
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(pending, 1)
     assert cancelled.is_set()
+    assert events == ["client_closed", "released"]
+    lease.release.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_responses_header_error_closes_client_and_releases_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class FailingResponse(FakeStreamResponse):
+        async def __aenter__(self) -> FakeStreamResponse:
+            raise httpx.ReadTimeout("agent headers timed out")
+
+    class ClosedClient(FakeClient):
+        async def __aexit__(self, *args: object) -> None:
+            events.append("client_closed")
+
+    _install_client(monkeypatch, responses_router, ClosedClient(FailingResponse([])))
+    monkeypatch.setattr(
+        responses_router,
+        "ensure_server_ready_by_id",
+        AsyncMock(return_value=SimpleNamespace(agent_id="agent-id")),
+    )
+    monkeypatch.setattr(
+        responses_router.agent_manager,
+        "get_agent",
+        AsyncMock(return_value=SimpleNamespace(host="agent", port=8080)),
+    )
+    lease = InferenceLeaseHandle("request-id", SimpleNamespace(), uuid.uuid4())
+    lease.release = AsyncMock(side_effect=lambda: events.append("released"))
+    stream = _responses_stream(lease)
+    frames = [frame async for frame in stream]
+    assert any(frame.startswith("event: response.failed") for frame in frames)
+    assert frames[-1] == "data: [DONE]\n\n"
     assert events == ["client_closed", "released"]
     lease.release.assert_awaited_once()
 
