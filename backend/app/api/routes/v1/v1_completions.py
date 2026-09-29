@@ -189,6 +189,7 @@ async def _stream_completion_via_agent(
         if not agent:
             raise ValueError(f"Agent {agent_id} not found")
 
+        lease.mark_upstream_started()
         async with httpx.AsyncClient(timeout=300.0) as client:
             proxy_url = (
                 f"http://{agent.host}:{agent.port}/proxy/{server_id}/v1/completions"
@@ -198,7 +199,10 @@ async def _stream_completion_via_agent(
                 "POST",
                 proxy_url,
                 json=payload,
-                headers={"X-Inference-Slot-Generation": str(lease.slot_generation)},
+                headers={
+                    "X-Inference-Slot-Generation": str(lease.slot_generation),
+                    "X-Inference-Request-ID": lease.request_id,
+                },
             ) as response:
                 response.raise_for_status()
 
@@ -426,8 +430,11 @@ async def create_completion(
                 "POST",
                 f"/proxy/{server.id}/v1/completions",
                 _build_payload(request, stream=False),
-                timeout=300.0,
-                headers={"X-Inference-Slot-Generation": str(lease.slot_generation)},
+                timeout=1800.0,
+                headers={
+                    "X-Inference-Slot-Generation": str(lease.slot_generation),
+                    "X-Inference-Request-ID": lease.request_id,
+                },
             )
         )
 

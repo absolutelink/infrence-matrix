@@ -73,6 +73,9 @@ class AgentManager:
                 existing.status = "online"
                 existing.platform = agent_data.get("platform", "llamacpp")
                 existing.type = agent_data.get("type", "generic")
+                existing.inference_slot_protocol = max(
+                    int(agent_data.get("inference_slot_protocol", 0)), 0
+                )
                 existing.host = agent_data["host"]
                 existing.port = agent_data["port"]
                 existing.gpu_info = agent_data.get("gpu_info", {})
@@ -86,6 +89,9 @@ class AgentManager:
                     name=name,
                     platform=agent_data.get("platform", "llamacpp"),
                     type=agent_data.get("type", "generic"),
+                    inference_slot_protocol=max(
+                        int(agent_data.get("inference_slot_protocol", 0)), 0
+                    ),
                     host=agent_data["host"],
                     port=agent_data["port"],
                     gpu_info=agent_data.get("gpu_info", {}),
@@ -744,6 +750,7 @@ class AgentManager:
                     "name": agent.name,
                     "platform": agent.platform,
                     "type": agent.type,
+                    "inference_slot_protocol": agent.inference_slot_protocol,
                     "host": agent.host,
                     "port": agent.port,
                     "status": agent.status,

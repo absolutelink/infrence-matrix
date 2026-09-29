@@ -302,8 +302,11 @@ async def _complete(
             "POST",
             f"/proxy/{server_id}/v1/chat/completions",
             payload,
-            timeout=300.0,
-            headers={"X-Inference-Slot-Generation": str(lease.slot_generation)},
+            timeout=1800.0,
+            headers={
+                "X-Inference-Slot-Generation": str(lease.slot_generation),
+                "X-Inference-Request-ID": lease.request_id,
+            },
         )
     )
 
@@ -542,12 +545,17 @@ async def _stream_events(
         proxy_url = (
             f"http://{agent.host}:{agent.port}/proxy/{server_id}/v1/chat/completions"
         )
+        if lease is not None:
+            lease.mark_upstream_started()
         async with httpx.AsyncClient(timeout=300.0) as client:
             async with client.stream(
                 "POST",
                 proxy_url,
                 json=payload,
-                headers={"X-Inference-Slot-Generation": str(lease.slot_generation)}
+                headers={
+                    "X-Inference-Slot-Generation": str(lease.slot_generation),
+                    "X-Inference-Request-ID": lease.request_id,
+                }
                 if lease is not None
                 else None,
             ) as upstream:
@@ -1153,8 +1161,11 @@ async def compact_response(
                 "POST",
                 f"/proxy/{server.id}/v1/chat/completions",
                 llama_payload,
-                timeout=300.0,
-                headers={"X-Inference-Slot-Generation": str(lease.slot_generation)},
+                timeout=1800.0,
+                headers={
+                    "X-Inference-Slot-Generation": str(lease.slot_generation),
+                    "X-Inference-Request-ID": lease.request_id,
+                },
             )
         )
         choice = (response.get("choices") or [{}])[0]

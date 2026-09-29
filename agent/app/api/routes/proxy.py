@@ -6,7 +6,13 @@ from fastapi.responses import StreamingResponse
 
 from app.api.routes.servers import server_manager
 from app.core.config import settings
-from app.services.proxy import ServerProxy
+from app.services.inference_operations import (
+    cancel_operation,
+    get_operation,
+    list_operations,
+    operation_exists,
+)
+from app.services.proxy import ProxyOperationExists, ServerProxy
 
 router = APIRouter(prefix="/proxy", tags=["proxy"])
 
@@ -28,6 +34,33 @@ def _is_supported_halogen_flash_path(path: str) -> bool:
     return path in HALOGEN_FLASH_PATHS
 
 
+@router.get("/{server_id}/operations/{request_id}")
+async def get_inference_operation(server_id: str, request_id: str) -> dict:
+    operation = get_operation(server_manager, request_id, server_id)
+    if operation is None:
+        return {"request_id": request_id, "status": "unknown"}
+    return operation
+
+
+@router.get("/{server_id}/operations")
+async def list_inference_operations(server_id: str) -> dict:
+    return {
+        "complete": True,
+        "operations": list_operations(server_manager, server_id),
+    }
+
+
+@router.post("/{server_id}/operations/{request_id}/cancel")
+async def cancel_inference_operation(server_id: str, request_id: str) -> dict:
+    accepted = cancel_operation(server_manager, request_id, server_id)
+    operation = get_operation(server_manager, request_id, server_id)
+    return {
+        "request_id": request_id,
+        "status": operation["status"] if operation else "unknown",
+        "cancelled": accepted,
+    }
+
+
 @router.api_route(
     "/{server_id}/{path:path}",
     methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
@@ -39,6 +72,9 @@ async def proxy_request(
     request: Request,
     slot_generation: int | None = Header(
         default=None, alias="X-Inference-Slot-Generation"
+    ),
+    inference_request_id: str | None = Header(
+        default=None, alias="X-Inference-Request-ID"
     ),
 ) -> StreamingResponse | dict:
     """Proxy request to llama.cpp server."""
@@ -56,6 +92,20 @@ async def proxy_request(
             )
 
     proxy = ServerProxy(server_manager)
+    inference_request = path in {
+        "v1/chat/completions",
+        "v1/completions",
+        "v1/embeddings",
+    }
+    if (
+        inference_request
+        and inference_request_id is not None
+        and operation_exists(server_manager, inference_request_id)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Inference operation {inference_request_id} already exists",
+        )
 
     body = None
     if request.method in ["POST", "PUT", "PATCH"]:
@@ -69,6 +119,8 @@ async def proxy_request(
                 f"/{path}",
                 body,
                 expected_slot_generation=slot_generation,
+                enforce_capacity=inference_request,
+                operation_id=inference_request_id,
             ),
             media_type="text/event-stream",
             headers={
@@ -86,7 +138,11 @@ async def proxy_request(
                 dict(request.headers),
                 body,
                 expected_slot_generation=slot_generation,
+                enforce_capacity=inference_request,
+                operation_id=inference_request_id,
             )
+        except ProxyOperationExists as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 409:
                 raise HTTPException(409, "Inference slot generation changed") from exc

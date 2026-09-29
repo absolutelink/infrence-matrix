@@ -279,6 +279,9 @@ class HalogenServerManager:
                 "port": config.api_port,
                 "slot_generation": config.slot_generation,
                 "effective_capacity": self.get_effective_capacity(server_id),
+                "active_inference_requests": getattr(
+                    self, "_active_inference_requests", {}
+                ).get(server_id, 0),
             },
         )
         return True
@@ -398,6 +401,9 @@ class HalogenServerManager:
             "uptime_seconds": time.time() - self.start_times[server_id],
             "slot_generation": config.slot_generation,
             "effective_capacity": self.get_effective_capacity(server_id),
+            "active_inference_requests": getattr(
+                self, "_active_inference_requests", {}
+            ).get(server_id, 0),
         }
 
     def get_server_logs(

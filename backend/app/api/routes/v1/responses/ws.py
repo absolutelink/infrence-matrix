@@ -200,6 +200,7 @@ async def _stream_to_ws(
         proxy_url = (
             f"http://{agent.host}:{agent.port}/proxy/{server.id}/v1/chat/completions"
         )
+        lease.mark_upstream_started()
         finish_reason: str | None = None
         final_usage: dict[str, Any] = {}
         fallback_chars = 0
@@ -208,7 +209,10 @@ async def _stream_to_ws(
                 "POST",
                 proxy_url,
                 json=payload,
-                headers={"X-Inference-Slot-Generation": str(lease.slot_generation)},
+                headers={
+                    "X-Inference-Slot-Generation": str(lease.slot_generation),
+                    "X-Inference-Request-ID": lease.request_id,
+                },
             ) as upstream:
                 upstream.raise_for_status()
                 lines = upstream.aiter_lines()

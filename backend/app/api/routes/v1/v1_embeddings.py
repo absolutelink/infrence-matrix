@@ -118,8 +118,11 @@ async def create_embedding(
                     "input": inputs,
                     "encoding_format": request.encoding_format,
                 },
-                timeout=300.0,
-                headers={"X-Inference-Slot-Generation": str(lease.slot_generation)},
+                timeout=1800.0,
+                headers={
+                    "X-Inference-Slot-Generation": str(lease.slot_generation),
+                    "X-Inference-Request-ID": lease.request_id,
+                },
             )
         )
         # Capture before the finally's release cooldown contaminates it.

@@ -60,6 +60,7 @@ class FakeClient:
 
 class FakeLease:
     def __init__(self, events: list[str], server: object | None = None) -> None:
+        self.request_id = "fake-request-id"
         self.slot_generation = 23
         self.server = server
         self.lost = asyncio.Event()
@@ -162,7 +163,10 @@ async def test_legacy_completion_releases_before_usage_and_done(
     assert '"text":"ok"' in content
     assert '"choices":[]' in usage
     assert events[:2] == ["upstream_closed", "released"]
-    assert client.stream_calls[0]["headers"] == {"X-Inference-Slot-Generation": "23"}
+    assert client.stream_calls[0]["headers"] == {
+        "X-Inference-Slot-Generation": "23",
+        "X-Inference-Request-ID": "fake-request-id",
+    }
 
     done = await anext(stream)
     assert done == "data: [DONE]\n\n"
@@ -228,7 +232,10 @@ async def test_responses_sse_releases_before_terminal_event_and_persistence(
     assert events == ["released", "terminal", "persisted"]
     assert lease.upstream_started
     assert frames[-1] == "data: [DONE]\n\n"
-    assert client.stream_calls[0]["headers"] == {"X-Inference-Slot-Generation": "23"}
+    assert client.stream_calls[0]["headers"] == {
+        "X-Inference-Slot-Generation": "23",
+        "X-Inference-Request-ID": "fake-request-id",
+    }
 
 
 @pytest.mark.asyncio
@@ -277,4 +284,7 @@ async def test_responses_websocket_propagates_disconnect_and_releases(
 
     assert len(acquire_callbacks) == 1
     lease.release.assert_awaited_once()
-    assert client.stream_calls[0]["headers"] == {"X-Inference-Slot-Generation": "31"}
+    assert client.stream_calls[0]["headers"] == {
+        "X-Inference-Slot-Generation": "31",
+        "X-Inference-Request-ID": "request-id",
+    }

@@ -420,6 +420,9 @@ class LlamaServerManager:
                     "port": config.port,
                     "slot_generation": config.slot_generation,
                     "effective_capacity": self.get_effective_capacity(server_id),
+                    "active_inference_requests": getattr(
+                        self, "_active_inference_requests", {}
+                    ).get(server_id, 0),
                 },
             )
 
@@ -674,6 +677,9 @@ class LlamaServerManager:
             "uptime_seconds": self.get_server_uptime(server_id),
             "slot_generation": self.configs[server_id].slot_generation,
             "effective_capacity": self.get_effective_capacity(server_id),
+            "active_inference_requests": getattr(
+                self, "_active_inference_requests", {}
+            ).get(server_id, 0),
         }
 
 

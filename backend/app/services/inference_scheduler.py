@@ -286,6 +286,8 @@ class InferenceScheduler:
     def __init__(self) -> None:
         self._admission_locks: dict[uuid.UUID, asyncio.Lock] = {}
         self._reconciliation_task: asyncio.Task[None] | None = None
+        self._last_reconciliation_at: datetime | None = None
+        self._last_reconciliation_error: str | None = None
 
     def start_reconciliation(self) -> None:
         """Start cleanup for leases left behind by failed requests or restarts."""
@@ -308,9 +310,12 @@ class InferenceScheduler:
             await asyncio.sleep(RECONCILIATION_INTERVAL_SECONDS)
             try:
                 await self.reconcile_stale_leases()
+                self._last_reconciliation_at = datetime.now(UTC)
+                self._last_reconciliation_error = None
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as error:
+                self._last_reconciliation_error = str(error)
                 logger.exception("Inference lease reconciliation failed")
 
     async def reconcile_persisted_leases(self) -> int:
@@ -318,9 +323,153 @@ class InferenceScheduler:
         return await self.reconcile_stale_leases()
 
     async def reconcile_stale_leases(self) -> int:
-        """Expire queued work and fence servers whose active ownership was lost."""
+        """Reconcile queue deadlines and agent-owned inference operations."""
         now = datetime.now(UTC)
         stops: list[tuple[uuid.UUID, uuid.UUID, int]] = []
+        reconciled_operation_count = 0
+
+        # An expired DB renewal does not prove the agent's upstream connection
+        # ended. Ask the agent before terminalizing healthy-server operations.
+        async with AsyncSessionMaker() as session:
+            old_generation_leases = list(
+                (
+                    await session.execute(
+                        select(InferenceLease.id)
+                        .join(
+                            ServerInstance,
+                            ServerInstance.id == InferenceLease.server_instance_id,
+                        )
+                        .where(
+                            InferenceLease.status == "active",
+                            InferenceLease.slot_generation.is_distinct_from(
+                                ServerInstance.slot_generation
+                            ),
+                        )
+                    )
+                ).scalars()
+            )
+            expired_candidates = list(
+                (
+                    await session.execute(
+                        select(
+                            InferenceLease,
+                            ServerInstance,
+                            Agent.inference_slot_protocol,
+                        )
+                        .join(
+                            ServerInstance,
+                            ServerInstance.id == InferenceLease.server_instance_id,
+                        )
+                        .join(Agent, Agent.id == ServerInstance.agent_id)
+                        .where(
+                            InferenceLease.status == "active",
+                            InferenceLease.lease_expires_at <= now,
+                            ServerInstance.status == "running",
+                            ServerInstance.health_status == "healthy",
+                            InferenceLease.slot_generation
+                            == ServerInstance.slot_generation,
+                        )
+                    )
+                ).all()
+            )
+
+        operations_by_server: dict[
+            uuid.UUID, tuple[ServerInstance, list[InferenceLease]]
+        ] = {}
+        for lease, server, protocol in expired_candidates:
+            if int(protocol or 0) < 1:
+                continue
+            entry = operations_by_server.setdefault(server.id, (server, []))
+            entry[1].append(lease)
+
+        operation_results: dict[uuid.UUID, str] = {}
+        deferred_operation_ids: set[uuid.UUID] = set()
+        query_limit = asyncio.Semaphore(10)
+
+        async def _query_server_operations(
+            server: ServerInstance, leases: list[InferenceLease]
+        ):
+            async with query_limit:
+                try:
+                    response = await agent_manager.send_to_agent(
+                        str(server.agent_id),
+                        "GET",
+                        f"/proxy/{server.id}/operations",
+                        timeout=5.0,
+                    )
+                except Exception:
+                    deferred_operation_ids.update(lease.id for lease in leases)
+                    logger.debug(
+                        "Unable to query agent operations for server %s during reconciliation",
+                        server.id,
+                        exc_info=True,
+                    )
+                    return
+                if (
+                    not isinstance(response, dict)
+                    or response.get("complete") is not True
+                ):
+                    deferred_operation_ids.update(lease.id for lease in leases)
+                    return
+                reported = {
+                    operation.get("request_id"): operation
+                    for operation in response.get("operations", [])
+                    if isinstance(operation, dict) and operation.get("request_id")
+                }
+                for lease in leases:
+                    status = reported.get(lease.request_id)
+                    if (
+                        status is not None
+                        and status.get("slot_generation") == lease.slot_generation
+                        and status.get("status")
+                        in {
+                            "queued",
+                            "active",
+                            "cancelling",
+                            "completed",
+                            "cancelled",
+                            "failed",
+                        }
+                    ):
+                        operation_results[lease.id] = status["status"]
+                    else:
+                        # A complete snapshot confirms that this request is no
+                        # longer represented by a matching agent operation.
+                        operation_results[lease.id] = "unknown"
+
+        await asyncio.gather(
+            *(
+                _query_server_operations(server, leases)
+                for server, leases in operations_by_server.values()
+            )
+        )
+
+        live_operation_ids = [
+            lease_id
+            for lease_id, status in operation_results.items()
+            if status in {"queued", "active", "cancelling"}
+        ]
+        completed_operation_ids = [
+            lease_id
+            for lease_id, status in operation_results.items()
+            if status == "completed"
+        ]
+        cancelled_operation_ids = [
+            lease_id
+            for lease_id, status in operation_results.items()
+            if status == "cancelled"
+        ]
+        failed_operation_ids = [
+            lease_id
+            for lease_id, status in operation_results.items()
+            if status == "failed"
+        ]
+        unknown_operation_ids = [
+            lease_id
+            for lease_id, status in operation_results.items()
+            if status == "unknown"
+        ]
+
         async with AsyncSessionMaker() as session:
             expired_queued = await session.execute(
                 update(InferenceLease)
@@ -334,6 +483,55 @@ class InferenceScheduler:
                     released_at=now,
                 )
             )
+            old_generation_failed = None
+            if old_generation_leases:
+                old_generation_failed = await session.execute(
+                    update(InferenceLease)
+                    .where(
+                        InferenceLease.id.in_(old_generation_leases),
+                        InferenceLease.status == "active",
+                    )
+                    .values(
+                        status="failed",
+                        terminal_reason="server_generation_changed",
+                        released_at=now,
+                    )
+                )
+            renewing_operation_ids = set(live_operation_ids) | deferred_operation_ids
+            if renewing_operation_ids:
+                await session.execute(
+                    update(InferenceLease)
+                    .where(
+                        InferenceLease.id.in_(renewing_operation_ids),
+                        InferenceLease.status == "active",
+                        InferenceLease.lease_expires_at <= now,
+                    )
+                    .values(
+                        lease_expires_at=now
+                        + timedelta(seconds=ACTIVE_LEASE_TTL_SECONDS)
+                    )
+                )
+            for lease_ids, terminal_status, reason in (
+                (completed_operation_ids, "released", "completed"),
+                (cancelled_operation_ids, "cancelled", "agent_cancelled"),
+                (failed_operation_ids, "failed", "agent_operation_failed"),
+                (unknown_operation_ids, "failed", "agent_operation_unknown"),
+            ):
+                if lease_ids:
+                    terminalized = await session.execute(
+                        update(InferenceLease)
+                        .where(
+                            InferenceLease.id.in_(lease_ids),
+                            InferenceLease.status == "active",
+                            InferenceLease.lease_expires_at <= now,
+                        )
+                        .values(
+                            status=terminal_status,
+                            terminal_reason=reason,
+                            released_at=now,
+                        )
+                    )
+                    reconciled_operation_count += int(terminalized.rowcount or 0)
             result = await session.execute(
                 select(InferenceLease, ServerInstance)
                 .outerjoin(
@@ -415,7 +613,17 @@ class InferenceScheduler:
                 )
             except Exception:
                 logger.exception("Unable to stop fenced server %s", server_id)
-        count = int(expired_queued.rowcount or 0) + len(stale)
+        old_generation_count = (
+            int(old_generation_failed.rowcount or 0)
+            if old_generation_failed is not None
+            else 0
+        )
+        count = (
+            int(expired_queued.rowcount or 0)
+            + old_generation_count
+            + reconciled_operation_count
+            + len(stale)
+        )
         if count:
             logger.warning("Reconciled %d stale inference lease(s)", count)
         return count
@@ -653,7 +861,6 @@ class InferenceScheduler:
         self,
         lease_id: uuid.UUID,
         server: ServerInstance,
-        capacity: int,
     ) -> InferenceLeaseHandle | None:
         now = datetime.now(UTC)
         async with AsyncSessionMaker() as session:
@@ -665,8 +872,8 @@ class InferenceScheduler:
             ).scalar_one()
             if not benchmark_lock:
                 return None
-            # Lock the server row so two backend workers cannot claim its last
-            # known capacity at the same time.
+            # The row lock keeps durable queue claims short and serialized for
+            # this server; protocol-1 agents own live slot admission.
             locked = (
                 await session.execute(
                     select(ServerInstance)
@@ -687,6 +894,28 @@ class InferenceScheduler:
                 ready_for = (now - ready_at).total_seconds()
                 if 0 <= ready_for < SERVER_READY_COOLDOWN_SECONDS:
                     return None
+            protocol = (
+                await session.execute(
+                    select(Agent.inference_slot_protocol).where(
+                        Agent.id == locked.agent_id
+                    )
+                )
+            ).scalar_one_or_none()
+            if int(protocol or 0) < 1:
+                legacy_active = (
+                    await session.execute(
+                        select(func.count(InferenceLease.id)).where(
+                            InferenceLease.server_instance_id == locked.id,
+                            InferenceLease.status == "active",
+                            InferenceLease.slot_generation == locked.slot_generation,
+                            InferenceLease.lease_expires_at > now,
+                        )
+                    )
+                ).scalar_one()
+                if int(legacy_active) >= server_capacity(locked):
+                    return None
+            # Wait on the true compatible head rather than skipping a row
+            # another worker is claiming on a different eligible server.
             oldest_compatible = (
                 await session.execute(
                     select(InferenceLease)
@@ -704,22 +933,11 @@ class InferenceScheduler:
                         ),
                     )
                     .order_by(InferenceLease.queued_at, InferenceLease.id)
-                    .with_for_update(skip_locked=True)
+                    .with_for_update()
                     .limit(1)
                 )
             ).scalar_one_or_none()
             if oldest_compatible is None or oldest_compatible.id != lease_id:
-                return None
-
-            active = (
-                await session.execute(
-                    select(func.count(InferenceLease.id)).where(
-                        InferenceLease.server_instance_id == locked.id,
-                        InferenceLease.status == "active",
-                    )
-                )
-            ).scalar_one()
-            if int(active) >= server_capacity(locked):
                 return None
 
             lease = oldest_compatible
@@ -871,21 +1089,10 @@ class InferenceScheduler:
                 candidates = await self._candidates(
                     model_id, preferred_server_id, required_agent_id
                 )
-                scored: list[tuple[ServerInstance, int, int]] = []
                 for server in candidates:
                     if server.status != "running":
                         continue
-                    capacity = server_capacity(server)
-                    active = await self._active_leases(server.id)
-                    scored.append((server, capacity, active))
-                scored.sort(
-                    key=lambda item: (
-                        -(item[1] - item[2]),
-                        item[2],
-                    )
-                )
-                for server, capacity, _active in scored:
-                    lease = await self._claim(queued.id, server, capacity)
+                    lease = await self._claim(queued.id, server)
                     if lease:
                         # A disconnect can race the atomic queue claim. Do not
                         # return an active lease that the response will never
@@ -913,9 +1120,7 @@ class InferenceScheduler:
                         await self._cancel(queued.id)
                         raise InferenceRequestCancelled
                     await self._ensure_queued(queued.id)
-                    lease = await self._claim(
-                        queued.id, prepared, server_capacity(prepared)
-                    )
+                    lease = await self._claim(queued.id, prepared)
                     if lease:
                         # A disconnect can race the atomic queue claim. Do not
                         # return an active lease that the streaming response
@@ -993,11 +1198,19 @@ class InferenceScheduler:
             )
 
         lease_counts: dict[uuid.UUID, int] = {}
+        stale_lease_counts: dict[uuid.UUID, int] = {}
+        now = datetime.now(UTC)
+        stale_active = 0
         for lease in active_leases:
             if lease.server_instance_id is not None:
                 lease_counts[lease.server_instance_id] = (
                     lease_counts.get(lease.server_instance_id, 0) + 1
                 )
+                if lease.lease_expires_at <= now:
+                    stale_active += 1
+                    stale_lease_counts[lease.server_instance_id] = (
+                        stale_lease_counts.get(lease.server_instance_id, 0) + 1
+                    )
         server_status: list[dict[str, Any]] = []
         total_capacity = 0
         total_active = 0
@@ -1017,6 +1230,7 @@ class InferenceScheduler:
                     "model_id": str(server.model_id),
                     "capacity": capacity,
                     "active": active,
+                    "stale_active": stale_lease_counts.get(server.id, 0),
                     "available": available,
                     "telemetry_known": not booting,
                     "state": "booting" if booting else "ready",
@@ -1028,8 +1242,19 @@ class InferenceScheduler:
             "data": {
                 "queued": queued,
                 "active": total_active,
+                "stale_active": stale_active,
                 "available": total_available,
                 "capacity": total_capacity,
+                "reconciliation_running": (
+                    self._reconciliation_task is not None
+                    and not self._reconciliation_task.done()
+                ),
+                "last_reconciliation_at": (
+                    self._last_reconciliation_at.isoformat()
+                    if self._last_reconciliation_at
+                    else None
+                ),
+                "last_reconciliation_error": self._last_reconciliation_error,
                 "servers": server_status,
             },
         }
