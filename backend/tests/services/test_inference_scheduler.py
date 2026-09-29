@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -167,7 +168,8 @@ def test_default_server_capacity_is_one():
 
 
 @pytest.mark.asyncio
-async def test_release_completes_when_request_task_is_cancelled():
+async def test_release_completes_when_request_task_is_cancelled(caplog):
+    caplog.set_level(logging.INFO)
     commit_started = asyncio.Event()
     allow_commit = asyncio.Event()
     session = AsyncMock()
@@ -203,6 +205,9 @@ async def test_release_completes_when_request_task_is_cancelled():
 
     session.execute.assert_awaited_once()
     session.commit.assert_awaited_once()
+    assert "inference_lease_release_begin request_id=request-1" in caplog.text
+    assert "inference_lease_release_complete request_id=request-1" in caplog.text
+    assert "request_cancelled=true" in caplog.text
 
 
 @pytest.mark.asyncio

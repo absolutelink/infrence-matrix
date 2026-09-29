@@ -193,8 +193,17 @@ class InferenceLeaseHandle:
 
     async def release(self) -> None:
         """Release the lease in a short, independent transaction."""
+        started_at = asyncio.get_running_loop().time()
+        server_id = getattr(self.server, "id", "-")
+        logger.info(
+            "inference_lease_release_begin request_id=%s lease_id=%s server_id=%s generation=%s",
+            self.request_id,
+            self.lease_id,
+            server_id,
+            self.slot_generation,
+        )
 
-        async def _release() -> None:
+        async def _release() -> int:
             await self._stop_disconnect_monitor()
             if self._renewal_task is not None:
                 self._renewal_task.cancel()
@@ -202,7 +211,7 @@ class InferenceLeaseHandle:
                 self._renewal_task = None
             await asyncio.sleep(UPSTREAM_COMPLETION_COOLDOWN_SECONDS)
             async with AsyncSessionMaker() as session:
-                await session.execute(
+                result = await session.execute(
                     update(InferenceLease)
                     .where(
                         InferenceLease.id == self.lease_id,
@@ -216,14 +225,40 @@ class InferenceLeaseHandle:
                     )
                 )
                 await session.commit()
+                return int(result.rowcount or 0)
 
         # ASGI cancels the request task when a client disconnects. Shield the
         # database update so cancellation cannot strand the slot as active.
         release_task = asyncio.create_task(_release())
         try:
-            await asyncio.shield(release_task)
+            updated = await asyncio.shield(release_task)
+            logger.info(
+                "inference_lease_release_complete request_id=%s lease_id=%s server_id=%s updated=%s duration_ms=%.1f",
+                self.request_id,
+                self.lease_id,
+                server_id,
+                updated,
+                (asyncio.get_running_loop().time() - started_at) * 1000.0,
+            )
         except asyncio.CancelledError:
-            await asyncio.shield(release_task)
+            updated = await asyncio.shield(release_task)
+            logger.info(
+                "inference_lease_release_complete request_id=%s lease_id=%s server_id=%s updated=%s duration_ms=%.1f request_cancelled=true",
+                self.request_id,
+                self.lease_id,
+                server_id,
+                updated,
+                (asyncio.get_running_loop().time() - started_at) * 1000.0,
+            )
+            raise
+        except Exception:
+            logger.exception(
+                "inference_lease_release_error request_id=%s lease_id=%s server_id=%s duration_ms=%.1f",
+                self.request_id,
+                self.lease_id,
+                server_id,
+                (asyncio.get_running_loop().time() - started_at) * 1000.0,
+            )
             raise
 
     async def cancel(self) -> None:

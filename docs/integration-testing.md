@@ -26,25 +26,27 @@ Run 11 (full-suite regression sweep): 2026-09-25 — **17 passed / 0 failed**
 Run 12 (full-suite regression sweep with rocinante): 2026-09-27 — **17 passed / 0 failed**
 Run 13 (full-suite run with rocinante): 2026-09-29 — **3 passed / 14 failed / 17 total** (not a clean baseline: the application service restarted and pulled an image while the suite was running; rocinante cold-started during the run)
 Run 13 post-check (00:38 UTC): **2 active / 9 queued** test leases remained; all registered agents reported `inference_slot_protocol=0`. With user approval, those 11 run-generated leases were terminalized as `integration_test_cleanup`; a follow-up DB check showed **0 active / 0 queued**. Protocol-capable agents still need to be deployed before validating agent-owned admission.
+Run 14 (full-suite run with rocinante, after warm-up): 2026-09-29 — **3 passed / 14 failed / 17 total**. Agent and backend close logs show two timed-out Responses requests ended upstream with HTTP 200 and `[DONE]`; their backend leases did not release. PostgreSQL shows an idle-in-transaction `server_instances` read blocking a lock convoy. Agents still report protocol 0.
+Run 14 post-check: with user approval, the 2 active and 9 queued Run 14 leases were terminalized as `integration_test_cleanup`; a follow-up DB check showed **0 active / 0 queued**.
 
 | Test ID | Name | Status | Notes |
 |---|---|---|---|
-| `basic-response` | Basic Text Response | ⚠️ TIMEOUT (Run 13) | Timed out during concurrent deployment/model cold start; passed Run 12 |
-| `assistant-phase` | Assistant Message Phase | ⚠️ TIMEOUT (Run 13) | Timed out during concurrent deployment/model cold start; passed Run 12 |
+| `basic-response` | Basic Text Response | ⚠️ TIMEOUT (Run 13/14) | Run 13 overlapped cold start; Run 14 stalled after connection contention; passed Run 12 |
+| `assistant-phase` | Assistant Message Phase | ⚠️ TIMEOUT (Run 13/14) | Run 13 overlapped cold start; Run 14 stalled after connection contention; passed Run 12 |
 | `response-output-phase-schema` | Response Output Phase Schema | ✅ PASS | local schema fixture, no HTTP |
-| `streaming-response` | Streaming Response | ⚠️ TIMEOUT (Run 13) | Timed out during concurrent deployment/model cold start; passed Run 12 |
-| `websocket-response` | WebSocket Response | ⚠️ TIMEOUT (Run 13) | Terminal event not received within 30s; passed Run 12 |
-| `websocket-sequential-responses` | WebSocket Sequential Responses | ⚠️ TIMEOUT (Run 13) | Terminal event not received within 30s; passed Run 12 |
-| `websocket-continuation` | WebSocket Continuation | ⚠️ TIMEOUT (Run 13) | Terminal event not received within 30s; passed Run 12 |
-| `websocket-reconnect-store-false-recovery` | WebSocket Store False Reconnect Recovery | ⚠️ TIMEOUT (Run 13) | Terminal event not received within 30s; passed Run 12 |
+| `streaming-response` | Streaming Response | ⚠️ TIMEOUT (Run 13/14) | Run 13 overlapped cold start; Run 14 timed out under queue/DB lock contention; passed Run 12 |
+| `websocket-response` | WebSocket Response | ⚠️ TIMEOUT (Run 13/14) | Terminal event not received within 30s; Run 14 upstream logged HTTP 200 + `[DONE]`; passed Run 12 |
+| `websocket-sequential-responses` | WebSocket Sequential Responses | ⚠️ TIMEOUT (Run 13/14) | Terminal event not received within 30s; passed Run 12 |
+| `websocket-continuation` | WebSocket Continuation | ⚠️ TIMEOUT (Run 13/14) | Terminal event not received within 30s; passed Run 12 |
+| `websocket-reconnect-store-false-recovery` | WebSocket Store False Reconnect Recovery | ⚠️ TIMEOUT (Run 13/14) | Terminal event not received within 30s; passed Run 12 |
 | `websocket-previous-response-not-found` | WebSocket Missing Previous Response | ✅ PASS | |
-| `websocket-failed-continuation-evicts-cache` | WebSocket Failed Continuation Evicts Cache | ⚠️ TIMEOUT (Run 13) | Terminal event not received within 30s; passed Run 12 after call-ID validation |
-| `websocket-compact-new-chain` | WebSocket Compact New Chain | ⚠️ TIMEOUT (Run 13) | Request timed out during queue contention; passed Run 12 |
-| `system-prompt` | System Prompt | ⚠️ TIMEOUT (Run 13) | Request timed out during queue contention; passed Run 12 |
-| `tool-calling` | Tool Calling | ⚠️ TIMEOUT (Run 13) | Request timed out during queue contention; passed Run 12 |
-| `image-input` | Image Input | ⚠️ TIMEOUT (Run 13) | Request timed out during queue contention; passed Run 12 |
-| `multi-turn` | Multi-turn Conversation | ⚠️ TIMEOUT (Run 13) | Request timed out during queue contention; passed Run 12 |
-| `compact-response` | Compaction Endpoint | ⚠️ TIMEOUT (Run 13) | Request timed out during queue contention; passed Run 12 |
+| `websocket-failed-continuation-evicts-cache` | WebSocket Failed Continuation Evicts Cache | ⚠️ TIMEOUT (Run 13/14) | Terminal event not received within 30s; passed Run 12 after call-ID validation |
+| `websocket-compact-new-chain` | WebSocket Compact New Chain | ⚠️ TIMEOUT (Run 13/14) | Request timed out during queue/DB lock contention; passed Run 12 |
+| `system-prompt` | System Prompt | ⚠️ TIMEOUT (Run 13/14) | Request timed out during queue/DB lock contention; passed Run 12 |
+| `tool-calling` | Tool Calling | ⚠️ TIMEOUT (Run 13/14) | Request timed out during queue/DB lock contention; passed Run 12 |
+| `image-input` | Image Input | ⚠️ TIMEOUT (Run 13/14) | Request timed out during queue/DB lock contention; passed Run 12 |
+| `multi-turn` | Multi-turn Conversation | ⚠️ TIMEOUT (Run 13/14) | Request timed out during queue/DB lock contention; passed Run 12 |
+| `compact-response` | Compaction Endpoint | ⚠️ TIMEOUT (Run 13/14) | Request timed out during queue/DB lock contention; passed Run 12 |
 | `compact-missing-model` | Compaction Missing Required Model | ✅ PASS | |
 
 ## Failure clusters
@@ -89,6 +91,18 @@ Run 13 post-check (00:38 UTC): **2 active / 9 queued** test leases remained; all
     `inference_slot_protocol=0`, so the new agent-owned admission path was not exercised.
     Those 11 test leases were terminalized as `integration_test_cleanup` with user approval;
     a follow-up check showed no active or queued leases.
+15. **Run 14: upstream completed but backend did not finish the client turn** — for request
+    IDs `resp_3a2465291dfc4269b597426e9fbb2fb9` and
+    `resp_4c519bf2191440e184c1260d64ef9f10`, the agent logged upstream HTTP 200, a `[DONE]`
+    marker, and normal EOF; the backend also logged `responses_ws_upstream_close` or
+    `responses_stream_upstream_close` with `done_marker=true`. The clients still timed out
+    waiting for terminal responses. PostgreSQL had PID 48388 idle in transaction after a
+    `SELECT server_instances...`; it held the transaction ID that blocked a convoy of
+    server-instance and token-usage operations for over 16 minutes. Both corresponding
+    inference leases remained active. This points to backend post-upstream/lease-release
+    processing blocked by the DB lock convoy, not the LLM dropping the stream. The deployed
+    agents still reported `inference_slot_protocol=0`. With user approval, the 11 test
+    leases were terminalized as `integration_test_cleanup`; active/queued count returned to 0.
 
 ## History
 
@@ -102,6 +116,7 @@ Run 13 post-check (00:38 UTC): **2 active / 9 queued** test leases remained; all
 | 2026-09-25 | Full-suite regression sweep | 17 | 0 | All compliance tests passed |
 | 2026-09-27 | Full-suite regression sweep with `rocinante` | 17 | 0 | All 17 OpenResponses compliance tests passed |
 | 2026-09-29 | Full-suite run with `rocinante` | 3 | 14 | Not a clean baseline: application service restarted during the suite and `rocinante` cold-started under concurrent requests; 2 expired active leases and 9 queued test leases remained; all agents reported protocol 0. User-approved cleanup terminalized the 11 test leases; active/queued count returned to 0. |
+| 2026-09-29 | Full-suite run with `rocinante` after warm-up | 3 | 14 | LLM streams completed with HTTP 200 and `[DONE]`, but WS terminal frames/client completions timed out. PostgreSQL showed an idle-in-transaction server-instance query blocking a lock convoy; 2 active and 9 queued test leases remained. Agents reported protocol 0. User-approved cleanup terminalized these leases; active/queued count returned to 0. |
 | 2026-09-26 | Full-suite regression sweep after cross-agent eviction fix | 12 | 5 | Voyager started successfully after evicting co-located rocinante-tiny; remaining failures were WebSocket 30s contention timeouts |
 | 2026-09-24 | (baseline) | 3 | 14 | Initial full run |
 | 2026-09-24 | serialize_spec fix (pushed) | 10 | 7 | Clusters 1–3 + 5 fixed: spec serializer (`serialize_spec`), `completed_at` at finalize, dropped `reasoning_text.*` event twins. Unblocked: basic-response, system-prompt, tool-calling, streaming-response, assistant-phase, multi-turn, compact-response |
