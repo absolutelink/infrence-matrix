@@ -73,10 +73,11 @@ def extract_usage_fields(
         prompt_ms = prompt_tokens / prompt_per_second * 1000.0
     if not predicted_ms and predicted_per_second:
         predicted_ms = completion_tokens / predicted_per_second * 1000.0
-    if not prompt_per_second and prompt_ms and prompt_tokens:
-        prompt_per_second = prompt_tokens / (prompt_ms / 1000.0)
-    if not predicted_per_second and predicted_ms and completion_tokens:
-        predicted_per_second = completion_tokens / (predicted_ms / 1000.0)
+    if not timings.get("metrics_scraped"):
+        if not prompt_per_second and prompt_ms and prompt_tokens:
+            prompt_per_second = prompt_tokens / (prompt_ms / 1000.0)
+        if not predicted_per_second and predicted_ms and completion_tokens:
+            predicted_per_second = completion_tokens / (predicted_ms / 1000.0)
     return {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
@@ -163,8 +164,7 @@ def record_request_telemetry(
             alias=getattr(server, "alias", None),
         )
     task = loop.create_task(
-        asyncio.to_thread(
-            _record_request_telemetry_sync,
+        _record_request_telemetry_after_scrape(
             server_snapshot,
             dict(usage) if usage is not None else None,
             dict(timings) if timings is not None else None,
@@ -280,19 +280,81 @@ def _record_request_telemetry_sync(
 # Retention: keep ~35 days so the 30-day window always has full coverage.
 TOKEN_SAMPLE_RETENTION_DAYS = 35
 PRUNE_INTERVAL_SECONDS = 6 * 60 * 60
-LIVE_RUNS = 10
+PROMETHEUS_METRICS_TIMEOUT_SECONDS = 5.0
+
+
+def parse_llama_metrics(metrics_text: str) -> dict[str, float]:
+    """Extract llama.cpp's reported decode and prefill throughput gauges."""
+    metric_names = {
+        "llamacpp:predicted_tokens_seconds": "predicted_per_second",
+        "llamacpp:prompt_tokens_seconds": "prompt_per_second",
+    }
+    parsed: dict[str, float] = {}
+    for line in metrics_text.splitlines():
+        fields = line.strip().split()
+        if len(fields) < 2 or fields[0] not in metric_names:
+            continue
+        try:
+            parsed[metric_names[fields[0]]] = float(fields[1])
+        except ValueError:
+            continue
+    return parsed
+
+
+async def _record_request_telemetry_after_scrape(
+    server: SimpleNamespace | None,
+    usage: dict[str, Any] | None,
+    timings: dict[str, Any] | None,
+    latency_ms: float,
+    status: str,
+    model_name: str | None,
+    agent_id: str | None,
+    request_id: str | None,
+) -> None:
+    """Scrape live rates once per successful request, then persist telemetry."""
+    scrape_timings = dict(timings or {})
+    if status == "success" and server is not None and server.id and server.agent_id:
+        # Rates are sourced from a single on-completion scrape, never computed
+        # from request tokens and elapsed time or polled on a timer.
+        scrape_timings.update(
+            prompt_per_second=0,
+            predicted_per_second=0,
+            metrics_scraped=True,
+        )
+        try:
+            from app.services.agent_manager import agent_manager
+
+            result = await agent_manager.send_to_agent(
+                str(server.agent_id),
+                "GET",
+                f"/proxy/{server.id}/metrics",
+                timeout=PROMETHEUS_METRICS_TIMEOUT_SECONDS,
+            )
+            scraped = parse_llama_metrics(str(result.get("metrics") or ""))
+            scrape_timings.update(scraped)
+        except Exception:
+            logger.debug(
+                "Unable to scrape inference rates request_id=%s server_id=%s",
+                request_id or "-",
+                server.id,
+                exc_info=True,
+            )
+
+    await asyncio.to_thread(
+        _record_request_telemetry_sync,
+        server,
+        usage,
+        scrape_timings,
+        latency_ms,
+        status,
+        model_name,
+        agent_id,
+        request_id,
+    )
 
 
 async def token_stats_snapshot() -> dict[str, Any]:
-    """Aggregate token usage for the status bar and popover.
-
-    Live rates are the mean of each server's last ``LIVE_RUNS`` completed
-    requests as reported by the engine: decode = ``predicted_per_second``,
-    prefill = ``prompt_per_second``. These are taken directly from
-    llama.cpp's timings rather than recomputed from token counts and
-    durations (which undercount prefill because ``prompt_ms`` covers only
-    uncached work while the engine's rate covers the whole stage).
-    """
+    """Aggregate historical token usage and latest scraped engine rates."""
     async with AsyncSessionMaker() as session:
         rows = (
             (
@@ -340,12 +402,8 @@ async def token_stats_snapshot() -> dict[str, Any]:
                         WITH ranked AS (
                             SELECT
                                 t.server_instance_id,
-                                CASE WHEN t.predicted_per_second > 0
-                                    THEN t.predicted_per_second
-                                END AS decode_tps,
-                                CASE WHEN t.prompt_per_second > 0
-                                    THEN t.prompt_per_second
-                                END AS prefill_tps,
+                                t.predicted_per_second AS decode_tps,
+                                t.prompt_per_second AS prefill_tps,
                                 row_number() OVER (
                                     PARTITION BY t.server_instance_id
                                     ORDER BY t.created_at DESC, t.id DESC
@@ -355,16 +413,12 @@ async def token_stats_snapshot() -> dict[str, Any]:
                         )
                         SELECT
                             server_instance_id AS server_id,
-                            avg(decode_tps) AS decode_tps,
-                            count(decode_tps) AS decode_runs,
-                            avg(prefill_tps) AS prefill_tps,
-                            count(prefill_tps) AS prefill_runs
+                            decode_tps,
+                            prefill_tps
                         FROM ranked
-                        WHERE rn <= :live_runs
-                        GROUP BY server_instance_id
+                        WHERE rn = 1
                         """
-                    ),
-                    {"live_runs": LIVE_RUNS},
+                    )
                 )
             )
             .mappings()
@@ -407,10 +461,14 @@ async def token_stats_snapshot() -> dict[str, Any]:
                 "id": str(row["server_id"]),
                 "alias": row["alias"] or "unknown",
                 "decode_tokens_per_second": (
-                    float(live["decode_tps"]) if live and live["decode_tps"] else None
+                    float(live["decode_tps"])
+                    if live and live["decode_tps"] and live["decode_tps"] > 0
+                    else None
                 ),
                 "prefill_tokens_per_second": (
-                    float(live["prefill_tps"]) if live and live["prefill_tps"] else None
+                    float(live["prefill_tps"])
+                    if live and live["prefill_tps"] and live["prefill_tps"] > 0
+                    else None
                 ),
                 "last_7d": {
                     "prompt_tokens": prompt_7d,
@@ -425,19 +483,16 @@ async def token_stats_snapshot() -> dict[str, Any]:
             }
         )
 
-    # Global live rates: run-weighted mean of per-server averages over
-    # each server's last LIVE_RUNS runs.
-    decode_weighted = 0.0
-    decode_runs = 0
-    prefill_weighted = 0.0
-    prefill_runs = 0
-    for live in live_by_server.values():
-        if live["decode_tps"] is not None and live["decode_runs"]:
-            decode_weighted += float(live["decode_tps"]) * int(live["decode_runs"])
-            decode_runs += int(live["decode_runs"])
-        if live["prefill_tps"] is not None and live["prefill_runs"]:
-            prefill_weighted += float(live["prefill_tps"]) * int(live["prefill_runs"])
-            prefill_runs += int(live["prefill_runs"])
+    decode_rates = [
+        float(live["decode_tps"])
+        for live in live_by_server.values()
+        if live["decode_tps"] is not None and live["decode_tps"] > 0
+    ]
+    prefill_rates = [
+        float(live["prefill_tps"])
+        for live in live_by_server.values()
+        if live["prefill_tps"] is not None and live["prefill_tps"] > 0
+    ]
 
     servers.sort(
         key=lambda item: (
@@ -451,12 +506,12 @@ async def token_stats_snapshot() -> dict[str, Any]:
     return {
         "global": {
             "live": {
-                "runs": LIVE_RUNS,
+                "runs": 1,
                 "decode_tokens_per_second": (
-                    decode_weighted / decode_runs if decode_runs else None
+                    sum(decode_rates) / len(decode_rates) if decode_rates else None
                 ),
                 "prefill_tokens_per_second": (
-                    prefill_weighted / prefill_runs if prefill_runs else None
+                    sum(prefill_rates) / len(prefill_rates) if prefill_rates else None
                 ),
             },
             "last_24h": window_totals["last_24h"],

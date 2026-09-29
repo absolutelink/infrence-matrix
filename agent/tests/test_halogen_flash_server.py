@@ -87,6 +87,7 @@ async def test_flash_start_uses_flash_environment_and_two_ports(mock_popen):
         options={
             "kv_pool_positions": 524288,
             "max_tok": 16384,
+            "max_tokens_default": 8192,
             "host_reserve_gib": 20,
             "rope_yarn": 4,
             "prompt_cache": 2,
@@ -116,6 +117,7 @@ async def test_flash_start_uses_flash_environment_and_two_ports(mock_popen):
     assert environment["HALOGEN_TOKENIZER"] == HALOGEN_FLASH_TOKENIZER
     assert environment["HALOGEN_KV_POOL_POSITIONS"] == "524288"
     assert environment["HALOGEN_MAX_TOK"] == "16384"
+    assert environment["HALOGEN_MAX_TOKENS_DEFAULT"] == "8192"
     assert environment["HALOGEN_HOST_RESERVE_GIB"] == "20"
     assert environment["HALOGEN_ROPE_YARN"] == "4"
     assert environment["HALOGEN_PROMPT_CACHE"] == "2"

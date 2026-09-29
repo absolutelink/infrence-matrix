@@ -5,6 +5,7 @@ import threading
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -18,14 +19,26 @@ from app.db.session import engine as async_engine
 from app.models import Agent, Model, ServerInstance, TokenUsageSample
 from app.services.inference_scheduler import InferenceLeaseHandle
 from app.services.token_stats import (
-    LIVE_RUNS,
     TOKEN_SAMPLE_RETENTION_DAYS,
     extract_usage_fields,
+    parse_llama_metrics,
     prune_old_samples,
     record_request_telemetry,
     record_usage,
     token_stats_snapshot,
 )
+
+
+def test_parse_llama_metrics_extracts_engine_reported_rates() -> None:
+    metrics = """# HELP llamacpp:prompt_tokens_seconds Average prompt throughput.
+llamacpp:prompt_tokens_seconds 1548.67
+llamacpp:predicted_tokens_seconds 47.8578
+"""
+
+    assert parse_llama_metrics(metrics) == {
+        "prompt_per_second": 1548.67,
+        "predicted_per_second": 47.8578,
+    }
 
 
 @pytest.mark.asyncio
@@ -58,6 +71,46 @@ async def test_async_request_telemetry_does_not_block_event_loop(monkeypatch):
     release_timer.cancel()
 
     assert elapsed < 0.1
+
+
+@pytest.mark.asyncio
+async def test_completed_request_scrapes_agent_metrics_once(monkeypatch):
+    from app.services import agent_manager, token_stats
+
+    persisted: dict[str, Any] = {}
+
+    def capture_persistence(_server, _usage, timings, *_args) -> None:
+        persisted.update(timings or {})
+
+    scrape = AsyncMock(
+        return_value={
+            "metrics": "llamacpp:prompt_tokens_seconds 1548.67\n"
+            "llamacpp:predicted_tokens_seconds 47.8578\n"
+        }
+    )
+    monkeypatch.setattr(agent_manager.agent_manager, "send_to_agent", scrape)
+    monkeypatch.setattr(
+        token_stats, "_record_request_telemetry_sync", capture_persistence
+    )
+
+    await token_stats._record_request_telemetry_after_scrape(
+        SimpleNamespace(id="server-1", agent_id="agent-1"),
+        {"prompt_tokens": 10, "completion_tokens": 2},
+        {"prompt_ms": 100, "predicted_ms": 50},
+        150,
+        "success",
+        None,
+        None,
+        "request-1",
+    )
+
+    scrape.assert_awaited_once_with(
+        "agent-1", "GET", "/proxy/server-1/metrics", timeout=5.0
+    )
+    assert persisted["prompt_per_second"] == 1548.67
+    assert persisted["predicted_per_second"] == 47.8578
+    assert persisted["prompt_ms"] == 100
+    assert persisted["predicted_ms"] == 50
 
 
 @pytest.mark.asyncio
@@ -424,15 +477,11 @@ async def test_snapshot_aggregates_windows_and_rates(db: Session) -> None:
 
     snapshot = await token_stats_snapshot()
     glob = snapshot["global"]
-    assert glob["live"]["runs"] == LIVE_RUNS
-    # server_a live: mean of engine-reported per-run rates over its 2 runs
-    # decode: (50 + 10) / 2 = 30
-    # prefill: (500 + 500) / 2 = 500  (whole-prompt rate, not uncached)
-    # global: run-weighted across servers:
-    # decode: (30*2 + 5*1) / 3 = 21.666...
-    # prefill: (500*2 + 100*1) / 3 = 400
-    assert glob["live"]["decode_tokens_per_second"] == pytest.approx(65 / 3)
-    assert glob["live"]["prefill_tokens_per_second"] == pytest.approx(1100 / 3)
+    assert glob["live"]["runs"] == 1
+    # Per-server rates use each server's latest metric scrape; global rates
+    # are the mean of those current per-server gauges.
+    assert glob["live"]["decode_tokens_per_second"] == pytest.approx(27.5)
+    assert glob["live"]["prefill_tokens_per_second"] == pytest.approx(300)
 
     assert glob["last_24h"]["prompt_tokens"] == 1107
     assert glob["last_24h"]["completion_tokens"] == 157
@@ -446,13 +495,12 @@ async def test_snapshot_aggregates_windows_and_rates(db: Session) -> None:
     # orphan excluded; server_a first (only one with a live rate)
     assert [s["id"] for s in servers] == [str(server_a.id), str(server_b.id)]
     assert servers[0]["alias"] == server_a.alias
-    assert servers[0]["decode_tokens_per_second"] == 30.0
+    assert servers[0]["decode_tokens_per_second"] == 50.0
     assert servers[0]["prefill_tokens_per_second"] == 500.0
     assert servers[0]["last_7d"]["total_tokens"] == 1250
     assert servers[1]["last_7d"]["total_tokens"] == 0
     assert servers[1]["last_30d"]["total_tokens"] == 330
-    # "last N runs" is per server regardless of recency, so server_b's
-    # 8-day-old sample still yields a rate from its engine timings.
+    # Latest available per-server scrape is used (this fixture is 8 days old).
     assert servers[1]["decode_tokens_per_second"] == 5.0
     assert servers[1]["prefill_tokens_per_second"] == 100.0
 
