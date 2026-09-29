@@ -268,16 +268,29 @@ def _build_usage(
 ) -> dict[str, Any]:
     prompt_tokens = int(usage_data.get("prompt_tokens") or 0)
     completion_tokens = int(usage_data.get("completion_tokens") or 0)
-    if not prompt_tokens and not completion_tokens:
+    if (
+        "prompt_tokens" not in usage_data
+        and "completion_tokens" not in usage_data
+        and "input_tokens" not in usage_data
+        and "output_tokens" not in usage_data
+    ):
         completion_tokens = fallback_chars // 4
     prompt_details = usage_data.get("prompt_tokens_details") or {}
-    cached_tokens = int(
-        prompt_details.get("cached_tokens")
-        or (usage_data.get("timings") or {}).get("cache_n")
-        or 0
+    cached_value = (
+        prompt_details["cached_tokens"]
+        if "cached_tokens" in prompt_details
+        else (usage_data.get("timings") or {}).get("cache_n", 0)
+    )
+    cached_tokens = int(cached_value or 0)
+    completion_details = usage_data.get("completion_tokens_details") or {}
+    reported_reasoning_tokens = completion_details.get("reasoning_tokens")
+    resolved_reasoning_tokens = (
+        int(reported_reasoning_tokens)
+        if reported_reasoning_tokens is not None
+        else reasoning_tokens
     )
     return ev.usage_from_llama(
-        prompt_tokens, completion_tokens, reasoning_tokens, cached_tokens
+        prompt_tokens, completion_tokens, resolved_reasoning_tokens, cached_tokens
     ).model_dump(exclude_none=True)
 
 

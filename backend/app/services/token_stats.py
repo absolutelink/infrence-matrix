@@ -81,9 +81,11 @@ def extract_usage_fields(
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "cached_tokens": _as_int(
-            prompt_details.get("cached_tokens")
-            or input_details.get("cached_tokens")
-            or timings.get("cache_n")
+            prompt_details["cached_tokens"]
+            if "cached_tokens" in prompt_details
+            else input_details["cached_tokens"]
+            if "cached_tokens" in input_details
+            else timings.get("cache_n")
         ),
         "prompt_ms": prompt_ms,
         "predicted_ms": predicted_ms,

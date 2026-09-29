@@ -299,13 +299,15 @@ def _extract_usage(chunk_data: dict) -> UsageInfo | None:
     )
 
     timings = chunk_data.get("timings") or {}
-    cached_tokens = int(
-        (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
-        or timings.get("cache_n")
-        or 0
+    prompt_details = usage.get("prompt_tokens_details") or {}
+    cached_value = (
+        prompt_details["cached_tokens"]
+        if "cached_tokens" in prompt_details
+        else timings.get("cache_n", 0)
     )
+    cached_tokens = int(cached_value or 0)
     prompt_details = {
-        **(usage.get("prompt_tokens_details") or {}),
+        **prompt_details,
         "cached_tokens": cached_tokens,
     }
     prompt_details.setdefault("audio_tokens", 0)
@@ -865,19 +867,34 @@ async def create_chat_completion(
         reasoning_content = message.get("reasoning_content") or None
         tool_calls = message.get("tool_calls") or None
         prompt_tokens = (
-            usage_data.get("prompt_tokens")
-            or sum(len(m["content"]) for m in non_stream_payload["messages"]) // 4
+            int(usage_data["prompt_tokens"])
+            if usage_data.get("prompt_tokens") is not None
+            else sum(len(m["content"]) for m in non_stream_payload["messages"]) // 4
         )
-        completion_tokens = usage_data.get("completion_tokens") or len(content) // 4
-        total_tokens = usage_data.get("total_tokens") or (
-            prompt_tokens + completion_tokens
+        completion_tokens = (
+            int(usage_data["completion_tokens"])
+            if usage_data.get("completion_tokens") is not None
+            else len(content) // 4
+        )
+        total_tokens = (
+            int(usage_data["total_tokens"])
+            if usage_data.get("total_tokens") is not None
+            else prompt_tokens + completion_tokens
         )
         prompt_details = usage_data.get("prompt_tokens_details") or {}
-        cached_tokens = int(
-            prompt_details.get("cached_tokens")
-            or (response.get("timings") or {}).get("cache_n")
-            or 0
+        cached_value = (
+            prompt_details["cached_tokens"]
+            if "cached_tokens" in prompt_details
+            else (response.get("timings") or {}).get("cache_n", 0)
         )
+        cached_tokens = int(cached_value or 0)
+        prompt_details = {**prompt_details, "cached_tokens": cached_tokens}
+        prompt_details.setdefault("audio_tokens", 0)
+        completion_details = dict(usage_data.get("completion_tokens_details") or {})
+        completion_details.setdefault("reasoning_tokens", 0)
+        completion_details.setdefault("audio_tokens", 0)
+        completion_details.setdefault("accepted_prediction_tokens", 0)
+        completion_details.setdefault("rejected_prediction_tokens", 0)
         result = ChatCompletionResponse(
             id=request_id,
             created=created,
@@ -899,10 +916,8 @@ async def create_chat_completion(
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "total_tokens": total_tokens,
-                    "prompt_tokens_details": {
-                        "cached_tokens": cached_tokens,
-                        "audio_tokens": 0,
-                    },
+                    "prompt_tokens_details": prompt_details,
+                    "completion_tokens_details": completion_details,
                 }
             ),
         )
