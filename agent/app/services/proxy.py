@@ -158,6 +158,16 @@ class ServerProxy:
                         response_bytes = (
                             len(content) if isinstance(content, bytes) else 0
                         )
+                    if upstream_status == 400:
+                        logger.error(
+                            "inference_upstream_bad_request server_id=%s generation=%s method=%s path=%s request_body=%s response_body=%s",
+                            server_id,
+                            expected_slot_generation,
+                            method,
+                            path,
+                            json,
+                            response.text,
+                        )
                     is_error = upstream_status is not None and upstream_status >= 400
                     outcome = "failed" if is_error else "completed"
                     close_reason = (
@@ -315,6 +325,27 @@ class ServerProxy:
                             expected_slot_generation,
                             upstream_status,
                         )
+                        if upstream_status == 400:
+                            error_body = bytearray()
+                            async for chunk in response.aiter_bytes():
+                                error_body.extend(chunk)
+                            bytes_sent += len(error_body)
+                            logger.error(
+                                "inference_upstream_bad_request server_id=%s generation=%s method=%s path=%s request_body=%s response_body=%s",
+                                server_id,
+                                expected_slot_generation,
+                                method,
+                                path,
+                                json,
+                                error_body.decode(
+                                    response.encoding or "utf-8", errors="replace"
+                                ),
+                            )
+                            if error_body:
+                                yield bytes(error_body)
+                            outcome = "failed"
+                            close_reason = "llm_http_error"
+                            return
                         async for chunk in response.aiter_bytes():
                             chunks += 1
                             bytes_sent += len(chunk)

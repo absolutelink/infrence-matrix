@@ -62,6 +62,75 @@ async def test_proxy_request_retries_connection_failures():
 
 
 @pytest.mark.asyncio
+async def test_proxy_request_logs_upstream_400_request_and_response(caplog):
+    caplog.set_level(logging.ERROR)
+    manager = Mock(configs={"server-1": Mock(port=8091)}, _active_connections={})
+    proxy = ServerProxy(manager)
+    response = httpx.Response(
+        400,
+        json={"error": {"message": "max_tokens exceeds cap"}},
+        request=httpx.Request("POST", "http://127.0.0.1:8091/v1/chat/completions"),
+    )
+    proxy.client.request = AsyncMock(return_value=response)
+    request_body = {"messages": [{"role": "user", "content": "hello"}]}
+
+    await proxy.proxy_request(
+        "server-1",
+        "POST",
+        "/v1/chat/completions",
+        {},
+        json=request_body,
+    )
+
+    assert "inference_upstream_bad_request" in caplog.text
+    assert "max_tokens exceeds cap" in caplog.text
+    assert str(request_body) in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_proxy_stream_logs_and_forwards_upstream_400_body(caplog):
+    caplog.set_level(logging.ERROR)
+    manager = Mock(
+        configs={"server-1": Mock(port=8091, api_port=8091, slot_generation=1)},
+        _active_connections={},
+        _active_inference_requests={},
+        _inference_slot_conditions={},
+        _inference_operations={},
+        get_effective_capacity=Mock(return_value=1),
+    )
+    proxy = ServerProxy(manager)
+    error_body = b'{"error":{"message":"max_tokens exceeds cap"}}'
+    request = httpx.Request("POST", "http://127.0.0.1:8091/v1/chat/completions")
+    proxy.client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(400, content=error_body, request=request)
+        )
+    )
+    request_body = {"messages": [{"role": "user", "content": "hello"}]}
+
+    try:
+        chunks = [
+            chunk
+            async for chunk in proxy.proxy_stream(
+                "server-1",
+                "POST",
+                "/v1/chat/completions",
+                json=request_body,
+                enforce_capacity=True,
+                expected_slot_generation=1,
+                operation_id="bad-request-1",
+            )
+        ]
+    finally:
+        await proxy.client.aclose()
+
+    assert chunks == [error_body]
+    assert "inference_upstream_bad_request" in caplog.text
+    assert "max_tokens exceeds cap" in caplog.text
+    assert str(request_body) in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_inference_proxy_admission_is_atomic_and_released_on_completion():
     manager = Mock(
         configs={"server-1": Mock(port=8091)},
