@@ -1,3 +1,4 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,6 +34,8 @@ class Settings(BaseSettings):
     DEFAULT_CONTEXT_SIZE: int = 4096
     DEFAULT_BATCH_SIZE: int = 512
     SERVER_INACTIVITY_TIMEOUT: int = 300
+    # Maximum pause while waiting for upstream headers or the next response byte.
+    UPSTREAM_IDLE_TIMEOUT_SECONDS: float = Field(default=120.0, gt=0)
 
     # GPU
     GPU_BACKEND: str = "auto"

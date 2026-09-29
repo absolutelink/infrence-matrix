@@ -13,6 +13,7 @@ import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.core.config import settings
 from app.main import app
 from app.services.inference_operations import cancel_operation, get_operation
 from app.services.llama_server import ServerConfig
@@ -20,6 +21,25 @@ from app.services.proxy import (
     ProxyOperationExists,
     ServerProxy,
 )
+
+
+class _BufferedUpstream:
+    status_code = 200
+    headers = {}
+    request = httpx.Request("POST", "http://127.0.0.1:8091/v1/chat/completions")
+
+    def __init__(self, enter):
+        self.enter = enter
+
+    async def __aenter__(self):
+        await self.enter()
+        return self
+
+    async def __aexit__(self, *_args):
+        pass
+
+    async def aiter_bytes(self):
+        yield b"{}"
 
 
 @pytest.mark.asyncio
@@ -66,7 +86,9 @@ async def test_inference_proxy_admission_is_atomic_and_released_on_completion():
             second_entered.set()
         return Mock()
 
-    proxy.client.request = AsyncMock(side_effect=upstream_request)
+    proxy.client.stream = Mock(
+        side_effect=lambda **_: _BufferedUpstream(upstream_request)
+    )
     first = asyncio.create_task(
         proxy.proxy_request(
             "server-1",
@@ -124,7 +146,9 @@ async def test_operation_id_prevents_duplicate_dispatch_and_can_cancel_upstream(
         await finish_upstream.wait()
         return Mock()
 
-    proxy.client.request = AsyncMock(side_effect=upstream_request)
+    proxy.client.stream = Mock(
+        side_effect=lambda **_: _BufferedUpstream(upstream_request)
+    )
     operation = asyncio.create_task(
         proxy.proxy_request(
             "server-1",
@@ -183,7 +207,9 @@ async def test_queued_operation_is_visible_and_cancellable():
         await finish_first.wait()
         return Mock()
 
-    proxy.client.request = AsyncMock(side_effect=upstream_request)
+    proxy.client.stream = Mock(
+        side_effect=lambda **_: _BufferedUpstream(upstream_request)
+    )
     first = asyncio.create_task(
         proxy.proxy_request(
             "server-1",
@@ -521,6 +547,404 @@ async def test_stream_close_log_identifies_llm_connection_drop(caplog):
     assert "error_type=RemoteProtocolError" in caplog.text
     assert "close_reason=llm_stream_error:RemoteProtocolError" in caplog.text
     assert manager._active_inference_requests == {}
+
+
+@pytest.mark.asyncio
+async def test_stream_idle_before_first_byte_retries_once_in_same_operation(caplog):
+    caplog.set_level(logging.INFO)
+    manager = Mock(
+        configs={"server-1": Mock(port=8091, slot_generation=13)},
+        _active_connections={},
+        _active_inference_requests={},
+        _inference_slot_conditions={},
+        _inference_operations={},
+        get_effective_capacity=Mock(return_value=1),
+    )
+    proxy = ServerProxy(manager)
+    attempts = 0
+
+    class Upstream:
+        status_code = 200
+
+        async def __aenter__(self):
+            nonlocal attempts
+            attempts += 1
+            assert manager._active_inference_requests == {"server-1": 1}
+            assert manager._active_connections == {}
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def aiter_bytes(self):
+            if attempts == 1:
+                raise httpx.ReadTimeout("LLM idle")
+            yield b"data: [DONE]\n\n"
+
+    proxy.client.stream = Mock(side_effect=lambda **_: Upstream())
+    chunks = [
+        chunk
+        async for chunk in proxy.proxy_stream(
+            "server-1",
+            "POST",
+            "/v1/chat/completions",
+            json={"stream": True},
+            enforce_capacity=True,
+            expected_slot_generation=13,
+            operation_id="idle-retry-13",
+        )
+    ]
+    assert chunks == [b"data: [DONE]\n\n"]
+    assert attempts == 2
+    assert proxy.client.stream.call_args.kwargs["timeout"].read == (
+        settings.UPSTREAM_IDLE_TIMEOUT_SECONDS
+    )
+    assert "inference_stream_idle_retry operation_id=idle-retry-13" in caplog.text
+    assert "outcome=completed" in caplog.text
+    assert manager._active_inference_requests == {}
+    assert manager._active_connections == {}
+    assert get_operation(manager, "idle-retry-13", "server-1")["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_idle_before_response_headers_retries_once():
+    manager = Mock(
+        configs={"server-1": Mock(port=8091, slot_generation=20)},
+        _active_connections={},
+        _active_inference_requests={},
+        _inference_slot_conditions={},
+        _inference_operations={},
+        get_effective_capacity=Mock(return_value=1),
+    )
+    proxy = ServerProxy(manager)
+    attempts = 0
+
+    class Upstream:
+        status_code = 200
+
+        async def __aenter__(self):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise httpx.ReadTimeout("no headers")
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def aiter_bytes(self):
+            yield b"data: [DONE]\n\n"
+
+    proxy.client.stream = Mock(side_effect=lambda **_: Upstream())
+    frames = [
+        frame
+        async for frame in proxy.proxy_stream(
+            "server-1",
+            "POST",
+            "/v1/chat/completions",
+            json={"stream": True},
+            enforce_capacity=True,
+            expected_slot_generation=20,
+            operation_id="headers-idle-20",
+        )
+    ]
+    assert frames == [b"data: [DONE]\n\n"]
+    assert attempts == 2
+    assert (
+        get_operation(manager, "headers-idle-20", "server-1")["status"] == "completed"
+    )
+    assert manager._active_connections == {}
+    assert manager._active_inference_requests == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("partial", [False, True])
+async def test_stream_idle_exhaustion_or_partial_output_fails_without_replay(
+    partial, caplog
+):
+    caplog.set_level(logging.INFO)
+    manager = Mock(
+        configs={"server-1": Mock(port=8091, slot_generation=14)},
+        _active_connections={},
+        _active_inference_requests={},
+        _inference_slot_conditions={},
+        _inference_operations={},
+        get_effective_capacity=Mock(return_value=1),
+    )
+    proxy = ServerProxy(manager)
+    attempts = 0
+
+    class Upstream:
+        status_code = 200
+
+        async def __aenter__(self):
+            nonlocal attempts
+            attempts += 1
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def aiter_bytes(self):
+            if partial:
+                yield b"data: partial\n\n"
+            raise httpx.ReadTimeout("LLM idle")
+
+    proxy.client.stream = Mock(side_effect=lambda **_: Upstream())
+    chunks = []
+    with pytest.raises(httpx.ReadTimeout):
+        async for chunk in proxy.proxy_stream(
+            "server-1",
+            "POST",
+            "/v1/chat/completions",
+            json={"stream": True},
+            enforce_capacity=True,
+            expected_slot_generation=14,
+            operation_id="idle-failed-14",
+        ):
+            chunks.append(chunk)
+    assert chunks == ([b"data: partial\n\n"] if partial else [])
+    assert attempts == (1 if partial else 2)
+    assert get_operation(manager, "idle-failed-14", "server-1")["status"] == "failed"
+    assert manager._active_connections == {}
+    assert manager._active_inference_requests == {}
+    assert "operation_id=idle-failed-14" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_nonstream_idle_retries_only_before_any_body_bytes(caplog):
+    caplog.set_level(logging.INFO)
+    manager = Mock(
+        configs={"server-1": Mock(port=8091, slot_generation=15)},
+        _active_connections={},
+        _active_inference_requests={},
+        _inference_slot_conditions={},
+        _inference_operations={},
+        get_effective_capacity=Mock(return_value=1),
+    )
+    proxy = ServerProxy(manager)
+    attempts = 0
+
+    class Upstream(_BufferedUpstream):
+        async def __aenter__(self):
+            nonlocal attempts
+            attempts += 1
+            return self
+
+        async def aiter_bytes(self):
+            if attempts == 1:
+                raise httpx.ReadTimeout("LLM idle")
+            yield b'{"ok":true}'
+
+    proxy.client.stream = Mock(side_effect=lambda **_: Upstream(None))
+    response = await proxy.proxy_request(
+        "server-1",
+        "POST",
+        "/v1/chat/completions",
+        {},
+        json={},
+        enforce_capacity=True,
+        expected_slot_generation=15,
+        operation_id="http-idle-15",
+    )
+    assert attempts == 2
+    assert response.json() == {"ok": True}
+    assert "inference_proxy_http_idle_retry operation_id=http-idle-15" in caplog.text
+    assert get_operation(manager, "http-idle-15", "server-1")["status"] == "completed"
+    assert manager._active_connections == {}
+
+
+@pytest.mark.asyncio
+async def test_nonstream_retry_works_with_real_httpx_stream_transport():
+    manager = Mock(
+        configs={"server-1": Mock(port=8091, api_port=8091, slot_generation=21)},
+        _active_connections={},
+        _active_inference_requests={},
+        _inference_slot_conditions={},
+        _inference_operations={},
+        get_effective_capacity=Mock(return_value=1),
+    )
+    requests = []
+
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            if len(requests) == 1:
+                raise httpx.ReadTimeout("first upstream stalled")
+            yield b'{"ok":true}'
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, stream=Body())
+
+    proxy = ServerProxy(manager)
+    await proxy.client.aclose()
+    proxy.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        response = await proxy.proxy_request(
+            "server-1",
+            "POST",
+            "/v1/chat/completions",
+            {},
+            json={},
+            enforce_capacity=True,
+            expected_slot_generation=21,
+            operation_id="httpx-idle-21",
+        )
+        assert response.json() == {"ok": True}
+        assert len(requests) == 2
+        assert (
+            get_operation(manager, "httpx-idle-21", "server-1")["status"] == "completed"
+        )
+        assert manager._active_inference_requests == {}
+        assert manager._active_connections == {}
+    finally:
+        await proxy.client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_nonstream_partial_body_idle_does_not_retry():
+    manager = Mock(
+        configs={"server-1": Mock(port=8091, slot_generation=16)},
+        _active_connections={},
+        _active_inference_requests={},
+        _inference_slot_conditions={},
+        _inference_operations={},
+        get_effective_capacity=Mock(return_value=1),
+    )
+    proxy = ServerProxy(manager)
+    attempts = 0
+
+    class Upstream(_BufferedUpstream):
+        async def __aenter__(self):
+            nonlocal attempts
+            attempts += 1
+            return self
+
+        async def aiter_bytes(self):
+            yield b'{"ok":'
+            raise httpx.ReadTimeout("LLM idle")
+
+    proxy.client.stream = Mock(side_effect=lambda **_: Upstream(None))
+    with pytest.raises(httpx.ReadTimeout):
+        await proxy.proxy_request(
+            "server-1",
+            "POST",
+            "/v1/chat/completions",
+            {},
+            json={},
+            enforce_capacity=True,
+            expected_slot_generation=16,
+            operation_id="partial-idle-16",
+        )
+    assert attempts == 1
+    assert get_operation(manager, "partial-idle-16", "server-1")["status"] == "failed"
+    assert manager._active_connections == {}
+    assert manager._active_inference_requests == {}
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_idle_retry_closes_same_operation():
+    manager = Mock(
+        configs={"server-1": Mock(port=8091, slot_generation=17)},
+        _active_connections={},
+        _active_inference_requests={},
+        _inference_slot_conditions={},
+        _inference_operations={},
+        get_effective_capacity=Mock(return_value=1),
+    )
+    proxy = ServerProxy(manager)
+    second_started = asyncio.Event()
+    attempts = 0
+
+    class Upstream:
+        status_code = 200
+
+        async def __aenter__(self):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 2:
+                second_started.set()
+                await asyncio.Event().wait()
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def aiter_bytes(self):
+            raise httpx.ReadTimeout("LLM idle")
+            yield b""  # pragma: no cover - marks this as an async iterator
+
+    proxy.client.stream = Mock(side_effect=lambda **_: Upstream())
+    stream = proxy.proxy_stream(
+        "server-1",
+        "POST",
+        "/v1/chat/completions",
+        json={"stream": True},
+        enforce_capacity=True,
+        expected_slot_generation=17,
+        operation_id="cancel-retry-17",
+    )
+    consumer = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(second_started.wait(), 1)
+    assert cancel_operation(manager, "cancel-retry-17", "server-1") is True
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+    assert attempts == 2
+    assert (
+        get_operation(manager, "cancel-retry-17", "server-1")["status"] == "cancelled"
+    )
+    assert manager._active_inference_requests == {}
+    assert manager._active_connections == {}
+
+
+@pytest.mark.asyncio
+async def test_generation_change_prevents_prebyte_idle_retry():
+    manager = Mock(
+        configs={"server-1": Mock(port=8091, slot_generation=18)},
+        _active_connections={},
+        _active_inference_requests={},
+        _inference_slot_conditions={},
+        _inference_operations={},
+        get_effective_capacity=Mock(return_value=1),
+    )
+    proxy = ServerProxy(manager)
+    attempts = 0
+
+    class Upstream:
+        status_code = 200
+
+        async def __aenter__(self):
+            nonlocal attempts
+            attempts += 1
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def aiter_bytes(self):
+            manager.configs["server-1"].slot_generation = 19
+            # Server stop fences the old generation's reservation counter.
+            manager._active_inference_requests.clear()
+            raise httpx.ReadTimeout("LLM idle")
+            yield b""  # pragma: no cover - marks this as an async iterator
+
+    proxy.client.stream = Mock(side_effect=lambda **_: Upstream())
+    with pytest.raises(httpx.HTTPStatusError) as exc:
+        async for _ in proxy.proxy_stream(
+            "server-1",
+            "POST",
+            "/v1/chat/completions",
+            json={"stream": True},
+            enforce_capacity=True,
+            expected_slot_generation=18,
+            operation_id="old-generation-18",
+        ):
+            pass
+    assert exc.value.response.status_code == 409
+    assert attempts == 1
+    assert manager._active_inference_requests == {}
+    assert manager._active_connections == {}
+    assert get_operation(manager, "old-generation-18", "server-1")["status"] == "failed"
 
 
 @pytest.mark.asyncio

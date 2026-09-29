@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from app.core.config import settings
 from app.core.logging import logger
 from app.services.inference_operations import (
     activate_operation,
@@ -18,6 +19,7 @@ from app.services.inference_operations import (
 
 CONNECT_RETRY_DELAYS = (0.5, 1.0, 2.0, 4.0, 8.0, 8.0)
 UPSTREAM_CONNECT_TIMEOUT_SECONDS = 10.0
+MAX_PRE_BYTE_IDLE_RETRIES = 1
 
 
 class ProxyOperationExists(Exception):
@@ -102,6 +104,8 @@ class ServerProxy:
         upstream_status: int | None = None
         response_bytes = 0
         upstream_opened = False
+        idle_retries = 0
+        inference = enforce_capacity or operation_id is not None
         try:
             self._check_generation(server_id, expected_slot_generation)
             url = self._get_server_url(server_id, path)
@@ -113,20 +117,47 @@ class ServerProxy:
                     expected_slot_generation,
                     reservation,
                 )
-            for delay in (*CONNECT_RETRY_DELAYS, None):
+            connect_delays = iter(CONNECT_RETRY_DELAYS)
+            while True:
                 try:
                     self._check_generation(server_id, expected_slot_generation)
-                    response = await self.client.request(
-                        method=method, url=url, headers=headers, json=json
-                    )
-                    self._upstream_opened(server_id)
-                    upstream_opened = True
+                    if inference:
+                        # request() buffers the whole response, hiding whether a
+                        # timed-out call had already returned body bytes. Read
+                        # explicitly so only pre-byte stalls can be replayed.
+                        async with self.client.stream(
+                            method=method,
+                            url=url,
+                            headers=headers,
+                            json=json,
+                            timeout=self._inference_timeout(),
+                        ) as upstream:
+                            self._upstream_opened(server_id)
+                            upstream_opened = True
+                            upstream_status = upstream.status_code
+                            content = bytearray()
+                            async for chunk in upstream.aiter_bytes():
+                                content.extend(chunk)
+                                response_bytes += len(chunk)
+                            response = httpx.Response(
+                                upstream.status_code,
+                                headers=upstream.headers,
+                                content=bytes(content),
+                                request=upstream.request,
+                            )
+                    else:
+                        response = await self.client.request(
+                            method=method, url=url, headers=headers, json=json
+                        )
                     status_code = getattr(response, "status_code", None)
                     upstream_status = (
                         status_code if isinstance(status_code, int) else None
                     )
-                    content = getattr(response, "content", b"")
-                    response_bytes = len(content) if isinstance(content, bytes) else 0
+                    if not inference:
+                        content = getattr(response, "content", b"")
+                        response_bytes = (
+                            len(content) if isinstance(content, bytes) else 0
+                        )
                     is_error = upstream_status is not None and upstream_status >= 400
                     outcome = "failed" if is_error else "completed"
                     close_reason = (
@@ -134,9 +165,35 @@ class ServerProxy:
                     )
                     return response
                 except (httpx.ConnectError, httpx.ConnectTimeout):
-                    if delay is None:
+                    delay = next(connect_delays, None)
+                    if upstream_opened or delay is None:
                         raise
                     await asyncio.sleep(delay)
+                except httpx.ReadTimeout:
+                    # Closing the first upstream context precedes this retry;
+                    # keep the same operation ID and slot throughout.
+                    if (
+                        not inference
+                        or response_bytes
+                        or idle_retries >= MAX_PRE_BYTE_IDLE_RETRIES
+                        or upstream_status is not None
+                        and upstream_status >= 400
+                    ):
+                        raise
+                    idle_retries += 1
+                    logger.warning(
+                        "inference_proxy_http_idle_retry operation_id=%s server_id=%s generation=%s attempt=%d idle_seconds=%.1f",
+                        operation_id or "-",
+                        server_id,
+                        expected_slot_generation,
+                        idle_retries,
+                        settings.UPSTREAM_IDLE_TIMEOUT_SECONDS,
+                    )
+                    if upstream_opened:
+                        self._upstream_closed(server_id)
+                        upstream_opened = False
+                    self._check_generation(server_id, expected_slot_generation)
+                    continue
         except asyncio.CancelledError:
             outcome = "cancelled"
             close_reason = "request_cancelled_before_http_response"
@@ -203,6 +260,7 @@ class ServerProxy:
         done_marker_seen = False
         done_marker_tail = b""
         reservation_task: asyncio.Task[None] | None = None
+        idle_retries = 0
         try:
             self._check_generation(server_id, expected_slot_generation)
             url = self._get_server_url(server_id, path)
@@ -231,7 +289,8 @@ class ServerProxy:
                     if operation is None or operation["status"] != "active":
                         raise asyncio.CancelledError
                 bind_operation_task(self.server_manager, operation_id)
-            for delay in (*CONNECT_RETRY_DELAYS, None):
+            connect_delays = iter(CONNECT_RETRY_DELAYS)
+            while True:
                 connected = False
                 try:
                     self._check_generation(server_id, expected_slot_generation)
@@ -240,6 +299,9 @@ class ServerProxy:
                         url=url,
                         json=json,
                         headers={"Accept": "text/event-stream"},
+                        timeout=self._inference_timeout()
+                        if enforce_capacity
+                        else self.client.timeout,
                     ) as response:
                         connected = True
                         upstream_opened = True
@@ -276,9 +338,35 @@ class ServerProxy:
                         )
                     return
                 except (httpx.ConnectError, httpx.ConnectTimeout):
+                    delay = next(connect_delays, None)
                     if connected or delay is None:
                         raise
                     await asyncio.sleep(delay)
+                except httpx.ReadTimeout:
+                    # Never restart generation after anything was sent toward
+                    # the backend, even if the upstream later goes idle.
+                    if (
+                        not enforce_capacity
+                        or bytes_sent
+                        or idle_retries >= MAX_PRE_BYTE_IDLE_RETRIES
+                        or upstream_status is not None
+                        and upstream_status >= 400
+                    ):
+                        raise
+                    idle_retries += 1
+                    logger.warning(
+                        "inference_stream_idle_retry operation_id=%s server_id=%s generation=%s attempt=%d idle_seconds=%.1f",
+                        operation_id or "-",
+                        server_id,
+                        expected_slot_generation,
+                        idle_retries,
+                        settings.UPSTREAM_IDLE_TIMEOUT_SECONDS,
+                    )
+                    if connection_open:
+                        self._upstream_closed(server_id)
+                        connection_open = False
+                    self._check_generation(server_id, expected_slot_generation)
+                    continue
         except asyncio.CancelledError:
             outcome = "cancelled"
             close_reason = (
@@ -509,6 +597,14 @@ class ServerProxy:
             raise ValueError(f"Server {server_id} not found")
         port = getattr(config, "api_port", config.port)
         return f"http://127.0.0.1:{port}{path}"
+
+    @staticmethod
+    def _inference_timeout() -> httpx.Timeout:
+        return httpx.Timeout(
+            300.0,
+            connect=UPSTREAM_CONNECT_TIMEOUT_SECONDS,
+            read=settings.UPSTREAM_IDLE_TIMEOUT_SECONDS,
+        )
 
     def _check_generation(self, server_id: str, expected: int | None) -> None:
         if expected is None:
