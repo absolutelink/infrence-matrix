@@ -144,7 +144,13 @@ async def _stream_to_ws(
     """
     lease = None
     server = None
+    lease_request_id = "-"
     started = time.monotonic()
+    upstream_status: int | None = None
+    upstream_opened = False
+    upstream_lines = 0
+    emitted_events = 0
+    done_marker_seen = False
     telemetry_recorded = False
     seq = ev.SSEmitter()
     try:
@@ -159,6 +165,7 @@ async def _stream_to_ws(
             preferred_server_id=preferred_server_id,
             is_cancelled=is_disconnected,
         )
+        lease_request_id = lease.request_id
         server = lease.server
         agent = await agent_manager.get_agent(str(server.agent_id))
         if not agent:
@@ -214,6 +221,16 @@ async def _stream_to_ws(
                     "X-Inference-Request-ID": lease.request_id,
                 },
             ) as upstream:
+                upstream_opened = True
+                upstream_status = upstream.status_code
+                logger.info(
+                    "responses_ws_upstream_open request_id=%s response_id=%s server_id=%s agent_id=%s upstream_status=%s",
+                    lease.request_id,
+                    response_id,
+                    server.id,
+                    server.agent_id,
+                    upstream_status,
+                )
                 upstream.raise_for_status()
                 lines = upstream.aiter_lines()
                 while True:
@@ -221,10 +238,12 @@ async def _stream_to_ws(
                         line = await lease.guard(anext(lines), cancelled=disconnected)
                     except StopAsyncIteration:
                         break
+                    upstream_lines += 1
                     if not line.startswith("data:"):
                         continue
                     data = line[5:].lstrip()
                     if data.strip() == "[DONE]":
+                        done_marker_seen = True
                         break
                     try:
                         chunk = json.loads(data)
@@ -258,7 +277,25 @@ async def _stream_to_ws(
                         state.add_text_delta(content_delta)
                     for tc in delta.get("tool_calls") or []:
                         state.add_tool_call_delta(tc.get("index", 0), tc)
-                    await _send_events(websocket, seq.drain_events())
+                    events = seq.drain_events()
+                    emitted_events += len(events)
+                    await _send_events(websocket, events)
+
+        logger.info(
+            "responses_ws_upstream_close request_id=%s response_id=%s server_id=%s outcome=%s close_reason=%s upstream_status=%s done_marker=%s upstream_lines=%d emitted_events=%d duration_ms=%.1f",
+            lease.request_id,
+            response_id,
+            server.id,
+            "completed"
+            if upstream_status is not None and upstream_status < 400
+            else "error",
+            "done_marker" if done_marker_seen else "upstream_eof_without_done_marker",
+            upstream_status,
+            done_marker_seen,
+            upstream_lines,
+            emitted_events,
+            (time.monotonic() - started) * 1000.0,
+        )
 
         # Record before release() and the close-out yields: the upstream
         # work is complete at this point, so a cancel during release or the
@@ -320,7 +357,21 @@ async def _stream_to_ws(
                 "responses %s: stored (chain continues from this turn)", response_id
             )
         return serialized
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as exc:
+        logger.info(
+            "responses_ws_stream_close request_id=%s server_id=%s outcome=cancelled close_reason=%s exception=%s upstream_status=%s upstream_opened=%s upstream_lines=%d emitted_events=%d duration_ms=%.1f",
+            lease_request_id,
+            server.id if server is not None else "-",
+            "client_disconnect"
+            if disconnected and disconnected.is_set()
+            else "task_cancelled",
+            type(exc).__name__,
+            upstream_status,
+            upstream_opened,
+            upstream_lines,
+            emitted_events,
+            (time.monotonic() - started) * 1000.0,
+        )
         if not telemetry_recorded:
             record_request_telemetry(
                 server,
@@ -346,6 +397,21 @@ async def _stream_to_ws(
         )
         return None
     except Exception as e:
+        logger.warning(
+            "responses_ws_stream_close request_id=%s server_id=%s outcome=error close_reason=%s error_type=%s error=%s upstream_status=%s upstream_opened=%s upstream_lines=%d emitted_events=%d duration_ms=%.1f",
+            lease_request_id,
+            server.id if server is not None else "-",
+            "client_disconnect"
+            if disconnected and disconnected.is_set()
+            else "upstream_or_websocket_error",
+            type(e).__name__,
+            str(e),
+            upstream_status,
+            upstream_opened,
+            upstream_lines,
+            emitted_events,
+            (time.monotonic() - started) * 1000.0,
+        )
         if not telemetry_recorded:
             record_request_telemetry(
                 server,

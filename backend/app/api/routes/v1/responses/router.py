@@ -489,6 +489,12 @@ async def _stream_events(
     # disconnects at the initial yield, the generator's finally block below
     # has not started yet, so explicitly cover that early-close window.
     initial_frames_sent = False
+    request_id = lease.request_id if lease is not None else response_id
+    upstream_status: int | None = None
+    upstream_opened = False
+    upstream_lines = 0
+    emitted_frames = 0
+    done_marker_seen = False
     try:
         ev.response_created(seq, response)
         ev.response_in_progress(seq, response)
@@ -496,6 +502,13 @@ async def _stream_events(
             yield frame
         initial_frames_sent = True
     except GeneratorExit, asyncio.CancelledError:
+        logger.info(
+            "responses_stream_close request_id=%s response_id=%s server_id=%s outcome=cancelled close_reason=downstream_disconnect_before_stream_setup duration_ms=%.1f",
+            request_id,
+            response_id,
+            server_id,
+            (time.monotonic() - started) * 1000.0,
+        )
         # Early-close window: the later try/finally has not started, so
         # release here and label the failure by its real kind.
         if not initial_frames_sent and lease is not None:
@@ -559,15 +572,27 @@ async def _stream_events(
                 if lease is not None
                 else None,
             ) as upstream:
+                upstream_opened = True
+                upstream_status = upstream.status_code
+                logger.info(
+                    "responses_stream_open request_id=%s response_id=%s server_id=%s agent_id=%s upstream_status=%s",
+                    request_id,
+                    response_id,
+                    server_id,
+                    agent_id,
+                    upstream_status,
+                )
                 upstream.raise_for_status()
                 async for line in _upstream_lines_with_keepalive(upstream, lease):
                     if line is None:
                         yield ": keep-alive\n\n"
                         continue
+                    upstream_lines += 1
                     if not line.startswith("data:"):
                         continue
                     data = line[5:].lstrip()
                     if data.strip() == "[DONE]":
+                        done_marker_seen = True
                         break
                     try:
                         chunk = json.loads(data)
@@ -611,8 +636,25 @@ async def _stream_events(
 
                     # Emit the item/delta events built during this chunk
                     for frame in seq.drain_frames():
+                        emitted_frames += 1
                         yield frame
 
+        logger.info(
+            "responses_stream_upstream_close request_id=%s response_id=%s server_id=%s outcome=%s close_reason=%s upstream_status=%s upstream_opened=%s done_marker=%s upstream_lines=%d emitted_frames=%d duration_ms=%.1f",
+            request_id,
+            response_id,
+            server_id,
+            "completed"
+            if upstream_status is not None and upstream_status < 400
+            else "error",
+            "done_marker" if done_marker_seen else "upstream_eof_without_done_marker",
+            upstream_status,
+            upstream_opened,
+            done_marker_seen,
+            upstream_lines,
+            emitted_frames,
+            (time.monotonic() - started) * 1000.0,
+        )
         # Record before release() and the close-out yields: the upstream
         # work is complete at this point, so a cancel during release or the
         # final sends must not downgrade a finished inference to cancelled.
@@ -692,7 +734,40 @@ async def _stream_events(
         else:
             logger.info("responses %s: not stored (store=false)", response_id)
 
-    except asyncio.CancelledError:
+    except GeneratorExit:
+        logger.info(
+            "responses_stream_close request_id=%s response_id=%s server_id=%s outcome=cancelled close_reason=downstream_generator_closed upstream_status=%s upstream_opened=%s upstream_lines=%d emitted_frames=%d duration_ms=%.1f",
+            request_id,
+            response_id,
+            server_id,
+            upstream_status,
+            upstream_opened,
+            upstream_lines,
+            emitted_frames,
+            (time.monotonic() - started) * 1000.0,
+        )
+        if not telemetry_recorded:
+            record_request_telemetry(
+                sample_server,
+                None,
+                None,
+                latency_ms=(time.monotonic() - started) * 1000.0,
+                status="cancelled",
+            )
+        raise
+    except asyncio.CancelledError as exc:
+        logger.info(
+            "responses_stream_close request_id=%s response_id=%s server_id=%s outcome=cancelled close_reason=downstream_disconnect_or_task_cancel exception=%s upstream_status=%s upstream_opened=%s upstream_lines=%d emitted_frames=%d duration_ms=%.1f",
+            request_id,
+            response_id,
+            server_id,
+            type(exc).__name__,
+            upstream_status,
+            upstream_opened,
+            upstream_lines,
+            emitted_frames,
+            (time.monotonic() - started) * 1000.0,
+        )
         if not telemetry_recorded:
             record_request_telemetry(
                 sample_server,
@@ -703,6 +778,19 @@ async def _stream_events(
             )
         raise
     except Exception as e:
+        logger.warning(
+            "responses_stream_close request_id=%s response_id=%s server_id=%s outcome=error close_reason=upstream_or_proxy_error error_type=%s error=%s upstream_status=%s upstream_opened=%s upstream_lines=%d emitted_frames=%d duration_ms=%.1f",
+            request_id,
+            response_id,
+            server_id,
+            type(e).__name__,
+            str(e),
+            upstream_status,
+            upstream_opened,
+            upstream_lines,
+            emitted_frames,
+            (time.monotonic() - started) * 1000.0,
+        )
         if not telemetry_recorded:
             record_request_telemetry(
                 sample_server,

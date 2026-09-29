@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from app.core.logging import logger
 from app.services.inference_operations import (
     activate_operation,
     bind_operation_task,
@@ -59,6 +60,10 @@ class ServerProxy:
         """Proxy HTTP request to llama.cpp."""
         reservation = _SlotReservation(acquired=capacity_reserved)
         outcome = "failed"
+        close_reason = "proxy_error"
+        started_at = asyncio.get_running_loop().time()
+        upstream_status: int | None = None
+        response_bytes = 0
         try:
             self._check_generation(server_id, expected_slot_generation)
             url = self._get_server_url(server_id, path)
@@ -76,7 +81,17 @@ class ServerProxy:
                     response = await self.client.request(
                         method=method, url=url, headers=headers, json=json
                     )
-                    outcome = "completed"
+                    status_code = getattr(response, "status_code", None)
+                    upstream_status = (
+                        status_code if isinstance(status_code, int) else None
+                    )
+                    content = getattr(response, "content", b"")
+                    response_bytes = len(content) if isinstance(content, bytes) else 0
+                    is_error = upstream_status is not None and upstream_status >= 400
+                    outcome = "failed" if is_error else "completed"
+                    close_reason = (
+                        "llm_http_error" if is_error else "llm_response_complete"
+                    )
                     return response
                 except (httpx.ConnectError, httpx.ConnectTimeout):
                     if delay is None:
@@ -84,8 +99,38 @@ class ServerProxy:
                     await asyncio.sleep(delay)
         except asyncio.CancelledError:
             outcome = "cancelled"
+            close_reason = "request_cancelled_before_http_response"
+            raise
+        except Exception as exc:
+            close_reason = (
+                f"llm_http_error:{type(exc).__name__}"
+                if upstream_status is not None
+                else f"agent_connect_error:{type(exc).__name__}"
+            )
+            logger.warning(
+                "inference_proxy_http_error operation_id=%s server_id=%s generation=%s source=%s upstream_status=%s error_type=%s error=%s",
+                operation_id or "-",
+                server_id,
+                expected_slot_generation,
+                "llm" if upstream_status is not None else "agent_or_connect",
+                upstream_status,
+                type(exc).__name__,
+                str(exc),
+            )
             raise
         finally:
+            if enforce_capacity or operation_id is not None:
+                logger.info(
+                    "inference_proxy_http_close operation_id=%s server_id=%s generation=%s outcome=%s close_reason=%s upstream_status=%s response_bytes=%d duration_ms=%.1f",
+                    operation_id or "-",
+                    server_id,
+                    expected_slot_generation,
+                    outcome,
+                    close_reason,
+                    upstream_status,
+                    response_bytes,
+                    (asyncio.get_running_loop().time() - started_at) * 1000,
+                )
             await self._release_reservation(
                 server_id, enforce_capacity, operation_id, outcome, reservation
             )
@@ -104,6 +149,14 @@ class ServerProxy:
         """Proxy streaming request (SSE) to llama.cpp."""
         reservation = _SlotReservation(acquired=capacity_reserved)
         outcome = "failed"
+        close_reason = "proxy_error"
+        started_at = asyncio.get_running_loop().time()
+        upstream_status: int | None = None
+        upstream_opened = False
+        chunks = 0
+        bytes_sent = 0
+        done_marker_seen = False
+        done_marker_tail = b""
         reservation_task: asyncio.Task[None] | None = None
         try:
             self._check_generation(server_id, expected_slot_generation)
@@ -138,9 +191,33 @@ class ServerProxy:
                         headers={"Accept": "text/event-stream"},
                     ) as response:
                         connected = True
+                        upstream_opened = True
+                        upstream_status = response.status_code
+                        logger.info(
+                            "inference_stream_open operation_id=%s server_id=%s generation=%s upstream_status=%s",
+                            operation_id or "-",
+                            server_id,
+                            expected_slot_generation,
+                            upstream_status,
+                        )
                         async for chunk in response.aiter_bytes():
+                            chunks += 1
+                            bytes_sent += len(chunk)
+                            if not done_marker_seen:
+                                scan = done_marker_tail + chunk
+                                done_marker_seen = b"[DONE]" in scan
+                                done_marker_tail = scan[-16:]
                             yield chunk
-                    outcome = "completed"
+                    if upstream_status is not None and upstream_status >= 400:
+                        outcome = "failed"
+                        close_reason = "llm_http_error"
+                    else:
+                        outcome = "completed"
+                        close_reason = (
+                            "llm_eof_after_done_marker"
+                            if done_marker_seen
+                            else "llm_eof_without_done_marker"
+                        )
                     return
                 except (httpx.ConnectError, httpx.ConnectTimeout):
                     if connected or delay is None:
@@ -148,14 +225,59 @@ class ServerProxy:
                     await asyncio.sleep(delay)
         except asyncio.CancelledError:
             outcome = "cancelled"
+            close_reason = (
+                "downstream_cancelled_after_llm_connect"
+                if upstream_opened
+                else "downstream_cancelled_before_llm_connect"
+            )
             if reservation_task is not None and not reservation_task.done():
                 reservation_task.cancel()
                 await asyncio.gather(reservation_task, return_exceptions=True)
+            raise
+        except GeneratorExit:
+            outcome = "cancelled"
+            close_reason = (
+                "downstream_closed_after_llm_connect"
+                if upstream_opened
+                else "downstream_closed_before_llm_connect"
+            )
+            raise
+        except Exception as exc:
+            close_reason = (
+                f"llm_stream_error:{type(exc).__name__}"
+                if upstream_opened
+                else f"agent_proxy_error:{type(exc).__name__}"
+            )
+            logger.warning(
+                "inference_stream_error operation_id=%s server_id=%s generation=%s source=%s upstream_status=%s error_type=%s error=%s",
+                operation_id or "-",
+                server_id,
+                expected_slot_generation,
+                "llm" if upstream_opened else "agent_proxy_or_slot_wait",
+                upstream_status,
+                type(exc).__name__,
+                str(exc),
+            )
             raise
         finally:
             if reservation_task is not None and not reservation_task.done():
                 reservation_task.cancel()
                 await asyncio.gather(reservation_task, return_exceptions=True)
+            duration_ms = (asyncio.get_running_loop().time() - started_at) * 1000
+            logger.info(
+                "inference_stream_close operation_id=%s server_id=%s generation=%s outcome=%s close_reason=%s upstream_status=%s upstream_opened=%s done_marker=%s chunks=%d bytes=%d duration_ms=%.1f",
+                operation_id or "-",
+                server_id,
+                expected_slot_generation,
+                outcome,
+                close_reason,
+                upstream_status,
+                upstream_opened,
+                done_marker_seen,
+                chunks,
+                bytes_sent,
+                duration_ms,
+            )
             await self._release_reservation(
                 server_id, enforce_capacity, operation_id, outcome, reservation
             )

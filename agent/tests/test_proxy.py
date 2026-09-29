@@ -1,6 +1,7 @@
 """Tests for transient upstream connection handling."""
 
 import asyncio
+import logging
 import os
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -101,7 +102,8 @@ async def test_inference_proxy_admission_is_atomic_and_released_on_completion():
 
 
 @pytest.mark.asyncio
-async def test_operation_id_prevents_duplicate_dispatch_and_can_cancel_upstream():
+async def test_operation_id_prevents_duplicate_dispatch_and_can_cancel_upstream(caplog):
+    caplog.set_level(logging.INFO)
     manager = Mock(
         configs={"server-1": Mock(port=8091, slot_generation=4)},
         _active_connections={},
@@ -155,6 +157,8 @@ async def test_operation_id_prevents_duplicate_dispatch_and_can_cancel_upstream(
     assert status is not None
     assert status["status"] == "cancelled"
     assert manager._active_inference_requests == {}
+    assert "inference_proxy_http_close" in caplog.text
+    assert "operation_id=request-123" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -218,7 +222,8 @@ async def test_queued_operation_is_visible_and_cancellable():
 
 
 @pytest.mark.asyncio
-async def test_stream_cancellation_after_slot_acquire_releases_exactly_once():
+async def test_stream_cancellation_after_slot_acquire_releases_exactly_once(caplog):
+    caplog.set_level(logging.INFO)
     manager = Mock(
         configs={"server-1": Mock(port=8091, slot_generation=7)},
         _active_connections={},
@@ -260,6 +265,117 @@ async def test_stream_cancellation_after_slot_acquire_releases_exactly_once():
     status = get_operation(manager, "cancel-at-acquire", "server-1")
     assert status is not None
     assert status["status"] == "cancelled"
+    assert "inference_stream_close" in caplog.text
+    assert "close_reason=downstream_cancelled_before_llm_connect" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body_chunks", "expected_reason", "done_marker"),
+    [
+        (
+            [b"data: hello\n\n", b"data: [DONE]\n\n"],
+            "llm_eof_after_done_marker",
+            "True",
+        ),
+        ([b"data: hello\n\n"], "llm_eof_without_done_marker", "False"),
+    ],
+)
+async def test_stream_close_log_distinguishes_llm_eof_from_done_marker(
+    caplog, body_chunks, expected_reason, done_marker
+):
+    caplog.set_level(logging.INFO)
+    manager = Mock(
+        configs={"server-1": Mock(port=8091, slot_generation=9)},
+        _active_connections={},
+        _active_inference_requests={},
+        _inference_slot_conditions={},
+        _inference_operations={},
+        get_effective_capacity=Mock(return_value=1),
+    )
+    proxy = ServerProxy(manager)
+
+    class UpstreamResponse:
+        status_code = 200
+        is_error = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            pass
+
+        async def aiter_bytes(self):
+            for chunk in body_chunks:
+                yield chunk
+
+    proxy.client.stream = Mock(return_value=UpstreamResponse())
+    chunks = [
+        chunk
+        async for chunk in proxy.proxy_stream(
+            "server-1",
+            "POST",
+            "/v1/chat/completions",
+            json={"stream": True},
+            expected_slot_generation=9,
+            enforce_capacity=True,
+            operation_id="stream-log-id",
+        )
+    ]
+
+    assert chunks == body_chunks
+    assert "operation_id=stream-log-id" in caplog.text
+    assert f"close_reason={expected_reason}" in caplog.text
+    assert f"done_marker={done_marker}" in caplog.text
+    assert manager._active_inference_requests == {}
+
+
+@pytest.mark.asyncio
+async def test_stream_close_log_identifies_llm_connection_drop(caplog):
+    caplog.set_level(logging.INFO)
+    manager = Mock(
+        configs={"server-1": Mock(port=8091, slot_generation=10)},
+        _active_connections={},
+        _active_inference_requests={},
+        _inference_slot_conditions={},
+        _inference_operations={},
+        get_effective_capacity=Mock(return_value=1),
+    )
+    proxy = ServerProxy(manager)
+
+    class DroppedUpstream:
+        status_code = 200
+        is_error = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            pass
+
+        async def aiter_bytes(self):
+            yield b"data: partial\n\n"
+            raise httpx.RemoteProtocolError("upstream closed mid-frame")
+
+    proxy.client.stream = Mock(return_value=DroppedUpstream())
+    stream = proxy.proxy_stream(
+        "server-1",
+        "POST",
+        "/v1/chat/completions",
+        json={"stream": True},
+        expected_slot_generation=10,
+        enforce_capacity=True,
+        operation_id="llm-dropped-request",
+    )
+
+    with pytest.raises(httpx.RemoteProtocolError):
+        async for _chunk in stream:
+            pass
+
+    assert "operation_id=llm-dropped-request" in caplog.text
+    assert "error_type=RemoteProtocolError" in caplog.text
+    assert "close_reason=llm_stream_error:RemoteProtocolError" in caplog.text
+    assert manager._active_inference_requests == {}
 
 
 @pytest.mark.asyncio

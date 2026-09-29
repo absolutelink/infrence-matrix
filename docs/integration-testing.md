@@ -24,25 +24,27 @@ Run 9 (full-suite regression sweep): 2026-09-25 — **15 passed / 2 failed** (on
 Run 10 (full-suite regression sweep): 2026-09-25 — **10 passed / 7 failed** (HTTP/model-backed tests returned 500s during agent/server restart; WebSocket tests passed)
 Run 11 (full-suite regression sweep): 2026-09-25 — **17 passed / 0 failed**
 Run 12 (full-suite regression sweep with rocinante): 2026-09-27 — **17 passed / 0 failed**
+Run 13 (full-suite run with rocinante): 2026-09-29 — **3 passed / 14 failed / 17 total** (not a clean baseline: the application service restarted and pulled an image while the suite was running; rocinante cold-started during the run)
+Run 13 post-check (00:38 UTC): **2 active / 9 queued** test leases remained; all registered agents reported `inference_slot_protocol=0`. With user approval, those 11 run-generated leases were terminalized as `integration_test_cleanup`; a follow-up DB check showed **0 active / 0 queued**. Protocol-capable agents still need to be deployed before validating agent-owned admission.
 
 | Test ID | Name | Status | Notes |
 |---|---|---|---|
-| `basic-response` | Basic Text Response | ✅ PASS | |
-| `assistant-phase` | Assistant Message Phase | ✅ PASS | |
+| `basic-response` | Basic Text Response | ⚠️ TIMEOUT (Run 13) | Timed out during concurrent deployment/model cold start; passed Run 12 |
+| `assistant-phase` | Assistant Message Phase | ⚠️ TIMEOUT (Run 13) | Timed out during concurrent deployment/model cold start; passed Run 12 |
 | `response-output-phase-schema` | Response Output Phase Schema | ✅ PASS | local schema fixture, no HTTP |
-| `streaming-response` | Streaming Response | ✅ PASS | |
-| `websocket-response` | WebSocket Response | ✅ PASS | |
-| `websocket-sequential-responses` | WebSocket Sequential Responses | ✅ PASS | |
-| `websocket-continuation` | WebSocket Continuation | ✅ PASS | |
-| `websocket-reconnect-store-false-recovery` | WebSocket Store False Reconnect Recovery | ✅ PASS | |
+| `streaming-response` | Streaming Response | ⚠️ TIMEOUT (Run 13) | Timed out during concurrent deployment/model cold start; passed Run 12 |
+| `websocket-response` | WebSocket Response | ⚠️ TIMEOUT (Run 13) | Terminal event not received within 30s; passed Run 12 |
+| `websocket-sequential-responses` | WebSocket Sequential Responses | ⚠️ TIMEOUT (Run 13) | Terminal event not received within 30s; passed Run 12 |
+| `websocket-continuation` | WebSocket Continuation | ⚠️ TIMEOUT (Run 13) | Terminal event not received within 30s; passed Run 12 |
+| `websocket-reconnect-store-false-recovery` | WebSocket Store False Reconnect Recovery | ⚠️ TIMEOUT (Run 13) | Terminal event not received within 30s; passed Run 12 |
 | `websocket-previous-response-not-found` | WebSocket Missing Previous Response | ✅ PASS | |
-| `websocket-failed-continuation-evicts-cache` | WebSocket Failed Continuation Evicts Cache | ✅ PASS | passes full suite and individually after call-ID validation |
-| `websocket-compact-new-chain` | WebSocket Compact New Chain | ✅ PASS | |
-| `system-prompt` | System Prompt | ✅ PASS | |
-| `tool-calling` | Tool Calling | ✅ PASS | |
-| `image-input` | Image Input | ✅ PASS | |
-| `multi-turn` | Multi-turn Conversation | ✅ PASS | |
-| `compact-response` | Compaction Endpoint | ✅ PASS | |
+| `websocket-failed-continuation-evicts-cache` | WebSocket Failed Continuation Evicts Cache | ⚠️ TIMEOUT (Run 13) | Terminal event not received within 30s; passed Run 12 after call-ID validation |
+| `websocket-compact-new-chain` | WebSocket Compact New Chain | ⚠️ TIMEOUT (Run 13) | Request timed out during queue contention; passed Run 12 |
+| `system-prompt` | System Prompt | ⚠️ TIMEOUT (Run 13) | Request timed out during queue contention; passed Run 12 |
+| `tool-calling` | Tool Calling | ⚠️ TIMEOUT (Run 13) | Request timed out during queue contention; passed Run 12 |
+| `image-input` | Image Input | ⚠️ TIMEOUT (Run 13) | Request timed out during queue contention; passed Run 12 |
+| `multi-turn` | Multi-turn Conversation | ⚠️ TIMEOUT (Run 13) | Request timed out during queue contention; passed Run 12 |
+| `compact-response` | Compaction Endpoint | ⚠️ TIMEOUT (Run 13) | Request timed out during queue contention; passed Run 12 |
 | `compact-missing-model` | Compaction Missing Required Model | ✅ PASS | |
 
 ## Failure clusters
@@ -75,8 +77,18 @@ Run 12 (full-suite regression sweep with rocinante): 2026-09-27 — **17 passed 
 12. ~~**WS continuation history hydration**~~ — FIXED: WS turns pass connection-local cached
     history for `store=false` and the full DB chain for `store=true`; verified after deploy.
 13. ~~**Invalid WebSocket tool result cache eviction**~~ — FIXED: unmatched
-     `function_call_output.call_id` now raises a translation error, producing a failed turn
-     and evicting the referenced cached response; verified in deployment.
+    `function_call_output.call_id` now raises a translation error, producing a failed turn
+    and evicting the referenced cached response; verified in deployment.
+14. **Run 13 overlapped an application restart and model cold start** — the deployment log
+    shows `inference-matrix.service` restarting and pulling `matrix-app:main` at 00:26 while
+    the suite was active. The suite's rocinante requests began around 00:29 while the
+    Halogen-flash server was stopped, then auto-started and became healthy at 00:29:26.
+    WebSocket waits timed out first; the remaining requests then timed out under queue
+    contention. Post-run DB inspection showed 2 expired active leases and 9 queued leases
+    created between 00:29:12 and 00:29:14. All registered agents reported
+    `inference_slot_protocol=0`, so the new agent-owned admission path was not exercised.
+    Those 11 test leases were terminalized as `integration_test_cleanup` with user approval;
+    a follow-up check showed no active or queued leases.
 
 ## History
 
@@ -89,6 +101,7 @@ Run 12 (full-suite regression sweep with rocinante): 2026-09-27 — **17 passed 
 | 2026-09-25 | Full-suite regression sweep after restart | 10 | 7 | HTTP/model-backed tests returned 500s while the agent/server was restarting; one compaction request exposed an upstream 503. All WebSocket tests passed |
 | 2026-09-25 | Full-suite regression sweep | 17 | 0 | All compliance tests passed |
 | 2026-09-27 | Full-suite regression sweep with `rocinante` | 17 | 0 | All 17 OpenResponses compliance tests passed |
+| 2026-09-29 | Full-suite run with `rocinante` | 3 | 14 | Not a clean baseline: application service restarted during the suite and `rocinante` cold-started under concurrent requests; 2 expired active leases and 9 queued test leases remained; all agents reported protocol 0. User-approved cleanup terminalized the 11 test leases; active/queued count returned to 0. |
 | 2026-09-26 | Full-suite regression sweep after cross-agent eviction fix | 12 | 5 | Voyager started successfully after evicting co-located rocinante-tiny; remaining failures were WebSocket 30s contention timeouts |
 | 2026-09-24 | (baseline) | 3 | 14 | Initial full run |
 | 2026-09-24 | serialize_spec fix (pushed) | 10 | 7 | Clusters 1–3 + 5 fixed: spec serializer (`serialize_spec`), `completed_at` at finalize, dropped `reasoning_text.*` event twins. Unblocked: basic-response, system-prompt, tool-calling, streaming-response, assistant-phase, multi-turn, compact-response |

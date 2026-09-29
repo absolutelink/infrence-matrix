@@ -183,6 +183,10 @@ async def _stream_completion_via_agent(
     final_timings: dict = {}
     telemetry_recorded = False
     lease_released = False
+    upstream_status: int | None = None
+    upstream_opened = False
+    upstream_lines = 0
+    emitted_chunks = 0
 
     try:
         agent = await agent_manager.get_agent(agent_id)
@@ -204,6 +208,15 @@ async def _stream_completion_via_agent(
                     "X-Inference-Request-ID": lease.request_id,
                 },
             ) as response:
+                upstream_opened = True
+                upstream_status = response.status_code
+                logger.info(
+                    "backend_inference_stream_open request_id=%s server_id=%s agent_id=%s upstream_status=%s",
+                    lease.request_id,
+                    server_id,
+                    agent_id,
+                    upstream_status,
+                )
                 response.raise_for_status()
 
                 lines = response.aiter_lines()
@@ -212,6 +225,7 @@ async def _stream_completion_via_agent(
                         line = await lease.guard(anext(lines))
                     except StopAsyncIteration:
                         break
+                    upstream_lines += 1
                     if line.startswith("data:"):
                         data = line[5:].lstrip()
                         if data.strip() == "[DONE]":
@@ -242,6 +256,7 @@ async def _stream_completion_via_agent(
                                 usage=None,
                             )
 
+                            emitted_chunks += 1
                             yield f"data: {stream_chunk.model_dump_json()}\n\n"
 
                         except json.JSONDecodeError:
@@ -255,6 +270,17 @@ async def _stream_completion_via_agent(
                 prompt_tokens=len(prompt) // 4,
                 completion_tokens=fallback_completion_chars // 4,
             )
+        logger.info(
+            "backend_inference_stream_close request_id=%s server_id=%s agent_id=%s outcome=completed close_reason=upstream_eof upstream_status=%s upstream_opened=%s upstream_lines=%d emitted_chunks=%d duration_ms=%.1f",
+            lease.request_id,
+            server_id,
+            agent_id,
+            upstream_status,
+            upstream_opened,
+            upstream_lines,
+            emitted_chunks,
+            (time.monotonic() - started) * 1000.0,
+        )
         record_request_telemetry(
             lease.server,
             final_usage.model_dump(),
@@ -278,7 +304,40 @@ async def _stream_completion_via_agent(
 
         yield "data: [DONE]\n\n"
 
-    except asyncio.CancelledError:
+    except GeneratorExit:
+        logger.info(
+            "backend_inference_stream_close request_id=%s server_id=%s agent_id=%s outcome=cancelled close_reason=downstream_generator_closed upstream_status=%s upstream_opened=%s upstream_lines=%d emitted_chunks=%d duration_ms=%.1f",
+            lease.request_id,
+            server_id,
+            agent_id,
+            upstream_status,
+            upstream_opened,
+            upstream_lines,
+            emitted_chunks,
+            (time.monotonic() - started) * 1000.0,
+        )
+        if not telemetry_recorded:
+            record_request_telemetry(
+                lease.server,
+                None,
+                None,
+                latency_ms=(time.monotonic() - started) * 1000.0,
+                status="cancelled",
+            )
+        raise
+    except asyncio.CancelledError as exc:
+        logger.info(
+            "backend_inference_stream_close request_id=%s server_id=%s agent_id=%s outcome=cancelled close_reason=downstream_disconnect_or_task_cancel exception=%s upstream_status=%s upstream_opened=%s upstream_lines=%d emitted_chunks=%d duration_ms=%.1f",
+            lease.request_id,
+            server_id,
+            agent_id,
+            type(exc).__name__,
+            upstream_status,
+            upstream_opened,
+            upstream_lines,
+            emitted_chunks,
+            (time.monotonic() - started) * 1000.0,
+        )
         if not telemetry_recorded:
             record_request_telemetry(
                 lease.server,
@@ -289,6 +348,19 @@ async def _stream_completion_via_agent(
             )
         raise
     except Exception as e:
+        logger.warning(
+            "backend_inference_stream_close request_id=%s server_id=%s agent_id=%s outcome=error close_reason=upstream_or_proxy_error error_type=%s error=%s upstream_status=%s upstream_opened=%s upstream_lines=%d emitted_chunks=%d duration_ms=%.1f",
+            lease.request_id,
+            server_id,
+            agent_id,
+            type(e).__name__,
+            str(e),
+            upstream_status,
+            upstream_opened,
+            upstream_lines,
+            emitted_chunks,
+            (time.monotonic() - started) * 1000.0,
+        )
         if not telemetry_recorded:
             record_request_telemetry(
                 lease.server,

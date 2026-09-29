@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import uuid
 from types import SimpleNamespace
 from typing import Any
@@ -23,6 +24,7 @@ class FakeStreamResponse:
     def __init__(self, lines: list[str], events: list[str] | None = None) -> None:
         self.lines = lines
         self.events = events
+        self.status_code = 200
 
     async def __aenter__(self) -> FakeStreamResponse:
         return self
@@ -131,8 +133,9 @@ def test_responses_payload_omits_reasoning_effort_when_none() -> None:
 
 @pytest.mark.asyncio
 async def test_legacy_completion_releases_before_usage_and_done(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    caplog.set_level(logging.INFO)
     events: list[str] = []
     upstream = FakeStreamResponse(
         [
@@ -163,6 +166,9 @@ async def test_legacy_completion_releases_before_usage_and_done(
     assert '"text":"ok"' in content
     assert '"choices":[]' in usage
     assert events[:2] == ["upstream_closed", "released"]
+    assert "backend_inference_stream_open" in caplog.text
+    assert "request_id=fake-request-id" in caplog.text
+    assert "close_reason=upstream_eof" in caplog.text
     assert client.stream_calls[0]["headers"] == {
         "X-Inference-Slot-Generation": "23",
         "X-Inference-Request-ID": "fake-request-id",
@@ -240,8 +246,9 @@ async def test_responses_sse_releases_before_terminal_event_and_persistence(
 
 @pytest.mark.asyncio
 async def test_responses_websocket_propagates_disconnect_and_releases(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    caplog.set_level(logging.INFO)
     disconnected = asyncio.Event()
     disconnected.set()
     server = SimpleNamespace(id="server-id", agent_id="agent-id", model_id="model-id")
@@ -288,3 +295,5 @@ async def test_responses_websocket_propagates_disconnect_and_releases(
         "X-Inference-Slot-Generation": "31",
         "X-Inference-Request-ID": "request-id",
     }
+    assert "responses_ws_stream_close" in caplog.text
+    assert "close_reason=client_disconnect" in caplog.text
