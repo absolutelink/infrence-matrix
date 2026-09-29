@@ -328,8 +328,9 @@ class ServerProxy:
                         if upstream_status == 400:
                             error_body = bytearray()
                             async for chunk in response.aiter_bytes():
+                                chunks += 1
+                                bytes_sent += len(chunk)
                                 error_body.extend(chunk)
-                            bytes_sent += len(error_body)
                             logger.error(
                                 "inference_upstream_bad_request server_id=%s generation=%s method=%s path=%s request_body=%s response_body=%s",
                                 server_id,
@@ -337,8 +338,9 @@ class ServerProxy:
                                 method,
                                 path,
                                 json,
-                                error_body.decode(
-                                    response.encoding or "utf-8", errors="replace"
+                                bytes(error_body).decode(
+                                    response.encoding or "utf-8",
+                                    errors="replace",
                                 ),
                             )
                             if error_body:
