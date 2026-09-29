@@ -30,15 +30,27 @@ from app.services.token_stats import (
 
 
 def test_parse_llama_metrics_extracts_engine_reported_rates() -> None:
-    metrics = """# HELP llamacpp:prompt_tokens_seconds Average prompt throughput.
-llamacpp:prompt_tokens_seconds 1548.67
-llamacpp:predicted_tokens_seconds 47.8578
+    metrics = """# HELP llamacpp:prompt_tokens_total Number of prompt tokens processed
+llamacpp:prompt_tokens_total 29701
+llamacpp:prompt_seconds_total 19.1784
+llamacpp:tokens_predicted_total 983
+llamacpp:tokens_predicted_seconds_total 20.54
 """
 
     assert parse_llama_metrics(metrics) == {
-        "prompt_per_second": 1548.67,
-        "predicted_per_second": 47.8578,
+        "prompt_per_second": pytest.approx(29701 / 19.1784),
+        "predicted_per_second": pytest.approx(983 / 20.54),
     }
+
+
+def test_parse_llama_metrics_ignores_zero_duration_ratios() -> None:
+    metrics = """llamacpp:prompt_tokens_total 200
+llamacpp:prompt_seconds_total 0
+llamacpp:tokens_predicted_total 10
+llamacpp:tokens_predicted_seconds_total 0
+"""
+
+    assert parse_llama_metrics(metrics) == {}
 
 
 @pytest.mark.asyncio
@@ -84,8 +96,10 @@ async def test_completed_request_scrapes_agent_metrics_once(monkeypatch):
 
     scrape = AsyncMock(
         return_value={
-            "metrics": "llamacpp:prompt_tokens_seconds 1548.67\n"
-            "llamacpp:predicted_tokens_seconds 47.8578\n"
+            "metrics": "llamacpp:prompt_tokens_total 29701\n"
+            "llamacpp:prompt_seconds_total 19.1784\n"
+            "llamacpp:tokens_predicted_total 983\n"
+            "llamacpp:tokens_predicted_seconds_total 20.54\n"
         }
     )
     monkeypatch.setattr(agent_manager.agent_manager, "send_to_agent", scrape)
@@ -107,8 +121,8 @@ async def test_completed_request_scrapes_agent_metrics_once(monkeypatch):
     scrape.assert_awaited_once_with(
         "agent-1", "GET", "/proxy/server-1/metrics", timeout=5.0
     )
-    assert persisted["prompt_per_second"] == 1548.67
-    assert persisted["predicted_per_second"] == 47.8578
+    assert persisted["prompt_per_second"] == pytest.approx(29701 / 19.1784)
+    assert persisted["predicted_per_second"] == pytest.approx(983 / 20.54)
     assert persisted["prompt_ms"] == 100
     assert persisted["predicted_ms"] == 50
 
@@ -425,6 +439,18 @@ async def test_snapshot_aggregates_windows_and_rates(db: Session) -> None:
                 prompt_per_second=500.0,
                 predicted_per_second=50.0,
                 created_at=now - timedelta(seconds=10),
+            )
+        )
+        # A more recent idle/unsupported metrics scrape must not erase the
+        # last non-zero rates reported by either llama.cpp or Halogen Flash.
+        session.add(
+            TokenUsageSample(
+                server_instance_id=server_a.id,
+                prompt_tokens=0,
+                completion_tokens=0,
+                prompt_per_second=0.0,
+                predicted_per_second=0.0,
+                created_at=now - timedelta(seconds=1),
             )
         )
         # server_a: older, outside the live window but inside 24h

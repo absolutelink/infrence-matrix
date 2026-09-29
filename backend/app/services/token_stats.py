@@ -284,21 +284,33 @@ PROMETHEUS_METRICS_TIMEOUT_SECONDS = 5.0
 
 
 def parse_llama_metrics(metrics_text: str) -> dict[str, float]:
-    """Extract llama.cpp's reported decode and prefill throughput gauges."""
+    """Calculate throughput from llama.cpp's cumulative token/time counters."""
     metric_names = {
-        "llamacpp:predicted_tokens_seconds": "predicted_per_second",
-        "llamacpp:prompt_tokens_seconds": "prompt_per_second",
+        "llamacpp:prompt_tokens_total": "prompt_tokens",
+        "llamacpp:prompt_seconds_total": "prompt_seconds",
+        "llamacpp:tokens_predicted_total": "predicted_tokens",
+        "llamacpp:tokens_predicted_seconds_total": "predicted_seconds",
     }
-    parsed: dict[str, float] = {}
+    counters: dict[str, float] = {}
     for line in metrics_text.splitlines():
         fields = line.strip().split()
         if len(fields) < 2 or fields[0] not in metric_names:
             continue
         try:
-            parsed[metric_names[fields[0]]] = float(fields[1])
+            counters[metric_names[fields[0]]] = float(fields[1])
         except ValueError:
             continue
-    return parsed
+
+    rates: dict[str, float] = {}
+    prompt_seconds = counters.get("prompt_seconds", 0)
+    if prompt_seconds > 0:
+        rates["prompt_per_second"] = counters.get("prompt_tokens", 0) / prompt_seconds
+    predicted_seconds = counters.get("predicted_seconds", 0)
+    if predicted_seconds > 0:
+        rates["predicted_per_second"] = (
+            counters.get("predicted_tokens", 0) / predicted_seconds
+        )
+    return rates
 
 
 async def _record_request_telemetry_after_scrape(
@@ -399,10 +411,20 @@ async def token_stats_snapshot() -> dict[str, Any]:
                 await session.execute(
                     text(
                         """
-                        WITH ranked AS (
+                        WITH decode_ranked AS (
                             SELECT
                                 t.server_instance_id,
                                 t.predicted_per_second AS decode_tps,
+                                row_number() OVER (
+                                    PARTITION BY t.server_instance_id
+                                    ORDER BY t.created_at DESC, t.id DESC
+                                ) AS rn
+                            FROM token_usage_samples t
+                            WHERE t.created_at >= now() - make_interval(days => 30)
+                              AND t.predicted_per_second > 0
+                        ), prefill_ranked AS (
+                            SELECT
+                                t.server_instance_id,
                                 t.prompt_per_second AS prefill_tps,
                                 row_number() OVER (
                                     PARTITION BY t.server_instance_id
@@ -410,13 +432,17 @@ async def token_stats_snapshot() -> dict[str, Any]:
                                 ) AS rn
                             FROM token_usage_samples t
                             WHERE t.created_at >= now() - make_interval(days => 30)
+                              AND t.prompt_per_second > 0
                         )
                         SELECT
-                            server_instance_id AS server_id,
-                            decode_tps,
-                            prefill_tps
-                        FROM ranked
-                        WHERE rn = 1
+                            coalesce(d.server_instance_id, p.server_instance_id)
+                                AS server_id,
+                            d.decode_tps,
+                            p.prefill_tps
+                        FROM (SELECT * FROM decode_ranked WHERE rn = 1) d
+                        FULL OUTER JOIN (
+                            SELECT * FROM prefill_ranked WHERE rn = 1
+                        ) p ON p.server_instance_id = d.server_instance_id
                         """
                     )
                 )
