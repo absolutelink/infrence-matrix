@@ -3,6 +3,8 @@
 import asyncio
 import json
 import uuid
+from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 
@@ -404,6 +406,132 @@ class TestTransportKeepalives:
         stream = router._upstream_lines_with_keepalive(Response())
         assert await anext(stream) is None
         await stream.aclose()
+
+    @pytest.mark.asyncio
+    async def test_idle_keepalive_does_not_truncate_upstream_stream(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A keepalive tick must not cancel the pending upstream read.
+
+        Regression: ``asyncio.wait_for`` on ``anext()`` closed the upstream
+        async generator at the first idle gap, so everything after the gap
+        was lost while the response still looked successful.
+        """
+        from app.api.routes.v1.responses import router
+
+        upstream = _FakeUpstream(
+            [
+                "data: one",
+                _FakeUpstream.idle(0.02),
+                "data: two",
+                "data: [DONE]",
+            ]
+        )
+
+        monkeypatch.setattr(router, "SSE_KEEPALIVE_INTERVAL_SECONDS", 0.002)
+        received = [
+            item async for item in router._upstream_lines_with_keepalive(upstream)
+        ]
+
+        # Both real lines and the DONE marker survive the idle gap.
+        assert [item for item in received if item is not None] == [
+            "data: one",
+            "data: two",
+            "data: [DONE]",
+        ]
+        # A keepalive was emitted inside the gap, not after the stream ended.
+        keepalives = [i for i, value in enumerate(received) if value is None]
+        assert any(
+            received.index("data: one") < i < received.index("data: two")
+            for i in keepalives
+        )
+
+    @pytest.mark.asyncio
+    async def test_lease_guard_exception_propagates_from_generator(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.api.routes.v1.responses import router
+
+        class LeaseGuardLost(RuntimeError):
+            pass
+
+        class FakeLease:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def guard(self, awaitable: Any) -> str:
+                self.calls += 1
+                line = await awaitable
+                if self.calls > 1:
+                    raise LeaseGuardLost("lease ownership lost")
+                return line
+
+        upstream = _FakeUpstream(
+            [
+                "data: one",
+                _FakeUpstream.idle(0.02),
+                "data: two",
+                "data: [DONE]",
+            ]
+        )
+
+        monkeypatch.setattr(router, "SSE_KEEPALIVE_INTERVAL_SECONDS", 0.002)
+        stream = router._upstream_lines_with_keepalive(upstream, FakeLease())
+        collected: list[str | None] = []
+        with pytest.raises(LeaseGuardLost):
+            async for item in stream:
+                collected.append(item)
+        assert [item for item in collected if item is not None] == ["data: one"]
+
+    @pytest.mark.asyncio
+    async def test_early_close_cancels_reader_task_without_leak(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.api.routes.v1.responses import router
+
+        upstream = _FakeUpstream(
+            [
+                "data: one",
+                _FakeUpstream.idle(30.0),
+                "data: two",
+                "data: [DONE]",
+            ]
+        )
+
+        monkeypatch.setattr(router, "SSE_KEEPALIVE_INTERVAL_SECONDS", 0.002)
+        before = set(asyncio.all_tasks())
+        stream = router._upstream_lines_with_keepalive(upstream)
+        assert await anext(stream) == "data: one"
+        assert set(asyncio.all_tasks()) - before  # reader task is live
+        await stream.aclose()
+        assert set(asyncio.all_tasks()) == before
+        assert upstream.cancelled is True
+
+
+class _FakeUpstream:
+    """Stand-in for httpx.Response whose ``aiter_lines()`` is an async generator."""
+
+    _IDLE = object()
+
+    def __init__(self, chunks: list[Any]) -> None:
+        self.chunks = chunks
+        self.cancelled = False
+
+    @classmethod
+    def idle(cls, seconds: float) -> tuple[Any, float]:
+        return (cls._IDLE, seconds)
+
+    async def aiter_lines(self) -> AsyncIterator[str]:
+        for chunk in self.chunks:
+            if isinstance(chunk, tuple) and chunk and chunk[0] is self._IDLE:
+                try:
+                    await asyncio.sleep(chunk[1])
+                except asyncio.CancelledError:
+                    self.cancelled = True
+                    raise
+                continue
+            assert isinstance(chunk, str)
+            yield chunk
 
 
 class TestResponseResourceEcho:

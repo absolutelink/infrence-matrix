@@ -10,6 +10,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from datetime import UTC, datetime
 from typing import Any
 
@@ -73,6 +74,10 @@ DEFAULT_MAX_OUTPUT_TOKENS = 1024
 # Keep intermediaries from treating a slow prompt prefill as a dead SSE
 # connection. This is a transport comment, not an OpenResponses event.
 SSE_KEEPALIVE_INTERVAL_SECONDS = 15.0
+
+# Terminal marker for the keepalive reader queue. A unique object so it can
+# never be confused with the None keepalive signal or a real upstream line.
+_STREAM_END = object()
 
 router = APIRouter()
 
@@ -434,27 +439,63 @@ async def _upstream_lines_with_keepalive(
     upstream: httpx.Response,
     lease: InferenceLeaseHandle | None = None,
 ) -> AsyncIterator[str | None]:
-    """Read upstream SSE lines while emitting comments during idle periods."""
-    lines = upstream.aiter_lines()
-    while True:
+    """Read upstream SSE lines while emitting comments during idle periods.
+
+    The idle timer must never cancel the pending upstream read: cancelling a
+    suspended ``__anext__`` closes the async generator, so the next read
+    raises ``StopAsyncIteration`` and the rest of the stream is silently
+    lost.  Instead a long-lived reader task feeds a size-1 queue and only
+    the queue pop is timed out, which is always safe.  Yields ``None`` for
+    "emit a keepalive comment now" and ``str`` for an upstream line.
+    """
+    queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=1)
+    shutting_down = False
+
+    async def reader() -> None:
+        lines = upstream.aiter_lines()
         try:
-            next_line = anext(lines)
-            if lease is not None:
-                line = await asyncio.wait_for(
-                    lease.guard(next_line),
-                    timeout=SSE_KEEPALIVE_INTERVAL_SECONDS,
+            while True:
+                try:
+                    if lease is not None:
+                        line = await lease.guard(anext(lines))
+                    else:
+                        line = await anext(lines)
+                except StopAsyncIteration:
+                    break
+                await queue.put(line)
+        except asyncio.CancelledError as exc:
+            # Our own teardown: drop the cancellation instead of reporting it.
+            # Lease loss and client cancellation raise CancelledError subclasses
+            # from guard while the consumer is still running, so those must be
+            # delivered with their real type.
+            if shutting_down:
+                raise
+            await queue.put(exc)
+        except Exception as exc:
+            await queue.put(exc)
+        else:
+            await queue.put(_STREAM_END)
+
+    task = asyncio.create_task(reader())
+    try:
+        while True:
+            try:
+                item = await asyncio.wait_for(
+                    queue.get(), timeout=SSE_KEEPALIVE_INTERVAL_SECONDS
                 )
-            else:
-                line = await asyncio.wait_for(
-                    next_line,
-                    timeout=SSE_KEEPALIVE_INTERVAL_SECONDS,
-                )
-        except TimeoutError:
-            yield None
-            continue
-        except StopAsyncIteration:
-            return
-        yield line
+            except TimeoutError:
+                yield None
+                continue
+            if item is _STREAM_END:
+                return
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+    finally:
+        shutting_down = True
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def _stream_events(
@@ -583,61 +624,64 @@ async def _stream_events(
                     upstream_status,
                 )
                 upstream.raise_for_status()
-                async for line in _upstream_lines_with_keepalive(upstream, lease):
-                    if line is None:
-                        yield ": keep-alive\n\n"
-                        continue
-                    upstream_lines += 1
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].lstrip()
-                    if data.strip() == "[DONE]":
-                        done_marker_seen = True
-                        break
-                    try:
-                        chunk = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
+                async with aclosing(
+                    _upstream_lines_with_keepalive(upstream, lease)
+                ) as upstream_stream:
+                    async for line in upstream_stream:
+                        if line is None:
+                            yield ": keep-alive\n\n"
+                            continue
+                        upstream_lines += 1
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].lstrip()
+                        if data.strip() == "[DONE]":
+                            done_marker_seen = True
+                            break
+                        try:
+                            chunk = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
 
-                    usage_data = chunk.get("usage")
-                    if isinstance(usage_data, dict) and usage_data:
-                        final_usage_data = {
-                            **usage_data,
-                            "timings": chunk.get("timings") or {},
-                        }
-                    if "tokens_evaluated" in chunk or "tokens_predicted" in chunk:
-                        final_usage_data = {
-                            "prompt_tokens": chunk.get("tokens_evaluated", 0),
-                            "completion_tokens": chunk.get("tokens_predicted", 0),
-                        }
+                        usage_data = chunk.get("usage")
+                        if isinstance(usage_data, dict) and usage_data:
+                            final_usage_data = {
+                                **usage_data,
+                                "timings": chunk.get("timings") or {},
+                            }
+                        if "tokens_evaluated" in chunk or "tokens_predicted" in chunk:
+                            final_usage_data = {
+                                "prompt_tokens": chunk.get("tokens_evaluated", 0),
+                                "completion_tokens": chunk.get("tokens_predicted", 0),
+                            }
 
-                    choices = chunk.get("choices") or []
-                    if not choices:
-                        continue
-                    choice = choices[0]
-                    delta = choice.get("delta") or {}
-                    fr = choice.get("finish_reason")
-                    if fr:
-                        finish_reason = fr
+                        choices = chunk.get("choices") or []
+                        if not choices:
+                            continue
+                        choice = choices[0]
+                        delta = choice.get("delta") or {}
+                        fr = choice.get("finish_reason")
+                        if fr:
+                            finish_reason = fr
 
-                    reasoning_delta = delta.get("reasoning_content") or ""
-                    if reasoning_delta:
-                        state.add_reasoning_delta(reasoning_delta)
-                    if fr == "reasoning_content":
-                        state.finish_reasoning()
+                        reasoning_delta = delta.get("reasoning_content") or ""
+                        if reasoning_delta:
+                            state.add_reasoning_delta(reasoning_delta)
+                        if fr == "reasoning_content":
+                            state.finish_reasoning()
 
-                    content_delta = delta.get("content") or ""
-                    if content_delta:
-                        fallback_chars += len(content_delta)
-                        state.add_text_delta(content_delta)
+                        content_delta = delta.get("content") or ""
+                        if content_delta:
+                            fallback_chars += len(content_delta)
+                            state.add_text_delta(content_delta)
 
-                    for tc in delta.get("tool_calls") or []:
-                        state.add_tool_call_delta(tc.get("index", 0), tc)
+                        for tc in delta.get("tool_calls") or []:
+                            state.add_tool_call_delta(tc.get("index", 0), tc)
 
-                    # Emit the item/delta events built during this chunk
-                    for frame in seq.drain_frames():
-                        emitted_frames += 1
-                        yield frame
+                        # Emit the item/delta events built during this chunk
+                        for frame in seq.drain_frames():
+                            emitted_frames += 1
+                            yield frame
 
         logger.info(
             "responses_stream_upstream_close request_id=%s response_id=%s server_id=%s outcome=%s close_reason=%s upstream_status=%s upstream_opened=%s done_marker=%s upstream_lines=%d emitted_frames=%d duration_ms=%.1f",
