@@ -1,12 +1,17 @@
 """Tests for token usage sample recording and retention."""
 
+import asyncio
+import threading
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import text
 from sqlmodel import Session, select
 
+from app.core.config import settings
 from app.core.db import engine
+from app.db.session import AsyncSessionMaker
 from app.db.session import engine as async_engine
 from app.models import Agent, Model, ServerInstance, TokenUsageSample
 from app.services.token_stats import (
@@ -18,6 +23,38 @@ from app.services.token_stats import (
     record_usage,
     token_stats_snapshot,
 )
+
+
+@pytest.mark.asyncio
+async def test_async_request_telemetry_does_not_block_event_loop(monkeypatch):
+    from app.services import token_stats
+
+    started = threading.Event()
+    unblock = threading.Event()
+    finished = threading.Event()
+
+    def blocked_persistence(*_args) -> None:
+        started.set()
+        unblock.wait(timeout=2.0)
+        finished.set()
+
+    monkeypatch.setattr(
+        token_stats, "_record_request_telemetry_sync", blocked_persistence
+    )
+    loop = asyncio.get_running_loop()
+    loop_tick = asyncio.Event()
+    loop.call_later(0.02, loop_tick.set)
+    release_timer = threading.Timer(0.2, unblock.set)
+    release_timer.start()
+
+    started_at = loop.time()
+    record_request_telemetry(None, {"prompt_tokens": 1}, status="success")
+    await asyncio.wait_for(loop_tick.wait(), timeout=0.1)
+    elapsed = loop.time() - started_at
+    await asyncio.to_thread(finished.wait, 1.0)
+    release_timer.cancel()
+
+    assert elapsed < 0.1
 
 
 def _make_server(db: Session) -> ServerInstance:
@@ -53,6 +90,29 @@ def _make_server(db: Session) -> ServerInstance:
     db.commit()
     db.refresh(server)
     return server
+
+
+@pytest.mark.asyncio
+async def test_database_engines_bound_idle_transactions() -> None:
+    with Session(engine) as session:
+        timeout_ms = session.exec(
+            text(
+                "SELECT extract(epoch from current_setting("
+                "'idle_in_transaction_session_timeout')::interval) * 1000"
+            )
+        ).one()[0]
+    async with AsyncSessionMaker() as session:
+        async_timeout_ms = (
+            await session.execute(
+                text(
+                    "SELECT extract(epoch from current_setting("
+                    "'idle_in_transaction_session_timeout')::interval) * 1000"
+                )
+            )
+        ).scalar_one()
+
+    assert timeout_ms == pytest.approx(settings.DB_IDLE_TRANSACTION_TIMEOUT_MS)
+    assert async_timeout_ms == pytest.approx(settings.DB_IDLE_TRANSACTION_TIMEOUT_MS)
 
 
 def test_extract_openai_style_usage_with_timings() -> None:

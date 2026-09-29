@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     DB_POOL_SIZE: int = Field(default=100, ge=1)
     DB_MAX_OVERFLOW: int = Field(default=200, ge=0)
     DB_POOL_TIMEOUT: float = Field(default=30.0, gt=0)
+    # Application DB transactions should be short; bound idle transactions so
+    # abandoned row locks cannot convoy inference admission and completion.
+    DB_IDLE_TRANSACTION_TIMEOUT_MS: int = Field(default=15_000, ge=1_000)
 
     @computed_field  # type: ignore[prop-decorator]
     @property

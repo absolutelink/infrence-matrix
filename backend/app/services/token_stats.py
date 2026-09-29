@@ -8,6 +8,7 @@ never break inference.
 
 import asyncio
 import logging
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import text
@@ -19,6 +20,7 @@ from app.db.session import engine as async_engine
 from app.models import ServerInstance, TokenUsageSample
 
 logger = logging.getLogger(__name__)
+_telemetry_tasks: set[asyncio.Task[None]] = set()
 
 
 def _as_float(value: Any) -> float:
@@ -132,8 +134,61 @@ def record_request_telemetry(
     metrics, and lifetime counters on the serving ServerInstance.
 
     ``latency_ms`` is wall-clock request latency; ``status`` is
-    ``success``/``error``/``cancelled``. Best-effort: never raises.
+    ``success``/``error``/``cancelled``. Database persistence runs off the
+    request event loop so a telemetry insert waiting on a server-row lock
+    cannot hold up stream completion or lease release. Best-effort: never raises.
     """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _record_request_telemetry_sync(
+            server, usage, timings, latency_ms, status, model_name, agent_id
+        )
+        return
+
+    server_snapshot = None
+    if server is not None:
+        server_snapshot = SimpleNamespace(
+            id=getattr(server, "id", None),
+            agent_id=getattr(server, "agent_id", None),
+            model_id=getattr(server, "model_id", None),
+            alias=getattr(server, "alias", None),
+        )
+    task = loop.create_task(
+        asyncio.to_thread(
+            _record_request_telemetry_sync,
+            server_snapshot,
+            dict(usage) if usage is not None else None,
+            dict(timings) if timings is not None else None,
+            latency_ms,
+            status,
+            model_name,
+            agent_id,
+        )
+    )
+    _telemetry_tasks.add(task)
+    task.add_done_callback(_telemetry_task_done)
+
+
+def _telemetry_task_done(task: asyncio.Task[None]) -> None:
+    _telemetry_tasks.discard(task)
+    if task.cancelled():
+        return
+    try:
+        task.result()
+    except Exception:
+        logger.warning("Background request telemetry task failed", exc_info=True)
+
+
+def _record_request_telemetry_sync(
+    server: ServerInstance | None,
+    usage: dict[str, Any] | None,
+    timings: dict[str, Any] | None,
+    latency_ms: float,
+    status: str,
+    model_name: str | None,
+    agent_id: str | None,
+) -> None:
     record_usage(server, usage, timings)
     try:
         fields = extract_usage_fields(usage, timings)

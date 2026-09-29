@@ -15,7 +15,13 @@ engine = create_async_engine(
     pool_timeout=settings.DB_POOL_TIMEOUT,
     pool_pre_ping=True,
     echo=False,
-    connect_args={"client_encoding": "utf8"},
+    connect_args={
+        "client_encoding": "utf8",
+        "options": (
+            f"-c idle_in_transaction_session_timeout="
+            f"{settings.DB_IDLE_TRANSACTION_TIMEOUT_MS}"
+        ),
+    },
 )
 
 AsyncSessionMaker = async_sessionmaker(

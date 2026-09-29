@@ -712,6 +712,7 @@ class InferenceScheduler:
                         select(func.count(InferenceLease.id)).where(
                             InferenceLease.server_instance_id == server_id,
                             InferenceLease.status == "active",
+                            InferenceLease.lease_expires_at > datetime.now(UTC),
                         )
                     )
                 ).scalar_one()
@@ -907,28 +908,16 @@ class InferenceScheduler:
             ).scalar_one()
             if not benchmark_lock:
                 return None
-            # The row lock keeps durable queue claims short and serialized for
-            # this server; protocol-1 agents own live slot admission.
-            locked = (
-                await session.execute(
-                    select(ServerInstance)
-                    .where(ServerInstance.id == server.id)
-                    .with_for_update()
-                )
-            ).scalar_one_or_none()
+            server_result = await session.execute(
+                select(ServerInstance).where(ServerInstance.id == server.id)
+            )
+            locked = server_result.scalar_one_or_none()
             if (
                 locked is None
                 or locked.status != "running"
                 or locked.health_status != "healthy"
             ):
                 return None
-            if locked.started_at is not None:
-                ready_at = locked.started_at
-                if ready_at.tzinfo is None:
-                    ready_at = ready_at.replace(tzinfo=UTC)
-                ready_for = (now - ready_at).total_seconds()
-                if 0 <= ready_for < SERVER_READY_COOLDOWN_SECONDS:
-                    return None
             protocol = (
                 await session.execute(
                     select(Agent.inference_slot_protocol).where(
@@ -936,7 +925,29 @@ class InferenceScheduler:
                     )
                 )
             ).scalar_one_or_none()
+            if locked.started_at is not None:
+                ready_at = locked.started_at
+                if ready_at.tzinfo is None:
+                    ready_at = ready_at.replace(tzinfo=UTC)
+                ready_for = (now - ready_at).total_seconds()
+                if 0 <= ready_for < SERVER_READY_COOLDOWN_SECONDS:
+                    return None
             if int(protocol or 0) < 1:
+                # Legacy agents have no local admission queue, so retain the
+                # DB-backed capacity guard under a short server-row lock.
+                locked = (
+                    await session.execute(
+                        select(ServerInstance)
+                        .where(ServerInstance.id == server.id)
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if (
+                    locked is None
+                    or locked.status != "running"
+                    or locked.health_status != "healthy"
+                ):
+                    return None
                 legacy_active = (
                     await session.execute(
                         select(func.count(InferenceLease.id)).where(
@@ -981,8 +992,9 @@ class InferenceScheduler:
             lease.started_at = now
             lease.lease_expires_at = now + timedelta(seconds=ACTIVE_LEASE_TTL_SECONDS)
             lease.slot_generation = locked.slot_generation
-            locked.last_request_at = now
-            session.add(locked)
+            if int(protocol or 0) < 1:
+                locked.last_request_at = now
+                session.add(locked)
             session.add(lease)
             await session.commit()
             await session.refresh(lease)
