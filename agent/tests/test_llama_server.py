@@ -109,6 +109,7 @@ class TestLlamaServerManager:
         )
 
         command = mock_popen.call_args.args[0]
+        assert "--metrics" in command
         assert ["--threads", "8"] == command[
             command.index("--threads") : command.index("--threads") + 2
         ]

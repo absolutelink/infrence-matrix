@@ -298,6 +298,7 @@ class LlamaServerManager:
             str(options.get("context_size", config.context_size)),
             "--batch-size",
             str(batch_size),
+            "--metrics",
         ]
 
         value_flags = {
