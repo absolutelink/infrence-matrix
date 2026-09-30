@@ -66,6 +66,7 @@ import json
 import random
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -101,6 +102,7 @@ class TurnResult:
     last_token_at: float | None = None
     content_chars: int = 0
     content: str = ""
+    request_id: str = ""
     started_at: float = field(default_factory=time.monotonic)
 
 
@@ -118,10 +120,16 @@ def _user_message(turn: int, rnd: random.Random, grow_tokens: int) -> str:
     return f"{base}\nContext notes (ignore for the answer): {filler}"
 
 
-def _build_payload(args: argparse.Namespace, history: list[dict[str, str]], turn: int,
-                  rnd: random.Random) -> dict[str, Any]:
+def _build_payload(
+    args: argparse.Namespace,
+    history: list[dict[str, str]],
+    turn: int,
+    rnd: random.Random,
+) -> dict[str, Any]:
     messages = list(history)
-    messages.append({"role": "user", "content": _user_message(turn, rnd, args.grow_tokens)})
+    messages.append(
+        {"role": "user", "content": _user_message(turn, rnd, args.grow_tokens)}
+    )
     payload: dict[str, Any] = {
         "model": args.model,
         "messages": messages,
@@ -155,8 +163,16 @@ async def _run_turn(
 ) -> TurnResult:
     res = TurnResult(conv_id=conv_id, turn=turn)
     started = time.monotonic()
+    # Stamp a unique, backend-parseable inference request id so this turn can be
+    # grepped in backend logs (backend_inference_stream_open/close, lease
+    # acquire/release) even when the client never sees response headers.
+    request_id = f"chatcmpl-{uuid.uuid4()}"
+    res.request_id = request_id
+    turn_headers = {**headers, "X-Inference-Request-ID": request_id}
     try:
-        async with client.stream("POST", url, json=payload, headers=headers) as resp:
+        async with client.stream(
+            "POST", url, json=payload, headers=turn_headers
+        ) as resp:
             res.status = resp.status_code
             if resp.status_code >= 400:
                 body = (await resp.aread()).decode("utf-8", "replace")[:600]
@@ -320,9 +336,12 @@ async def _async_main(args: argparse.Namespace) -> int:
         ) as probe:
             r = await probe.post(
                 url,
-                json={"model": args.model, "messages": [
-                    {"role": "user", "content": "ping"}], "stream": False,
-                    "max_tokens": 1},
+                json={
+                    "model": args.model,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "stream": False,
+                    "max_tokens": 1,
+                },
                 headers=headers,
             )
             if r.status_code >= 500:
@@ -354,9 +373,7 @@ async def _async_main(args: argparse.Namespace) -> int:
                 ),
                 verify=not args.insecure,
             ) as client:
-                stalled = await _conversation(
-                    client, url, headers, conv_id, args, stop
-                )
+                stalled = await _conversation(client, url, headers, conv_id, args, stop)
                 if stalled is not None:
                     await results.put(stalled)
                     stop.set()
@@ -412,11 +429,14 @@ async def _async_main(args: argparse.Namespace) -> int:
         print(
             f"[STALL] conv={stalled.conv_id} turn={stalled.turn} "
             f"status={stalled.status} after {elapsed:.1f}s\n"
+            f"        request_id={stalled.request_id}\n"
             f"        reason: {stalled.reason}",
             file=sys.stderr,
         )
         if args.verbose and stalled.content:
-            print(f"        partial content: {stalled.content[:300]!r}", file=sys.stderr)
+            print(
+                f"        partial content: {stalled.content[:300]!r}", file=sys.stderr
+            )
         return 1
 
     print(
@@ -443,9 +463,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="none",
         help="bearer token; 'none' to omit (matrix auth is disabled)",
     )
-    ap.add_argument(
-        "--concurrency", type=int, default=4, help="parallel growing chats"
-    )
+    ap.add_argument("--concurrency", type=int, default=4, help="parallel growing chats")
     ap.add_argument(
         "--max-turns",
         type=int,
