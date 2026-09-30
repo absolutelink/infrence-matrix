@@ -2,6 +2,8 @@
 
 import asyncio
 import os
+import subprocess
+import time
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -11,6 +13,39 @@ os.environ["AGENT_ID"] = "test-agent"
 os.environ["FRONTEND_URL"] = "http://test:8000"
 
 from app.services.llama_server import LlamaServerManager, ServerConfig
+
+
+class BlockingProc:
+    """Fake subprocess whose wait() really blocks the calling thread.
+
+    Mirrors a slow-exiting (or SIGTERM-ignoring) llama-server so tests can detect
+    event-loop stalls: if wait() runs on the loop, heartbeats stop.
+    """
+
+    def __init__(self, block_seconds: float, timeout_first: bool = False):
+        self.block_seconds = block_seconds
+        self.timeout_first = timeout_first
+        self.wait_calls: list[int | None] = []
+        self.signalled = False
+        self.killed = False
+        self.pid = 4242
+
+    def wait(self, timeout=None):
+        self.wait_calls.append(timeout)
+        time.sleep(self.block_seconds)
+        if self.timeout_first and len(self.wait_calls) == 1:
+            raise subprocess.TimeoutExpired(cmd="llama-server", timeout=timeout)
+        return 0
+
+    def send_signal(self, sig):
+        self.signalled = True
+
+    def kill(self):
+        self.killed = True
+        self.signalled = True
+
+    def poll(self):
+        return None
 
 
 class TestServerConfig:
@@ -243,6 +278,129 @@ class TestLlamaServerManager:
 
         assert result is True
         mock_proc.kill.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_stop_server_keeps_event_loop_responsive(self):
+        """A slow-exiting llama-server must not freeze the agent's event loop."""
+        manager = LlamaServerManager()
+        proc = BlockingProc(block_seconds=1.0)
+        manager.servers["slow-stop-server"] = proc
+        manager.configs["slow-stop-server"] = ServerConfig(
+            model_path="/models/test.gguf",
+            port=8081,
+            slot_generation=3,
+        )
+
+        ticks = 0
+
+        async def heartbeat():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.05)
+                ticks += 1
+
+        hb = asyncio.create_task(heartbeat())
+        try:
+            await asyncio.sleep(0.15)
+            baseline = ticks
+            assert baseline >= 1, "heartbeat never started ticking"
+
+            stop_task = asyncio.create_task(manager.stop_server("slow-stop-server"))
+            done, _ = await asyncio.wait({stop_task}, timeout=10)
+            assert done, "stop_server did not complete"
+            ticks_during_stop = ticks - baseline
+        finally:
+            hb.cancel()
+
+        # A blocking proc.wait() freezes the loop so the heartbeat stalls at the
+        # baseline. With asyncio.to_thread the ~1s stop yields roughly 20 ticks.
+        assert ticks_during_stop > 5, (
+            "event loop was frozen during stop_server: "
+            f"only {ticks_during_stop} heartbeat ticks in ~1s"
+        )
+        assert proc.wait_calls == [30]
+        assert proc.signalled is True
+        assert "slow-stop-server" not in manager.servers
+
+    @pytest.mark.asyncio
+    async def test_stop_server_timeout_escalates_to_kill_off_loop(self):
+        """SIGTERM timeout must escalate to kill and wait off the event loop."""
+        manager = LlamaServerManager()
+        proc = BlockingProc(block_seconds=0.5, timeout_first=True)
+        manager.servers["stubborn-server"] = proc
+        manager.configs["stubborn-server"] = ServerConfig(
+            model_path="/models/test.gguf",
+            port=8081,
+            slot_generation=7,
+        )
+
+        ticks = 0
+
+        async def heartbeat():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.05)
+                ticks += 1
+
+        hb = asyncio.create_task(heartbeat())
+        try:
+            await asyncio.sleep(0.15)
+            baseline = ticks
+            result = await manager.stop_server("stubborn-server")
+            ticks_during_stop = ticks - baseline
+        finally:
+            hb.cancel()
+
+        assert result is True
+        # First wait timed out at 30s, second unbounded wait followed the kill.
+        assert proc.wait_calls == [30, None]
+        assert proc.signalled is True
+        assert proc.killed is True
+        assert ticks_during_stop > 2, (
+            "event loop was frozen during kill escalation: "
+            f"only {ticks_during_stop} heartbeat ticks in ~0.5s"
+        )
+        assert "stubborn-server" not in manager.servers
+
+    @pytest.mark.asyncio
+    @patch("app.services.llama_server.LlamaServerManager._wait_for_server")
+    @patch("app.services.llama_server.subprocess.Popen")
+    async def test_start_error_path_waits_off_loop(self, mock_popen, mock_wait):
+        """Start-failure cleanup must not block the event loop either."""
+        manager = LlamaServerManager()
+        proc = BlockingProc(block_seconds=0.5)
+        proc.poll = Mock(return_value=None)
+        mock_popen.return_value = proc
+        mock_wait.side_effect = RuntimeError("startup failed")
+
+        ticks = 0
+
+        async def heartbeat():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.05)
+                ticks += 1
+
+        hb = asyncio.create_task(heartbeat())
+        try:
+            await asyncio.sleep(0.15)
+            baseline = ticks
+            result = await manager.start_server(
+                "bad-start-server",
+                ServerConfig(model_path="/models/test.gguf", port=8081),
+            )
+            ticks_during_stop = ticks - baseline
+        finally:
+            hb.cancel()
+
+        assert result is False
+        assert proc.killed is True
+        assert proc.wait_calls == [None]
+        assert ticks_during_stop > 2, (
+            "event loop was frozen during start error cleanup: "
+            f"only {ticks_during_stop} heartbeat ticks in ~0.5s"
+        )
+        assert "bad-start-server" not in manager.servers
 
     def test_get_server_uptime(self):
         """Test getting server uptime."""

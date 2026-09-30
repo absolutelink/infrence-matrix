@@ -446,7 +446,7 @@ class LlamaServerManager:
             self.start_times.pop(server_id, None)
             if proc is not None and proc.poll() is None:
                 proc.kill()
-                proc.wait()
+                await asyncio.to_thread(proc.wait)
             publish_event(
                 "server.error",
                 {
@@ -483,10 +483,10 @@ class LlamaServerManager:
             proc.send_signal(signal.SIGTERM)
 
         try:
-            proc.wait(timeout=30)
+            await asyncio.to_thread(proc.wait, 30)
         except subprocess.TimeoutExpired:
             proc.kill()
-            proc.wait()
+            await asyncio.to_thread(proc.wait)
 
         self.servers.pop(server_id, None)
         self.configs.pop(server_id, None)
