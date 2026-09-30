@@ -47,6 +47,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     finally:
         heartbeat_task.cancel()
         sender_task.cancel()
+        # Join the tasks so their exceptions are retrieved and neither can outlive
+        # the socket (cancel() alone only schedules cancellation).
+        await asyncio.gather(heartbeat_task, sender_task, return_exceptions=True)
         unsubscribe(queue)
 
 
