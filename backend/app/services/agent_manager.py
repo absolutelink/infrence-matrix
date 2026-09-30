@@ -14,6 +14,7 @@ from app.core.config import settings
 from app.core.logging import logger
 from app.db.session import AsyncSessionMaker
 from app.models import Agent, InferenceLease
+from app.services.http_client import get_http_client
 
 AGENT_CONNECT_TIMEOUT_SECONDS = 10.0
 
@@ -707,22 +708,23 @@ class AgentManager:
             timeout,
             connect=min(timeout, AGENT_CONNECT_TIMEOUT_SECONDS),
         )
-        async with httpx.AsyncClient(timeout=request_timeout) as client:
-            try:
-                response = await client.request(
-                    method=method,
-                    url=url,
-                    json=json,
-                    headers=headers,
-                )
-                response.raise_for_status()
-                return response.json()
-            except httpx.HTTPError as e:
-                logger.error(f"HTTP error to agent {agent_id}: {e}")
-                raise
-            except Exception as e:
-                logger.error(f"Error sending to agent {agent_id}: {e}")
-                raise
+        client = get_http_client()
+        try:
+            response = await client.request(
+                method=method,
+                url=url,
+                json=json,
+                headers=headers,
+                timeout=request_timeout,
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPError as e:
+            logger.error(f"HTTP error to agent {agent_id}: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Error sending to agent {agent_id}: {e}")
+            raise
 
     async def get_agent(self, agent_id: str) -> Agent | None:
         """Get agent by ID."""

@@ -24,6 +24,7 @@ from app.api.routes.websocket import router as agent_ws_router
 from app.core.config import settings
 from app.services.agent_manager import agent_manager
 from app.services.benchmark import start_queue_worker, stop_queue_worker
+from app.services.http_client import aclose_http_client
 from app.services.inference_scheduler import inference_scheduler
 from app.services.request_activity import (
     request_finished,
@@ -57,6 +58,7 @@ async def lifespan(_app: FastAPI):
         await asyncio.gather(prune_task, metrics_task, return_exceptions=True)
         await inference_scheduler.stop_reconciliation()
         await stop_queue_worker()
+        await aclose_http_client()
 
 
 def custom_generate_unique_id(route: APIRoute) -> str:

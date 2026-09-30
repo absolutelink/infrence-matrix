@@ -49,12 +49,19 @@ class FakeClient:
     def __init__(self, response: FakeStreamResponse) -> None:
         self.response = response
         self.stream_calls: list[dict[str, Any]] = []
+        # The shared client must never be entered-and-closed per request; only
+        # the streamed response context closes (returning its connection to
+        # the pool). Any client-level close is a regression.
+        self.closed = False
 
     async def __aenter__(self) -> FakeClient:
         return self
 
     async def __aexit__(self, *args: object) -> None:
-        pass
+        self.closed = True
+
+    async def aclose(self) -> None:
+        self.closed = True
 
     def stream(self, method: str, url: str, **kwargs: Any) -> FakeStreamResponse:
         self.stream_calls.append({"method": method, "url": url, **kwargs})
@@ -82,7 +89,7 @@ class FakeLease:
 
 
 def _install_client(monkeypatch: pytest.MonkeyPatch, module: Any, client: FakeClient):
-    monkeypatch.setattr(module.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(module, "get_http_client", lambda: client)
 
 
 def _responses_stream(lease: Any):
@@ -241,11 +248,7 @@ async def test_responses_blocked_headers_cleanup(
             finally:
                 cancelled.set()
 
-    class ClosedClient(FakeClient):
-        async def __aexit__(self, *args: object) -> None:
-            events.append("client_closed")
-
-    client = ClosedClient(BlockedResponse([], events))
+    client = FakeClient(BlockedResponse([], events))
     _install_client(monkeypatch, responses_router, client)
     monkeypatch.setattr(responses_router, "SSE_KEEPALIVE_INTERVAL_SECONDS", 0.01)
     monkeypatch.setattr(
@@ -272,7 +275,8 @@ async def test_responses_blocked_headers_cleanup(
     else:
         await stream.aclose()
     await asyncio.wait_for(cancelled.wait(), 1)
-    assert events == ["client_closed", "released"]
+    assert events == ["released"]
+    assert client.closed is False
     lease.release.assert_awaited_once()
 
 
@@ -292,11 +296,7 @@ async def test_responses_cancel_task_while_waiting_for_headers(
             finally:
                 cancelled.set()
 
-    class ClosedClient(FakeClient):
-        async def __aexit__(self, *args: object) -> None:
-            events.append("client_closed")
-
-    client = ClosedClient(BlockedResponse([], events))
+    client = FakeClient(BlockedResponse([], events))
     _install_client(monkeypatch, responses_router, client)
     monkeypatch.setattr(
         responses_router,
@@ -318,12 +318,13 @@ async def test_responses_cancel_task_while_waiting_for_headers(
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(pending, 1)
     assert cancelled.is_set()
-    assert events == ["client_closed", "released"]
+    assert events == ["released"]
+    assert client.closed is False
     lease.release.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_responses_header_error_closes_client_and_releases_lease(
+async def test_responses_header_error_releases_lease_without_closing_shared_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
@@ -332,11 +333,8 @@ async def test_responses_header_error_closes_client_and_releases_lease(
         async def __aenter__(self) -> FakeStreamResponse:
             raise httpx.ReadTimeout("agent headers timed out")
 
-    class ClosedClient(FakeClient):
-        async def __aexit__(self, *args: object) -> None:
-            events.append("client_closed")
-
-    _install_client(monkeypatch, responses_router, ClosedClient(FailingResponse([])))
+    client = FakeClient(FailingResponse([]))
+    _install_client(monkeypatch, responses_router, client)
     monkeypatch.setattr(
         responses_router,
         "ensure_server_ready_by_id",
@@ -353,7 +351,8 @@ async def test_responses_header_error_closes_client_and_releases_lease(
     frames = [frame async for frame in stream]
     assert any(frame.startswith("event: response.failed") for frame in frames)
     assert frames[-1] == "data: [DONE]\n\n"
-    assert events == ["client_closed", "released"]
+    assert events == ["released"]
+    assert client.closed is False
     lease.release.assert_awaited_once()
 
 
@@ -371,11 +370,7 @@ async def test_responses_headers_arriving_at_disconnect_are_closed(
             headers_arrived.set()
             return self
 
-    class ClosedClient(FakeClient):
-        async def __aexit__(self, *args: object) -> None:
-            events.append("client_closed")
-
-    client = ClosedClient(DelayedResponse([], events))
+    client = FakeClient(DelayedResponse([], events))
     _install_client(monkeypatch, responses_router, client)
     monkeypatch.setattr(responses_router, "SSE_KEEPALIVE_INTERVAL_SECONDS", 0.01)
     monkeypatch.setattr(
@@ -395,7 +390,8 @@ async def test_responses_headers_arriving_at_disconnect_are_closed(
     gate.set()
     await asyncio.wait_for(headers_arrived.wait(), 1)
     await stream.aclose()
-    assert events == ["upstream_closed", "client_closed", "released"]
+    assert events == ["upstream_closed", "released"]
+    assert client.closed is False
 
 
 @pytest.mark.asyncio

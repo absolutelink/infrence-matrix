@@ -17,7 +17,6 @@ import logging
 import time
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 from sqlmodel import Session
@@ -50,6 +49,7 @@ from app.api.routes.v1.responses.translator import (
 )
 from app.core.db import engine
 from app.services.agent_manager import agent_manager
+from app.services.http_client import get_http_client
 from app.services.inference_scheduler import inference_scheduler
 from app.services.reasoning_metadata import (
     ReasoningPolicyError,
@@ -211,75 +211,75 @@ async def _stream_to_ws(
         finish_reason: str | None = None
         final_usage: dict[str, Any] = {}
         fallback_chars = 0
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            async with client.stream(
-                "POST",
-                proxy_url,
-                json=payload,
-                headers={
-                    "X-Inference-Slot-Generation": str(lease.slot_generation),
-                    "X-Inference-Request-ID": lease.request_id,
-                },
-            ) as upstream:
-                upstream_opened = True
-                upstream_status = upstream.status_code
-                logger.info(
-                    "responses_ws_upstream_open request_id=%s response_id=%s server_id=%s agent_id=%s upstream_status=%s",
-                    lease.request_id,
-                    response_id,
-                    server.id,
-                    server.agent_id,
-                    upstream_status,
-                )
-                upstream.raise_for_status()
-                lines = upstream.aiter_lines()
-                while True:
-                    try:
-                        line = await lease.guard(anext(lines), cancelled=disconnected)
-                    except StopAsyncIteration:
-                        break
-                    upstream_lines += 1
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].lstrip()
-                    if data.strip() == "[DONE]":
-                        done_marker_seen = True
-                        break
-                    try:
-                        chunk = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-                    usage_data = chunk.get("usage")
-                    if isinstance(usage_data, dict) and usage_data:
-                        final_usage = {
-                            **usage_data,
-                            "timings": chunk.get("timings") or {},
-                        }
-                    if "tokens_evaluated" in chunk or "tokens_predicted" in chunk:
-                        final_usage = {
-                            "prompt_tokens": chunk.get("tokens_evaluated", 0),
-                            "completion_tokens": chunk.get("tokens_predicted", 0),
-                        }
-                    choices = chunk.get("choices") or []
-                    if not choices:
-                        continue
-                    choice = choices[0]
-                    delta = choice.get("delta") or {}
-                    fr = choice.get("finish_reason")
-                    if fr:
-                        finish_reason = fr
-                    reasoning_delta = delta.get("reasoning_content") or ""
-                    if reasoning_delta:
-                        state.add_reasoning_delta(reasoning_delta)
-                    content_delta = delta.get("content") or ""
-                    if content_delta:
-                        fallback_chars += len(content_delta)
-                        state.add_text_delta(content_delta)
-                    for tc in delta.get("tool_calls") or []:
-                        state.add_tool_call_delta(tc.get("index", 0), tc)
-                    events = seq.drain_events()
-                    emitted_events += len(events)
-                    await _send_events(websocket, events)
+        client = get_http_client()
+        async with client.stream(
+            "POST",
+            proxy_url,
+            json=payload,
+            headers={
+                "X-Inference-Slot-Generation": str(lease.slot_generation),
+                "X-Inference-Request-ID": lease.request_id,
+            },
+        ) as upstream:
+            upstream_opened = True
+            upstream_status = upstream.status_code
+            logger.info(
+                "responses_ws_upstream_open request_id=%s response_id=%s server_id=%s agent_id=%s upstream_status=%s",
+                lease.request_id,
+                response_id,
+                server.id,
+                server.agent_id,
+                upstream_status,
+            )
+            upstream.raise_for_status()
+            lines = upstream.aiter_lines()
+            while True:
+                try:
+                    line = await lease.guard(anext(lines), cancelled=disconnected)
+                except StopAsyncIteration:
+                    break
+                upstream_lines += 1
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].lstrip()
+                if data.strip() == "[DONE]":
+                    done_marker_seen = True
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                usage_data = chunk.get("usage")
+                if isinstance(usage_data, dict) and usage_data:
+                    final_usage = {
+                        **usage_data,
+                        "timings": chunk.get("timings") or {},
+                    }
+                if "tokens_evaluated" in chunk or "tokens_predicted" in chunk:
+                    final_usage = {
+                        "prompt_tokens": chunk.get("tokens_evaluated", 0),
+                        "completion_tokens": chunk.get("tokens_predicted", 0),
+                    }
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                choice = choices[0]
+                delta = choice.get("delta") or {}
+                fr = choice.get("finish_reason")
+                if fr:
+                    finish_reason = fr
+                reasoning_delta = delta.get("reasoning_content") or ""
+                if reasoning_delta:
+                    state.add_reasoning_delta(reasoning_delta)
+                content_delta = delta.get("content") or ""
+                if content_delta:
+                    fallback_chars += len(content_delta)
+                    state.add_text_delta(content_delta)
+                for tc in delta.get("tool_calls") or []:
+                    state.add_tool_call_delta(tc.get("index", 0), tc)
+                events = seq.drain_events()
+                emitted_events += len(events)
+                await _send_events(websocket, events)
 
         logger.info(
             "responses_ws_upstream_close request_id=%s response_id=%s server_id=%s outcome=%s close_reason=%s upstream_status=%s done_marker=%s upstream_lines=%d emitted_events=%d duration_ms=%.1f",

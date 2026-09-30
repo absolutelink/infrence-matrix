@@ -48,6 +48,7 @@ from app.api.routes.v1.responses.translator import (
 from app.core.db import engine
 from app.models import Model, ResponseRecord, ServerInstance
 from app.services.agent_manager import agent_manager
+from app.services.http_client import get_http_client
 from app.services.inference_scheduler import (
     InferenceLeaseHandle,
     inference_scheduler,
@@ -667,124 +668,118 @@ async def _stream_events(
         )
         if lease is not None:
             lease.mark_upstream_started()
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            # The worker owns the response context from header acquisition to
-            # body close. If cancellation races with headers arriving, its
-            # async-with still closes the response before the client closes.
-            opened: asyncio.Future[httpx.Response] = (
-                asyncio.get_running_loop().create_future()
-            )
-            close_upstream = asyncio.Event()
+        client = get_http_client()
+        # The worker owns the response context from header acquisition to
+        # body close. If cancellation races with headers arriving, its
+        # async-with still closes the response before the client closes.
+        opened: asyncio.Future[httpx.Response] = (
+            asyncio.get_running_loop().create_future()
+        )
+        close_upstream = asyncio.Event()
 
-            async def upstream_context() -> None:
-                async with client.stream(
-                    "POST",
-                    proxy_url,
-                    json=payload,
-                    headers={
-                        "X-Inference-Slot-Generation": str(lease.slot_generation),
-                        "X-Inference-Request-ID": lease.request_id,
-                    }
-                    if lease is not None
-                    else None,
-                ) as response_stream:
-                    opened.set_result(response_stream)
-                    await close_upstream.wait()
-
-            worker = asyncio.create_task(
-                lease.guard(upstream_context())
+        async def upstream_context() -> None:
+            async with client.stream(
+                "POST",
+                proxy_url,
+                json=payload,
+                headers={
+                    "X-Inference-Slot-Generation": str(lease.slot_generation),
+                    "X-Inference-Request-ID": lease.request_id,
+                }
                 if lease is not None
-                else upstream_context()
+                else None,
+            ) as response_stream:
+                opened.set_result(response_stream)
+                await close_upstream.wait()
+
+        worker = asyncio.create_task(
+            lease.guard(upstream_context()) if lease is not None else upstream_context()
+        )
+        finished_body = False
+        try:
+            async with aclosing(_setup_keepalives(opened, deadline, worker)) as ticks:
+                async for _ in ticks:
+                    yield ": keep-alive\n\n"
+            upstream = opened.result()
+            upstream_opened = True
+            upstream_status = upstream.status_code
+            logger.info(
+                "responses_stream_open request_id=%s response_id=%s server_id=%s agent_id=%s upstream_status=%s",
+                request_id,
+                response_id,
+                server_id,
+                agent_id,
+                upstream_status,
             )
-            finished_body = False
-            try:
-                async with aclosing(
-                    _setup_keepalives(opened, deadline, worker)
-                ) as ticks:
-                    async for _ in ticks:
+            upstream.raise_for_status()
+            async with aclosing(
+                _upstream_lines_with_keepalive(upstream, lease, deadline)
+            ) as upstream_stream:
+                async for line in upstream_stream:
+                    if line is None:
                         yield ": keep-alive\n\n"
-                upstream = opened.result()
-                upstream_opened = True
-                upstream_status = upstream.status_code
-                logger.info(
-                    "responses_stream_open request_id=%s response_id=%s server_id=%s agent_id=%s upstream_status=%s",
-                    request_id,
-                    response_id,
-                    server_id,
-                    agent_id,
-                    upstream_status,
-                )
-                upstream.raise_for_status()
-                async with aclosing(
-                    _upstream_lines_with_keepalive(upstream, lease, deadline)
-                ) as upstream_stream:
-                    async for line in upstream_stream:
-                        if line is None:
-                            yield ": keep-alive\n\n"
-                            continue
-                        upstream_lines += 1
-                        if not line.startswith("data:"):
-                            continue
-                        data = line[5:].lstrip()
-                        if data.strip() == "[DONE]":
-                            done_marker_seen = True
-                            break
-                        try:
-                            chunk = json.loads(data)
-                        except json.JSONDecodeError:
-                            continue
+                        continue
+                    upstream_lines += 1
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].lstrip()
+                    if data.strip() == "[DONE]":
+                        done_marker_seen = True
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
 
-                        usage_data = chunk.get("usage")
-                        if isinstance(usage_data, dict) and usage_data:
-                            final_usage_data = {
-                                **usage_data,
-                                "timings": chunk.get("timings") or {},
-                            }
-                        if "tokens_evaluated" in chunk or "tokens_predicted" in chunk:
-                            final_usage_data = {
-                                "prompt_tokens": chunk.get("tokens_evaluated", 0),
-                                "completion_tokens": chunk.get("tokens_predicted", 0),
-                            }
+                    usage_data = chunk.get("usage")
+                    if isinstance(usage_data, dict) and usage_data:
+                        final_usage_data = {
+                            **usage_data,
+                            "timings": chunk.get("timings") or {},
+                        }
+                    if "tokens_evaluated" in chunk or "tokens_predicted" in chunk:
+                        final_usage_data = {
+                            "prompt_tokens": chunk.get("tokens_evaluated", 0),
+                            "completion_tokens": chunk.get("tokens_predicted", 0),
+                        }
 
-                        choices = chunk.get("choices") or []
-                        if not choices:
-                            continue
-                        choice = choices[0]
-                        delta = choice.get("delta") or {}
-                        fr = choice.get("finish_reason")
-                        if fr:
-                            finish_reason = fr
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    delta = choice.get("delta") or {}
+                    fr = choice.get("finish_reason")
+                    if fr:
+                        finish_reason = fr
 
-                        reasoning_delta = delta.get("reasoning_content") or ""
-                        if reasoning_delta:
-                            state.add_reasoning_delta(reasoning_delta)
-                        if fr == "reasoning_content":
-                            state.finish_reasoning()
+                    reasoning_delta = delta.get("reasoning_content") or ""
+                    if reasoning_delta:
+                        state.add_reasoning_delta(reasoning_delta)
+                    if fr == "reasoning_content":
+                        state.finish_reasoning()
 
-                        content_delta = delta.get("content") or ""
-                        if content_delta:
-                            fallback_chars += len(content_delta)
-                            state.add_text_delta(content_delta)
+                    content_delta = delta.get("content") or ""
+                    if content_delta:
+                        fallback_chars += len(content_delta)
+                        state.add_text_delta(content_delta)
 
-                        for tc in delta.get("tool_calls") or []:
-                            state.add_tool_call_delta(tc.get("index", 0), tc)
+                    for tc in delta.get("tool_calls") or []:
+                        state.add_tool_call_delta(tc.get("index", 0), tc)
 
-                        # Emit the item/delta events built during this chunk
-                        for frame in seq.drain_frames():
-                            emitted_frames += 1
-                            yield frame
-                            deadline[0] = (
-                                time.monotonic() + SSE_KEEPALIVE_INTERVAL_SECONDS
-                            )
-                finished_body = True
-            finally:
-                close_upstream.set()
-                if not finished_body and not worker.done():
-                    worker.cancel()
-                if finished_body:
-                    await worker
-                else:
-                    await asyncio.gather(worker, return_exceptions=True)
+                    # Emit the item/delta events built during this chunk
+                    for frame in seq.drain_frames():
+                        emitted_frames += 1
+                        yield frame
+                        deadline[0] = time.monotonic() + SSE_KEEPALIVE_INTERVAL_SECONDS
+            finished_body = True
+        finally:
+            close_upstream.set()
+            if not finished_body and not worker.done():
+                worker.cancel()
+            if finished_body:
+                await worker
+            else:
+                await asyncio.gather(worker, return_exceptions=True)
 
         logger.info(
             "responses_stream_upstream_close request_id=%s response_id=%s server_id=%s outcome=%s close_reason=%s upstream_status=%s upstream_opened=%s done_marker=%s upstream_lines=%d emitted_frames=%d duration_ms=%.1f",

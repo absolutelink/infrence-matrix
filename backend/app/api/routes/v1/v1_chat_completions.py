@@ -8,7 +8,6 @@ import uuid
 from collections.abc import AsyncGenerator
 from typing import Any, Literal
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -19,6 +18,7 @@ from app.api.deps import get_db
 from app.core.db import engine
 from app.models import Model, ServerInstance
 from app.services.agent_manager import agent_manager
+from app.services.http_client import get_http_client
 from app.services.inference_scheduler import (
     InferenceLeaseHandle,
     inference_scheduler,
@@ -388,87 +388,87 @@ async def _stream_completion_via_agent(
         # Stream through agent proxy; renew the durable request while the agent
         # queues it behind its live upstream connection capacity.
         lease.mark_upstream_started()
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            proxy_url = f"http://{agent.host}:{agent.port}/proxy/{server.id}/v1/chat/completions"
+        client = get_http_client()
+        proxy_url = (
+            f"http://{agent.host}:{agent.port}/proxy/{server.id}/v1/chat/completions"
+        )
 
-            async with client.stream(
-                "POST",
-                proxy_url,
-                json=payload,
-                headers={
-                    "X-Inference-Slot-Generation": str(lease.slot_generation),
-                    "X-Inference-Request-ID": lease.request_id,
-                },
-            ) as response:
-                upstream_opened = True
-                upstream_status = response.status_code
-                logger.info(
-                    "backend_inference_stream_open request_id=%s server_id=%s agent_id=%s upstream_status=%s",
-                    lease.request_id,
-                    server.id,
-                    agent_id,
-                    upstream_status,
-                )
-                response.raise_for_status()
+        async with client.stream(
+            "POST",
+            proxy_url,
+            json=payload,
+            headers={
+                "X-Inference-Slot-Generation": str(lease.slot_generation),
+                "X-Inference-Request-ID": lease.request_id,
+            },
+        ) as response:
+            upstream_opened = True
+            upstream_status = response.status_code
+            logger.info(
+                "backend_inference_stream_open request_id=%s server_id=%s agent_id=%s upstream_status=%s",
+                lease.request_id,
+                server.id,
+                agent_id,
+                upstream_status,
+            )
+            response.raise_for_status()
 
-                lines = response.aiter_lines()
-                while True:
-                    try:
-                        line = await lease.guard(anext(lines))
-                    except StopAsyncIteration:
+            lines = response.aiter_lines()
+            while True:
+                try:
+                    line = await lease.guard(anext(lines))
+                except StopAsyncIteration:
+                    break
+                upstream_lines += 1
+                if line.startswith("data:"):
+                    data = line[5:].lstrip()
+                    if data.strip() == "[DONE]":
                         break
-                    upstream_lines += 1
-                    if line.startswith("data:"):
-                        data = line[5:].lstrip()
-                        if data.strip() == "[DONE]":
-                            break
 
-                        try:
-                            chunk_data = json.loads(data)
+                    try:
+                        chunk_data = json.loads(data)
 
-                            # Server-provided usage (final chunk) wins
-                            chunk_usage = _extract_usage(chunk_data)
-                            if chunk_usage is not None:
-                                final_usage = chunk_usage
-                                final_timings = chunk_data.get("timings") or {}
+                        # Server-provided usage (final chunk) wins
+                        chunk_usage = _extract_usage(chunk_data)
+                        if chunk_usage is not None:
+                            final_usage = chunk_usage
+                            final_timings = chunk_data.get("timings") or {}
 
-                            delta_content = _extract_delta_content(chunk_data)
-                            delta_reasoning = _extract_delta_reasoning(chunk_data)
-                            fallback_completion_chars += len(delta_content)
-                            tool_call_deltas = _extract_tool_call_deltas(chunk_data)
-                            # OpenAI chunk shape: delta carries only the
-                            # fields present in this fragment (content is
-                            # omitted entirely on tool-call-only chunks).
-                            delta_out: dict[str, Any] = {}
-                            if delta_content or not tool_call_deltas:
-                                delta_out["content"] = delta_content
-                            if delta_reasoning:
-                                delta_out["reasoning_content"] = delta_reasoning
-                            if tool_call_deltas:
-                                delta_out["tool_calls"] = tool_call_deltas
+                        delta_content = _extract_delta_content(chunk_data)
+                        delta_reasoning = _extract_delta_reasoning(chunk_data)
+                        fallback_completion_chars += len(delta_content)
+                        tool_call_deltas = _extract_tool_call_deltas(chunk_data)
+                        # OpenAI chunk shape: delta carries only the
+                        # fields present in this fragment (content is
+                        # omitted entirely on tool-call-only chunks).
+                        delta_out: dict[str, Any] = {}
+                        if delta_content or not tool_call_deltas:
+                            delta_out["content"] = delta_content
+                        if delta_reasoning:
+                            delta_out["reasoning_content"] = delta_reasoning
+                        if tool_call_deltas:
+                            delta_out["tool_calls"] = tool_call_deltas
 
-                            stream_chunk = ChatCompletionChunk(
-                                id=request_id,
-                                created=created,
-                                model=request.model,
-                                choices=[
-                                    StreamChoice(
-                                        index=0,
-                                        delta=delta_out,
-                                        finish_reason=_extract_finish_reason(
-                                            chunk_data
-                                        ),
-                                    )
-                                ],
-                                usage=None,
-                            )
+                        stream_chunk = ChatCompletionChunk(
+                            id=request_id,
+                            created=created,
+                            model=request.model,
+                            choices=[
+                                StreamChoice(
+                                    index=0,
+                                    delta=delta_out,
+                                    finish_reason=_extract_finish_reason(chunk_data),
+                                )
+                            ],
+                            usage=None,
+                        )
 
-                            emitted_chunks += 1
-                            yield f"data: {stream_chunk.model_dump_json()}\n\n"
+                        emitted_chunks += 1
+                        yield f"data: {stream_chunk.model_dump_json()}\n\n"
 
-                        except json.JSONDecodeError:
-                            logger.warning(f"Invalid JSON in stream: {data}")
-                            continue
+                    except json.JSONDecodeError:
+                        logger.warning(f"Invalid JSON in stream: {data}")
+                        continue
 
         if final_usage is None:
             # Fallback: estimate tokens from content length.

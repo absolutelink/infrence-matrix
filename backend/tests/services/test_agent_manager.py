@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime
 from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
 import pytest
 
 from app.core.config import settings
@@ -527,8 +528,8 @@ class TestAgentManagerSend:
     """Test sending requests to agents."""
 
     @pytest.mark.asyncio
-    @patch("app.services.agent_manager.httpx.AsyncClient")
-    async def test_send_to_agent_success(self, mock_client):
+    @patch("app.services.agent_manager.get_http_client")
+    async def test_send_to_agent_success(self, mock_get_http_client):
         """Test successful request to agent."""
         manager = AgentManager()
 
@@ -547,11 +548,9 @@ class TestAgentManagerSend:
         mock_response.raise_for_status = Mock()
 
         mock_client_instance = AsyncMock()
-        mock_client_instance.__aenter__ = AsyncMock(return_value=mock_client_instance)
-        mock_client_instance.__aexit__ = AsyncMock(return_value=None)
         mock_client_instance.request = AsyncMock(return_value=mock_response)
 
-        mock_client.return_value = mock_client_instance
+        mock_get_http_client.return_value = mock_client_instance
 
         result = await manager.send_to_agent(
             "test-agent-id",
@@ -561,6 +560,10 @@ class TestAgentManagerSend:
         )
 
         assert result == {"status": "ok"}
+        mock_client_instance.request.assert_awaited_once()
+        assert isinstance(
+            mock_client_instance.request.await_args.kwargs["timeout"], httpx.Timeout
+        )
 
     @pytest.mark.asyncio
     async def test_send_to_agent_not_found(self):
