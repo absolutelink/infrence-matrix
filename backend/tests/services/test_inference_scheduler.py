@@ -465,9 +465,24 @@ async def test_concurrent_claims_queue_at_agent_for_capacity_one_server(db):
         queued_at=first.queued_at + timedelta(microseconds=1),
     )
 
+    async def claim_until_active(lease_id: uuid.UUID) -> InferenceLeaseHandle:
+        # _claim is a single-shot attempt: it returns None when this lease is
+        # not yet the FIFO head of the queue. Under asyncio.gather the two
+        # coroutines race for the FOR UPDATE lock on the oldest queued row, so
+        # the second one can transiently see a different head and return None.
+        # Retry (as the real scheduler polls) until each becomes the head and
+        # is claimed, making the outcome independent of coroutine ordering.
+        scheduler = InferenceScheduler()
+        for _ in range(50):
+            handle = await scheduler._claim(lease_id, server)
+            if handle is not None:
+                return handle
+            await asyncio.sleep(0.02)
+        raise AssertionError(f"lease {lease_id} was never claimable")
+
     claims = await asyncio.gather(
-        InferenceScheduler()._claim(first.id, server),
-        InferenceScheduler()._claim(second.id, server),
+        claim_until_active(first.id),
+        claim_until_active(second.id),
     )
 
     assert all(claim is not None for claim in claims)
