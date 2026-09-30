@@ -72,7 +72,18 @@ async def cancel_inference_operation(
     ),
 ) -> dict:
     operation = get_operation(server_manager, request_id, server_id)
-    if operation is not None and operation.get("reservation_id") != reservation_id:
+    stored_reservation = (
+        operation.get("reservation_id") if operation is not None else None
+    )
+    # A reservation_id mismatch is only authoritative when the operation was
+    # actually created through the reservation protocol. The plain proxy dispatch
+    # path (_connection_started -> activate_operation) never stores a reservation
+    # token, so a running ``active`` op there has no ``reservation_id`` at all.
+    # Rejecting those cancels (``None != <uuid>``) left the bound llama.cpp stream
+    # draining to completion after the downstream client was gone, holding the
+    # inference slot. The lease owner is the only caller that knows the request_id,
+    # so it must be able to cancel a token-less running operation.
+    if stored_reservation is not None and stored_reservation != reservation_id:
         return {
             "request_id": request_id,
             "status": operation["status"],

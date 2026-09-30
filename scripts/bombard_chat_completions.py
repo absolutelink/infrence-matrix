@@ -315,6 +315,80 @@ async def _conversation(
     return None
 
 
+async def _cancel_probe(args: argparse.Namespace, url: str, headers: dict) -> int:
+    """Open one stream, read N content deltas, then hard-close the TCP connection.
+
+    Simulates a client that cancels/refreshes mid-response. We stamp a known
+    request_id, read a few tokens, then tear the socket down WITHOUT a clean
+    close so the backend sees an abrupt disconnect. The caller then inspects
+    the inference_leases table: if the lease stays 'active' and keeps being
+    renewed while no stream is open, that is the zombie.
+    """
+    request_id = f"chatcmpl-{uuid.uuid4()}"
+    payload = {
+        "model": args.model,
+        "messages": [
+            {
+                "role": "user",
+                "content": "Write a long, detailed story of at least 300 words "
+                "about a robot learning to paint. Keep going until told to stop.",
+            }
+        ],
+        "stream": True,
+        "max_tokens": 512,
+        "temperature": 0.9,
+    }
+    h = {**headers, "X-Inference-Request-ID": request_id}
+    print(
+        f"[cancel-probe] request_id={request_id} "
+        f"will read {args.cancel_after_tokens} content deltas then hard-close",
+        flush=True,
+    )
+    seen = 0
+    # A dedicated client we never reuse; we forcibly close its transport.
+    client = httpx.AsyncClient(
+        timeout=httpx.Timeout(args.turn_timeout, connect=args.connect_timeout),
+        verify=not args.insecure,
+    )
+    try:
+        async with client.stream("POST", url, json=payload, headers=h) as resp:
+            print(f"[cancel-probe] HTTP {resp.status_code}", flush=True)
+            async for line in resp.aiter_lines():
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    print(
+                        "[cancel-probe] got [DONE] before reaching cancel "
+                        "threshold; stream too short, raise --max-tokens",
+                        flush=True,
+                    )
+                    break
+                try:
+                    obj = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                if _extract_delta(obj):
+                    seen += 1
+                    print(f"[cancel-probe] content delta #{seen}", flush=True)
+                    if seen >= args.cancel_after_tokens:
+                        print(
+                            "[cancel-probe] >>> hard-closing connection now", flush=True
+                        )
+                        break
+    except httpx.HTTPError as exc:
+        print(f"[cancel-probe] stream error: {type(exc).__name__}: {exc}", flush=True)
+    # Force-close the client so the pooled connection is torn down. aclose()
+    # closes the underlying TCP connection; the backend sees a disconnect.
+    await client.aclose()
+    print(
+        f"[cancel-probe] connection closed after {seen} deltas. "
+        f"request_id={request_id} -- now inspect the lease table for a zombie.",
+        flush=True,
+    )
+    return 0
+
+
 async def _async_main(args: argparse.Namespace) -> int:
     url = args.base_url.rstrip("/") + "/chat/completions"
     headers = {"Accept": "text/event-stream"}
@@ -325,6 +399,9 @@ async def _async_main(args: argparse.Namespace) -> int:
         rnd = random.Random(args.seed)
         print(json.dumps(_build_payload(args, [], 0, rnd), indent=2))
         return 0
+
+    if args.cancel_probe:
+        return await _cancel_probe(args, url, headers)
 
     # Health/first-connection probe: distinguish a totally unreachable endpoint
     # (setup error) from a stall under load.
@@ -532,6 +609,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--verbose", action="store_true", help="partial content on stall")
     ap.add_argument(
         "--dry-run", action="store_true", help="print the turn-1 request and exit"
+    )
+    ap.add_argument(
+        "--cancel-probe",
+        action="store_true",
+        help="single-shot: open a stream, read N deltas, then hard-close the "
+        "connection to reproduce a mid-stream client disconnect (zombie test)",
+    )
+    ap.add_argument(
+        "--cancel-after-tokens",
+        type=int,
+        default=5,
+        help="with --cancel-probe: content deltas to read before disconnecting",
     )
     args = ap.parse_args(argv)
     if args.concurrency < 1:
