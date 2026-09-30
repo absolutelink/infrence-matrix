@@ -244,7 +244,10 @@ class AgentManager:
         try:
             await task
         finally:
-            self._connect_tasks.pop(agent_id, None)
+            # Only remove our own supervisor: a cancelled wrapper resuming here
+            # must not clobber a newer supervisor stored by a re-registration.
+            if self._connect_tasks.get(agent_id) is task:
+                del self._connect_tasks[agent_id]
 
     async def _run_agent_websocket(self, agent: Agent) -> None:
         """Run one agent event WebSocket connection until it closes."""

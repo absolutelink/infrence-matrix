@@ -871,3 +871,76 @@ class TestGpuUsageMetrics:
             )
             == 7777
         )
+
+
+class TestConnectWebsocketTaskBookkeeping:
+    """connect_websocket must not clobber a newer supervisor's task entry."""
+
+    @pytest.mark.asyncio
+    async def test_stale_wrapper_does_not_clobber_newer_supervisor(self):
+        async def block_until_cancelled(_agent):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                raise
+
+        manager = AgentManager()
+        agent = Agent(
+            name="bookkeeping-agent",
+            host="localhost",
+            port=8080,
+            status="online",
+        )
+        agent_id = str(agent.id)
+        tasks = []
+        try:
+            # W_A stores supervisor SA.
+            with patch.object(manager, "_connection_supervisor", block_until_cancelled):
+                task_a = asyncio.create_task(manager.connect_websocket(agent))
+                tasks.append(task_a)
+                await asyncio.sleep(0)
+                task_sa = manager._connect_tasks[agent_id]
+
+            # Simulate the delete route: pop and cancel SA (without joining W_A).
+            popped = manager._connect_tasks.pop(agent_id)
+            popped.cancel()
+            assert popped is task_sa
+
+            # W_B stores a newer supervisor SB.
+            with patch.object(manager, "_connection_supervisor", block_until_cancelled):
+                task_b = asyncio.create_task(manager.connect_websocket(agent))
+                tasks.append(task_b)
+                await asyncio.sleep(0)
+                task_sb = manager._connect_tasks[agent_id]
+                assert task_sb is not task_sa
+
+            # W_A resumes from its cancelled await; its finally must not delete SB.
+            with pytest.raises(asyncio.CancelledError):
+                await task_a
+            await asyncio.sleep(0)
+
+            assert manager._connect_tasks.get(agent_id) is task_sb
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            manager._connect_tasks.pop(agent_id, None)
+
+    @pytest.mark.asyncio
+    async def test_wrapper_removes_its_own_entry_on_normal_exit(self):
+        async def exit_immediately(_agent):
+            return None
+
+        manager = AgentManager()
+        agent = Agent(
+            name="normal-exit-agent",
+            host="localhost",
+            port=8080,
+            status="online",
+        )
+        agent_id = str(agent.id)
+
+        with patch.object(manager, "_connection_supervisor", exit_immediately):
+            await manager.connect_websocket(agent)
+
+        assert agent_id not in manager._connect_tasks
