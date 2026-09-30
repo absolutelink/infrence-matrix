@@ -52,7 +52,7 @@ async def register_agent(request: AgentRegisterRequest) -> AgentRegisterResponse
         await agent_manager.register_agent(request.model_dump())
         return AgentRegisterResponse(
             registered=True,
-            frontend_version="0.1.0",
+            frontend_version="1.0.0",
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Registration failed: {e}")

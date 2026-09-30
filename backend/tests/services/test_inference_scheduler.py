@@ -44,14 +44,12 @@ def _make_server(
     *,
     alias: str,
     effective_capacity: int = 1,
-    inference_slot_protocol: int = 1,
 ) -> ServerInstance:
     agent = Agent(
         name=f"scheduler-agent-{uuid.uuid4().hex}",
         host="127.0.0.1",
         port=8080,
         status="online",
-        inference_slot_protocol=inference_slot_protocol,
     )
     db.add(agent)
     db.commit()
@@ -135,6 +133,30 @@ async def _try_advisory_lock_elsewhere(key: int) -> bool:
     return acquired
 
 
+@pytest.fixture(autouse=True)
+def _default_agent_accepts_reservations():
+    """The scheduler now always uses the reservation protocol.
+
+    Every claim contacts the agent for a slot. Provide a default accepting
+    transport so tests that only care about DB/queue behavior work unchanged;
+    tests needing custom agent responses patch ``send_to_agent`` themselves.
+    """
+
+    async def _default_send(_agent_id, _method, path, **_kwargs):
+        if "/reservations/" in path:
+            return {"accepted": True, "request_id": path.rsplit("/", 1)[-1]}
+        if "/cancel" in path:
+            return {"cancelled": True}
+        return {"complete": True, "operations": []}
+
+    with patch(
+        "app.services.inference_scheduler.agent_manager.send_to_agent",
+        new_callable=AsyncMock,
+        side_effect=_default_send,
+    ) as send:
+        yield send
+
+
 def test_server_capacity_uses_effective_capacity():
     server = SimpleNamespace(
         engine="llamacpp",
@@ -186,14 +208,9 @@ async def test_release_completes_when_request_task_is_cancelled(caplog):
     session_context.__aexit__.return_value = None
 
     handle = InferenceLeaseHandle("request-1", SimpleNamespace(), uuid.uuid4())
-    with (
-        patch(
-            "app.services.inference_scheduler.AsyncSessionMaker",
-            return_value=session_context,
-        ),
-        patch(
-            "app.services.inference_scheduler.UPSTREAM_COMPLETION_COOLDOWN_SECONDS", 0
-        ),
+    with patch(
+        "app.services.inference_scheduler.AsyncSessionMaker",
+        return_value=session_context,
     ):
         release_task = asyncio.create_task(handle.release())
         await commit_started.wait()
@@ -211,36 +228,80 @@ async def test_release_completes_when_request_task_is_cancelled(caplog):
 
 
 @pytest.mark.asyncio
-async def test_release_keeps_slot_active_during_completion_cooldown():
-    cooldown_started = asyncio.Event()
-    allow_cooldown = asyncio.Event()
+async def test_cancelled_release_posts_agent_cancel_with_reservation_id(
+    _default_agent_accepts_reservations,
+):
+    """A disconnected (cancelled) reservation must reach the agent cancel POST.
+
+    Regression: with the old protocol branching, ``release("cancelled")`` only
+    called ``_cancel_agent_operation`` when ``reservation_protocol`` was set, and
+    the legacy handle never had it, so the ghost llama.cpp generation was left
+    running. Now every handle is a reservation handle and the cancel POST must be
+    made with the operation's reservation id.
+    """
+    send = _default_agent_accepts_reservations
     session = AsyncMock()
     session.execute.return_value.rowcount = 1
     session_context = AsyncMock()
     session_context.__aenter__.return_value = session
     session_context.__aexit__.return_value = None
-
-    async def sleep(_seconds: float) -> None:
-        cooldown_started.set()
-        await allow_cooldown.wait()
-
+    server = SimpleNamespace(id=uuid.uuid4(), agent_id=uuid.uuid4())
+    reservation_id = uuid.uuid4()
     handle = InferenceLeaseHandle(
-        "request-1", SimpleNamespace(), uuid.uuid4(), legacy_capacity=True
+        "request-1",
+        server,
+        uuid.uuid4(),
+        slot_generation=9,
+        reservation_id=reservation_id,
     )
-    with (
-        patch(
-            "app.services.inference_scheduler.AsyncSessionMaker",
-            return_value=session_context,
-        ),
-        patch("app.services.inference_scheduler.asyncio.sleep", side_effect=sleep),
+    with patch(
+        "app.services.inference_scheduler.AsyncSessionMaker",
+        return_value=session_context,
     ):
-        release_task = asyncio.create_task(handle.release())
-        await cooldown_started.wait()
-        session.execute.assert_not_awaited()
-        allow_cooldown.set()
-        await release_task
+        await handle.release("cancelled")
 
-    session.execute.assert_awaited_once()
+    cancel_calls = [
+        call
+        for call in send.await_args_list
+        if "/operations/request-1/cancel" in call.args[2]
+    ]
+    assert len(cancel_calls) == 1
+    assert cancel_calls[0].kwargs["headers"] == {
+        "X-Inference-Reservation-ID": str(reservation_id)
+    }
+
+
+@pytest.mark.asyncio
+async def test_completed_release_with_started_upstream_does_not_cancel_agent(
+    _default_agent_accepts_reservations,
+):
+    """A cleanly completed stream must NOT send an agent cancel."""
+    send = _default_agent_accepts_reservations
+    session = AsyncMock()
+    session.execute.return_value.rowcount = 1
+    session_context = AsyncMock()
+    session_context.__aenter__.return_value = session
+    session_context.__aexit__.return_value = None
+    server = SimpleNamespace(id=uuid.uuid4(), agent_id=uuid.uuid4())
+    handle = InferenceLeaseHandle(
+        "request-1",
+        server,
+        uuid.uuid4(),
+        slot_generation=9,
+        reservation_id=uuid.uuid4(),
+    )
+    handle.mark_upstream_started()
+    with patch(
+        "app.services.inference_scheduler.AsyncSessionMaker",
+        return_value=session_context,
+    ):
+        await handle.release("completed")
+
+    assert not [
+        call
+        for call in send.await_args_list
+        if "/operations/request-1/cancel" in call.args[2]
+    ]
 
 
 async def test_guard_cancels_upstream_when_lease_is_lost():
@@ -454,7 +515,7 @@ async def test_newly_ready_server_waits_before_claiming(db):
     await handle.release()
 
 
-async def test_concurrent_claims_queue_at_agent_for_capacity_one_server(db):
+async def test_concurrent_claims_respect_capacity_one_server(db):
     model = _make_model(db, "scheduler-concurrent-model.gguf")
     server = _make_server(db, model, alias="scheduler-capacity-one-server")
     first = _make_lease(db, model, f"first-{uuid.uuid4()}")
@@ -464,37 +525,27 @@ async def test_concurrent_claims_queue_at_agent_for_capacity_one_server(db):
         f"second-{uuid.uuid4()}",
         queued_at=first.queued_at + timedelta(microseconds=1),
     )
+    scheduler = InferenceScheduler()
 
-    async def claim_until_active(lease_id: uuid.UUID) -> InferenceLeaseHandle:
-        # _claim is a single-shot attempt: it returns None when this lease is
-        # not yet the FIFO head of the queue. Under asyncio.gather the two
-        # coroutines race for the FOR UPDATE lock on the oldest queued row, so
-        # the second one can transiently see a different head and return None.
-        # Retry (as the real scheduler polls) until each becomes the head and
-        # is claimed, making the outcome independent of coroutine ordering.
-        scheduler = InferenceScheduler()
-        for _ in range(50):
-            handle = await scheduler._claim(lease_id, server)
-            if handle is not None:
-                return handle
-            await asyncio.sleep(0.02)
-        raise AssertionError(f"lease {lease_id} was never claimable")
+    # First claim takes the single reservation slot.
+    first_handle = await scheduler._claim(first.id, server)
+    assert first_handle is not None
+    db.expire_all()
+    assert db.get(InferenceLease, first.id).status == "active"
 
-    claims = await asyncio.gather(
-        claim_until_active(first.id),
-        claim_until_active(second.id),
-    )
+    # A capacity-one server cannot admit the second while the first holds the
+    # slot (active + reserving occupancy is checked against capacity).
+    assert await scheduler._claim(second.id, server) is None
+    db.expire_all()
+    assert db.get(InferenceLease, second.id).status == "queued"
 
-    assert all(claim is not None for claim in claims)
-    try:
-        db.expire_all()
-        statuses = {
-            db.get(InferenceLease, first.id).status,
-            db.get(InferenceLease, second.id).status,
-        }
-        assert statuses == {"active"}
-    finally:
-        await asyncio.gather(*(claim.release() for claim in claims if claim))
+    # After the first releases, the second becomes the FIFO head and claims.
+    await first_handle.release()
+    second_handle = await scheduler._claim(second.id, server)
+    assert second_handle is not None
+    db.expire_all()
+    assert db.get(InferenceLease, second.id).status == "active"
+    await second_handle.release()
 
 
 async def test_cross_server_claim_waits_for_older_locked_compatible_request(db):
@@ -539,37 +590,66 @@ async def test_cross_server_claim_waits_for_older_locked_compatible_request(db):
     await asyncio.gather(older_on_a.release(), newer_on_b.release())
 
 
-async def test_protocol_one_claim_never_waits_on_server_row_capacity_lock(db):
+async def test_claim_releases_db_lock_before_agent_round_trip(db):
+    """The reservation commit must release row locks before contacting the agent.
+
+    The scheduler sets the lease to ``reserving`` and commits, then calls the
+    agent outside any DB transaction. While the agent call is still pending, an
+    external ``SELECT ... FOR UPDATE`` on the same server row must not block,
+    proving no DB lock is held across the network round-trip.
+    """
     model = _make_model(db, f"scheduler-agent-lock-{uuid.uuid4().hex}")
     server = _make_server(db, model, alias=f"agent-lock-{uuid.uuid4().hex}")
     queued = _make_lease(db, model, f"agent-lock-request-{uuid.uuid4()}")
-    assert db.get(Agent, server.agent_id).inference_slot_protocol == 1
 
-    connection = await async_engine.connect()
-    transaction = await connection.begin()
-    await connection.execute(
-        select(ServerInstance.id)
-        .where(ServerInstance.id == server.id)
-        .with_for_update(key_share=True)
-    )
-    try:
-        handle = await asyncio.wait_for(
-            InferenceScheduler()._claim(queued.id, server), timeout=1.0
-        )
-        assert handle is not None
-    finally:
-        await transaction.rollback()
-        await connection.close()
+    agent_entered = asyncio.Event()
+    allow_agent = asyncio.Event()
+
+    async def blocking_reservation(_agent_id, _method, path, **_kwargs):
+        if "/reservations/" in path:
+            agent_entered.set()
+            await allow_agent.wait()
+            return {"accepted": True}
+        return {"cancelled": True}
+
+    with patch(
+        "app.services.inference_scheduler.agent_manager.send_to_agent",
+        new_callable=AsyncMock,
+        side_effect=blocking_reservation,
+    ):
+        claim = asyncio.create_task(InferenceScheduler()._claim(queued.id, server))
+        await asyncio.wait_for(agent_entered.wait(), 1)
+        db.expire_all()
+        assert db.get(InferenceLease, queued.id).status == "reserving"
+
+        # The reservation commit already released the server-row lock, so an
+        # external FOR UPDATE succeeds without blocking while the agent call
+        # is still pending.
+        connection = await async_engine.connect()
+        try:
+            await asyncio.wait_for(
+                connection.execute(
+                    select(ServerInstance.id)
+                    .where(ServerInstance.id == server.id)
+                    .with_for_update()
+                ),
+                timeout=1.0,
+            )
+        finally:
+            await connection.close()
+
+        allow_agent.set()
+        handle = await asyncio.wait_for(claim, timeout=1.0)
+    assert handle is not None
     await handle.release()
 
 
-async def test_protocol_three_claim_waits_for_acknowledged_agent_capacity(db):
+async def test_claim_waits_for_acknowledged_agent_capacity(db):
     model = _make_model(db, f"scheduler-reservation-{uuid.uuid4().hex}")
     server = _make_server(
         db,
         model,
         alias=f"scheduler-reservation-{uuid.uuid4().hex}",
-        inference_slot_protocol=3,
     )
     first = _make_lease(db, model, f"first-{uuid.uuid4()}")
     second = _make_lease(
@@ -597,10 +677,13 @@ async def test_protocol_three_claim_waits_for_acknowledged_agent_capacity(db):
         assert await scheduler._claim(second.id, server) is None
         first_handle = await scheduler._claim(first.id, server)
         assert first_handle is not None
-        assert first_handle.reservation_protocol
+        assert first_handle.reservation_id is not None
         assert (
             first_handle.dispatch_headers()["X-Inference-Reservation"]
             == first.request_id
+        )
+        assert first_handle.dispatch_headers()["X-Inference-Reservation-ID"] == str(
+            first_handle.reservation_id
         )
         db.expire_all()
         assert db.get(InferenceLease, first.id).status == "active"
@@ -618,13 +701,12 @@ async def test_protocol_three_claim_waits_for_acknowledged_agent_capacity(db):
     db.rollback()
 
 
-async def test_protocol_three_concurrent_workers_reserve_only_once(db):
+async def test_concurrent_workers_reserve_only_once(db):
     model = _make_model(db, f"scheduler-parallel-{uuid.uuid4().hex}")
     server = _make_server(
         db,
         model,
         alias=f"scheduler-parallel-{uuid.uuid4().hex}",
-        inference_slot_protocol=3,
     )
     queued = _make_lease(db, model, f"parallel-{uuid.uuid4()}")
 
@@ -648,9 +730,7 @@ async def test_protocol_three_concurrent_workers_reserve_only_once(db):
 
 async def test_reserving_lease_can_be_cancelled_while_agent_is_slow(db):
     model = _make_model(db, f"scheduler-slow-{uuid.uuid4().hex}")
-    server = _make_server(
-        db, model, alias=f"slow-{uuid.uuid4().hex}", inference_slot_protocol=3
-    )
+    server = _make_server(db, model, alias=f"slow-{uuid.uuid4().hex}")
     queued = _make_lease(db, model, f"slow-{uuid.uuid4()}")
     called = asyncio.Event()
     release = asyncio.Event()
@@ -691,7 +771,6 @@ async def test_cancelled_claim_after_commit_does_not_leave_active_lease(db):
         db,
         model,
         alias=f"post-commit-{uuid.uuid4().hex}",
-        inference_slot_protocol=3,
     )
     queued = _make_lease(db, model, f"post-commit-{uuid.uuid4()}")
     cancelled_tokens = []
@@ -727,7 +806,6 @@ async def test_lost_agent_ack_cancels_attempt_and_requeues(db):
         db,
         model,
         alias=f"lost-ack-{uuid.uuid4().hex}",
-        inference_slot_protocol=3,
     )
     queued = _make_lease(db, model, f"lost-ack-{uuid.uuid4()}")
     tokens = []
@@ -756,7 +834,6 @@ async def test_abandoned_reservation_rejoins_fifo_after_recovery(db):
         db,
         model,
         alias=f"recovery-{uuid.uuid4().hex}",
-        inference_slot_protocol=3,
     )
     lease = _make_lease(db, model, f"recovery-{uuid.uuid4()}")
     lease.status = "reserving"
@@ -774,34 +851,6 @@ async def test_abandoned_reservation_rejoins_fifo_after_recovery(db):
     assert recovered.reservation_id is None
     assert recovered.server_instance_id is None
     db.rollback()
-
-
-async def test_legacy_agent_uses_database_capacity_fallback(db):
-    model = _make_model(db, f"scheduler-legacy-agent-{uuid.uuid4().hex}")
-    server = _make_server(
-        db,
-        model,
-        alias=f"scheduler-legacy-agent-{uuid.uuid4().hex}",
-        inference_slot_protocol=0,
-    )
-    first = _make_lease(db, model, f"legacy-first-{uuid.uuid4()}")
-    second = _make_lease(
-        db,
-        model,
-        f"legacy-second-{uuid.uuid4()}",
-        queued_at=first.queued_at + timedelta(microseconds=1),
-    )
-    scheduler = InferenceScheduler()
-
-    first_handle = await scheduler._claim(first.id, server)
-    second_handle = await scheduler._claim(second.id, server)
-
-    assert first_handle is not None
-    assert second_handle is None
-    await first_handle.release()
-    second_handle = await scheduler._claim(second.id, server)
-    assert second_handle is not None
-    await second_handle.release()
 
 
 @pytest.mark.parametrize(
@@ -925,37 +974,6 @@ async def test_reconciliation_defers_lease_for_incomplete_agent_snapshot(db, sna
     assert reconciled == 0
     assert persisted.status == "active"
     assert persisted.lease_expires_at > datetime.now(UTC)
-
-
-async def test_legacy_agent_reconciles_expired_lease_without_operation_api(db):
-    model = _make_model(db, f"scheduler-legacy-reconcile-{uuid.uuid4().hex}")
-    server = _make_server(
-        db,
-        model,
-        alias=f"scheduler-legacy-reconcile-{uuid.uuid4().hex}",
-        inference_slot_protocol=0,
-    )
-    lease = _make_lease(
-        db,
-        model,
-        f"legacy-reconcile-{uuid.uuid4()}",
-        status="active",
-        server=server,
-        expires_at=datetime.now(UTC) - timedelta(seconds=1),
-    )
-    query = AsyncMock()
-
-    with patch(
-        "app.services.inference_scheduler.agent_manager.send_to_agent", new=query
-    ):
-        reconciled = await InferenceScheduler().reconcile_stale_leases()
-
-    db.expire_all()
-    persisted = db.get(InferenceLease, lease.id)
-    assert reconciled == 1
-    assert persisted.status == "failed"
-    assert persisted.terminal_reason == "lease_expired_or_server_unavailable"
-    query.assert_not_awaited()
 
 
 async def test_reconciliation_fails_active_lease_from_previous_generation(db):

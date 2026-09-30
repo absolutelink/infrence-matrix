@@ -1,4 +1,4 @@
-"""Tests for agent registration capability negotiation."""
+"""Tests for agent registration payload shape."""
 
 import os
 from unittest.mock import AsyncMock
@@ -9,8 +9,8 @@ os.environ["MODELS_PATH"] = "/tmp/models"
 
 import pytest
 
+from app.core.config import settings
 from app.services.frontend_client import FrontendClient
-from app.services.inference_operations import INFERENCE_SLOT_PROTOCOL_VERSION
 
 
 class FakeResponse:
@@ -34,7 +34,7 @@ class FakeAsyncClient:
 
 
 @pytest.mark.asyncio
-async def test_registration_advertises_agent_slot_protocol(monkeypatch):
+async def test_registration_payload_shape_without_slot_protocol(monkeypatch):
     payloads: list[dict] = []
     monkeypatch.setattr(
         "app.services.frontend_client.httpx.AsyncClient",
@@ -44,4 +44,12 @@ async def test_registration_advertises_agent_slot_protocol(monkeypatch):
     monkeypatch.setattr(client, "_get_gpu_info", AsyncMock(return_value={}))
 
     assert await client.register()
-    assert payloads[0]["inference_slot_protocol"] == INFERENCE_SLOT_PROTOCOL_VERSION
+    payload = payloads[0]
+    assert payload["agent_id"] == settings.AGENT_ID
+    assert payload["name"] == settings.AGENT_NAME
+    assert payload["platform"] == settings.AGENT_PLATFORM
+    assert payload["type"] == settings.AGENT_TYPE
+    assert payload["port"] == settings.AGENT_PORT
+    assert "server_statuses" in payload
+    # The inference slot protocol concept has been removed entirely.
+    assert "inference_slot_protocol" not in payload

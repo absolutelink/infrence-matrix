@@ -57,7 +57,6 @@ class TestAgentManagerRegistration:
             "host": "localhost",
             "port": 8080,
             "gpu_info": {"name": "RTX 4090", "vram_total": 24576000000},
-            "inference_slot_protocol": 1,
         }
 
         agent = await manager.register_agent(agent_data)
@@ -65,7 +64,6 @@ class TestAgentManagerRegistration:
         assert agent is not None
         assert str(agent.id) in manager.agents
         assert agent.status == "online"
-        assert agent.inference_slot_protocol == 1
         mock_session.add.assert_called_once()
 
     @pytest.mark.asyncio
@@ -110,14 +108,12 @@ class TestAgentManagerRegistration:
             "host": "new-host",
             "port": 8080,
             "gpu_info": {},
-            "inference_slot_protocol": 1,
         }
 
         agent = await manager.register_agent(agent_data)
 
         assert agent.host == "new-host"
         assert agent.status == "online"
-        assert agent.inference_slot_protocol == 1
 
 
 class TestAgentManagerRestoreOnRegister:

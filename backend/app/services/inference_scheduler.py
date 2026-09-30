@@ -33,9 +33,6 @@ RESERVATION_RECOVERY_SECONDS = 12
 TELEMETRY_TIMEOUT_SECONDS = 5.0
 RECONCILIATION_INTERVAL_SECONDS = 30.0
 DEFAULT_SINGLE_REQUEST_CAPACITY = 1
-# Give llama-server a brief settling period before another request claims the
-# slot. The lease stays active during this delay so other workers also wait.
-UPSTREAM_COMPLETION_COOLDOWN_SECONDS = 0.5
 SERVER_READY_COOLDOWN_SECONDS = 3.0
 
 
@@ -64,8 +61,6 @@ class InferenceLeaseHandle:
     server: ServerInstance
     lease_id: uuid.UUID
     slot_generation: int | None = None
-    legacy_capacity: bool = False
-    reservation_protocol: bool = False
     reservation_id: uuid.UUID | None = None
     lost: asyncio.Event = field(default_factory=asyncio.Event)
     _upstream_started: asyncio.Event = field(default_factory=asyncio.Event, init=False)
@@ -81,14 +76,12 @@ class InferenceLeaseHandle:
         self._upstream_started.set()
 
     def dispatch_headers(self) -> dict[str, str]:
-        headers = {
+        return {
             "X-Inference-Slot-Generation": str(self.slot_generation),
             "X-Inference-Request-ID": self.request_id,
+            "X-Inference-Reservation": self.request_id,
+            "X-Inference-Reservation-ID": str(self.reservation_id),
         }
-        if self.reservation_protocol:
-            headers["X-Inference-Reservation"] = self.request_id
-            headers["X-Inference-Reservation-ID"] = str(self.reservation_id)
-        return headers
 
     def monitor_disconnect(
         self, is_cancelled: Callable[[], Awaitable[bool]] | None
@@ -211,9 +204,7 @@ class InferenceLeaseHandle:
         """Release the lease in a short, independent transaction."""
         if outcome not in {"completed", "failed", "cancelled"}:
             raise ValueError(f"Invalid inference outcome: {outcome}")
-        if self.reservation_protocol and (
-            outcome != "completed" or not self._upstream_started.is_set()
-        ):
+        if outcome != "completed" or not self._upstream_started.is_set():
             await self._cancel_agent_operation()
         started_at = asyncio.get_running_loop().time()
         server_id = getattr(self.server, "id", "-")
@@ -231,8 +222,6 @@ class InferenceLeaseHandle:
                 self._renewal_task.cancel()
                 await asyncio.gather(self._renewal_task, return_exceptions=True)
                 self._renewal_task = None
-            if self.legacy_capacity:
-                await asyncio.sleep(UPSTREAM_COMPLETION_COOLDOWN_SECONDS)
             async with AsyncSessionMaker() as session:
                 result = await session.execute(
                     update(InferenceLease)
@@ -332,8 +321,6 @@ class InferenceLeaseHandle:
         await self._cancel_agent_operation()
 
     async def _cancel_agent_operation(self) -> None:
-        if not self.reservation_protocol:
-            return
         try:
             await agent_manager.send_to_agent(
                 str(self.server.agent_id),
@@ -442,13 +429,11 @@ class InferenceScheduler:
                         select(
                             InferenceLease,
                             ServerInstance,
-                            Agent.inference_slot_protocol,
                         )
                         .join(
                             ServerInstance,
                             ServerInstance.id == InferenceLease.server_instance_id,
                         )
-                        .join(Agent, Agent.id == ServerInstance.agent_id)
                         .where(
                             InferenceLease.status == "active",
                             InferenceLease.lease_expires_at <= now,
@@ -464,9 +449,7 @@ class InferenceScheduler:
         operations_by_server: dict[
             uuid.UUID, tuple[ServerInstance, list[InferenceLease]]
         ] = {}
-        for lease, server, protocol in expired_candidates:
-            if int(protocol or 0) < 1:
-                continue
+        for lease, server in expired_candidates:
             entry = operations_by_server.setdefault(server.id, (server, []))
             entry[1].append(lease)
 
@@ -1000,13 +983,6 @@ class InferenceScheduler:
                 or locked.health_status != "healthy"
             ):
                 return None
-            protocol = (
-                await session.execute(
-                    select(Agent.inference_slot_protocol).where(
-                        Agent.id == locked.agent_id
-                    )
-                )
-            ).scalar_one_or_none()
             if locked.started_at is not None:
                 ready_at = locked.started_at
                 if ready_at.tzinfo is None:
@@ -1014,48 +990,43 @@ class InferenceScheduler:
                 ready_for = (now - ready_at).total_seconds()
                 if 0 <= ready_for < SERVER_READY_COOLDOWN_SECONDS:
                     return None
-            if int(protocol or 0) < 1 or int(protocol or 0) >= 3:
-                # Legacy agents need DB capacity enforcement. Protocol v3
-                # also locks the row while it acquires a real agent slot.
-                locked = (
-                    await session.execute(
-                        select(ServerInstance)
-                        .where(ServerInstance.id == server.id)
-                        .with_for_update()
+            # Lock the server row while enforcing DB capacity so a reservation
+            # cannot overshoot the agent's slot count.
+            locked = (
+                await session.execute(
+                    select(ServerInstance)
+                    .where(ServerInstance.id == server.id)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if (
+                locked is None
+                or locked.status != "running"
+                or locked.health_status != "healthy"
+            ):
+                return None
+            occupied = (
+                await session.execute(
+                    select(func.count(InferenceLease.id)).where(
+                        InferenceLease.server_instance_id == locked.id,
+                        InferenceLease.status.in_(["active", "reserving"]),
+                        InferenceLease.slot_generation == locked.slot_generation,
+                        or_(
+                            InferenceLease.status == "reserving",
+                            InferenceLease.lease_expires_at > now,
+                        ),
                     )
-                ).scalar_one_or_none()
-                if (
-                    locked is None
-                    or locked.status != "running"
-                    or locked.health_status != "healthy"
-                ):
-                    return None
-                occupied = (
-                    await session.execute(
-                        select(func.count(InferenceLease.id)).where(
-                            InferenceLease.server_instance_id == locked.id,
-                            InferenceLease.status.in_(["active", "reserving"])
-                            if int(protocol or 0) >= 3
-                            else InferenceLease.status == "active",
-                            InferenceLease.slot_generation == locked.slot_generation,
-                            or_(
-                                InferenceLease.status == "reserving",
-                                InferenceLease.lease_expires_at > now,
-                            ),
-                        )
-                    )
-                ).scalar_one()
-                if int(occupied) >= server_capacity(locked):
-                    return None
+                )
+            ).scalar_one()
+            if int(occupied) >= server_capacity(locked):
+                return None
             # Wait on the true compatible head rather than skipping a row
             # another worker is claiming on a different eligible server.
             oldest_compatible = (
                 await session.execute(
                     select(InferenceLease)
                     .where(
-                        InferenceLease.status.in_(["queued", "reserving"])
-                        if int(protocol or 0) >= 3
-                        else InferenceLease.status == "queued",
+                        InferenceLease.status.in_(["queued", "reserving"]),
                         InferenceLease.model_id == locked.model_id,
                         InferenceLease.lease_expires_at > now,
                         or_(
@@ -1079,44 +1050,20 @@ class InferenceScheduler:
             ):
                 return None
 
-            if int(protocol or 0) >= 3:
-                attempt = uuid.uuid4()
-                oldest_compatible.status = "reserving"
-                oldest_compatible.server_instance_id = locked.id
-                oldest_compatible.slot_generation = locked.slot_generation
-                oldest_compatible.reservation_id = attempt
-                oldest_compatible.reservation_expires_at = now + timedelta(
-                    seconds=RESERVATION_RECOVERY_SECONDS
-                )
-                session.add(oldest_compatible)
-                await session.commit()
-                request_id = oldest_compatible.request_id
-                generation = locked.slot_generation
-                agent_id = locked.agent_id
-                server_id = locked.id
-            else:
-                lease = oldest_compatible
-                lease.server_instance_id = locked.id
-                lease.status = "active"
-                lease.started_at = datetime.now(UTC)
-                lease.lease_expires_at = lease.started_at + timedelta(
-                    seconds=ACTIVE_LEASE_TTL_SECONDS
-                )
-                lease.slot_generation = locked.slot_generation
-                if int(protocol or 0) < 1:
-                    locked.last_request_at = now
-                    session.add(locked)
-                session.add(lease)
-                await session.commit()
-                handle = InferenceLeaseHandle(
-                    lease.request_id,
-                    locked,
-                    lease.id,
-                    lease.slot_generation,
-                    legacy_capacity=int(protocol or 0) < 1,
-                )
-                handle.start_renewal()
-                return handle
+            attempt = uuid.uuid4()
+            oldest_compatible.status = "reserving"
+            oldest_compatible.server_instance_id = locked.id
+            oldest_compatible.slot_generation = locked.slot_generation
+            oldest_compatible.reservation_id = attempt
+            oldest_compatible.reservation_expires_at = now + timedelta(
+                seconds=RESERVATION_RECOVERY_SECONDS
+            )
+            session.add(oldest_compatible)
+            await session.commit()
+            request_id = oldest_compatible.request_id
+            generation = locked.slot_generation
+            agent_id = locked.agent_id
+            server_id = locked.id
 
         # No database transaction or row lock is held while contacting the agent.
         return await self._reserve_and_activate(
@@ -1212,7 +1159,6 @@ class InferenceScheduler:
                 server,
                 lease_id,
                 generation,
-                reservation_protocol=True,
                 reservation_id=attempt,
             )
             handle.start_renewal()

@@ -606,7 +606,14 @@ async def test_responses_websocket_propagates_disconnect_and_releases(
     disconnected.set()
     server = SimpleNamespace(id="server-id", agent_id="agent-id", model_id="model-id")
     model = SimpleNamespace(id="model-id")
-    lease = InferenceLeaseHandle("request-id", server, uuid.uuid4(), slot_generation=31)
+    reservation_id = uuid.uuid4()
+    lease = InferenceLeaseHandle(
+        "request-id",
+        server,
+        uuid.uuid4(),
+        slot_generation=31,
+        reservation_id=reservation_id,
+    )
     lease.release = AsyncMock()
     acquire_callbacks: list[Any] = []
 
@@ -647,6 +654,8 @@ async def test_responses_websocket_propagates_disconnect_and_releases(
     assert client.stream_calls[0]["headers"] == {
         "X-Inference-Slot-Generation": "31",
         "X-Inference-Request-ID": "request-id",
+        "X-Inference-Reservation": "request-id",
+        "X-Inference-Reservation-ID": str(reservation_id),
     }
     assert "responses_ws_stream_close" in caplog.text
     assert "close_reason=client_disconnect" in caplog.text

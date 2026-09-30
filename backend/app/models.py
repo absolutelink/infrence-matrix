@@ -38,8 +38,6 @@ class Agent(SQLModel, table=True):
     name: str = Field(max_length=255, unique=True, index=True)
     platform: str = "llamacpp"
     type: str = "generic"
-    # Protocol 1 agents own live inference slot admission and operation tracking.
-    inference_slot_protocol: int = 0
     host: str
     port: int
 

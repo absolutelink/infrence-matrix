@@ -29,7 +29,6 @@ class FrontendClient:
 
     async def register(self) -> bool:
         """Register Agent with Frontend."""
-        from app.services.inference_operations import INFERENCE_SLOT_PROTOCOL_VERSION
         from app.services.server_manager import server_manager
 
         registration_data = {
@@ -37,7 +36,6 @@ class FrontendClient:
             "name": settings.AGENT_NAME,
             "platform": settings.AGENT_PLATFORM,
             "type": settings.AGENT_TYPE,
-            "inference_slot_protocol": INFERENCE_SLOT_PROTOCOL_VERSION,
             "host": settings.AGENT_HOST or socket.gethostname(),
             "port": settings.AGENT_PORT,
             "gpu_info": await self._get_gpu_info(),

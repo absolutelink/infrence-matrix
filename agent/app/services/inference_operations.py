@@ -5,7 +5,6 @@ import time
 from typing import Any
 
 MAX_RETAINED_OPERATIONS = 4096
-INFERENCE_SLOT_PROTOCOL_VERSION = 3
 
 
 class DuplicateInferenceOperation(Exception):

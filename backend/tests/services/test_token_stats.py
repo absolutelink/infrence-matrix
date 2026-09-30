@@ -151,15 +151,9 @@ async def test_blocked_telemetry_persistence_does_not_delay_lease_release(monkey
             None, {"prompt_tokens": 1}, request_id=handle.request_id
         )
         assert await asyncio.to_thread(started.wait, 1)
-        with (
-            patch(
-                "app.services.inference_scheduler.AsyncSessionMaker",
-                return_value=context,
-            ),
-            patch(
-                "app.services.inference_scheduler.UPSTREAM_COMPLETION_COOLDOWN_SECONDS",
-                0,
-            ),
+        with patch(
+            "app.services.inference_scheduler.AsyncSessionMaker",
+            return_value=context,
         ):
             await asyncio.wait_for(handle.release(), timeout=0.5)
         session.commit.assert_awaited_once()
