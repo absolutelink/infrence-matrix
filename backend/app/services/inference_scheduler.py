@@ -27,6 +27,9 @@ LEASE_TIMEOUT_SECONDS = 30 * 60
 ACTIVE_LEASE_TTL_SECONDS = 90
 LEASE_RENEWAL_INTERVAL_SECONDS = 30
 SCHEDULER_POLL_SECONDS = 1.0
+# Must expire before the agent's 15-second unconsumed reservation TTL: a late
+# database commit must never admit an already-released agent slot.
+RESERVATION_RECOVERY_SECONDS = 12
 TELEMETRY_TIMEOUT_SECONDS = 5.0
 RECONCILIATION_INTERVAL_SECONDS = 30.0
 DEFAULT_SINGLE_REQUEST_CAPACITY = 1
@@ -62,6 +65,8 @@ class InferenceLeaseHandle:
     lease_id: uuid.UUID
     slot_generation: int | None = None
     legacy_capacity: bool = False
+    reservation_protocol: bool = False
+    reservation_id: uuid.UUID | None = None
     lost: asyncio.Event = field(default_factory=asyncio.Event)
     _upstream_started: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _renewal_task: asyncio.Task[None] | None = field(default=None, init=False)
@@ -74,6 +79,16 @@ class InferenceLeaseHandle:
     def mark_upstream_started(self) -> None:
         """Allow the renewal loop to renew a stream owned outside ``guard``."""
         self._upstream_started.set()
+
+    def dispatch_headers(self) -> dict[str, str]:
+        headers = {
+            "X-Inference-Slot-Generation": str(self.slot_generation),
+            "X-Inference-Request-ID": self.request_id,
+        }
+        if self.reservation_protocol:
+            headers["X-Inference-Reservation"] = self.request_id
+            headers["X-Inference-Reservation-ID"] = str(self.reservation_id)
+        return headers
 
     def monitor_disconnect(
         self, is_cancelled: Callable[[], Awaitable[bool]] | None
@@ -192,8 +207,14 @@ class InferenceLeaseHandle:
         except asyncio.CancelledError:
             pass
 
-    async def release(self) -> None:
+    async def release(self, outcome: str = "completed") -> None:
         """Release the lease in a short, independent transaction."""
+        if outcome not in {"completed", "failed", "cancelled"}:
+            raise ValueError(f"Invalid inference outcome: {outcome}")
+        if self.reservation_protocol and (
+            outcome != "completed" or not self._upstream_started.is_set()
+        ):
+            await self._cancel_agent_operation()
         started_at = asyncio.get_running_loop().time()
         server_id = getattr(self.server, "id", "-")
         logger.info(
@@ -221,8 +242,12 @@ class InferenceLeaseHandle:
                         InferenceLease.slot_generation == self.slot_generation,
                     )
                     .values(
-                        status="released",
-                        terminal_reason="completed",
+                        status={
+                            "completed": "released",
+                            "failed": "failed",
+                            "cancelled": "cancelled",
+                        }[outcome],
+                        terminal_reason=outcome,
                         released_at=datetime.now(UTC),
                     )
                 )
@@ -304,6 +329,21 @@ class InferenceLeaseHandle:
         except asyncio.CancelledError:
             await asyncio.shield(cancel_task)
             raise
+        await self._cancel_agent_operation()
+
+    async def _cancel_agent_operation(self) -> None:
+        if not self.reservation_protocol:
+            return
+        try:
+            await agent_manager.send_to_agent(
+                str(self.server.agent_id),
+                "POST",
+                f"/proxy/{self.server.id}/operations/{self.request_id}/cancel",
+                timeout=3.0,
+                headers={"X-Inference-Reservation-ID": str(self.reservation_id)},
+            )
+        except Exception:
+            logger.warning("Unable to cancel reserved operation %s", self.request_id)
 
     async def _mark_cancelled(self) -> None:
         async with AsyncSessionMaker() as session:
@@ -321,6 +361,7 @@ class InferenceLeaseHandle:
                 )
             )
             await session.commit()
+        await self._cancel_agent_operation()
 
 
 class InferenceRequestCancelled(asyncio.CancelledError):
@@ -472,6 +513,7 @@ class InferenceScheduler:
                         and status.get("status")
                         in {
                             "queued",
+                            "reserved",
                             "active",
                             "cancelling",
                             "completed",
@@ -495,7 +537,7 @@ class InferenceScheduler:
         live_operation_ids = [
             lease_id
             for lease_id, status in operation_results.items()
-            if status in {"queued", "active", "cancelling"}
+            if status in {"queued", "reserved", "active", "cancelling"}
         ]
         completed_operation_ids = [
             lease_id
@@ -519,6 +561,31 @@ class InferenceScheduler:
         ]
 
         async with AsyncSessionMaker() as session:
+            abandoned_reservations = await session.execute(
+                update(InferenceLease)
+                .where(
+                    InferenceLease.status == "reserving",
+                    InferenceLease.reservation_expires_at <= now,
+                    InferenceLease.lease_expires_at > now,
+                )
+                .values(
+                    status="queued",
+                    reservation_id=None,
+                    reservation_expires_at=None,
+                    server_instance_id=None,
+                    slot_generation=None,
+                )
+            )
+            expired_reservations = await session.execute(
+                update(InferenceLease)
+                .where(
+                    InferenceLease.status == "reserving",
+                    InferenceLease.lease_expires_at <= now,
+                )
+                .values(
+                    status="expired", terminal_reason="queue_timeout", released_at=now
+                )
+            )
             expired_queued = await session.execute(
                 update(InferenceLease)
                 .where(
@@ -668,6 +735,8 @@ class InferenceScheduler:
         )
         count = (
             int(expired_queued.rowcount or 0)
+            + int(abandoned_reservations.rowcount or 0)
+            + int(expired_reservations.rowcount or 0)
             + old_generation_count
             + reconciled_operation_count
             + len(stale)
@@ -945,9 +1014,9 @@ class InferenceScheduler:
                 ready_for = (now - ready_at).total_seconds()
                 if 0 <= ready_for < SERVER_READY_COOLDOWN_SECONDS:
                     return None
-            if int(protocol or 0) < 1:
-                # Legacy agents have no local admission queue, so retain the
-                # DB-backed capacity guard under a short server-row lock.
+            if int(protocol or 0) < 1 or int(protocol or 0) >= 3:
+                # Legacy agents need DB capacity enforcement. Protocol v3
+                # also locks the row while it acquires a real agent slot.
                 locked = (
                     await session.execute(
                         select(ServerInstance)
@@ -961,17 +1030,22 @@ class InferenceScheduler:
                     or locked.health_status != "healthy"
                 ):
                     return None
-                legacy_active = (
+                occupied = (
                     await session.execute(
                         select(func.count(InferenceLease.id)).where(
                             InferenceLease.server_instance_id == locked.id,
-                            InferenceLease.status == "active",
+                            InferenceLease.status.in_(["active", "reserving"])
+                            if int(protocol or 0) >= 3
+                            else InferenceLease.status == "active",
                             InferenceLease.slot_generation == locked.slot_generation,
-                            InferenceLease.lease_expires_at > now,
+                            or_(
+                                InferenceLease.status == "reserving",
+                                InferenceLease.lease_expires_at > now,
+                            ),
                         )
                     )
                 ).scalar_one()
-                if int(legacy_active) >= server_capacity(locked):
+                if int(occupied) >= server_capacity(locked):
                     return None
             # Wait on the true compatible head rather than skipping a row
             # another worker is claiming on a different eligible server.
@@ -979,7 +1053,9 @@ class InferenceScheduler:
                 await session.execute(
                     select(InferenceLease)
                     .where(
-                        InferenceLease.status == "queued",
+                        InferenceLease.status.in_(["queued", "reserving"])
+                        if int(protocol or 0) >= 3
+                        else InferenceLease.status == "queued",
                         InferenceLease.model_id == locked.model_id,
                         InferenceLease.lease_expires_at > now,
                         or_(
@@ -996,30 +1072,206 @@ class InferenceScheduler:
                     .limit(1)
                 )
             ).scalar_one_or_none()
-            if oldest_compatible is None or oldest_compatible.id != lease_id:
+            if (
+                oldest_compatible is None
+                or oldest_compatible.id != lease_id
+                or oldest_compatible.status != "queued"
+            ):
                 return None
 
-            lease = oldest_compatible
-            lease.server_instance_id = locked.id
-            lease.status = "active"
-            lease.started_at = now
-            lease.lease_expires_at = now + timedelta(seconds=ACTIVE_LEASE_TTL_SECONDS)
-            lease.slot_generation = locked.slot_generation
-            if int(protocol or 0) < 1:
-                locked.last_request_at = now
-                session.add(locked)
-            session.add(lease)
-            await session.commit()
-            await session.refresh(lease)
+            if int(protocol or 0) >= 3:
+                attempt = uuid.uuid4()
+                oldest_compatible.status = "reserving"
+                oldest_compatible.server_instance_id = locked.id
+                oldest_compatible.slot_generation = locked.slot_generation
+                oldest_compatible.reservation_id = attempt
+                oldest_compatible.reservation_expires_at = now + timedelta(
+                    seconds=RESERVATION_RECOVERY_SECONDS
+                )
+                session.add(oldest_compatible)
+                await session.commit()
+                request_id = oldest_compatible.request_id
+                generation = locked.slot_generation
+                agent_id = locked.agent_id
+                server_id = locked.id
+            else:
+                lease = oldest_compatible
+                lease.server_instance_id = locked.id
+                lease.status = "active"
+                lease.started_at = datetime.now(UTC)
+                lease.lease_expires_at = lease.started_at + timedelta(
+                    seconds=ACTIVE_LEASE_TTL_SECONDS
+                )
+                lease.slot_generation = locked.slot_generation
+                if int(protocol or 0) < 1:
+                    locked.last_request_at = now
+                    session.add(locked)
+                session.add(lease)
+                await session.commit()
+                handle = InferenceLeaseHandle(
+                    lease.request_id,
+                    locked,
+                    lease.id,
+                    lease.slot_generation,
+                    legacy_capacity=int(protocol or 0) < 1,
+                )
+                handle.start_renewal()
+                return handle
+
+        # No database transaction or row lock is held while contacting the agent.
+        return await self._reserve_and_activate(
+            lease_id, server, request_id, server_id, agent_id, generation, attempt
+        )
+
+    async def _reserve_and_activate(
+        self,
+        lease_id: uuid.UUID,
+        server: ServerInstance,
+        request_id: str,
+        server_id: uuid.UUID,
+        agent_id: uuid.UUID,
+        generation: int,
+        attempt: uuid.UUID,
+    ) -> InferenceLeaseHandle | None:
+        committed = False
+        returned = False
+        try:
+            try:
+                response = await asyncio.wait_for(
+                    agent_manager.send_to_agent(
+                        str(agent_id),
+                        "POST",
+                        f"/proxy/{server_id}/reservations/{request_id}",
+                        timeout=3.0,
+                        headers={
+                            "X-Inference-Slot-Generation": str(generation),
+                            "X-Inference-Reservation-ID": str(attempt),
+                        },
+                    ),
+                    timeout=3.5,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "Agent did not acknowledge slot for %s", request_id, exc_info=True
+                )
+                return None
+            if not response.get("accepted"):
+                return None
+
+            async def finalize() -> bool:
+                async with AsyncSessionMaker() as session:
+                    current_server = (
+                        await session.execute(
+                            select(ServerInstance)
+                            .where(ServerInstance.id == server_id)
+                            .with_for_update()
+                        )
+                    ).scalar_one_or_none()
+                    lease = (
+                        await session.execute(
+                            select(InferenceLease)
+                            .where(InferenceLease.id == lease_id)
+                            .with_for_update()
+                        )
+                    ).scalar_one_or_none()
+                    now = datetime.now(UTC)
+                    if (
+                        current_server is None
+                        or current_server.status != "running"
+                        or current_server.health_status != "healthy"
+                        or current_server.slot_generation != generation
+                        or lease is None
+                        or lease.status != "reserving"
+                        or lease.reservation_id != attempt
+                        or lease.lease_expires_at <= now
+                        or lease.reservation_expires_at <= now
+                    ):
+                        return False
+                    lease.status = "active"
+                    lease.started_at = now
+                    lease.lease_expires_at = now + timedelta(
+                        seconds=ACTIVE_LEASE_TTL_SECONDS
+                    )
+                    lease.reservation_expires_at = None
+                    session.add(lease)
+                    await session.commit()
+                    return True
+
+            finalize_task = asyncio.create_task(finalize())
+            try:
+                committed = await asyncio.shield(finalize_task)
+            except asyncio.CancelledError:
+                committed = await asyncio.shield(finalize_task)
+                raise
+            if not committed:
+                return None
             handle = InferenceLeaseHandle(
-                lease.request_id,
-                locked,
-                lease.id,
-                lease.slot_generation,
-                legacy_capacity=int(protocol or 0) < 1,
+                request_id,
+                server,
+                lease_id,
+                generation,
+                reservation_protocol=True,
+                reservation_id=attempt,
             )
             handle.start_renewal()
+            returned = True
             return handle
+        finally:
+            if not returned:
+
+                async def cleanup() -> None:
+                    try:
+                        await agent_manager.send_to_agent(
+                            str(agent_id),
+                            "POST",
+                            f"/proxy/{server_id}/operations/{request_id}/cancel",
+                            timeout=3.0,
+                            headers={"X-Inference-Reservation-ID": str(attempt)},
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Unable to cancel reservation for %s", request_id
+                        )
+                    async with AsyncSessionMaker() as session:
+                        now = datetime.now(UTC)
+                        await session.execute(
+                            update(InferenceLease)
+                            .where(
+                                InferenceLease.id == lease_id,
+                                InferenceLease.status == "active",
+                                InferenceLease.reservation_id == attempt,
+                            )
+                            .values(
+                                status="cancelled",
+                                terminal_reason="request_abandoned",
+                                released_at=now,
+                            )
+                        )
+                        await session.execute(
+                            update(InferenceLease)
+                            .where(
+                                InferenceLease.id == lease_id,
+                                InferenceLease.status == "reserving",
+                                InferenceLease.reservation_id == attempt,
+                            )
+                            .values(
+                                status="queued",
+                                reservation_id=None,
+                                reservation_expires_at=None,
+                                server_instance_id=None,
+                                slot_generation=None,
+                            )
+                        )
+                        await session.commit()
+
+                cleanup_task = asyncio.create_task(cleanup())
+                try:
+                    await asyncio.shield(cleanup_task)
+                except asyncio.CancelledError:
+                    await asyncio.shield(cleanup_task)
+                    raise
 
     async def _queue(
         self,
@@ -1050,7 +1302,7 @@ class InferenceScheduler:
                 update(InferenceLease)
                 .where(
                     InferenceLease.id == lease_id,
-                    InferenceLease.status == "queued",
+                    InferenceLease.status.in_(["queued", "reserving"]),
                 )
                 .values(
                     status=status,
@@ -1089,7 +1341,7 @@ class InferenceScheduler:
         async with AsyncSessionMaker() as session:
             result = await session.execute(
                 update(InferenceLease)
-                .where(InferenceLease.status == "queued")
+                .where(InferenceLease.status.in_(["queued", "reserving"]))
                 .values(
                     status="cancelled",
                     terminal_reason="queue_cleared",
@@ -1099,11 +1351,28 @@ class InferenceScheduler:
             await session.commit()
             return int(result.rowcount or 0)
 
-    async def _ensure_queued(self, lease_id: uuid.UUID) -> None:
+    async def _ensure_queued(self, lease_id: uuid.UUID) -> bool:
         async with AsyncSessionMaker() as session:
-            lease = await session.get(InferenceLease, lease_id)
+            lease = (
+                await session.execute(
+                    select(InferenceLease)
+                    .where(InferenceLease.id == lease_id)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if lease is not None and lease.status == "reserving":
+                if lease.reservation_expires_at > datetime.now(UTC):
+                    return False
+                lease.status = "queued"
+                lease.reservation_id = None
+                lease.reservation_expires_at = None
+                lease.server_instance_id = None
+                lease.slot_generation = None
+                session.add(lease)
+                await session.commit()
             if lease is None or lease.status != "queued":
                 raise InferenceRequestCancelled
+            return True
 
     async def acquire(
         self,
@@ -1141,7 +1410,9 @@ class InferenceScheduler:
                 if disconnected.is_set():
                     await self._cancel(queued.id)
                     raise InferenceRequestCancelled
-                await self._ensure_queued(queued.id)
+                if not await self._ensure_queued(queued.id):
+                    await asyncio.sleep(SCHEDULER_POLL_SECONDS)
+                    continue
                 if asyncio.get_running_loop().time() >= deadline:
                     await self._expire(queued.id)
                     raise TimeoutError(
@@ -1183,7 +1454,8 @@ class InferenceScheduler:
                     if disconnected.is_set():
                         await self._cancel(queued.id)
                         raise InferenceRequestCancelled
-                    await self._ensure_queued(queued.id)
+                    if not await self._ensure_queued(queued.id):
+                        continue
                     lease = await self._claim(queued.id, prepared)
                     if lease:
                         # A disconnect can race the atomic queue claim. Do not
@@ -1246,7 +1518,7 @@ class InferenceScheduler:
                 (
                     await session.execute(
                         select(func.count(InferenceLease.id)).where(
-                            InferenceLease.status == "queued"
+                            InferenceLease.status.in_(["queued", "reserving"])
                         )
                     )
                 ).scalar_one()

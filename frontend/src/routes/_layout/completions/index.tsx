@@ -96,15 +96,22 @@ function TextCompletion() {
           buffer = lines.pop() ?? ""
           for (const line of lines) {
             const data = line.replace(/^data: /, "").trim()
+            if (line.startsWith(":")) continue
             if (!data || data === "[DONE]") continue
+            let chunk: {
+              error?: { message?: string }
+              choices?: Array<{ text?: string }>
+            }
             try {
-              const chunk = JSON.parse(data)
-              if (chunk.error) {
-                throw new Error(chunk.error.message ?? "Stream error")
-              }
-              const text = chunk.choices?.[0]?.text ?? ""
-              setOutput((prev) => prev + text)
-            } catch {}
+              chunk = JSON.parse(data)
+            } catch {
+              continue
+            }
+            if (chunk.error) {
+              throw new Error(chunk.error.message ?? "Stream error")
+            }
+            const text = chunk.choices?.[0]?.text ?? ""
+            setOutput((prev) => prev + text)
           }
         }
       } else {

@@ -91,7 +91,7 @@ async def test_proxy_request_logs_upstream_400_request_and_response(caplog):
 
 
 @pytest.mark.asyncio
-async def test_proxy_stream_logs_and_forwards_upstream_400_body(caplog):
+async def test_proxy_stream_reports_upstream_400_as_sse_error(caplog):
     caplog.set_level(logging.ERROR)
     manager = Mock(
         configs={"server-1": Mock(port=8091, api_port=8091, slot_generation=1)},
@@ -127,7 +127,7 @@ async def test_proxy_stream_logs_and_forwards_upstream_400_body(caplog):
     finally:
         await proxy.client.aclose()
 
-    assert chunks == [error_body]
+    assert chunks == [b'data: {"error": {"message": "max_tokens exceeds cap"}}\n\n']
     assert "inference_upstream_bad_request" in caplog.text
     assert "max_tokens exceeds cap" in caplog.text
     assert str(request_body) in caplog.text
@@ -320,6 +320,118 @@ async def test_queued_operation_is_visible_and_cancellable():
     assert status is not None
     assert status["status"] == "cancelled"
     assert manager._active_inference_requests == {}
+
+
+@pytest.mark.asyncio
+async def test_protocol_three_reservation_is_atomic_idempotent_and_never_queues():
+    manager = Mock(
+        configs={"server-1": Mock(port=8091, slot_generation=2)},
+        _active_connections={},
+        _active_inference_requests={},
+        _inference_slot_conditions={},
+        _inference_operations={},
+        get_effective_capacity=Mock(return_value=1),
+    )
+    proxy = ServerProxy(manager)
+    try:
+        assert await proxy.try_reserve_inference_slot("server-1", "first", 2)
+        assert await proxy.try_reserve_inference_slot("server-1", "first", 2)
+        assert not await proxy.try_reserve_inference_slot("server-1", "second", 2)
+        assert manager._active_inference_requests == {"server-1": 1}
+        with pytest.raises(httpx.HTTPStatusError):
+            await proxy.consume_inference_slot("server-1", "first", 3)
+        assert await proxy.consume_inference_slot("server-1", "first", 2)
+        assert not await proxy.consume_inference_slot("server-1", "first", 2)
+        assert not await proxy.release_pending_reservation("server-1", "first", 2)
+        await proxy._connection_finished("server-1", True, "first", generation=2)
+        assert await proxy.try_reserve_inference_slot("server-1", "second", 2)
+        assert await proxy.release_pending_reservation("server-1", "second", 2)
+        assert manager._active_inference_requests == {}
+    finally:
+        await proxy.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stale_reservation_token_cannot_cancel_or_dispatch_new_attempt():
+    manager = Mock(
+        configs={"server-1": Mock(port=8091, slot_generation=2)},
+        _active_inference_requests={},
+        _inference_slot_conditions={},
+        _inference_operations={},
+        get_effective_capacity=Mock(return_value=1),
+    )
+    proxy = ServerProxy(manager)
+    try:
+        assert await proxy.try_reserve_inference_slot("server-1", "request", 2, "old")
+        assert await proxy.release_pending_reservation("server-1", "request", 2, "old")
+        assert await proxy.try_reserve_inference_slot("server-1", "request", 2, "new")
+        assert not await proxy.release_pending_reservation(
+            "server-1", "request", 2, "old"
+        )
+        assert not await proxy.consume_inference_slot("server-1", "request", 2, "old")
+        assert await proxy.consume_inference_slot("server-1", "request", 2, "new")
+        await proxy._connection_finished("server-1", True, "request", generation=2)
+        assert manager._active_inference_requests == {}
+    finally:
+        await proxy.aclose()
+
+
+@pytest.mark.asyncio
+async def test_protocol_three_expired_reservation_can_be_retried_without_dispatch():
+    manager = Mock(
+        configs={"server-1": Mock(port=8091, slot_generation=2)},
+        _active_inference_requests={},
+        _inference_slot_conditions={},
+        _inference_operations={},
+        get_effective_capacity=Mock(return_value=1),
+    )
+    proxy = ServerProxy(manager)
+    try:
+        assert await proxy.try_reserve_inference_slot("server-1", "first", 2)
+        assert await proxy.release_pending_reservation("server-1", "first", 2)
+        assert await proxy.try_reserve_inference_slot("server-1", "first", 2)
+        assert await proxy.release_pending_reservation("server-1", "first", 2)
+    finally:
+        await proxy.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_reservation_cannot_dispatch_after_response_headers():
+    manager = Mock(
+        configs={"server-1": Mock(port=8091, slot_generation=2)},
+        _active_connections={},
+        _active_inference_requests={},
+        _inference_slot_conditions={},
+        _inference_operations={},
+        get_effective_capacity=Mock(return_value=1),
+    )
+    proxy = ServerProxy(manager)
+    try:
+        assert await proxy.try_reserve_inference_slot("server-1", "first", 2)
+        assert await proxy.consume_inference_slot("server-1", "first", 2)
+        # The route task exits on returning StreamingResponse before its body
+        # generator starts. Cancellation in that gap must not contact the LLM.
+        manager._inference_operations["first"]["task"] = asyncio.create_task(
+            asyncio.sleep(0)
+        )
+        await manager._inference_operations["first"]["task"]
+        assert await proxy.release_pending_reservation("server-1", "first", 2)
+        stream = proxy.proxy_stream(
+            "server-1",
+            "POST",
+            "/v1/chat/completions",
+            json={"stream": True},
+            expected_slot_generation=2,
+            enforce_capacity=True,
+            capacity_reserved=True,
+            operation_id="first",
+        )
+        with pytest.raises(ProxyOperationExists):
+            await anext(stream)
+        assert manager._active_inference_requests == {}
+        assert manager._active_connections == {}
+    finally:
+        await proxy.aclose()
 
 
 @pytest.mark.asyncio

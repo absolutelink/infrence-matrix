@@ -9,6 +9,28 @@ Inference Matrix is an OpenAI API-compatible inference server with a distributed
 
 Designed for single-user home server deployments with support for multiple inference agents.
 
+### Inference admission
+
+The backend keeps the FIFO inference queue in PostgreSQL. With an agent that
+registers inference slot protocol v3, admission has two short database
+transactions: mark the oldest compatible request `reserving` with a unique
+attempt ID; ask the agent for a non-blocking slot reservation **outside** the
+transaction; then mark it `active` only if that same attempt and server
+generation still own the request. A busy response leaves the request queued.
+Reservations expire at the agent after 15 seconds; database attempts become
+eligible for recovery after 12 seconds so a late commit cannot admit an expired
+slot. The waiting request or the periodic reconciler performs the recovery.
+Dispatch and cancellation carry the attempt ID
+so late replies cannot consume or cancel a newer reservation. Client disconnects
+cancel outstanding work. Streaming requests receive SSE comments while waiting
+for agent headers or the first LLM frame, under a single dispatch deadline.
+
+During a mixed-version rollout, protocol-v0/v1/v2 agents retain their legacy
+admission behavior. Protocol-v1/v2 agents may still wait in their own local
+capacity queue after the backend claims a lease; the one-queue guarantee applies
+only to protocol-v3 agents and reserved inference paths. Upgrade the backend
+before the agents so it can negotiate both protocol generations.
+
 ## System Architecture
 
 ```

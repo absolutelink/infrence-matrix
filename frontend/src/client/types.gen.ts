@@ -3171,6 +3171,40 @@ export type modelsUpdateModelResponses = {
 
 export type modelsUpdateModelResponse = modelsUpdateModelResponses[keyof modelsUpdateModelResponses];
 
+export type queueInferenceRequestStatusData = {
+    body?: never;
+    path: {
+        /**
+         * Request Id
+         */
+        request_id: string;
+    };
+    query?: never;
+    url: '/api/v1/queue/{request_id}';
+};
+
+export type queueInferenceRequestStatusErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type queueInferenceRequestStatusError = queueInferenceRequestStatusErrors[keyof queueInferenceRequestStatusErrors];
+
+export type queueInferenceRequestStatusResponses = {
+    /**
+     * Response Queue-Inference Request Status
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: string | null;
+    };
+};
+
+export type queueInferenceRequestStatusResponse = queueInferenceRequestStatusResponses[keyof queueInferenceRequestStatusResponses];
+
 export type queueClearInferenceQueueData = {
     body?: never;
     path?: never;

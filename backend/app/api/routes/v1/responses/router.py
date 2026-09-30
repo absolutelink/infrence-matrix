@@ -323,8 +323,7 @@ async def _complete(
             payload,
             timeout=1800.0,
             headers={
-                "X-Inference-Slot-Generation": str(lease.slot_generation),
-                "X-Inference-Request-ID": lease.request_id,
+                **lease.dispatch_headers(),
             },
         )
     )
@@ -613,7 +612,7 @@ async def _stream_events(
                 latency_ms=(time.monotonic() - started) * 1000.0,
                 status="cancelled",
             )
-            await lease.release()
+            await lease.release("cancelled")
             lease = None
         raise
     except Exception:
@@ -625,7 +624,7 @@ async def _stream_events(
                 latency_ms=(time.monotonic() - started) * 1000.0,
                 status="error",
             )
-            await lease.release()
+            await lease.release("failed")
             lease = None
         raise
 
@@ -683,8 +682,7 @@ async def _stream_events(
                 proxy_url,
                 json=payload,
                 headers={
-                    "X-Inference-Slot-Generation": str(lease.slot_generation),
-                    "X-Inference-Request-ID": lease.request_id,
+                    **lease.dispatch_headers(),
                 }
                 if lease is not None
                 else None,
@@ -731,6 +729,9 @@ async def _stream_events(
                     except json.JSONDecodeError:
                         continue
 
+                    if "error" in chunk:
+                        raise RuntimeError(f"LLM error: {chunk['error']}")
+
                     usage_data = chunk.get("usage")
                     if isinstance(usage_data, dict) and usage_data:
                         final_usage_data = {
@@ -771,6 +772,8 @@ async def _stream_events(
                         emitted_frames += 1
                         yield frame
                         deadline[0] = time.monotonic() + SSE_KEEPALIVE_INTERVAL_SECONDS
+            if not done_marker_seen:
+                raise RuntimeError("LLM stream ended without a completion marker")
             finished_body = True
         finally:
             close_upstream.set()
@@ -966,7 +969,9 @@ async def _stream_events(
 
     finally:
         if lease is not None:
-            await lease.release()
+            await lease.release(
+                "failed" if response.status == "failed" else "cancelled"
+            )
 
     yield "data: [DONE]\n\n"
 
@@ -1188,7 +1193,7 @@ async def create_response(
             server, request.reasoning.effort if request.reasoning else None
         )
     except ReasoningPolicyError as e:
-        await lease.release()
+        await lease.release("failed")
         return _error_response(
             400,
             "invalid_request",
@@ -1221,6 +1226,7 @@ async def create_response(
             headers=SSE_HEADERS,
         )
 
+    terminal_outcome = "completed"
     try:
         result = await _complete(
             request,
@@ -1234,6 +1240,7 @@ async def create_response(
             started_mono=created_at_mono,
         )
     except asyncio.CancelledError:
+        terminal_outcome = "cancelled"
         record_request_telemetry(
             lease.server,
             None,
@@ -1243,6 +1250,7 @@ async def create_response(
         )
         raise
     except TranslationError as e:
+        terminal_outcome = "failed"
         record_request_telemetry(
             lease.server,
             None,
@@ -1252,6 +1260,7 @@ async def create_response(
         )
         return _error_response(400, "invalid_request", "invalid_input", str(e))
     except Exception as e:
+        terminal_outcome = "failed"
         record_request_telemetry(
             lease.server,
             None,
@@ -1262,7 +1271,7 @@ async def create_response(
         logger.error(f"Responses completion error: {e}")
         return _error_response(500, "model_error", "model_error", str(e))
     finally:
-        await lease.release()
+        await lease.release(terminal_outcome)
 
     if request.store:
         _persist_response(
@@ -1375,6 +1384,7 @@ async def compact_response(
         )
 
     lease = None
+    terminal_outcome = "failed"
     try:
         lease = await inference_scheduler.acquire(
             server.model_id,
@@ -1396,8 +1406,7 @@ async def compact_response(
                 llama_payload,
                 timeout=1800.0,
                 headers={
-                    "X-Inference-Slot-Generation": str(lease.slot_generation),
-                    "X-Inference-Request-ID": lease.request_id,
+                    **lease.dispatch_headers(),
                 },
             )
         )
@@ -1405,6 +1414,10 @@ async def compact_response(
         message = choice.get("message") or {}
         summary_text = message.get("content") or ""
         usage_data = response.get("usage") or {}
+        terminal_outcome = "completed"
+    except asyncio.CancelledError:
+        terminal_outcome = "cancelled"
+        raise
     except TimeoutError as e:
         return _error_response(503, "too_many_requests", "no_slot", str(e))
     except Exception as e:
@@ -1412,7 +1425,7 @@ async def compact_response(
         return _error_response(500, "model_error", "model_error", str(e))
     finally:
         if lease is not None:
-            await lease.release()
+            await lease.release(terminal_outcome)
 
     prompt_tokens = int(usage_data.get("prompt_tokens") or 0)
     completion_tokens = int(usage_data.get("completion_tokens") or 0)

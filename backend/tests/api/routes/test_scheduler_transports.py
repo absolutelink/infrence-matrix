@@ -80,11 +80,17 @@ class FakeLease:
     def mark_upstream_started(self) -> None:
         self.upstream_started = True
 
+    def dispatch_headers(self) -> dict[str, str]:
+        return {
+            "X-Inference-Slot-Generation": str(self.slot_generation),
+            "X-Inference-Request-ID": self.request_id,
+        }
+
     async def guard(self, awaitable, *, cancelled=None):
         self.upstream_started = True
         return await awaitable
 
-    async def release(self) -> None:
+    async def release(self, outcome: str = "completed") -> None:
         self.events.append("released")
 
 
@@ -262,7 +268,7 @@ async def test_responses_blocked_headers_cleanup(
         AsyncMock(return_value=SimpleNamespace(host="agent", port=8080)),
     )
     lease = InferenceLeaseHandle("request-id", SimpleNamespace(), uuid.uuid4())
-    lease.release = AsyncMock(side_effect=lambda: events.append("released"))
+    lease.release = AsyncMock(side_effect=lambda *_: events.append("released"))
     stream = _responses_stream(lease)
     await _initial_responses_frames(stream)
     pending = asyncio.create_task(anext(stream))
@@ -278,6 +284,9 @@ async def test_responses_blocked_headers_cleanup(
     assert events == ["released"]
     assert client.closed is False
     lease.release.assert_awaited_once()
+    lease.release.assert_awaited_once_with(
+        "failed" if close_reason == "lease_lost" else "cancelled"
+    )
 
 
 @pytest.mark.asyncio
@@ -309,7 +318,7 @@ async def test_responses_cancel_task_while_waiting_for_headers(
         AsyncMock(return_value=SimpleNamespace(host="agent", port=8080)),
     )
     lease = InferenceLeaseHandle("request-id", SimpleNamespace(), uuid.uuid4())
-    lease.release = AsyncMock(side_effect=lambda: events.append("released"))
+    lease.release = AsyncMock(side_effect=lambda *_: events.append("released"))
     stream = _responses_stream(lease)
     await _initial_responses_frames(stream)
     pending = asyncio.create_task(anext(stream))
@@ -320,7 +329,7 @@ async def test_responses_cancel_task_while_waiting_for_headers(
     assert cancelled.is_set()
     assert events == ["released"]
     assert client.closed is False
-    lease.release.assert_awaited_once()
+    lease.release.assert_awaited_once_with("cancelled")
 
 
 @pytest.mark.asyncio
@@ -346,14 +355,14 @@ async def test_responses_header_error_releases_lease_without_closing_shared_clie
         AsyncMock(return_value=SimpleNamespace(host="agent", port=8080)),
     )
     lease = InferenceLeaseHandle("request-id", SimpleNamespace(), uuid.uuid4())
-    lease.release = AsyncMock(side_effect=lambda: events.append("released"))
+    lease.release = AsyncMock(side_effect=lambda *_: events.append("released"))
     stream = _responses_stream(lease)
     frames = [frame async for frame in stream]
     assert any(frame.startswith("event: response.failed") for frame in frames)
     assert frames[-1] == "data: [DONE]\n\n"
     assert events == ["released"]
     assert client.closed is False
-    lease.release.assert_awaited_once()
+    lease.release.assert_awaited_once_with("failed")
 
 
 @pytest.mark.asyncio
@@ -470,8 +479,8 @@ async def test_legacy_completion_releases_before_usage_and_done(
     stream = v1_completions._stream_completion_via_agent(
         "agent-id", "server-id", request, "cmpl-1", lease
     )
-    content = await anext(stream)
-    usage = await anext(stream)
+    content = await asyncio.wait_for(anext(stream), 1)
+    usage = await asyncio.wait_for(anext(stream), 1)
 
     assert '"text":"ok"' in content
     assert '"choices":[]' in usage
@@ -488,6 +497,40 @@ async def test_legacy_completion_releases_before_usage_and_done(
     assert done == "data: [DONE]\n\n"
     with pytest.raises(StopAsyncIteration):
         await anext(stream)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "upstream_lines",
+    [
+        ['data: {"error":{"message":"invalid prompt"}}'],
+        ['data: {"choices":[{"text":"partial"}]}'],
+    ],
+)
+async def test_completion_stream_reports_agent_failure_instead_of_done(
+    monkeypatch: pytest.MonkeyPatch, upstream_lines: list[str]
+) -> None:
+    events: list[str] = []
+    _install_client(
+        monkeypatch, v1_completions, FakeClient(FakeStreamResponse(upstream_lines))
+    )
+    monkeypatch.setattr(
+        v1_completions.agent_manager,
+        "get_agent",
+        AsyncMock(return_value=SimpleNamespace(host="agent", port=8080)),
+    )
+    request = v1_completions.CompletionRequest(
+        model="model", prompt="hello", stream=True
+    )
+    frames = [
+        frame
+        async for frame in v1_completions._stream_completion_via_agent(
+            "agent-id", "server-id", request, "cmpl-1", FakeLease(events)
+        )
+    ]
+    assert any('"error"' in frame for frame in frames)
+    assert "data: [DONE]\n\n" not in frames
+    assert events == ["released"]
 
 
 @pytest.mark.asyncio

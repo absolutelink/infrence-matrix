@@ -100,6 +100,7 @@ async def create_embedding(
     inputs = request.input if isinstance(request.input, list) else [request.input]
 
     lease: InferenceLeaseHandle | None = None
+    terminal_outcome = "completed"
     try:
         lease = await inference_scheduler.acquire(
             model.id,
@@ -120,8 +121,7 @@ async def create_embedding(
                 },
                 timeout=1800.0,
                 headers={
-                    "X-Inference-Slot-Generation": str(lease.slot_generation),
-                    "X-Inference-Request-ID": lease.request_id,
+                    **lease.dispatch_headers(),
                 },
             )
         )
@@ -160,6 +160,7 @@ async def create_embedding(
         )
         return result
     except HTTPException:
+        terminal_outcome = "failed"
         record_request_telemetry(
             server,
             None,
@@ -169,6 +170,7 @@ async def create_embedding(
         )
         raise
     except asyncio.CancelledError:
+        terminal_outcome = "cancelled"
         record_request_telemetry(
             server,
             None,
@@ -178,6 +180,7 @@ async def create_embedding(
         )
         raise
     except TimeoutError as e:
+        terminal_outcome = "failed"
         record_request_telemetry(
             server,
             None,
@@ -187,6 +190,7 @@ async def create_embedding(
         )
         raise HTTPException(503, str(e)) from e
     except Exception as e:
+        terminal_outcome = "failed"
         record_request_telemetry(
             server,
             None,
@@ -198,4 +202,4 @@ async def create_embedding(
         raise HTTPException(500, f"Failed to create embeddings: {e}")
     finally:
         if lease is not None:
-            await lease.release()
+            await lease.release(terminal_outcome)

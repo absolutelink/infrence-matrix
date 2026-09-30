@@ -185,6 +185,27 @@ function Chat() {
     setWaitingForCapacity(false)
     queueTimerRef.current = setTimeout(() => setWaitingForCapacity(true), 1500)
     abortRef.current = new AbortController()
+    const inferenceRequestId = `chatcmpl-${crypto.randomUUID()}`
+    let firstChunkReceived = false
+    const queuePoll = setInterval(() => {
+      if (firstChunkReceived) return
+      void fetch(`/api/v1/queue/${inferenceRequestId}`, {
+        signal: abortRef.current?.signal,
+      })
+        .then(async (statusResponse) => {
+          if (!statusResponse.ok) return
+          const state: { status: string } = await statusResponse.json()
+          if (!firstChunkReceived) {
+            if (queueTimerRef.current) clearTimeout(queueTimerRef.current)
+            setWaitingForCapacity(
+              state.status === "queued" || state.status === "reserving",
+            )
+          }
+        })
+        .catch(() => {
+          // The request may not be queued yet, or was cancelled.
+        })
+    }, 1000)
 
     const body: Record<string, unknown> = {
       model: selectedModel,
@@ -198,7 +219,10 @@ function Chat() {
     try {
       const response = await fetch("/v1/chat/completions", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Inference-Request-ID": inferenceRequestId,
+        },
         signal: abortRef.current.signal,
         body: JSON.stringify(body),
       })
@@ -208,8 +232,6 @@ function Chat() {
         throw new Error(detail || `Request failed: ${response.status}`)
       }
 
-      if (queueTimerRef.current) clearTimeout(queueTimerRef.current)
-      setWaitingForCapacity(false)
       setMessages((prev) => [...prev, { role: "assistant", content: "" }])
 
       const reader = response.body.getReader()
@@ -225,35 +247,47 @@ function Chat() {
         buffer = lines.pop() ?? ""
         for (const line of lines) {
           const data = line.replace(/^data: /, "").trim()
+          if (line.startsWith(":")) continue
           if (!data || data === "[DONE]") {
             if (data === "[DONE]") done = true
             continue
           }
+          let chunk: {
+            error?: { message?: string }
+            choices?: Array<{
+              delta?: { content?: string; reasoning_content?: string }
+            }>
+          }
           try {
-            const chunk = JSON.parse(data)
-            if (chunk.error) {
-              throw new Error(chunk.error.message ?? "Stream error")
-            }
-            const delta = chunk.choices?.[0]?.delta ?? {}
-            const text = delta.content ?? ""
-            const reasoning = delta.reasoning_content ?? ""
-            if (text || reasoning) {
-              setMessages((prev) => {
-                const newMessages = [...prev]
-                const lastMessage = newMessages[newMessages.length - 1]
-                if (lastMessage.role === "assistant") {
-                  if (reasoning) {
-                    lastMessage.reasoning =
-                      (lastMessage.reasoning ?? "") + reasoning
-                  }
-                  if (text) {
-                    lastMessage.content += text
-                  }
+            chunk = JSON.parse(data)
+          } catch {
+            continue
+          }
+          if (chunk.error) {
+            throw new Error(chunk.error.message ?? "Stream error")
+          }
+          firstChunkReceived = true
+          if (queueTimerRef.current) clearTimeout(queueTimerRef.current)
+          setWaitingForCapacity(false)
+          const delta = chunk.choices?.[0]?.delta ?? {}
+          const text = delta.content ?? ""
+          const reasoning = delta.reasoning_content ?? ""
+          if (text || reasoning) {
+            setMessages((prev) => {
+              const newMessages = [...prev]
+              const lastMessage = newMessages[newMessages.length - 1]
+              if (lastMessage.role === "assistant") {
+                if (reasoning) {
+                  lastMessage.reasoning =
+                    (lastMessage.reasoning ?? "") + reasoning
                 }
-                return newMessages
-              })
-            }
-          } catch {}
+                if (text) {
+                  lastMessage.content += text
+                }
+              }
+              return newMessages
+            })
+          }
         }
       }
     } catch (error) {
@@ -261,15 +295,23 @@ function Chat() {
         // User-initiated stop; keep partial output
       } else {
         console.error("Error:", error)
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: "assistant",
-            content: "Error occurred while generating response.",
-          },
-        ])
+        setMessages((prev) => {
+          const updated = [...prev]
+          const last = updated[updated.length - 1]
+          const message = `Error: ${(error as Error).message}`
+          if (last?.role === "assistant") {
+            updated[updated.length - 1] = {
+              ...last,
+              content: last.content ? `${last.content}\n\n${message}` : message,
+            }
+          } else {
+            updated.push({ role: "assistant", content: message })
+          }
+          return updated
+        })
       }
     } finally {
+      clearInterval(queuePoll)
       if (queueTimerRef.current) clearTimeout(queueTimerRef.current)
       setIsLoading(false)
       setWaitingForCapacity(false)
@@ -437,7 +479,7 @@ function Chat() {
                 <div className="flex items-center gap-2">
                   {waitingForCapacity ? (
                     <span className="text-xs text-muted-foreground">
-                      Waiting for an available slot...
+                      Waiting for model response...
                     </span>
                   ) : (
                     <>

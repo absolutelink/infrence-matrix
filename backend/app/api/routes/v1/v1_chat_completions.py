@@ -16,13 +16,14 @@ from sqlmodel import Session, select
 
 from app.api.deps import get_db
 from app.core.db import engine
-from app.models import Model, ServerInstance
+from app.models import InferenceLease, Model, ServerInstance
 from app.services.agent_manager import agent_manager
 from app.services.http_client import get_http_client
 from app.services.inference_scheduler import (
     InferenceLeaseHandle,
     inference_scheduler,
 )
+from app.services.inference_stream import lines_with_keepalive, upstream_with_keepalive
 from app.services.inference_target import resolve_inference_target
 from app.services.reasoning_metadata import (
     ReasoningPolicyError,
@@ -370,10 +371,13 @@ async def _stream_completion_via_agent(
     final_timings: dict = {}
     telemetry_recorded = False
     lease_released = False
+    terminal_outcome = "completed"
     upstream_status: int | None = None
     upstream_opened = False
     upstream_lines = 0
     emitted_chunks = 0
+    done_marker_seen = False
+    waiting = None
 
     try:
         # Hold the client connection while a cold start completes so the
@@ -385,23 +389,19 @@ async def _stream_completion_via_agent(
         if not agent:
             raise ValueError(f"Agent {agent_id} not found")
 
-        # Stream through agent proxy; renew the durable request while the agent
-        # queues it behind its live upstream connection capacity.
+        # Stream through the acknowledged agent reservation.
         lease.mark_upstream_started()
         client = get_http_client()
         proxy_url = (
             f"http://{agent.host}:{agent.port}/proxy/{server.id}/v1/chat/completions"
         )
 
-        async with client.stream(
-            "POST",
-            proxy_url,
-            json=payload,
-            headers={
-                "X-Inference-Slot-Generation": str(lease.slot_generation),
-                "X-Inference-Request-ID": lease.request_id,
-            },
-        ) as response:
+        waiting = upstream_with_keepalive(client, proxy_url, payload, lease)
+        async for upstream in waiting:
+            if upstream is None:
+                yield ": keep-alive\n\n"
+                continue
+            response, deadline = upstream
             upstream_opened = True
             upstream_status = response.status_code
             logger.info(
@@ -413,20 +413,23 @@ async def _stream_completion_via_agent(
             )
             response.raise_for_status()
 
-            lines = response.aiter_lines()
-            while True:
-                try:
-                    line = await lease.guard(anext(lines))
-                except StopAsyncIteration:
-                    break
+            async for line in lines_with_keepalive(
+                response.aiter_lines(), lease, deadline=deadline
+            ):
+                if line is None:
+                    yield ": keep-alive\n\n"
+                    continue
                 upstream_lines += 1
                 if line.startswith("data:"):
                     data = line[5:].lstrip()
                     if data.strip() == "[DONE]":
+                        done_marker_seen = True
                         break
 
                     try:
                         chunk_data = json.loads(data)
+                        if "error" in chunk_data:
+                            raise RuntimeError(f"LLM error: {chunk_data['error']}")
 
                         # Server-provided usage (final chunk) wins
                         chunk_usage = _extract_usage(chunk_data)
@@ -470,6 +473,8 @@ async def _stream_completion_via_agent(
                         logger.warning(f"Invalid JSON in stream: {data}")
                         continue
 
+        if not done_marker_seen:
+            raise RuntimeError("LLM stream ended without a completion marker")
         if final_usage is None:
             # Fallback: estimate tokens from content length.
             # ~4 chars/token heuristic for prompt; completion
@@ -519,6 +524,7 @@ async def _stream_completion_via_agent(
         yield "data: [DONE]\n\n"
 
     except GeneratorExit:
+        terminal_outcome = "cancelled"
         logger.info(
             "backend_inference_stream_close request_id=%s server_id=%s agent_id=%s outcome=cancelled close_reason=downstream_generator_closed upstream_status=%s upstream_opened=%s upstream_lines=%d emitted_chunks=%d duration_ms=%.1f",
             lease.request_id,
@@ -540,6 +546,7 @@ async def _stream_completion_via_agent(
             )
         raise
     except asyncio.CancelledError as exc:
+        terminal_outcome = "cancelled"
         logger.info(
             "backend_inference_stream_close request_id=%s server_id=%s agent_id=%s outcome=cancelled close_reason=downstream_disconnect_or_task_cancel exception=%s upstream_status=%s upstream_opened=%s upstream_lines=%d emitted_chunks=%d duration_ms=%.1f",
             lease.request_id,
@@ -562,6 +569,9 @@ async def _stream_completion_via_agent(
             )
         raise
     except Exception as e:
+        terminal_outcome = "failed"
+        if waiting is not None:
+            await waiting.aclose()
         logger.warning(
             "backend_inference_stream_close request_id=%s server_id=%s agent_id=%s outcome=error close_reason=upstream_or_proxy_error error_type=%s error=%s upstream_status=%s upstream_opened=%s upstream_lines=%d emitted_chunks=%d duration_ms=%.1f",
             lease.request_id,
@@ -587,8 +597,10 @@ async def _stream_completion_via_agent(
         error_chunk = {"error": {"message": str(e), "type": "server_error"}}
         yield f"data: {json.dumps(error_chunk)}\n\n"
     finally:
+        if waiting is not None:
+            await waiting.aclose()
         if not lease_released:
-            await lease.release()
+            await lease.release(terminal_outcome)
 
 
 def _find_existing_server(
@@ -710,7 +722,24 @@ async def create_chat_completion(
     completion is generated, so the client just sees a longer first-token
     latency.
     """
-    request_id = f"chatcmpl-{uuid.uuid4()}"
+    client_request_id = (
+        http_request.headers.get("X-Inference-Request-ID") if http_request else None
+    )
+    try:
+        request_id = (
+            f"chatcmpl-{uuid.UUID(client_request_id.removeprefix('chatcmpl-'))}"
+            if client_request_id and client_request_id.startswith("chatcmpl-")
+            else f"chatcmpl-{uuid.uuid4()}"
+        )
+    except ValueError:
+        raise HTTPException(400, "Invalid inference request ID") from None
+    if (
+        client_request_id
+        and db.exec(
+            select(InferenceLease.id).where(InferenceLease.request_id == request_id)
+        ).first()
+    ):
+        raise HTTPException(409, "Inference request ID already exists")
     created = int(time.time())
     started = time.monotonic()
     required_agent_id = uuid.UUID(request.agent_id) if request.agent_id else None
@@ -799,7 +828,7 @@ async def create_chat_completion(
             lease.server, request.reasoning_effort
         )
     except ReasoningPolicyError as e:
-        await lease.release()
+        await lease.release("failed")
         raise HTTPException(400, str(e)) from e
     request.reasoning_effort = reasoning_effort
 
@@ -824,6 +853,7 @@ async def create_chat_completion(
         )
 
     # Non-streaming response
+    terminal_outcome = "completed"
     try:
         agent = await agent_manager.get_agent(str(server.agent_id))
         if not agent:
@@ -852,10 +882,7 @@ async def create_chat_completion(
                 f"/proxy/{server.id}/v1/chat/completions",
                 non_stream_payload,
                 timeout=1800.0,
-                headers={
-                    "X-Inference-Slot-Generation": str(lease.slot_generation),
-                    "X-Inference-Request-ID": lease.request_id,
-                },
+                headers=lease.dispatch_headers(),
             )
         )
 
@@ -937,6 +964,7 @@ async def create_chat_completion(
         return result
 
     except asyncio.CancelledError:
+        terminal_outcome = "cancelled"
         record_request_telemetry(
             lease.server,
             None,
@@ -946,6 +974,7 @@ async def create_chat_completion(
         )
         raise
     except Exception as e:
+        terminal_outcome = "failed"
         record_request_telemetry(
             lease.server,
             None,
@@ -956,4 +985,4 @@ async def create_chat_completion(
         logger.error(f"Completion error: {e}")
         raise HTTPException(500, f"Inference failed: {e}")
     finally:
-        await lease.release()
+        await lease.release(terminal_outcome)

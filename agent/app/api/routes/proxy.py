@@ -64,7 +64,26 @@ async def list_inference_operations(server_id: str) -> dict:
 
 
 @router.post("/{server_id}/operations/{request_id}/cancel")
-async def cancel_inference_operation(server_id: str, request_id: str) -> dict:
+async def cancel_inference_operation(
+    server_id: str,
+    request_id: str,
+    reservation_id: str | None = Header(
+        default=None, alias="X-Inference-Reservation-ID"
+    ),
+) -> dict:
+    operation = get_operation(server_manager, request_id, server_id)
+    if operation is not None and operation.get("reservation_id") != reservation_id:
+        return {
+            "request_id": request_id,
+            "status": operation["status"],
+            "cancelled": False,
+        }
+    if operation is not None and operation["status"] in {"reserved", "active"}:
+        accepted = await proxy.release_pending_reservation(
+            server_id, request_id, operation["slot_generation"], reservation_id
+        )
+        if accepted:
+            return {"request_id": request_id, "status": "cancelled", "cancelled": True}
     accepted = cancel_operation(server_manager, request_id, server_id)
     operation = get_operation(server_manager, request_id, server_id)
     return {
@@ -72,6 +91,26 @@ async def cancel_inference_operation(server_id: str, request_id: str) -> dict:
         "status": operation["status"] if operation else "unknown",
         "cancelled": accepted,
     }
+
+
+@router.post("/{server_id}/reservations/{request_id}")
+async def reserve_inference_operation(
+    server_id: str,
+    request_id: str,
+    slot_generation: int = Header(alias="X-Inference-Slot-Generation"),
+    reservation_id: str = Header(alias="X-Inference-Reservation-ID"),
+) -> dict:
+    if server_id not in server_manager.servers:
+        raise HTTPException(404, "Server not found")
+    try:
+        accepted = await proxy.try_reserve_inference_slot(
+            server_id, request_id, slot_generation, reservation_id
+        )
+    except ProxyOperationExists as exc:
+        raise HTTPException(409, "Reservation already exists") from exc
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(409, "Server generation changed") from exc
+    return {"accepted": accepted, "request_id": request_id}
 
 
 @router.api_route(
@@ -88,6 +127,12 @@ async def proxy_request(
     ),
     inference_request_id: str | None = Header(
         default=None, alias="X-Inference-Request-ID"
+    ),
+    inference_reservation: str | None = Header(
+        default=None, alias="X-Inference-Reservation"
+    ),
+    reservation_id: str | None = Header(
+        default=None, alias="X-Inference-Reservation-ID"
     ),
 ) -> StreamingResponse | dict:
     """Proxy request to llama.cpp server."""
@@ -112,6 +157,7 @@ async def proxy_request(
     if (
         inference_request
         and inference_request_id is not None
+        and inference_reservation is None
         and operation_exists(server_manager, inference_request_id)
     ):
         raise HTTPException(
@@ -123,6 +169,18 @@ async def proxy_request(
     if request.method in ["POST", "PUT", "PATCH"]:
         body = await request.json()
 
+    if inference_reservation is not None:
+        if (
+            not inference_request
+            or inference_request_id != inference_reservation
+            or slot_generation is None
+            or reservation_id is None
+            or not await proxy.consume_inference_slot(
+                server_id, inference_reservation, slot_generation, reservation_id
+            )
+        ):
+            raise HTTPException(409, "Invalid or expired inference reservation")
+
     if path.startswith("stream") or (body and body.get("stream")):
         return StreamingResponse(
             proxy.proxy_stream_background(
@@ -132,6 +190,7 @@ async def proxy_request(
                 body,
                 expected_slot_generation=slot_generation,
                 enforce_capacity=inference_request,
+                capacity_reserved=inference_reservation is not None,
                 operation_id=inference_request_id,
             ),
             media_type="text/event-stream",
@@ -151,6 +210,7 @@ async def proxy_request(
                 body,
                 expected_slot_generation=slot_generation,
                 enforce_capacity=inference_request,
+                capacity_reserved=inference_reservation is not None,
                 operation_id=inference_request_id,
             )
         except ProxyOperationExists as exc:

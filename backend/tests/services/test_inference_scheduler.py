@@ -548,6 +548,219 @@ async def test_protocol_one_claim_never_waits_on_server_row_capacity_lock(db):
     await handle.release()
 
 
+async def test_protocol_three_claim_waits_for_acknowledged_agent_capacity(db):
+    model = _make_model(db, f"scheduler-reservation-{uuid.uuid4().hex}")
+    server = _make_server(
+        db,
+        model,
+        alias=f"scheduler-reservation-{uuid.uuid4().hex}",
+        inference_slot_protocol=3,
+    )
+    first = _make_lease(db, model, f"first-{uuid.uuid4()}")
+    second = _make_lease(
+        db,
+        model,
+        f"second-{uuid.uuid4()}",
+        queued_at=first.queued_at + timedelta(microseconds=1),
+    )
+    scheduler = InferenceScheduler()
+    reservations = iter([False, True, True])
+
+    async def respond(_agent_id, _method, path, **_kwargs):
+        if "/reservations/" in path:
+            return {"accepted": next(reservations)}
+        return {"cancelled": True}
+
+    with patch(
+        "app.services.inference_scheduler.agent_manager.send_to_agent",
+        new_callable=AsyncMock,
+        side_effect=respond,
+    ) as send:
+        assert await scheduler._claim(first.id, server) is None
+        db.expire_all()
+        assert db.get(InferenceLease, first.id).status == "queued"
+        assert await scheduler._claim(second.id, server) is None
+        first_handle = await scheduler._claim(first.id, server)
+        assert first_handle is not None
+        assert first_handle.reservation_protocol
+        assert (
+            first_handle.dispatch_headers()["X-Inference-Reservation"]
+            == first.request_id
+        )
+        db.expire_all()
+        assert db.get(InferenceLease, first.id).status == "active"
+        assert (
+            db.get(InferenceLease, first.id).slot_generation == server.slot_generation
+        )
+        assert await scheduler._claim(second.id, server) is None
+        assert (
+            sum("/reservations/" in call.args[2] for call in send.await_args_list) == 2
+        )
+        await first_handle.release()
+        second_handle = await scheduler._claim(second.id, server)
+        assert second_handle is not None
+        await second_handle.release()
+    db.rollback()
+
+
+async def test_protocol_three_concurrent_workers_reserve_only_once(db):
+    model = _make_model(db, f"scheduler-parallel-{uuid.uuid4().hex}")
+    server = _make_server(
+        db,
+        model,
+        alias=f"scheduler-parallel-{uuid.uuid4().hex}",
+        inference_slot_protocol=3,
+    )
+    queued = _make_lease(db, model, f"parallel-{uuid.uuid4()}")
+
+    async def acknowledge(*_args, **_kwargs):
+        await asyncio.sleep(0.02)
+        return {"accepted": True}
+
+    with patch(
+        "app.services.inference_scheduler.agent_manager.send_to_agent",
+        new_callable=AsyncMock,
+        side_effect=acknowledge,
+    ) as send:
+        handles = await asyncio.gather(
+            InferenceScheduler()._claim(queued.id, server),
+            InferenceScheduler()._claim(queued.id, server),
+        )
+        assert sum(handle is not None for handle in handles) == 1
+        assert send.await_count == 1
+        await next(handle for handle in handles if handle is not None).release()
+
+
+async def test_reserving_lease_can_be_cancelled_while_agent_is_slow(db):
+    model = _make_model(db, f"scheduler-slow-{uuid.uuid4().hex}")
+    server = _make_server(
+        db, model, alias=f"slow-{uuid.uuid4().hex}", inference_slot_protocol=3
+    )
+    queued = _make_lease(db, model, f"slow-{uuid.uuid4()}")
+    called = asyncio.Event()
+    release = asyncio.Event()
+    tokens = []
+
+    async def agent_call(_agent_id, _method, path, *, headers=None, **_kwargs):
+        tokens.append(headers["X-Inference-Reservation-ID"])
+        if "/reservations/" in path:
+            called.set()
+            await release.wait()
+            return {"accepted": True}
+        return {"cancelled": True}
+
+    scheduler = InferenceScheduler()
+    with patch(
+        "app.services.inference_scheduler.agent_manager.send_to_agent",
+        new_callable=AsyncMock,
+        side_effect=agent_call,
+    ):
+        pending = asyncio.create_task(scheduler._claim(queued.id, server))
+        await asyncio.wait_for(called.wait(), 1)
+        db.expire_all()
+        assert db.get(InferenceLease, queued.id).status == "reserving"
+        db.rollback()
+        await scheduler._cancel(queued.id)
+        release.set()
+        assert await pending is None
+        db.expire_all()
+        assert db.get(InferenceLease, queued.id).status == "cancelled"
+        assert len(tokens) == 2
+        assert tokens[0] == tokens[1]
+        db.rollback()
+
+
+async def test_cancelled_claim_after_commit_does_not_leave_active_lease(db):
+    model = _make_model(db, f"scheduler-post-commit-{uuid.uuid4().hex}")
+    server = _make_server(
+        db,
+        model,
+        alias=f"post-commit-{uuid.uuid4().hex}",
+        inference_slot_protocol=3,
+    )
+    queued = _make_lease(db, model, f"post-commit-{uuid.uuid4()}")
+    cancelled_tokens = []
+
+    async def agent_call(_agent_id, _method, path, *, headers=None, **_kwargs):
+        if "/reservations/" in path:
+            return {"accepted": True}
+        cancelled_tokens.append(headers["X-Inference-Reservation-ID"])
+        return {"cancelled": True}
+
+    with (
+        patch(
+            "app.services.inference_scheduler.agent_manager.send_to_agent",
+            new_callable=AsyncMock,
+            side_effect=agent_call,
+        ),
+        patch.object(
+            InferenceLeaseHandle, "start_renewal", side_effect=asyncio.CancelledError
+        ),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await InferenceScheduler()._claim(queued.id, server)
+    db.expire_all()
+    finished = db.get(InferenceLease, queued.id)
+    assert finished.status == "cancelled"
+    assert cancelled_tokens == [str(finished.reservation_id)]
+    db.rollback()
+
+
+async def test_lost_agent_ack_cancels_attempt_and_requeues(db):
+    model = _make_model(db, f"scheduler-lost-ack-{uuid.uuid4().hex}")
+    server = _make_server(
+        db,
+        model,
+        alias=f"lost-ack-{uuid.uuid4().hex}",
+        inference_slot_protocol=3,
+    )
+    queued = _make_lease(db, model, f"lost-ack-{uuid.uuid4()}")
+    tokens = []
+
+    async def agent_call(_agent_id, _method, path, *, headers=None, **_kwargs):
+        tokens.append(headers["X-Inference-Reservation-ID"])
+        if "/reservations/" in path:
+            raise TimeoutError("Agent accepted but reply was lost")
+        return {"cancelled": True}
+
+    with patch(
+        "app.services.inference_scheduler.agent_manager.send_to_agent",
+        new_callable=AsyncMock,
+        side_effect=agent_call,
+    ):
+        assert await InferenceScheduler()._claim(queued.id, server) is None
+    db.expire_all()
+    assert db.get(InferenceLease, queued.id).status == "queued"
+    assert len(tokens) == 2 and tokens[0] == tokens[1]
+    db.rollback()
+
+
+async def test_abandoned_reservation_rejoins_fifo_after_recovery(db):
+    model = _make_model(db, f"scheduler-recovery-{uuid.uuid4().hex}")
+    server = _make_server(
+        db,
+        model,
+        alias=f"recovery-{uuid.uuid4().hex}",
+        inference_slot_protocol=3,
+    )
+    lease = _make_lease(db, model, f"recovery-{uuid.uuid4()}")
+    lease.status = "reserving"
+    lease.server_instance_id = server.id
+    lease.slot_generation = server.slot_generation
+    lease.reservation_id = uuid.uuid4()
+    lease.reservation_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    db.add(lease)
+    db.commit()
+
+    assert await InferenceScheduler()._ensure_queued(lease.id)
+    db.expire_all()
+    recovered = db.get(InferenceLease, lease.id)
+    assert recovered.status == "queued"
+    assert recovered.reservation_id is None
+    assert recovered.server_instance_id is None
+    db.rollback()
+
+
 async def test_legacy_agent_uses_database_capacity_fallback(db):
     model = _make_model(db, f"scheduler-legacy-agent-{uuid.uuid4().hex}")
     server = _make_server(

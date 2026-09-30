@@ -1,6 +1,7 @@
 """Proxies requests to llama.cpp servers."""
 
 import asyncio
+import json as json_lib
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 
@@ -11,15 +12,18 @@ from app.core.logging import logger
 from app.services.inference_operations import (
     activate_operation,
     bind_operation_task,
+    consume_reservation,
     finish_operation,
     get_operation,
     operation_exists,
+    reserve_operation,
     start_operation,
 )
 
 CONNECT_RETRY_DELAYS = (0.5, 1.0, 2.0, 4.0, 8.0, 8.0)
 UPSTREAM_CONNECT_TIMEOUT_SECONDS = 10.0
 MAX_PRE_BYTE_IDLE_RETRIES = 1
+RESERVATION_TTL_SECONDS = 15.0
 
 
 class ProxyOperationExists(Exception):
@@ -123,6 +127,12 @@ class ServerProxy:
         idle_retries = 0
         inference = enforce_capacity or operation_id is not None
         try:
+            if capacity_reserved:
+                operation = get_operation(self.server_manager, operation_id, server_id)
+                if operation is None or operation["status"] != "active":
+                    reservation.acquired = False
+                    raise ProxyOperationExists("Inference reservation was cancelled")
+                bind_operation_task(self.server_manager, operation_id)
             self._check_generation(server_id, expected_slot_generation)
             url = self._get_server_url(server_id, path)
             if not reservation.acquired:
@@ -196,10 +206,11 @@ class ServerProxy:
                         raise
                     await asyncio.sleep(delay)
                 except httpx.ReadTimeout:
-                    # Closing the first upstream context precedes this retry;
-                    # keep the same operation ID and slot throughout.
+                    # Reserved inference never replays once dispatched:
+                    # no bytes yet does not mean the LLM did no work.
                     if (
-                        not inference
+                        capacity_reserved
+                        or not inference
                         or response_bytes
                         or idle_retries >= MAX_PRE_BYTE_IDLE_RETRIES
                         or upstream_status is not None
@@ -288,6 +299,12 @@ class ServerProxy:
         reservation_task: asyncio.Task[None] | None = None
         idle_retries = 0
         try:
+            if capacity_reserved:
+                operation = get_operation(self.server_manager, operation_id, server_id)
+                if operation is None or operation["status"] != "active":
+                    reservation.acquired = False
+                    raise ProxyOperationExists("Inference reservation was cancelled")
+                bind_operation_task(self.server_manager, operation_id)
             self._check_generation(server_id, expected_slot_generation)
             url = self._get_server_url(server_id, path)
             if not reservation.acquired:
@@ -341,7 +358,7 @@ class ServerProxy:
                             expected_slot_generation,
                             upstream_status,
                         )
-                        if upstream_status == 400:
+                        if upstream_status >= 400:
                             error_body = bytearray()
                             async for chunk in response.aiter_bytes():
                                 chunks += 1
@@ -359,8 +376,20 @@ class ServerProxy:
                                     errors="replace",
                                 ),
                             )
-                            if error_body:
-                                yield bytes(error_body)
+                            try:
+                                error = json_lib.loads(error_body).get("error")
+                            except (ValueError, AttributeError):
+                                error = None
+                            if not isinstance(error, dict):
+                                error = {
+                                    "message": error_body.decode(
+                                        "utf-8", errors="replace"
+                                    ),
+                                    "type": "upstream_error",
+                                }
+                            yield (
+                                "data: " + json_lib.dumps({"error": error}) + "\n\n"
+                            ).encode()
                             outcome = "failed"
                             close_reason = "llm_http_error"
                             return
@@ -392,10 +421,10 @@ class ServerProxy:
                         raise
                     await asyncio.sleep(delay)
                 except httpx.ReadTimeout:
-                    # Never restart generation after anything was sent toward
-                    # the backend, even if the upstream later goes idle.
+                    # Reserved inference never replays once dispatched.
                     if (
-                        not enforce_capacity
+                        capacity_reserved
+                        or not enforce_capacity
                         or bytes_sent
                         or idle_retries >= MAX_PRE_BYTE_IDLE_RETRIES
                         or upstream_status is not None
@@ -568,6 +597,118 @@ class ServerProxy:
         await self._connection_started(
             server_id, enforce_capacity=True, operation_id=operation_id
         )
+
+    async def try_reserve_inference_slot(
+        self,
+        server_id: str,
+        operation_id: str,
+        generation: int,
+        token: str | None = None,
+    ) -> bool:
+        """Acquire a real slot without placing this request in an agent queue."""
+        conditions = getattr(self.server_manager, "_inference_slot_conditions", None)
+        if conditions is None:
+            conditions = self.server_manager._inference_slot_conditions = {}
+        condition = conditions.setdefault(server_id, asyncio.Condition())
+        async with condition:
+            self._check_generation(server_id, generation)
+            if operation_exists(self.server_manager, operation_id):
+                existing = get_operation(self.server_manager, operation_id, server_id)
+                if (
+                    existing is not None
+                    and existing["slot_generation"] == generation
+                    and existing["status"] == "reserved"
+                    and existing.get("reservation_id") == token
+                ):
+                    return True
+                if (
+                    existing is None
+                    or existing["status"] != "cancelled"
+                    or existing.get("dispatched")
+                ):
+                    raise ProxyOperationExists(operation_id)
+            active = getattr(self.server_manager, "_active_inference_requests", None)
+            if active is None:
+                active = self.server_manager._active_inference_requests = {}
+            capacity = max(
+                int(self.server_manager.get_effective_capacity(server_id)), 1
+            )
+            if active.get(server_id, 0) >= capacity:
+                return False
+            reserve_operation(
+                self.server_manager, operation_id, server_id, generation, token
+            )
+            active[server_id] = active.get(server_id, 0) + 1
+            operation = self.server_manager._inference_operations[operation_id]
+            operation["expiry_task"] = asyncio.create_task(
+                self._expire_reservation(server_id, operation_id, generation, token)
+            )
+            return True
+
+    async def _expire_reservation(
+        self, server_id: str, operation_id: str, generation: int, token: str | None
+    ) -> None:
+        await asyncio.sleep(RESERVATION_TTL_SECONDS)
+        await self.release_pending_reservation(
+            server_id, operation_id, generation, token
+        )
+
+    async def release_pending_reservation(
+        self,
+        server_id: str,
+        operation_id: str,
+        generation: int,
+        token: str | None = None,
+    ) -> bool:
+        conditions = self.server_manager._inference_slot_conditions
+        condition = conditions.setdefault(server_id, asyncio.Condition())
+        async with condition:
+            operation = get_operation(self.server_manager, operation_id, server_id)
+            if (
+                operation is None
+                or operation["slot_generation"] != generation
+                or operation.get("reservation_id") != token
+                or (
+                    operation["status"] != "reserved"
+                    and not (
+                        operation["status"] == "active"
+                        and self.server_manager._inference_operations[operation_id][
+                            "task"
+                        ].done()
+                    )
+                )
+            ):
+                return False
+            timer = self.server_manager._inference_operations[operation_id].pop(
+                "expiry_task", None
+            )
+            if timer is not None and timer is not asyncio.current_task():
+                timer.cancel()
+            active = self.server_manager._active_inference_requests
+            remaining = active.get(server_id, 0) - 1
+            if remaining > 0:
+                active[server_id] = remaining
+            else:
+                active.pop(server_id, None)
+            finish_operation(self.server_manager, operation_id, "cancelled")
+            condition.notify_all()
+            return True
+
+    async def consume_inference_slot(
+        self,
+        server_id: str,
+        operation_id: str,
+        generation: int,
+        token: str | None = None,
+    ) -> bool:
+        condition = self.server_manager._inference_slot_conditions.setdefault(
+            server_id, asyncio.Condition()
+        )
+        async with condition:
+            self._check_generation(server_id, generation)
+            return consume_reservation(
+                self.server_manager, operation_id, server_id, generation, token
+            )
 
     async def _connection_finished(
         self,

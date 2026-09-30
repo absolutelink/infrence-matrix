@@ -510,6 +510,10 @@ class InferenceLease(SQLModel, table=True):
         default=None, sa_type=DateTime(timezone=True)
     )
     slot_generation: int | None = None
+    reservation_id: uuid.UUID | None = Field(default=None, sa_type=UUID(as_uuid=True))  # type: ignore[call-arg,arg-type]
+    reservation_expires_at: datetime | None = Field(
+        default=None, sa_type=DateTime(timezone=True)
+    )
     released_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
 
 

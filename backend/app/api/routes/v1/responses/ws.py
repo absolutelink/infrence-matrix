@@ -152,6 +152,7 @@ async def _stream_to_ws(
     emitted_events = 0
     done_marker_seen = False
     telemetry_recorded = False
+    terminal_outcome = "completed"
     seq = ev.SSEmitter()
     try:
         server, model, preferred_server_id = await resolve_target(request.model)
@@ -217,8 +218,7 @@ async def _stream_to_ws(
             proxy_url,
             json=payload,
             headers={
-                "X-Inference-Slot-Generation": str(lease.slot_generation),
-                "X-Inference-Request-ID": lease.request_id,
+                **lease.dispatch_headers(),
             },
         ) as upstream:
             upstream_opened = True
@@ -249,6 +249,8 @@ async def _stream_to_ws(
                     chunk = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+                if "error" in chunk:
+                    raise RuntimeError(f"LLM error: {chunk['error']}")
                 usage_data = chunk.get("usage")
                 if isinstance(usage_data, dict) and usage_data:
                     final_usage = {
@@ -281,6 +283,8 @@ async def _stream_to_ws(
                 emitted_events += len(events)
                 await _send_events(websocket, events)
 
+        if not done_marker_seen:
+            raise RuntimeError("LLM stream ended without a completion marker")
         logger.info(
             "responses_ws_upstream_close request_id=%s response_id=%s server_id=%s outcome=%s close_reason=%s upstream_status=%s done_marker=%s upstream_lines=%d emitted_events=%d duration_ms=%.1f",
             lease.request_id,
@@ -358,6 +362,7 @@ async def _stream_to_ws(
             )
         return serialized
     except asyncio.CancelledError as exc:
+        terminal_outcome = "cancelled"
         logger.info(
             "responses_ws_stream_close request_id=%s server_id=%s outcome=cancelled close_reason=%s exception=%s upstream_status=%s upstream_opened=%s upstream_lines=%d emitted_events=%d duration_ms=%.1f",
             lease_request_id,
@@ -382,6 +387,7 @@ async def _stream_to_ws(
             )
         raise
     except TargetError as e:
+        terminal_outcome = "failed"
         if not telemetry_recorded:
             record_request_telemetry(
                 server,
@@ -397,6 +403,7 @@ async def _stream_to_ws(
         )
         return None
     except Exception as e:
+        terminal_outcome = "failed"
         logger.warning(
             "responses_ws_stream_close request_id=%s server_id=%s outcome=error close_reason=%s error_type=%s error=%s upstream_status=%s upstream_opened=%s upstream_lines=%d emitted_events=%d duration_ms=%.1f",
             lease_request_id,
@@ -430,7 +437,7 @@ async def _stream_to_ws(
         return None
     finally:
         if lease is not None:
-            await lease.release()
+            await lease.release(terminal_outcome)
 
 
 @router.websocket("/responses")
