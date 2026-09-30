@@ -56,7 +56,8 @@ The app mounts three groups of routers:
 
 1. **Management API** under `settings.API_V1_STR` (`/api/v1`) — `api_router` from
    `app/api/main.py`: agents, server instances, models, benchmarks, queue
-   (`POST /queue/clear`), metrics, stats, huggingface search, utils.
+   (`POST /queue/clear`, `GET /queue/{request_id}`), metrics, stats, huggingface
+   search, utils. The queue lookup exposes status and terminal reason, not prompts.
 2. **Agent/UI WebSocket** under `/api` (not `/api/v1`):
    - `/api/ws/agents/{agent_id}` — inbound **command** channel: the agent dials
      this socket and receives commands (`start_server`, `stop_server`,
@@ -78,10 +79,10 @@ Lifespan hooks (`lifespan` in `main.py`) start background loops:
 - `token_stats_prune_loop()` — prune token usage samples.
 - `metrics_snapshot_loop()` — maintain Prometheus-style metrics.
 
-An HTTP middleware (`track_inference_activity`) wraps `/v1/*` responses so that
-**streaming inference requests stay "active" until the SSE body is fully drained**,
-not merely until the handler returns. This is what keeps leases correctly held for
-SSE responses (see §4.4).
+An HTTP middleware (`track_inference_activity`) counts `/v1/*` requests until the
+SSE body is fully drained, not merely until the handler returns. This activity
+counter is separate from inference lease ownership: a streaming lease is released
+at upstream completion, even if the downstream client drains more slowly (§4.4).
 
 The frontend is served from `app.frontend("/", directory=FRONTEND_DIR)`
 (`backend/app/frontend`, populated at image build time).
@@ -101,8 +102,9 @@ The frontend is served from `app.frontend("/", directory=FRONTEND_DIR)`
 Core tables (all UUID PKs unless noted):
 
 - **Agent** — registered inference host. `name` (unique), `platform`
-  (`llamacpp`/`halogen`/...), `type`, `inference_slot_protocol` (v1 agents own
-  slot admission), `host`, `port`, `status`, `gpu_info` (JSON), `last_seen`,
+  (`llamacpp`/`halogen`/...), `type`, `inference_slot_protocol` (v3 supports
+  acknowledged, fenced reservations; v0–v2 use legacy admission), `host`,
+  `port`, `status`, `gpu_info` (JSON), `last_seen`,
   `websocket_connected`.
 - **Model** — GGUF registry. `name` (unique), `path`, `size_bytes` (BigInteger),
   `architecture`, `model_type` ∈ `llm|mtp|mmproj|dflash`, `quantization`,
@@ -116,9 +118,10 @@ Core tables (all UUID PKs unless noted):
   `proxy_url`.
 - **InferenceLease** — the scheduling primitive (§4). `request_id` (unique),
   `model_id`, `server_instance_id`, `preferred_server_id`, `required_agent_id`,
-  `status` (`queued|active|released|cancelled|expired|failed`),
-  `lease_expires_at`, `slot_generation`, partial indexes that order the FIFO queue
-  by model / preferred server / required agent.
+  `status` (`queued|reserving|active|released|cancelled|expired|failed`),
+  `terminal_reason`, `lease_expires_at`, `slot_generation`, `reservation_id`
+  (per-attempt fencing token), `reservation_expires_at`, and partial indexes for
+  FIFO queue order and reservation recovery.
 - **ResponseRecord** — OpenResponses API turns with `previous_response_id` chaining
   (tree conversations), full input/output item JSON, token counts, store/background
   flags.
@@ -142,6 +145,7 @@ Core tables (all UUID PKs unless noted):
 | --- | --- |
 | `agent_manager.py` | Agent registration, persistent WS connection supervisor, event fan-out, offline cleanup, command dispatch, lease invalidation on server death |
 | `inference_scheduler.py` | FIFO queueing, `InferenceLease` admission/renewal/release/reconciliation, VRAM room-making, target preparation |
+| `inference_stream.py` | SSE keepalives while opening the agent stream and waiting for the first LLM frame; shared dispatch deadline |
 | `inference_target.py` | Resolve an OpenAI `model` string (alias / name / UUID) → `InferenceTarget` with optional server/agent pinning |
 | `server_startup.py` | Build start payloads, `dispatch_start`/`initialize_server`, `ensure_server_ready`, readiness waits |
 | `server_lifecycle.py` | Start/stop/status mirroring of server instances |
@@ -183,7 +187,8 @@ Required env at import: `AGENT_ID`, `FRONTEND_URL`, `MODELS_PATH` (see AGENTS.md
 ### 3.2 Registration & connection (`services/frontend_client.py`)
 
 - `POST {FRONTEND_URL}/api/v1/agents/register` with `agent_id`, `name`, `host`,
-  `port`, `gpu_info`, and a report of **running server set**
+  `port`, `gpu_info`, `inference_slot_protocol` (v3 for fenced reservations),
+  and a report of the **running server set**
   (`running_server_ids` / `healthy_server_ids` / `server_statuses` with
   `slot_generation` + `effective_capacity`).
 - The backend dedupes by **name** (the agent-declared `agent_id` is not persisted;
@@ -246,19 +251,27 @@ port and streams SSE back. Notable behaviors:
   `X-Inference-Slot-Generation` are rejected if the process generation changed,
   preventing a stale lease from touching a recycled process.
 - **Capacity enforcement** — optional; coordinates with `inference_operations.py`
-  for agent-owned slot admission (protocol v1 agents). `inference_operations.py`
-  is the agent-side **operation registry**: it tracks each in-flight inference by
-  `request_id`, supports cancel, backs the `/proxy/{server_id}/operations/...`
-  endpoints, and answers the backend's reconciliation operation queries.
-- **Connect retries** with backoff (`CONNECT_RETRY_DELAYS`).
+  for agent-owned admission. Protocol v3's
+  `POST /proxy/{server_id}/reservations/{request_id}` accepts an available slot
+  immediately or reports busy; it **does not queue at the agent**. Its in-memory
+  operation registry tracks the `request_id`, server generation, one-use
+  `X-Inference-Reservation-ID`, and a 15s expiry for unconsumed reservations.
+  Dispatch and cancel carry the attempt ID, so a late request cannot consume or
+  cancel a newer attempt. `/proxy/{server_id}/operations/...` supports status,
+  cancellation, and backend reconciliation. Legacy/unreserved requests can still
+  use the agent-side wait.
+- **Connect retries** with backoff (`CONNECT_RETRY_DELAYS`) before connecting to
+  the engine; protocol-v3 inference is not replayed after dispatch when a read
+  times out, because no response bytes does not prove the engine did no work.
+- An upstream HTTP error in a stream becomes an SSE `data:` error frame instead
+  of a raw JSON body masquerading as a successful empty completion.
 - **`proxy_stream_background`** — drains the upstream LLM independently of
   downstream SSE backpressure: the producer owns the slot and closes it at
   upstream **EOF**, even if the downstream client stops reading. This is the fix
   for "a completed llama request holding a slot because a client connection
   remains open" (see AGENTS.md high-risk note).
-- Routes expose `/proxy/{server_id}/...` plus operation endpoints
-  (`/operations/{request_id}`, cancel) for tracking/cancelling individual
-  inferences.
+- Routes expose `/proxy/{server_id}/...`, reservation admission, and operation
+  endpoints for tracking/cancelling individual inferences.
 
 ### 3.5 Model & GPU services
 
@@ -281,6 +294,12 @@ correctness. It is PostgreSQL-backed so multiple backend workers (the image runs
 - `ACTIVE_LEASE_TTL_SECONDS = 90`, `LEASE_RENEWAL_INTERVAL_SECONDS = 30` —
   active leases must be renewed or they expire (crash safety).
 - `SCHEDULER_POLL_SECONDS = 1.0` — queue poll cadence.
+- `RESERVATION_RECOVERY_SECONDS = 12` — DB reservation attempt deadline, shorter
+  than the agent's 15s unconsumed-slot expiry. The waiting request or the
+  reconciler requeues an abandoned attempt.
+- `FIRST_FRAME_TIMEOUT_SECONDS = 150`, `KEEPALIVE_SECONDS = 10`
+  (`inference_stream.py`) — one dispatch deadline across agent headers and
+  first LLM data, with downstream SSE comment heartbeats during both waits.
 - `UPSTREAM_COMPLETION_COOLDOWN_SECONDS = 0.5`,
   `SERVER_READY_COOLDOWN_SECONDS = 3.0` — settling gaps between slot reuse.
 
@@ -293,54 +312,69 @@ is_cancelled?)` returns an `InferenceLeaseHandle`:
 2. Loop until deadline:
    - If client disconnected → cancel lease, raise `InferenceRequestCancelled`.
    - `_admission_open()` — advisory-lock-gated admission check.
-   - `_candidates(...)` → running servers first; `_claim()` atomically transitions
-     a queued lease to `active` on a server with free capacity.
-   - **Dual-mode admission** in `_claim()`: protocol-v1 agents (`inference_slot_protocol
-     >= 1`) own their own local admission queue, so the backend simply claims the
-     slot; **legacy agents** (`protocol < 1`) have no local queue, so the backend
-     retains a DB-backed capacity guard (count active leases for the current
-     `slot_generation` against `server_capacity`) under a short `SELECT ... FOR
-     UPDATE` server-row lock.
+   - `_candidates(...)` → running, healthy servers first. With a protocol-v3
+     agent, `_claim()` briefly locks the server and compatible FIFO head to check
+     capacity and mark the request `reserving` with a fresh attempt ID. It then
+     contacts the agent **outside any DB row-lock transaction**. On acceptance,
+     a second short, fenced transaction checks request/attempt/server generation
+     and transitions to `active`. Busy/error returns to `queued`; disconnected
+     or stale attempts are cancelled or recovered. `reserving` requests retain
+     their place at the compatible FIFO head and count toward pending capacity.
+   - **Mixed-version admission:** protocol-v0 agents use a DB-backed active-lease
+     capacity guard under a short server-row lock. Protocol-v1/v2 agents claim
+     an active backend lease before waiting for capacity locally at the agent.
+     Only v3 reserved inference has the **single-queue** guarantee. Deploy the
+     backend before v3 agents; all versions can coexist during rollout.
    - If only `starting`/`stopped` candidates: take the per-agent advisory lock and
      `_prepare_target()` (dispatch start / wait ready), then claim.
    - Otherwise sleep `SCHEDULER_POLL_SECONDS`.
 3. On claim, `monitor_disconnect(is_cancelled)` is attached so a dropped client
-   mid-stream releases the slot promptly.
+   mid-stream cancels its operation promptly. A disconnect while `reserving`
+   terminalizes that lease; agent cancellation and expiry free any unconsumed slot.
 4. Terminal mapping:
    - disconnected queued request → `cancelled`
    - scheduler timeout → `expired`
    - active lease on a stopped/failed/unreachable/expired server → `failed`
+   - upstream error/EOF without successful completion → `failed`
+   - successful upstream completion → `released` (`terminal_reason=completed`)
    Terminal leases are excluded from queued/active admission queries.
 
 ### 4.3 `InferenceLeaseHandle`
 
-Holds `server`, `lease_id`, `slot_generation`, a `lost` event, and background
-renewal + disconnect-monitor tasks. Key methods:
+Holds `server`, `lease_id`, `slot_generation`, optional v3 `reservation_id`, a
+`lost` event, and background renewal + disconnect-monitor tasks. Key methods:
 
 - `guard(awaitable, cancelled?)` — runs one upstream operation, cancelling it if
   the lease is lost or the client disconnects; raises `InferenceLeaseLost` or
   `InferenceRequestCancelled`.
 - `mark_upstream_started()` — lets the renewal loop renew a stream owned outside
   `guard` (used by SSE streaming).
-- `release()` / `cancel()` — terminal lease transitions with the cooldown.
+- `dispatch_headers()` — carries request ID, generation, and, for v3, the
+  reservation attempt ID through the agent proxy.
+- `release(outcome)` / `cancel()` — outcome-aware terminal transitions; cancellation
+  is fenced by the reservation token. Legacy capacity retains a settling cooldown.
 
 ### 4.4 Streaming lease lifecycle
 
-In `v1_chat_completions.py`, the route resolves the target, acquires a lease,
-then streams via the agent proxy. The lease is marked upstream-started and
-released in the generator's `finally`, **and** the HTTP middleware keeps the
-request "active" until the SSE body is drained. The agent's
-`proxy_stream_background` releases the slot at upstream EOF regardless of
-downstream consumption. Net invariant: **a slot is held only while the upstream
-engine is actually producing**, never by an idle downstream connection.
+In `v1_chat_completions.py` and `v1_completions.py`, the route acquires a lease,
+then opens the agent stream while sending SSE `: keep-alive` comments to the
+client. The same 150s deadline bounds header acquisition and the first `data:`
+frame; later idle reads retain transport timeouts. The backend requires an
+upstream completion marker rather than treating premature EOF as success. It
+records an error event and failed lease for upstream failures; normal completion
+releases the lease before downstream usage/`[DONE]` frames finish draining.
+The agent's `proxy_stream_background` drains the LLM independently of client
+backpressure and releases its slot at upstream EOF. Neither layer holds a slot
+solely because an idle downstream client has not finished consuming SSE.
 
 ### 4.5 Reconciliation
 
 `reconcile_stale_leases()` (every 30s) and `reconcile_persisted_leases()`
-(at startup) query agent operations, bump `slot_generation` when cleaning stale
-work, and fail/expire leases whose server can no longer honor them. `_make_room()`
-evicts/stops idle servers (VRAM-aware via `vram_required_bytes` vs live VRAM) to
-admit a higher-priority target.
+(at startup) recover expired `reserving` attempts, expire queued requests, and
+query agent operations before terminalizing stale active work on healthy
+servers. A stopped/unhealthy server or changed `slot_generation` fences active
+leases. `_make_room()` evicts/stops idle servers (VRAM-aware via
+`vram_required_bytes` vs live VRAM) to admit a higher-priority target.
 
 ---
 
@@ -358,6 +392,11 @@ Mounted at `/v1` (`backend/app/api/routes/v1/`):
 | `POST /v1/files` | Upload; sha256 + purpose |
 | `POST /v1/batches` | Batch jobs over JSONL files |
 | `POST /v1/audio/*` | Transcription / translation / speech (system Whisper) |
+
+The WebUI may send `X-Inference-Request-ID: chatcmpl-{uuid}` on chat requests
+and poll `GET /api/v1/queue/{request_id}` for `queued`, `reserving`, `active`,
+and terminal status. Other OpenAI clients need not set this header. The WebUI
+also surfaces streamed errors rather than silently treating them as empty output.
 
 `resolve_inference_target()` maps the `model` field: a **ServerInstance alias**
 pins `preferred_server_id`; a model name/UUID allows any compatible replica; an
@@ -383,7 +422,9 @@ the backend image (`app.frontend`).
 - `src/routeTree.gen.ts` — generated by TanStack Router; delete + restart Vite on
   unexpected 404s.
 - Live UI uses the backend WebSockets: `/api/ws/events/{agent_id}` (per-agent
-  event stream) and `/api/ws/queue-status` (queue/slot snapshot).
+  event stream) and `/api/ws/queue-status` (aggregate queue/slot snapshot).
+  Chat additionally polls its own `/api/v1/queue/{request_id}` while waiting;
+  OpenAI SSE keepalive comments do not change the client-visible chunk schema.
 
 ---
 
@@ -410,6 +451,10 @@ the backend image (`app.frontend`).
   `https://matrix.thelink.family` via Traefik + Let's Encrypt.
 - Inference agent types on `core@10.100.2.111` (Podman, root space).
 - PostgreSQL 16 for metadata.
+- Confirm `GET /api/v1/agents` reports `inference_slot_protocol: 3` for agents
+  serving inference before attributing live queue behavior to the v3 handoff.
+  A registered value of `0`, `1`, or `2` selects legacy admission even when the
+  broker and database migration are current.
 
 ### 7.3 Compose caveat
 
@@ -442,10 +487,13 @@ through the backend (TLS via Traefik). Secrets kept out of logs.
   or wait; on reconnect, re-registration reconciles the running set.
 - **llama-server crash**: agent health monitor detects exit, emits
   `server.stopped`/`server.error`; backend mirrors + invalidates leases.
-- **Backend restart**: `reconcile_persisted_leases()` invalidates stale leases on
-  boot; agents keep running processes and re-register to re-sync.
-- **Client disconnect mid-stream**: `is_cancelled` monitors + HTTP middleware +
-  agent background-drain release the slot at the right moment.
+- **Backend restart**: startup and periodic reconciliation recover pending
+  reservations and check stale active leases against agent operations; agents
+  keep running processes and re-register to re-sync.
+- **Client disconnect mid-stream**: the `is_cancelled` monitor fences the lease
+  and cancels the agent operation; the HTTP middleware separately tracks request
+  activity until its stream closes. Unconsumed v3 reservations also expire
+  independently on the agent.
 
 ### 8.3 Observability
 
@@ -454,6 +502,9 @@ through the backend (TLS via Traefik). Secrets kept out of logs.
 - WS event streams (per-agent + queue-status) feed the WebUI; the agent
   `/ws/status` endpoint emits periodic `heartbeat` frames
   (`WS_HEARTBEAT_INTERVAL`) for liveness.
+- Per-request `/api/v1/queue/{request_id}` statuses and correlated reservation,
+  stream-open, first-frame, and stream-close logs identify where admission or
+  dispatch stalled without exposing prompts in the queue-status response.
 - Structured JSON logs; llama-server/Halogen logs forwarded via ring buffers.
 
 ### 8.4 Extensibility
@@ -474,11 +525,13 @@ through the backend (TLS via Traefik). Secrets kept out of logs.
    rows are a mirror, reconciled at agent (re-)registration.
 2. Backend-generated UUIDs are authoritative server/agent identity; agent-declared
    `agent_id` is not persisted.
-3. Inference admission is FIFO and lease-backed in PostgreSQL; terminal leases
-   (`released`/`cancelled`/`expired`/`failed`) must never appear in queued/active
-   admission queries.
-4. A slot is held only while the upstream engine produces — never by an idle
-   downstream SSE connection.
+3. Inference admission is FIFO and lease-backed in PostgreSQL; v3 `reserving`
+   claims must be fenced by both reservation ID and server generation. Terminal
+   leases (`released`/`cancelled`/`expired`/`failed`) must never appear in
+   queued/active admission queries.
+4. A slot is held from agent reservation through upstream completion/cancellation,
+   never solely by an idle downstream SSE connection. The v3 agent may not put
+   an already-admitted request into a second capacity queue.
 5. `slot_generation` fences recycled processes from stale leases.
 6. Backend route/schema changes require `bash scripts/generate-client.sh`; never
    hand-edit `frontend/src/client/*` or `routeTree.gen.ts`.
