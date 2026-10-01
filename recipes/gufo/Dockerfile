@@ -17,7 +17,8 @@ COPY --from=gufo-runtime /nix/store /nix/store
 COPY --from=gufo-runtime /bin/gufo /usr/local/bin/gufo
 
 WORKDIR /app
-RUN uv sync --frozen --no-dev
+RUN chmod +x /usr/local/bin/entrypoint.sh \
+    && uv sync --frozen --no-dev
 
 ENV VIRTUAL_ENV=/app/.venv \
     AGENT_PLATFORM=gufo \
