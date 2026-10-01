@@ -53,6 +53,41 @@ llamacpp:tokens_predicted_seconds_total 0
     assert parse_llama_metrics(metrics) == {}
 
 
+def test_parse_llama_metrics_maps_gufo_gauge_rates() -> None:
+    # Gufo exposes instantaneous rate gauges instead of *_seconds_total
+    # counters (real gufo /metrics output shape).
+    metrics = """# HELP llamacpp:prompt_tokens_total Total prompt tokens processed
+# TYPE llamacpp:prompt_tokens_total counter
+llamacpp:prompt_tokens_total 7920
+# HELP llamacpp:tokens_predicted_total Total tokens generated
+# TYPE llamacpp:tokens_predicted_total counter
+llamacpp:tokens_predicted_total 120
+# HELP llamacpp:prompt_tokens_seconds Prompt processing speed in tokens per second
+# TYPE llamacpp:prompt_tokens_seconds gauge
+llamacpp:prompt_tokens_seconds 1412.21
+# HELP llamacpp:predicted_tokens_seconds Generation speed in tokens per second
+# TYPE llamacpp:predicted_tokens_seconds gauge
+llamacpp:predicted_tokens_seconds 36.2534
+# HELP llamacpp:kv_cache_usage_ratio KV cache usage ratio
+# TYPE llamacpp:kv_cache_usage_ratio gauge
+llamacpp:kv_cache_usage_ratio 0.0
+"""
+
+    assert parse_llama_metrics(metrics) == {
+        "prompt_per_second": 1412.21,
+        "predicted_per_second": 36.2534,
+    }
+
+
+def test_parse_llama_metrics_prefers_gauge_over_computed_counter() -> None:
+    metrics = """llamacpp:prompt_tokens_total 1000
+llamacpp:prompt_seconds_total 100
+llamacpp:prompt_tokens_seconds 95.5
+"""
+
+    assert parse_llama_metrics(metrics) == {"prompt_per_second": 95.5}
+
+
 @pytest.mark.asyncio
 async def test_async_request_telemetry_does_not_block_event_loop(monkeypatch):
     from app.services import token_stats

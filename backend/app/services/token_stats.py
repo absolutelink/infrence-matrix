@@ -284,32 +284,49 @@ PROMETHEUS_METRICS_TIMEOUT_SECONDS = 5.0
 
 
 def parse_llama_metrics(metrics_text: str) -> dict[str, float]:
-    """Calculate throughput from llama.cpp's cumulative token/time counters."""
+    """Calculate throughput from llama.cpp's cumulative token/time counters.
+
+    Gufo exposes the same token counters but no ``*_seconds_total`` totals;
+    it reports instantaneous rates directly as gauges, which are mapped
+    straight onto the output keys and take precedence over the computed
+    lifetime averages.
+    """
     metric_names = {
         "llamacpp:prompt_tokens_total": "prompt_tokens",
         "llamacpp:prompt_seconds_total": "prompt_seconds",
         "llamacpp:tokens_predicted_total": "predicted_tokens",
         "llamacpp:tokens_predicted_seconds_total": "predicted_seconds",
     }
+    direct_rates = {
+        "llamacpp:prompt_tokens_seconds": "prompt_per_second",
+        "llamacpp:predicted_tokens_seconds": "predicted_per_second",
+    }
     counters: dict[str, float] = {}
+    rates: dict[str, float] = {}
     for line in metrics_text.splitlines():
         fields = line.strip().split()
-        if len(fields) < 2 or fields[0] not in metric_names:
+        if len(fields) < 2:
             continue
         try:
-            counters[metric_names[fields[0]]] = float(fields[1])
+            if fields[0] in metric_names:
+                counters[metric_names[fields[0]]] = float(fields[1])
+            elif fields[0] in direct_rates:
+                rates[direct_rates[fields[0]]] = float(fields[1])
         except ValueError:
             continue
 
-    rates: dict[str, float] = {}
-    prompt_seconds = counters.get("prompt_seconds", 0)
-    if prompt_seconds > 0:
-        rates["prompt_per_second"] = counters.get("prompt_tokens", 0) / prompt_seconds
-    predicted_seconds = counters.get("predicted_seconds", 0)
-    if predicted_seconds > 0:
-        rates["predicted_per_second"] = (
-            counters.get("predicted_tokens", 0) / predicted_seconds
-        )
+    if "prompt_per_second" not in rates:
+        prompt_seconds = counters.get("prompt_seconds", 0)
+        if prompt_seconds > 0:
+            rates["prompt_per_second"] = (
+                counters.get("prompt_tokens", 0) / prompt_seconds
+            )
+    if "predicted_per_second" not in rates:
+        predicted_seconds = counters.get("predicted_seconds", 0)
+        if predicted_seconds > 0:
+            rates["predicted_per_second"] = (
+                counters.get("predicted_tokens", 0) / predicted_seconds
+            )
     return rates
 
 

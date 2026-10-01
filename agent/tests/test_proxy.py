@@ -1132,6 +1132,71 @@ async def test_generation_change_prevents_prebyte_idle_retry():
 
 
 @pytest.mark.asyncio
+async def test_gufo_proxy_injects_served_model_name(monkeypatch):
+    from app.api.routes import proxy as proxy_route
+
+    server_id = "gufo-proxy-server"
+    monkeypatch.setattr(settings, "AGENT_PLATFORM", "gufo")
+    proxy_route.server_manager.servers[server_id] = Mock()
+    proxy_route.server_manager.configs[server_id] = Mock(
+        port=8091, slot_generation=1, options={"served_model_name": "my-gufo-alias"}
+    )
+    captured: dict = {}
+
+    async def _capture(_server_id, _method, _path, _headers, body=None, **_kw):
+        captured["body"] = body
+        return Mock(is_error=False, json=lambda: {"ok": True})
+
+    monkeypatch.setattr(proxy_route.proxy, "proxy_request", _capture)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        result = await client.post(
+            f"/proxy/{server_id}/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+    assert result.status_code == 200
+    assert captured["body"]["model"] == "my-gufo-alias"
+
+    del proxy_route.server_manager.servers[server_id]
+    del proxy_route.server_manager.configs[server_id]
+
+
+@pytest.mark.asyncio
+async def test_gufo_proxy_preserves_client_model_field(monkeypatch):
+    from app.api.routes import proxy as proxy_route
+
+    server_id = "gufo-explicit-model"
+    monkeypatch.setattr(settings, "AGENT_PLATFORM", "gufo")
+    proxy_route.server_manager.servers[server_id] = Mock()
+    proxy_route.server_manager.configs[server_id] = Mock(
+        port=8091, slot_generation=1, options={"served_model_name": "alias"}
+    )
+    captured: dict = {}
+
+    async def _capture(_server_id, _method, _path, _headers, body=None, **_kw):
+        captured["body"] = body
+        return Mock(is_error=False, json=lambda: {"ok": True})
+
+    monkeypatch.setattr(proxy_route.proxy, "proxy_request", _capture)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.post(
+            f"/proxy/{server_id}/v1/chat/completions",
+            json={"model": "client-chosen", "messages": []},
+        )
+
+    assert captured["body"]["model"] == "client-chosen"
+
+    del proxy_route.server_manager.servers[server_id]
+    del proxy_route.server_manager.configs[server_id]
+
+
+@pytest.mark.asyncio
 async def test_metrics_are_returned_as_prometheus_text(monkeypatch):
     from app.api.routes import proxy as proxy_route
 

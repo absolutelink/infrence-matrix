@@ -200,6 +200,20 @@ async def proxy_request(
     if request.method in ["POST", "PUT", "PATCH"]:
         body = await request.json()
 
+    # Gufo requires an explicit "model" field on every inference request;
+    # llama.cpp ignores it. The backend always starts gufo with
+    # served_model_name = instance alias, so fill it in here for clients
+    # (and broker payload builders) that omit it.
+    if (
+        settings.AGENT_PLATFORM == "gufo"
+        and inference_request
+        and isinstance(body, dict)
+        and not body.get("model")
+    ):
+        served_name = server_manager.configs[server_id].options.get("served_model_name")
+        if served_name:
+            body["model"] = served_name
+
     if inference_reservation is not None:
         if (
             not inference_request
