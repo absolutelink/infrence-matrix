@@ -18,6 +18,17 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+ALLOWED_PURPOSES = [
+    "assistants",
+    "assistants_output",
+    "batch",
+    "batch_output",
+    "fine-tune",
+    "fine-tune-results",
+    "user_data",
+    "vision",
+]
+
 
 class FileData(BaseModel):
     """File data for OpenAI API response."""
@@ -61,6 +72,11 @@ def _get_mime_type(filename: str) -> str:
     return mime_type or "application/octet-stream"
 
 
+def _openai_file_id(file_uuid: uuid.UUID) -> str:
+    """Return the OpenAI-style ``file-`` prefixed id for a stored file UUID."""
+    return f"file-{file_uuid.hex}"
+
+
 @router.get("/files", response_model=FilesList)
 def list_files(
     purpose: str | None = None,
@@ -82,7 +98,7 @@ def list_files(
     for file_model in files:
         file_data.append(
             FileData(
-                id=str(file_model.id),
+                id=_openai_file_id(file_model.id),
                 bytes=file_model.size_bytes,
                 created_at=int(file_model.created_at.timestamp()),
                 filename=file_model.filename,
@@ -105,37 +121,41 @@ async def upload_file(
 
     Args:
         file: File to upload
-        purpose: File purpose (batch, retrieval, assistants)
+        purpose: File purpose (one of ALLOWED_PURPOSES)
     """
-    if purpose not in ["batch", "retrieval", "assistants"]:
+    if purpose not in ALLOWED_PURPOSES:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid purpose: {purpose}. Must be one of: batch, retrieval, assistants",
+            detail=(
+                f"Invalid purpose: {purpose}. Must be one of: "
+                f"{', '.join(ALLOWED_PURPOSES)}"
+            ),
         )
 
+    file_path: Path | None = None
     try:
-        files_dir = Path(
-            settings.FILES_PATH
-            if hasattr(settings, "FILES_PATH")
-            else "/tmp/inference-matrix/files"
-        )
+        files_dir = Path(settings.FILES_PATH)
         files_dir.mkdir(parents=True, exist_ok=True)
 
-        file_id = f"file-{uuid.uuid4().hex[:12]}"
-        file_extension = Path(file.filename or "").suffix
+        file_uuid = uuid.uuid4()
+        file_id = _openai_file_id(file_uuid)
+        # Sanitize to basename so a client-supplied "../x" cannot escape the dir.
+        safe_name = Path(file.filename or "unknown").name
+        file_extension = Path(safe_name).suffix
         file_path = files_dir / f"{file_id}{file_extension}"
 
-        content = await file.read()
+        # Stream to disk in chunks to avoid buffering large uploads in memory.
         with open(file_path, "wb") as f:
-            f.write(content)
+            while chunk := await file.read(1024 * 1024):
+                f.write(chunk)
 
         file_size = file_path.stat().st_size
         checksum = _compute_checksum(file_path)
-        mime_type = _get_mime_type(file.filename or "")
+        mime_type = _get_mime_type(safe_name)
 
         file_model = FileModel(
-            id=uuid.UUID(file_id.replace("file-", "")),
-            filename=file.filename or "unknown",
+            id=file_uuid,
+            filename=safe_name,
             path=str(file_path.absolute()),
             size_bytes=file_size,
             mime_type=mime_type,
@@ -149,7 +169,7 @@ async def upload_file(
         db.refresh(file_model)
 
         return FileData(
-            id=str(file_model.id),
+            id=_openai_file_id(file_model.id),
             bytes=file_model.size_bytes,
             created_at=int(file_model.created_at.timestamp()),
             filename=file_model.filename,
@@ -158,8 +178,17 @@ async def upload_file(
         )
 
     except Exception as e:
+        # Do not leak internal error details to the client.
         logger.error(f"Failed to upload file: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to upload file: {e}")
+        # Avoid orphaning the file on disk if the DB write failed.
+        if file_path is not None:
+            try:
+                file_path.unlink(missing_ok=True)
+            except Exception as cleanup_error:
+                logger.error(
+                    f"Failed to clean up orphaned file {file_path}: {cleanup_error}"
+                )
+        raise HTTPException(status_code=500, detail="Failed to upload file")
 
 
 @router.get("/files/{file_id}", response_model=FileData)
@@ -185,7 +214,7 @@ def retrieve_file(
         raise HTTPException(status_code=404, detail="File not found")
 
     return FileData(
-        id=str(file_model.id),
+        id=_openai_file_id(file_model.id),
         bytes=file_model.size_bytes,
         created_at=int(file_model.created_at.timestamp()),
         filename=file_model.filename,
@@ -227,7 +256,7 @@ def delete_file(
     db.commit()
 
     return DeleteFileResponse(
-        id=str(file_model.id),
+        id=_openai_file_id(file_model.id),
         deleted=True,
     )
 

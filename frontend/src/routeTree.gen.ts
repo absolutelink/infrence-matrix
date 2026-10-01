@@ -13,6 +13,7 @@ import { Route as LayoutRouteImport } from './routes/_layout'
 import { Route as LayoutIndexRouteImport } from './routes/_layout/index'
 import { Route as LayoutAgentsRouteImport } from './routes/_layout/agents'
 import { Route as LayoutBenchmarksRouteImport } from './routes/_layout/benchmarks'
+import { Route as LayoutFilesRouteImport } from './routes/_layout/files'
 import { Route as LayoutModelsRouteImport } from './routes/_layout/models'
 import { Route as LayoutServerInstancesRouteImport } from './routes/_layout/server-instances'
 import { Route as LayoutAudioIndexRouteImport } from './routes/_layout/audio/index'
@@ -38,6 +39,11 @@ const LayoutAgentsRoute = LayoutAgentsRouteImport.update({
 const LayoutBenchmarksRoute = LayoutBenchmarksRouteImport.update({
   id: '/benchmarks',
   path: '/benchmarks',
+  getParentRoute: () => LayoutRoute,
+} as any)
+const LayoutFilesRoute = LayoutFilesRouteImport.update({
+  id: '/files',
+  path: '/files',
   getParentRoute: () => LayoutRoute,
 } as any)
 const LayoutModelsRoute = LayoutModelsRouteImport.update({
@@ -80,6 +86,7 @@ export interface FileRoutesByFullPath {
   '/': typeof LayoutIndexRoute
   '/agents': typeof LayoutAgentsRoute
   '/benchmarks': typeof LayoutBenchmarksRoute
+  '/files': typeof LayoutFilesRoute
   '/models': typeof LayoutModelsRoute
   '/server-instances': typeof LayoutServerInstancesRoute
   '/audio/': typeof LayoutAudioIndexRoute
@@ -91,6 +98,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/agents': typeof LayoutAgentsRoute
   '/benchmarks': typeof LayoutBenchmarksRoute
+  '/files': typeof LayoutFilesRoute
   '/models': typeof LayoutModelsRoute
   '/server-instances': typeof LayoutServerInstancesRoute
   '/': typeof LayoutIndexRoute
@@ -105,6 +113,7 @@ export interface FileRoutesById {
   '/_layout': typeof LayoutRouteWithChildren
   '/_layout/agents': typeof LayoutAgentsRoute
   '/_layout/benchmarks': typeof LayoutBenchmarksRoute
+  '/_layout/files': typeof LayoutFilesRoute
   '/_layout/models': typeof LayoutModelsRoute
   '/_layout/server-instances': typeof LayoutServerInstancesRoute
   '/_layout/': typeof LayoutIndexRoute
@@ -120,6 +129,7 @@ export interface FileRouteTypes {
     | '/'
     | '/agents'
     | '/benchmarks'
+    | '/files'
     | '/models'
     | '/server-instances'
     | '/audio/'
@@ -131,6 +141,7 @@ export interface FileRouteTypes {
   to:
     | '/agents'
     | '/benchmarks'
+    | '/files'
     | '/models'
     | '/server-instances'
     | '/'
@@ -144,6 +155,7 @@ export interface FileRouteTypes {
     | '/_layout'
     | '/_layout/agents'
     | '/_layout/benchmarks'
+    | '/_layout/files'
     | '/_layout/models'
     | '/_layout/server-instances'
     | '/_layout/'
@@ -186,6 +198,13 @@ declare module '@tanstack/react-router' {
       path: '/benchmarks'
       fullPath: '/benchmarks'
       preLoaderRoute: typeof LayoutBenchmarksRouteImport
+      parentRoute: typeof LayoutRoute
+    }
+    '/_layout/files': {
+      id: '/_layout/files'
+      path: '/files'
+      fullPath: '/files'
+      preLoaderRoute: typeof LayoutFilesRouteImport
       parentRoute: typeof LayoutRoute
     }
     '/_layout/models': {
@@ -243,6 +262,7 @@ declare module '@tanstack/react-router' {
 interface LayoutRouteChildren {
   LayoutAgentsRoute: typeof LayoutAgentsRoute
   LayoutBenchmarksRoute: typeof LayoutBenchmarksRoute
+  LayoutFilesRoute: typeof LayoutFilesRoute
   LayoutModelsRoute: typeof LayoutModelsRoute
   LayoutServerInstancesRoute: typeof LayoutServerInstancesRoute
   LayoutIndexRoute: typeof LayoutIndexRoute
@@ -256,6 +276,7 @@ interface LayoutRouteChildren {
 const LayoutRouteChildren: LayoutRouteChildren = {
   LayoutAgentsRoute: LayoutAgentsRoute,
   LayoutBenchmarksRoute: LayoutBenchmarksRoute,
+  LayoutFilesRoute: LayoutFilesRoute,
   LayoutModelsRoute: LayoutModelsRoute,
   LayoutServerInstancesRoute: LayoutServerInstancesRoute,
   LayoutIndexRoute: LayoutIndexRoute,

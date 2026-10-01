@@ -3,6 +3,7 @@ import {
   Box,
   Braces,
   Cpu,
+  FileText,
   Gauge,
   Home,
   MessageSquare,
@@ -31,6 +32,7 @@ const baseItems: Item[] = [
   { icon: Type, title: "Text Completion", path: "/completions" },
   { icon: Braces, title: "Embeddings", path: "/embeddings" },
   { icon: AudioLines, title: "Transcriptions", path: "/audio" },
+  { icon: FileText, title: "Files", path: "/files" },
   { icon: Gauge, title: "Benchmarks", path: "/benchmarks" },
 ]
 

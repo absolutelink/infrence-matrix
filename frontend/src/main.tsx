@@ -12,20 +12,7 @@ import { ThemeProvider } from "./components/theme-provider"
 import { Toaster } from "./components/ui/sonner"
 import "./index.css"
 import { routeTree } from "./routeTree.gen"
-
-// Determine API URL: runtime config > build-time env > current origin
-const getApiUrl = () => {
-  // Check if runtime config is available (injected by container)
-  if (typeof window !== "undefined" && (window as any).APP_CONFIG?.API_URL) {
-    return (window as any).APP_CONFIG.API_URL
-  }
-  // Fall back to build-time env var
-  if (import.meta.env.VITE_API_URL) {
-    return import.meta.env.VITE_API_URL
-  }
-  // Default to current origin
-  return window.location.origin
-}
+import { getApiUrl } from "./utils"
 
 client.setConfig({
   baseURL: getApiUrl(),
