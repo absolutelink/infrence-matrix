@@ -399,8 +399,13 @@ class AgentManager:
                 await self._handle_server_health(agent_id, event_data)
             elif event_type == "gpu.usage":
                 await self._handle_gpu_usage(agent_id, event_data)
-            elif event_type == "download.progress":
-                await self._handle_download_progress(agent_id, event_data)
+            elif event_type in {
+                "download.progress",
+                "download.started",
+                "download.completed",
+                "download.failed",
+            }:
+                await self._handle_download_progress(agent_id, event_data, event_type)
             elif event_type == "log.lines":
                 # llama-server stdout/stderr relayed by the agent; surface it
                 # in the backend log (stderr as warning for visibility).
@@ -647,8 +652,38 @@ class AgentManager:
         except Exception:
             logger.debug("Failed to update VRAM metrics", exc_info=True)
 
-    async def _handle_download_progress(self, agent_id: str, data: dict) -> None:
-        """Handle download.progress event."""
+    async def _handle_download_progress(
+        self, agent_id: str, data: dict, event_type: str = "download.progress"
+    ) -> None:
+        """Handle download.* events.
+
+        Two independent persistence paths:
+        1. Server-initiated downloads carry a ``server_id`` (a real
+           ServerInstance UUID) with a synthetic ``job_id``. We mirror an
+           aggregated progress blob onto the instance row so the UI progress
+           bar survives page reloads.
+        2. Legacy/direct downloads are tracked by a real ``DownloadJob`` row
+           keyed by a UUID ``job_id``. This path is unchanged.
+        """
+        # --- Path 1: ServerInstance.download_progress (new) ----------------
+        server_id = data.get("server_id")
+        if server_id:
+            from app.models import ServerInstance
+
+            try:
+                server_uuid = uuid_module.UUID(str(server_id))
+            except ValueError, AttributeError, TypeError:
+                server_uuid = None
+            if server_uuid is not None:
+                progress = self._build_download_progress_blob(data, event_type)
+                async with AsyncSessionMaker() as session:
+                    server = await session.get(ServerInstance, server_uuid)
+                    if server is not None:
+                        server.download_progress = progress
+                        session.add(server)
+                        await session.commit()
+
+        # --- Path 2: DownloadJob row (existing, unchanged) ---------------
         # Update DownloadJob in database
         async with AsyncSessionMaker() as session:
             from sqlalchemy import select
@@ -663,8 +698,8 @@ class AgentManager:
             # cast fail — it used to crash the whole agent WS handler.
             try:
                 job_uuid = uuid_module.UUID(str(job_id))
-            except ValueError, AttributeError:
-                logger.debug(f"Ignoring download.progress for non-job id {job_id}")
+            except ValueError, AttributeError, TypeError:
+                logger.debug(f"Ignoring {event_type} for non-job id {job_id}")
                 return
             result = await session.execute(
                 select(DownloadJob).where(DownloadJob.id == job_uuid)
@@ -677,6 +712,35 @@ class AgentManager:
                 job.current_speed = data.get("speed_mbps", 0) * 1_000_000
                 session.add(job)
                 await session.commit()
+
+    @staticmethod
+    def _build_download_progress_blob(data: dict, event_type: str) -> dict:
+        """Build the small JSON-serializable download_progress blob.
+
+        phase is one of "downloading" | "completed" | "failed".
+        """
+        if event_type == "download.completed":
+            phase = "completed"
+            percent = 100.0
+        elif event_type == "download.failed":
+            phase = "failed"
+            percent = float(data.get("progress_percent") or 0.0)
+        else:  # download.started / download.progress
+            phase = "downloading"
+            percent = float(data.get("progress_percent") or 0.0)
+
+        blob: dict = {
+            "filename": data.get("filename", ""),
+            "progress_percent": round(percent, 2),
+            "bytes_downloaded": int(data.get("bytes_downloaded") or 0),
+            "total_bytes": data.get("total_bytes"),
+            "speed_mbps": float(data.get("speed_mbps") or 0.0),
+            "phase": phase,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        if phase == "failed" and data.get("error"):
+            blob["error"] = str(data["error"])
+        return blob
 
     async def send_to_agent(
         self,

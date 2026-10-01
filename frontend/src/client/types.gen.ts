@@ -1159,6 +1159,10 @@ export type Model = {
      */
     source_file?: string | null;
     /**
+     * Source Files
+     */
+    source_files?: Array<string> | null;
+    /**
      * Downloaded At
      */
     downloaded_at?: string;
@@ -1238,6 +1242,10 @@ export type ModelCreate = {
      * Source File
      */
     source_file?: string | null;
+    /**
+     * Source Files
+     */
+    source_files?: Array<string> | null;
 };
 
 /**
@@ -1361,6 +1369,10 @@ export type ModelUpdate = {
      * Source File
      */
     source_file?: string | null;
+    /**
+     * Source Files
+     */
+    source_files?: Array<string> | null;
 };
 
 /**
@@ -1663,6 +1675,12 @@ export type ServerInstanceResponse = {
      * Model Metadata
      */
     model_metadata?: {
+        [key: string]: unknown;
+    };
+    /**
+     * Download Progress
+     */
+    download_progress?: {
         [key: string]: unknown;
     };
 };

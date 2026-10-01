@@ -1,6 +1,7 @@
 """Manages model downloads from HuggingFace and ModelScope."""
 
 import asyncio
+import re
 import threading
 import time
 from pathlib import Path
@@ -9,6 +10,21 @@ from typing import Any, ClassVar, Self
 from app.core.config import settings
 from app.core.logging import logger
 from app.services.event_bus import publish_event
+
+SPLIT_PART_RE = re.compile(r"^(?P<base>.+)-(?P<idx>\d+)-of-(?P<total>\d+)\.gguf$")
+
+
+def pick_primary_filename(filenames: list[str]) -> str:
+    """Return the -00001-of- part if present, else the first filename.
+
+    llama.cpp loads split GGUFs by being pointed at the first part; it reads
+    the remaining parts from the same directory automatically.
+    """
+    for name in filenames:
+        m = SPLIT_PART_RE.search(name.rsplit("/", 1)[-1])
+        if m and int(m.group("idx")) == 1:
+            return name
+    return filenames[0]
 
 
 class _EventPublishingTqdm:
@@ -23,6 +39,7 @@ class _EventPublishingTqdm:
     _lock: ClassVar[threading.Lock] = threading.Lock()
     job_id: ClassVar[str] = ""
     filename: ClassVar[str] = ""
+    server_id: ClassVar[str] = ""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self.total: int = int(kwargs.get("total") or 0)
@@ -104,11 +121,14 @@ class _EventPublishingTqdm:
                 "bytes_downloaded": self.n,
                 "total_bytes": self.total or None,
                 "speed_mbps": round(speed_mbps, 2),
+                "server_id": self.server_id,
             },
         )
 
 
-def _make_tqdm_class(job_id: str, filename: str) -> type[_EventPublishingTqdm]:
+def _make_tqdm_class(
+    job_id: str, filename: str, server_id: str | None = None
+) -> type[_EventPublishingTqdm]:
     """Create a tqdm-compatible class bound to a specific download job."""
 
     class _BoundTqdm(_EventPublishingTqdm):
@@ -116,6 +136,7 @@ def _make_tqdm_class(job_id: str, filename: str) -> type[_EventPublishingTqdm]:
 
     _BoundTqdm.job_id = job_id
     _BoundTqdm.filename = filename
+    _BoundTqdm.server_id = server_id or ""
     return _BoundTqdm
 
 
@@ -157,6 +178,7 @@ class ModelManager:
         filename: str,
         source: str = "huggingface",
         job_id: str | None = None,
+        server_id: str | None = None,
     ) -> str:
         """Download a model file, awaiting completion. Returns the local path."""
         if source != "huggingface":
@@ -165,6 +187,7 @@ class ModelManager:
                 {
                     "job_id": job_id or filename,
                     "filename": filename,
+                    "server_id": server_id or "",
                     "error": f"Unsupported source: {source}",
                 },
             )
@@ -180,7 +203,7 @@ class ModelManager:
             return await in_flight
 
         task = asyncio.create_task(
-            self._download_to_disk(repo_id, filename, source, job_id)
+            self._download_to_disk(repo_id, filename, source, job_id, server_id)
         )
         self._download_tasks[download_key] = task
         try:
@@ -188,7 +211,37 @@ class ModelManager:
         finally:
             self._download_tasks.pop(download_key, None)
 
-    async def download_repository(self, repo_id: str, job_id: str | None = None) -> str:
+    async def download_model_parts(
+        self,
+        repo_id: str,
+        filenames: list[str],
+        source: str = "huggingface",
+        job_id: str | None = None,
+        server_id: str | None = None,
+    ) -> str:
+        """Download every split part, returning the primary (-00001-of-) path.
+
+        ``download_model`` short-circuits when a file already exists and
+        de-duplicates in-flight downloads, so calling per-part is safe and
+        resumable.
+        """
+        if not filenames:
+            raise ValueError("No filenames provided for download")
+        downloaded: dict[str, str] = {}
+        for fn in filenames:
+            downloaded[fn] = await self.download_model(
+                repo_id,
+                fn,
+                source=source,
+                job_id=job_id,
+                server_id=server_id,
+            )
+        primary = pick_primary_filename(filenames)
+        return downloaded[primary]
+
+    async def download_repository(
+        self, repo_id: str, job_id: str | None = None, server_id: str | None = None
+    ) -> str:
         """Download an entire Hugging Face repository into MODELS_PATH."""
         local_dir = self.models_path / repo_id
         checkpoint = local_dir / "qwen3.8-27b-p1w4d-d2.hgn"
@@ -201,7 +254,9 @@ class ModelManager:
         if in_flight is not None:
             return await in_flight
 
-        task = asyncio.create_task(self._download_repository_to_disk(repo_id, job_id))
+        task = asyncio.create_task(
+            self._download_repository_to_disk(repo_id, job_id, server_id)
+        )
         self._download_tasks[download_key] = task
         try:
             return await task
@@ -209,7 +264,7 @@ class ModelManager:
             self._download_tasks.pop(download_key, None)
 
     async def _download_repository_to_disk(
-        self, repo_id: str, job_id: str | None
+        self, repo_id: str, job_id: str | None, server_id: str | None = None
     ) -> str:
         """Run ``hf download REPO --local-dir`` without a subprocess."""
         from huggingface_hub import snapshot_download
@@ -221,6 +276,7 @@ class ModelManager:
                 "job_id": effective_job_id,
                 "filename": "*",
                 "repo_id": repo_id,
+                "server_id": server_id or "",
             },
         )
         local_dir = self.models_path / repo_id
@@ -229,7 +285,7 @@ class ModelManager:
                 lambda: snapshot_download(
                     repo_id=repo_id,
                     local_dir=str(local_dir),
-                    tqdm_class=_make_tqdm_class(effective_job_id, "*"),
+                    tqdm_class=_make_tqdm_class(effective_job_id, "*", server_id),
                 )
             )
         except Exception as error:
@@ -239,6 +295,7 @@ class ModelManager:
                     "job_id": effective_job_id,
                     "filename": "*",
                     "repo_id": repo_id,
+                    "server_id": server_id or "",
                     "error": str(error),
                 },
             )
@@ -250,6 +307,7 @@ class ModelManager:
                 "job_id": effective_job_id,
                 "filename": "*",
                 "repo_id": repo_id,
+                "server_id": server_id or "",
                 "path": str(local_dir),
             },
         )
@@ -261,12 +319,13 @@ class ModelManager:
         filename: str,
         source: str,
         job_id: str | None,
+        server_id: str | None = None,
     ) -> str:
         """Run the blocking download in a thread, emitting progress events."""
         from huggingface_hub import hf_hub_download
 
         effective_job_id = job_id or filename
-        tqdm_class = _make_tqdm_class(effective_job_id, filename)
+        tqdm_class = _make_tqdm_class(effective_job_id, filename, server_id)
         logger.info(f"Downloading {filename} from {repo_id}")
         publish_event(
             "download.started",
@@ -274,6 +333,7 @@ class ModelManager:
                 "job_id": effective_job_id,
                 "filename": filename,
                 "repo_id": repo_id,
+                "server_id": server_id or "",
             },
         )
 
@@ -293,6 +353,7 @@ class ModelManager:
                 {
                     "job_id": effective_job_id,
                     "filename": filename,
+                    "server_id": server_id or "",
                     "error": str(e),
                 },
             )
@@ -304,6 +365,7 @@ class ModelManager:
             {
                 "job_id": effective_job_id,
                 "filename": filename,
+                "server_id": server_id or "",
                 "path": downloaded_path,
             },
         )

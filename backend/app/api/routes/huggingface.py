@@ -3,7 +3,7 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, HTTPException, Query
 
-from app.services.models import guess_model_type
+from app.services.models import extract_quantization, guess_model_type, is_aux_type
 
 router = APIRouter(prefix="/huggingface", tags=["huggingface"])
 
@@ -60,6 +60,13 @@ def list_model_files(
             # Get the siblings (files) from the response
             siblings = model_data.get("siblings", [])
 
+            # Extract the cardData.gguf quantization mapping defensively.
+            card_gguf: Any = None
+            try:
+                card_gguf = model_data.get("cardData", {}).get("gguf")
+            except Exception:
+                card_gguf = None
+
             # Filter for GGUF files only
             gguf_files = [
                 file for file in siblings if file.get("rfilename", "").endswith(".gguf")
@@ -95,9 +102,12 @@ def list_model_files(
                     for file in gguf_files
                 ]
 
-            # Attach a model_type guess so the UI can pre-select it
+            # Attach a model_type guess and quantization tag so the UI can group.
             for file in gguf_files:
-                file["model_type"] = guess_model_type(file.get("path"))
+                file_path = file.get("path")
+                file["model_type"] = guess_model_type(file_path)
+                file["quantization"] = extract_quantization(file_path, card_gguf)
+                file["is_aux"] = is_aux_type(file["model_type"])
 
             return gguf_files
     except httpx.HTTPError as e:

@@ -2,6 +2,7 @@
 
 import socket
 from pathlib import Path
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -60,12 +61,13 @@ class ServerSpec(BaseModel):
 class ServerStartRequest(BaseModel):
     config: ServerSpec
     # If provided and the model file is missing locally, the agent downloads
-    # the file from the source repo before starting the server.
-    source: dict[str, str] | None = None
+    # the file from the source repo before starting the server. May carry a
+    # "filenames" list of split GGUF parts alongside the primary "filename".
+    source: dict[str, Any] | None = None
     # Same shape as source, for the mmproj projector (downloaded on demand)
-    mmproj_source: dict[str, str] | None = None
+    mmproj_source: dict[str, Any] | None = None
     # Same shape as source, for the dflash draft model
-    draft_source: dict[str, str] | None = None
+    draft_source: dict[str, Any] | None = None
 
 
 STRICT_PLATFORMS = ("halogen", "halogen-flash", "gufo")
@@ -93,7 +95,9 @@ async def prepare_server(request: ServerStartRequest) -> dict:
         _validate_engine_platform(request.config.engine)
         if request.config.engine == "halogen":
             await model_manager.download_repository(
-                HALOGEN_REPO_ID, job_id=f"halogen-{request.config.id}"
+                HALOGEN_REPO_ID,
+                job_id=f"halogen-{request.config.id}",
+                server_id=request.config.id,
             )
             return {
                 "status": "prepared",
@@ -103,7 +107,9 @@ async def prepare_server(request: ServerStartRequest) -> dict:
             }
         if request.config.engine == "halogen-flash":
             await model_manager.download_repository(
-                HALOGEN_FLASH_REPO_ID, job_id=f"halogen-flash-{request.config.id}"
+                HALOGEN_FLASH_REPO_ID,
+                job_id=f"halogen-flash-{request.config.id}",
+                server_id=request.config.id,
             )
             return {
                 "status": "prepared",
@@ -200,51 +206,78 @@ def _model_candidates(model_path: str, filename: str) -> list[Path]:
 
 async def _ensure_model(
     model_path: str,
-    source: dict[str, str] | None,
+    source: dict[str, Any] | None,
 ) -> str:
-    """Ensure the model file exists locally, downloading it if needed.
+    """Ensure the model file (and every split part) exists locally.
 
-    Returns the absolute path to the model file. Emits download.* events
-    so the backend/UI can follow the download phase of a server start.
+    Returns the absolute path to the primary file (the ``-00001-of-`` part
+    for split GGUFs, which is what llama-server is pointed at). Emits
+    download.* events so the backend/UI can follow the download phase of a
+    server start.
     """
+    from app.services.model_manager import pick_primary_filename
+
     path = _resolve_model_path(model_path)
-    filename = path.rsplit("/", 1)[-1]
 
-    candidates = _model_candidates(model_path, filename)
-    for candidate in candidates:
-        if candidate.exists():
-            return str(candidate)
+    filenames = (source or {}).get("filenames") or (
+        [source["filename"]] if source and source.get("filename") else []
+    )
+    primary = pick_primary_filename(filenames) if filenames else path.rsplit("/", 1)[-1]
 
-    # Not on disk: download it via hf_hub (lands under MODELS_PATH).
-    if not source or not source.get("repo_id") or not source.get("filename"):
+    def exists(fn: str) -> bool:
+        repo = (source or {}).get("repo_id")
+        candidates: list[Path] = []
+        if repo:
+            candidates.append(model_manager.storage_path(repo, fn))
+        candidates.append(model_manager.models_path / fn)
+        if fn == primary:
+            # Preserve single-file resolution: repo-style absolute path and the
+            # original model_path candidates (flat-under-MODELS_PATH etc.).
+            candidates.extend(_model_candidates(model_path, fn))
+        return any(c.exists() for c in candidates)
+
+    # If every part is already on disk, return the primary's resolved path.
+    if filenames and all(exists(fn) for fn in filenames):
+        repo = (source or {}).get("repo_id")
+        if repo and model_manager.storage_path(repo, primary).exists():
+            return str(model_manager.storage_path(repo, primary))
+        if (model_manager.models_path / primary).exists():
+            return str(model_manager.models_path / primary)
+        for candidate in _model_candidates(model_path, primary):
+            if candidate.exists():
+                return str(candidate)
+        return path
+
+    # Need to download: require a source repo.
+    if not source or not source.get("repo_id"):
         raise HTTPException(
             status_code=404,
-            detail=f"Model file {filename} not found on agent and no download source provided",
+            detail=f"Model file {primary} not found on agent and no download source provided",
         )
 
-    job_id = source.get("job_id") or f"server-file-{filename}"
-    logger.info(f"Model {filename} missing; downloading from {source['repo_id']}")
-    publish_event(
-        "download.started",
-        {
-            "job_id": job_id,
-            "filename": filename,
-            "repo_id": source["repo_id"],
-        },
+    job_id = source.get("job_id") or f"server-file-{primary}"
+    server_id = source.get("server_id")
+    logger.info(
+        f"Model {primary} (or a split part) missing; downloading from {source['repo_id']}"
     )
+    # download_model_parts drives per-file download.started/progress/completed
+    # events (via download_model); emit a top-level failed event on error to
+    # preserve the existing event contract for the primary file.
     try:
-        downloaded = await model_manager.download_model(
+        downloaded = await model_manager.download_model_parts(
             repo_id=source["repo_id"],
-            filename=source["filename"],
+            filenames=filenames or [primary],
             source=source.get("source", "huggingface"),
             job_id=job_id,
+            server_id=server_id,
         )
     except Exception as e:
         publish_event(
             "download.failed",
             {
                 "job_id": job_id,
-                "filename": filename,
+                "filename": primary,
+                "server_id": server_id or "",
                 "error": str(e),
             },
         )
@@ -299,12 +332,16 @@ async def start_server(request: ServerStartRequest) -> dict:
 
         if request.config.engine == "halogen":
             await model_manager.download_repository(
-                HALOGEN_REPO_ID, job_id=f"halogen-{request.config.id}"
+                HALOGEN_REPO_ID,
+                job_id=f"halogen-{request.config.id}",
+                server_id=request.config.id,
             )
             model_path = HALOGEN_CHECKPOINT
         elif request.config.engine == "halogen-flash":
             await model_manager.download_repository(
-                HALOGEN_FLASH_REPO_ID, job_id=f"halogen-flash-{request.config.id}"
+                HALOGEN_FLASH_REPO_ID,
+                job_id=f"halogen-flash-{request.config.id}",
+                server_id=request.config.id,
             )
             model_path = HALOGEN_FLASH_CHECKPOINT
         else:

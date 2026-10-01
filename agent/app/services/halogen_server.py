@@ -293,8 +293,10 @@ class HalogenServerManager:
         return True
 
     async def _wait_for_health(
-        self, server_id: str, port: int, timeout: float = 900
+        self, server_id: str, port: int, timeout: float | None = None
     ) -> None:
+        if timeout is None:
+            timeout = float(settings.SERVER_START_HEALTH_TIMEOUT)
         deadline = time.time() + timeout
         while time.time() < deadline:
             process = self.servers.get(server_id)

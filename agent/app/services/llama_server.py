@@ -510,9 +510,11 @@ class LlamaServerManager:
         return True
 
     async def _wait_for_server(
-        self, server_id: str, port: int, timeout: float = 30.0
+        self, server_id: str, port: int, timeout: float | None = None
     ) -> None:
         """Wait for server to be healthy."""
+        if timeout is None:
+            timeout = float(settings.SERVER_START_HEALTH_TIMEOUT)
         start = time.time()
 
         while time.time() - start < timeout:

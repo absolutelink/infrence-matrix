@@ -13,6 +13,8 @@ from app.services.server_startup import (
     build_start_payload,
     ensure_server_ready_by_id,
     initialize_server,
+    pick_primary_filename,
+    resolve_model_filenames,
 )
 
 
@@ -142,6 +144,146 @@ class TestBuildStartPayload:
         payload = build_start_payload(instance, model)
         assert "mmproj_path" not in payload["config"]
         assert "mmproj_source" not in payload
+
+
+class TestResolveModelFilenames:
+    def _model(self, **kwargs: object) -> Model:
+        base = {
+            "name": "m",
+            "path": "/models/m.gguf",
+            "size_bytes": 1,
+            "architecture": "llama",
+            "quantization": "Q4_K_M",
+            "source": "huggingface",
+        }
+        base.update(kwargs)
+        return Model(**base)  # type: ignore[arg-type]
+
+    def test_explicit_source_files_sorted_by_index(self) -> None:
+        model = self._model(
+            source_files=[
+                "model-00002-of-00003.gguf",
+                "model-00001-of-00003.gguf",
+                "model-00003-of-00003.gguf",
+            ]
+        )
+        assert resolve_model_filenames(model) == [
+            "model-00001-of-00003.gguf",
+            "model-00002-of-00003.gguf",
+            "model-00003-of-00003.gguf",
+        ]
+
+    def test_legacy_json_array_source_file_parsed(self) -> None:
+        model = self._model(
+            source_file='["b-00002-of-00002.gguf", "a-00001-of-00002.gguf"]'
+        )
+        assert resolve_model_filenames(model) == [
+            "a-00001-of-00002.gguf",
+            "b-00002-of-00002.gguf",
+        ]
+
+    def test_single_source_file(self) -> None:
+        model = self._model(source_file="plain.Q4_K_M.gguf")
+        assert resolve_model_filenames(model) == ["plain.Q4_K_M.gguf"]
+
+    def test_falls_back_to_path_basename(self) -> None:
+        model = self._model(source_file=None, path="/models/dir/fallback.gguf")
+        assert resolve_model_filenames(model) == ["fallback.gguf"]
+
+    def test_malformed_json_array_treated_as_single(self) -> None:
+        model = self._model(source_file="[not, json")
+        assert resolve_model_filenames(model) == ["[not, json"]
+
+    def test_pick_primary_prefers_first_part(self) -> None:
+        names = [
+            "model-00002-of-00003.gguf",
+            "model-00001-of-00003.gguf",
+            "model-00003-of-00003.gguf",
+        ]
+        assert pick_primary_filename(names) == "model-00001-of-00003.gguf"
+
+    def test_pick_primary_single_returns_it(self) -> None:
+        assert pick_primary_filename(["only.gguf"]) == "only.gguf"
+
+
+class TestBuildStartPayloadSplit:
+    def _agent(self, db) -> Agent:
+        agent = Agent(
+            name=f"split-test-agent-{uuid_module.uuid4().hex[:8]}",
+            host="127.0.0.1",
+            port=8080,
+        )
+        db.add(agent)
+        db.commit()
+        db.refresh(agent)
+        return agent
+
+    def test_split_payload_carries_all_parts_and_primary(self, db) -> None:
+        model = Model(
+            name=f"split-model-{uuid_module.uuid4().hex[:8]}.gguf",
+            path="/models/split-model.gguf",
+            size_bytes=3000,
+            architecture="llama",
+            quantization="Q4_K_M",
+            source="huggingface",
+            source_repo_id="test-org/split-repo",
+            source_file="split-model-00001-of-00003.gguf",
+            source_files=[
+                "split-model-00003-of-00003.gguf",
+                "split-model-00001-of-00003.gguf",
+                "split-model-00002-of-00003.gguf",
+            ],
+        )
+        db.add(model)
+        db.commit()
+        db.refresh(model)
+        instance = ServerInstance(
+            model_id=model.id,
+            agent_id=self._agent(db).id,
+            alias=f"split-alias-{model.id.hex[:8]}",
+            process_command="llama-server",
+            status="stopped",
+        )
+        db.add(instance)
+        db.commit()
+        db.refresh(instance)
+
+        payload = build_start_payload(instance, model)
+        assert payload["source"]["filenames"] == [
+            "split-model-00001-of-00003.gguf",
+            "split-model-00002-of-00003.gguf",
+            "split-model-00003-of-00003.gguf",
+        ]
+        assert payload["source"]["filename"] == "split-model-00001-of-00003.gguf"
+
+    def test_single_file_payload_unchanged(self, db) -> None:
+        model = Model(
+            name=f"single-model-{uuid_module.uuid4().hex[:8]}.gguf",
+            path="/models/single-model.gguf",
+            size_bytes=1000,
+            architecture="llama",
+            quantization="Q4_K_M",
+            source="huggingface",
+            source_repo_id="test-org/single-repo",
+            source_file="single-model.gguf",
+        )
+        db.add(model)
+        db.commit()
+        db.refresh(model)
+        instance = ServerInstance(
+            model_id=model.id,
+            agent_id=self._agent(db).id,
+            alias=f"single-alias-{model.id.hex[:8]}",
+            process_command="llama-server",
+            status="stopped",
+        )
+        db.add(instance)
+        db.commit()
+        db.refresh(instance)
+
+        payload = build_start_payload(instance, model)
+        assert payload["source"]["filename"] == "single-model.gguf"
+        assert payload["source"]["filenames"] == ["single-model.gguf"]
 
 
 class TestEnsureServerReady:

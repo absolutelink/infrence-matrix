@@ -60,10 +60,21 @@ type ServerInstance = {
   inactivity_timeout_seconds: number
   server_options?: ServerOptions
   model_metadata?: Record<string, unknown>
+  download_progress?: Record<string, any>
 }
 
 const formatRate = (rate: number | null | undefined) =>
   rate === null || rate === undefined ? "—" : rate.toFixed(1)
+
+const fmtBytes = (bytes: number | null | undefined): string => {
+  if (bytes === null || bytes === undefined || !Number.isFinite(bytes)) {
+    return "—"
+  }
+  const gb = bytes / 1_000_000_000
+  if (gb >= 1) return `${gb.toFixed(1)} GB`
+  const mb = bytes / 1_000_000
+  return `${mb.toFixed(0)} MB`
+}
 
 export function useColumns(): ColumnDef<ServerInstance>[] {
   const { status } = useQueueStatus()
@@ -180,6 +191,21 @@ export function useColumns(): ColumnDef<ServerInstance>[] {
                 ? "gathering metadata"
                 : instance.status
 
+          const dp = instance.download_progress
+          const dpPhase = dp?.phase as string | undefined
+          const showDownloadBar =
+            dp &&
+            ["preparing", "metadata_gathering", "starting"].includes(
+              instance.status,
+            ) &&
+            (dpPhase === "downloading" ||
+              dpPhase === "completed" ||
+              dpPhase === "failed")
+          const dpPercent =
+            typeof dp?.progress_percent === "number"
+              ? Math.max(0, Math.min(100, dp.progress_percent))
+              : 0
+
           return (
             <div className="flex flex-col items-start gap-1">
               <div className="flex gap-2">
@@ -188,6 +214,34 @@ export function useColumns(): ColumnDef<ServerInstance>[] {
                   {instance.health_status}
                 </Badge>
               </div>
+              {showDownloadBar && dpPhase === "downloading" && (
+                <div className="flex w-full max-w-64 flex-col gap-1">
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                    <div
+                      className="h-full rounded-full bg-sky-500 transition-all"
+                      style={{ width: `${dpPercent}%` }}
+                    />
+                  </div>
+                  <span className="text-[11px] text-muted-foreground">
+                    Downloading {dp.filename}: {dpPercent.toFixed(0)}% ·{" "}
+                    {fmtBytes(dp.bytes_downloaded)}/{fmtBytes(dp.total_bytes)} ·{" "}
+                    {formatRate(dp.speed_mbps)} MB/s
+                  </span>
+                </div>
+              )}
+              {showDownloadBar && dpPhase === "completed" && (
+                <span className="text-[11px] text-muted-foreground">
+                  Download complete
+                </span>
+              )}
+              {showDownloadBar && dpPhase === "failed" && (
+                <span
+                  className="max-w-64 truncate text-[11px] text-destructive"
+                  title={String(dp.error ?? "Download failed")}
+                >
+                  Download failed: {String(dp.error ?? "unknown error")}
+                </span>
+              )}
               {instance.last_health_check && (
                 <span
                   className="text-[11px] text-muted-foreground"

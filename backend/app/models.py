@@ -97,6 +97,7 @@ class Model(SQLModel, table=True):
     source_repo_id: str | None = None
     source_url: str | None = None
     source_file: str | None = None
+    source_files: list[str] | None = Field(default=None, sa_column=Column(JSON))
 
     downloaded_at: datetime = Field(default_factory=get_datetime_utc)
     updated_at: datetime | None = None
@@ -137,6 +138,7 @@ class ModelCreate(SQLModel):
     source_repo_id: str | None = None
     source_url: str | None = None
     source_file: str | None = None
+    source_files: list[str] | None = None
 
 
 class ModelUpdate(SQLModel):
@@ -158,6 +160,7 @@ class ModelUpdate(SQLModel):
     source_repo_id: str | None = None
     source_url: str | None = None
     source_file: str | None = None
+    source_files: list[str] | None = None
 
 
 # ============================================================================
@@ -412,6 +415,14 @@ class ServerInstance(SQLModel, table=True):
 
     error_message: str | None = None
     restart_count: int = 0
+
+    # Aggregated model-download progress for a server-initiated download, so
+    # the UI can show a progress bar that survives page reloads. Shape:
+    #   {filename, progress_percent, bytes_downloaded, total_bytes,
+    #    speed_mbps, phase, updated_at[, error]}
+    # phase is one of "downloading" | "completed" | "failed". All values are
+    # JSON-serializable (strings/numbers). Empty dict when no download tracked.
+    download_progress: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
     agent_id: uuid.UUID = Field(
         foreign_key="agents.id",

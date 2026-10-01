@@ -108,6 +108,7 @@ class ServerInstanceResponse(BaseModel):
     inactivity_timeout_seconds: int = 300
     server_options: dict = Field(default_factory=dict)
     model_metadata: dict = Field(default_factory=dict)
+    download_progress: dict = Field(default_factory=dict)
 
 
 class ServerInstanceListResponse(BaseModel):
@@ -223,6 +224,7 @@ async def list_server_instances() -> ServerInstanceListResponse:
                     inactivity_timeout_seconds=instance.inactivity_timeout_seconds,
                     server_options=instance.server_options or {},
                     model_metadata=instance.model_metadata or {},
+                    download_progress=instance.download_progress or {},
                 )
             )
 
@@ -289,6 +291,7 @@ async def get_server_instance(server_id: str) -> ServerInstanceResponse:
             inactivity_timeout_seconds=instance.inactivity_timeout_seconds,
             server_options=instance.server_options or {},
             model_metadata=instance.model_metadata or {},
+            download_progress=instance.download_progress or {},
         )
 
 

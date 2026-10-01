@@ -1,6 +1,7 @@
 """Tests for llama_server module."""
 
 import asyncio
+import inspect
 import os
 import subprocess
 import time
@@ -12,7 +13,84 @@ import pytest
 os.environ["AGENT_ID"] = "test-agent"
 os.environ["FRONTEND_URL"] = "http://test:8000"
 
+from app.core.config import settings
 from app.services.llama_server import LlamaServerManager, ServerConfig
+
+
+class TestServerStartHealthTimeout:
+    """The health-wait timeout must come from SERVER_START_HEALTH_TIMEOUT.
+
+    Regression: the llama manager hardcoded a 30s wait, which a multi-GB model
+    loading into GPU routinely exceeds, surfacing as initialization_failed.
+    """
+
+    def test_config_field_exists_with_expected_value(self):
+        assert settings.SERVER_START_HEALTH_TIMEOUT == 900
+        assert settings.SERVER_START_HEALTH_TIMEOUT > 30
+        # Must stay under backend START_DISPATCH_TIMEOUT (900) inclusive and well
+        # under INITIALIZATION_TIMEOUT (3600).
+        assert settings.SERVER_START_HEALTH_TIMEOUT <= 900
+
+    @pytest.mark.parametrize(
+        "module_path, class_name, method_name",
+        [
+            ("app.services.llama_server", "LlamaServerManager", "_wait_for_server"),
+            ("app.services.halogen_server", "HalogenServerManager", "_wait_for_health"),
+            ("app.services.gufo_server", "GufoServerManager", "_wait_for_server"),
+        ],
+    )
+    def test_default_timeout_is_settings_driven(
+        self, module_path, class_name, method_name
+    ):
+        """All engines default to None -> settings.SERVER_START_HEALTH_TIMEOUT."""
+        import importlib
+
+        cls = getattr(importlib.import_module(module_path), class_name)
+        param = inspect.signature(getattr(cls, method_name)).parameters["timeout"]
+        assert param.default is None, (
+            f"{class_name}.{method_name} must default timeout to None so the value "
+            "comes from settings.SERVER_START_HEALTH_TIMEOUT"
+        )
+
+    @pytest.mark.asyncio
+    async def test_llama_wait_uses_configured_timeout_not_30s(self):
+        """A never-healthy server respects the patched setting (not 30)."""
+        manager = LlamaServerManager()
+
+        # Each time.time() call advances 1.0s so the loop is deterministic.
+        clock = iter([float(i) for i in range(100)])
+        health_attempts = 0
+
+        class FailingClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def get(self, url):
+                nonlocal health_attempts
+                health_attempts += 1
+                raise ConnectionError("not healthy")
+
+        patched_timeout = 5
+        with (
+            patch.object(settings, "SERVER_START_HEALTH_TIMEOUT", patched_timeout),
+            patch(
+                "app.services.llama_server.time.time", side_effect=lambda: next(clock)
+            ),
+            patch("app.services.llama_server.asyncio.sleep", new=AsyncMock()),
+            patch("app.services.llama_server.httpx.AsyncClient", FailingClient),
+        ):
+            with pytest.raises(TimeoutError):
+                await manager._wait_for_server("svc", 8081)
+
+        # The loop evaluates `time.time() - start < timeout` with a clock that
+        # advances 1.0s per call, so the body runs for offsets 1..T-1, i.e.
+        # T-1 health checks. With the old hardcoded 30.0 default this would be
+        # ~30 regardless of the patched setting; here it tracks the setting.
+        assert health_attempts == patched_timeout - 1
+        assert health_attempts < 30
 
 
 class BlockingProc:

@@ -15,7 +15,9 @@ longer first-token latency.
 """
 
 import asyncio
+import json
 import logging
+import re
 import uuid as uuid_module
 from datetime import UTC, datetime
 from typing import Any
@@ -46,6 +48,51 @@ READY_TIMEOUT = 900.0
 # window, but must not hold an inference request for the full cold-start budget.
 UNHEALTHY_RECOVERY_TIMEOUT = 30.0
 READY_POLL_INTERVAL = 1.0
+
+
+SPLIT_PART_RE = re.compile(r"^(?P<base>.+)-(?P<idx>\d+)-of-(?P<total>\d+)\.gguf$")
+
+
+def resolve_model_filenames(model: Model) -> list[str]:
+    """Return the ordered list of GGUF part filenames for a model.
+
+    Priority: explicit source_files list -> JSON-array string in source_file
+    (legacy split registrations) -> single source_file -> basename of path.
+    Split parts are sorted by their index so the first element is the primary.
+    """
+    names: list[str] = []
+    if model.source_files:
+        names = list(model.source_files)
+    elif model.source_file:
+        raw = model.source_file
+        stripped = raw.strip()
+        if stripped.startswith("["):
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, list):
+                    names = [str(n) for n in parsed]
+            except ValueError, TypeError:
+                names = [raw]
+        else:
+            names = [raw]
+    else:
+        names = [model.path.rsplit("/", 1)[-1]]
+
+    def sort_key(name: str) -> tuple[int, str]:
+        m = SPLIT_PART_RE.search(name.rsplit("/", 1)[-1])
+        return (int(m.group("idx")) if m else 0, name)
+
+    return sorted(names, key=sort_key)
+
+
+def pick_primary_filename(filenames: list[str]) -> str:
+    """The file to pass to llama-server --model: the -00001-of- part if present,
+    else the first filename."""
+    for name in filenames:
+        m = SPLIT_PART_RE.search(name.rsplit("/", 1)[-1])
+        if m and int(m.group("idx")) == 1:
+            return name
+    return filenames[0]
 
 
 async def _send_start_with_gate(
@@ -107,7 +154,8 @@ def build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any
     llama-server loads it (--mmproj); with none selected the flag is
     omitted entirely.
     """
-    filename = model.source_file or model.path.rsplit("/", 1)[-1]
+    filenames = resolve_model_filenames(model)
+    primary_filename = pick_primary_filename(filenames)
     mmproj = _find_mmproj(instance, model)
     dflash = _find_dflash(instance, model)
     payload: dict[str, Any] = {
@@ -129,14 +177,16 @@ def build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any
         "source": {
             "source": model.source,
             "repo_id": model.source_repo_id or "",
-            "filename": filename,
+            "filename": primary_filename,
+            "filenames": filenames,
             "job_id": f"server-{instance.id}",
+            "server_id": str(instance.id),
         }
         if instance.engine not in ("halogen", "halogen-flash") and model.source_repo_id
         else None,
     }
     if mmproj is not None:
-        mmproj_model, mmproj_filename = mmproj
+        mmproj_model, mmproj_filenames = mmproj
         payload["config"]["mmproj_path"] = mmproj_model.path
         # Download the projector alongside the main model when missing.
         # Send the source whenever the projector has a repo — even for
@@ -148,11 +198,13 @@ def build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any
             payload["mmproj_source"] = {
                 "source": mmproj_model.source,
                 "repo_id": mmproj_model.source_repo_id,
-                "filename": mmproj_filename,
+                "filename": pick_primary_filename(mmproj_filenames),
+                "filenames": mmproj_filenames,
                 "job_id": f"server-{instance.id}-mmproj",
+                "server_id": str(instance.id),
             }
     if dflash is not None:
-        dflash_model, dflash_filename = dflash
+        dflash_model, dflash_filenames = dflash
         payload["config"]["draft_model_path"] = dflash_model.path
         if payload["config"]["options"].get("strict_mtp_qwen"):
             # Strict Qwen MTP is only valid with draft-MTP. A dflash model
@@ -170,8 +222,10 @@ def build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any
             payload["draft_source"] = {
                 "source": dflash_model.source,
                 "repo_id": dflash_model.source_repo_id,
-                "filename": dflash_filename,
+                "filename": pick_primary_filename(dflash_filenames),
+                "filenames": dflash_filenames,
                 "job_id": f"server-{instance.id}-dflash",
+                "server_id": str(instance.id),
             }
     return payload
 
@@ -190,7 +244,9 @@ def metadata_capability(instance: ServerInstance, capability: str) -> bool | Non
     return None
 
 
-def _find_mmproj(instance: ServerInstance, model: Model) -> tuple[Model, str] | None:
+def _find_mmproj(
+    instance: ServerInstance, model: Model
+) -> tuple[Model, list[str]] | None:
     """mmproj projector for a server instance, else None.
 
     The instance row is the source of truth: whatever projector was
@@ -208,19 +264,21 @@ def _find_mmproj(instance: ServerInstance, model: Model) -> tuple[Model, str] | 
             "points at the main model file; ignoring it"
         )
         return None
-    filename = mmproj_model.source_file or mmproj_model.path.rsplit("/", 1)[-1]
-    return mmproj_model, filename
+    filenames = resolve_model_filenames(mmproj_model)
+    return mmproj_model, filenames
 
 
-def _find_dflash(instance: ServerInstance, model: Model) -> tuple[Model, str] | None:
+def _find_dflash(
+    instance: ServerInstance, model: Model
+) -> tuple[Model, list[str]] | None:
     """Return a valid dflash draft model for the instance, if selected."""
     dflash_model = instance.dflash_model
     if not dflash_model:
         return None
     if dflash_model.model_type != "dflash" or dflash_model.path == model.path:
         return None
-    filename = dflash_model.source_file or dflash_model.path.rsplit("/", 1)[-1]
-    return dflash_model, filename
+    filenames = resolve_model_filenames(dflash_model)
+    return dflash_model, filenames
 
 
 async def dispatch_start(

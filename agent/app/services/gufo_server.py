@@ -464,9 +464,11 @@ class GufoServerManager:
             pass
 
     async def _wait_for_server(
-        self, server_id: str, port: int, timeout: float = 900.0
+        self, server_id: str, port: int, timeout: float | None = None
     ) -> None:
         """Wait until the gufo HTTP server answers its health endpoint."""
+        if timeout is None:
+            timeout = float(settings.SERVER_START_HEALTH_TIMEOUT)
         deadline = time.time() + timeout
         while time.time() < deadline:
             process = self.servers.get(server_id)
