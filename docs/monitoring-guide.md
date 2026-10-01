@@ -13,7 +13,7 @@ Inference Matrix provides comprehensive monitoring through:
 ### Endpoint
 
 ```
-GET /metrics
+GET /api/v1/metrics
 ```
 
 Returns Prometheus-format metrics for scraping.
@@ -74,7 +74,7 @@ scrape_configs:
   - job_name: 'inference-matrix'
     static_configs:
       - targets: ['frontend:8000']
-    metrics_path: '/metrics'
+    metrics_path: '/api/v1/metrics'
     scrape_interval: 15s
 ```
 
@@ -195,23 +195,27 @@ The WebUI provides real-time monitoring:
 
 ```bash
 # Frontend health
-curl http://localhost:8000/api/health
+curl http://localhost:8000/api/v1/utils/health-check/
 
-# Agent health
-curl http://localhost:8080/api/health
+# Agent health (agent serves /health at the root, not under /api)
+curl http://localhost:8080/health
 
 # Database health
 docker compose exec postgres pg_isready -U inference
 ```
 
-**Response:**
+**Agent `/health` response:**
 ```json
-{
-  "status": "healthy",
-  "agent_id": "agent-1",
-  "uptime_seconds": 3600
-}
+{"status": "healthy"}
 ```
+
+> Note: the agent's health endpoint is `GET /health` (`agent/app/main.py:36`) and
+> it returns only `{"status": "healthy"}` — no `agent_id` or `uptime_seconds`.
+> The broker's health endpoint is
+> `GET /api/v1/utils/health-check/` (returns `true`), **not** `/api/health`.
+> The `compose.yml` healthchecks currently target `http://localhost:8000/api/health`
+> and `http://localhost:8080/api/health`, both of which 404 — see the Compose
+> caveat in AGENTS.md.
 
 ### Docker Health Checks
 
@@ -366,13 +370,13 @@ receivers:
 
 ```bash
 # Monitor token generation
-watch -n 1 'curl -s http://localhost:8000/metrics | grep tokens_generated'
+watch -n 1 'curl -s http://localhost:8000/api/v1/metrics | grep tokens_generated'
 
 # Check VRAM trends
-curl http://localhost:8000/metrics | grep vram_usage
+curl http://localhost:8000/api/v1/metrics | grep vram_usage
 
 # Track cache effectiveness
-curl http://localhost:8000/metrics | grep cache_size
+curl http://localhost:8000/api/v1/metrics | grep cache_size
 ```
 
 ## Troubleshooting

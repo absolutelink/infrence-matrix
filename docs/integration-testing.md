@@ -13,6 +13,12 @@ bun run test:compliance --base-url https://matrix.thelink.family/v1 --api-key no
 
 ## Status
 
+> **Note (post `2359429`):** the `inference_slot_protocol` version field has been
+> removed. All agents now use the single reserved-slot admission path, so there is
+> no protocol number to check and no "protocol-capable agent" deployment gate.
+> Mentions of `inference_slot_protocol=0`/`3` in the run log below are historical
+> records from before that removal.
+
 Baseline run: 2026-09-24 — **3 passed / 14 failed / 17 total**
 Run 2 (clusters 1–3 + 5 fix): 2026-09-24 — **10 passed / 7 failed**
 Run 3 (WS framing fix): 2026-09-24 — **10 passed / 7 failed** (framing fixed; exposed WS non-persistence + 30s timer under load)

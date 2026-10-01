@@ -68,6 +68,15 @@ FRONTEND_URL=http://frontend:8000
 
 ### 3. Start Services
 
+> **Caveat: this section is aspirational, not currently runnable.** The Compose
+> files in the repo are inconsistent (see AGENTS.md): `compose.yml` defines
+> `postgres`/`frontend`/`agent`, but `compose.override.yml` and
+> `compose.deploy.yml` reference `db`/`backend`/`adminer`/`proxy` and a
+> `backend/Dockerfile` that does not exist, with port collisions on 8000/8080.
+> `docker compose up -d` will fail until these are reconciled. Also note
+> `compose.yml` never sets `POSTGRES_*` on the app container and mounts
+> `./models:/models:ro` while the broker may want to write there.
+
 ```bash
 docker compose up -d
 ```

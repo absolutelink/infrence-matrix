@@ -22,8 +22,8 @@ docker compose exec agent env | grep FRONTEND
 
 # Should show: FRONTEND_URL=http://frontend:8000
 
-# 2. Test connectivity from agent
-docker compose exec agent curl -v http://frontend:8000/api/health
+# 2. Test connectivity from agent (broker health is /api/v1/utils/health-check/)
+docker compose exec agent curl -v http://frontend:8000/api/v1/utils/health-check/
 
 # 3. Check frontend logs
 docker compose logs frontend | grep -i "agent"

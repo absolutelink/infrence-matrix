@@ -4,32 +4,29 @@
 
 Inference Matrix is an OpenAI API-compatible inference server with a distributed architecture. It consists of two services:
 
-1. **Frontend Service** - WebUI, API endpoints, database, and orchestration
-2. **Agent Service** - Hardware-local inference management with llama.cpp or Halogen
+1. **Frontend Service** (compose service name `frontend`; the `matrix-app`
+   container) - React WebUI, OpenAI-compatible API, database, and orchestration
+2. **Agent Service** - Hardware-local inference management with llama.cpp, Halogen, or Gufo
 
 Designed for single-user home server deployments with support for multiple inference agents.
 
 ### Inference admission
 
-The backend keeps the FIFO inference queue in PostgreSQL. With an agent that
-registers inference slot protocol v3, admission has two short database
-transactions: mark the oldest compatible request `reserving` with a unique
-attempt ID; ask the agent for a non-blocking slot reservation **outside** the
-transaction; then mark it `active` only if that same attempt and server
-generation still own the request. A busy response leaves the request queued.
-Reservations expire at the agent after 15 seconds; database attempts become
-eligible for recovery after 12 seconds so a late commit cannot admit an expired
-slot. The waiting request or the periodic reconciler performs the recovery.
-Dispatch and cancellation carry the attempt ID
-so late replies cannot consume or cancel a newer reservation. Client disconnects
-cancel outstanding work. Streaming requests receive SSE comments while waiting
-for agent headers or the first LLM frame, under a single dispatch deadline.
-
-During a mixed-version rollout, protocol-v0/v1/v2 agents retain their legacy
-admission behavior. Protocol-v1/v2 agents may still wait in their own local
-capacity queue after the backend claims a lease; the one-queue guarantee applies
-only to protocol-v3 agents and reserved inference paths. Upgrade the backend
-before the agents so it can negotiate both protocol generations.
+The backend keeps the FIFO inference queue in PostgreSQL. Admission is a single
+reserved-slot protocol (the old `inference_slot_protocol` v0–v3 version
+negotiation was removed in `2359429`); every agent now uses the same path. It has
+two short database transactions: mark the oldest compatible request `reserving`
+with a unique attempt ID; ask the agent for a non-blocking slot reservation
+**outside** the transaction; then mark it `active` only if that same attempt and
+server generation still own the request. A busy response leaves the request
+queued. Reservations expire at the agent after 15 seconds
+(`proxy.RESERVATION_TTL_SECONDS`); database attempts become eligible for recovery
+after 12 seconds (`RESERVATION_RECOVERY_SECONDS`) so a late commit cannot admit an
+expired slot. The waiting request or the periodic reconciler performs the
+recovery. Dispatch and cancellation carry the attempt ID so late replies cannot
+consume or cancel a newer reservation. Client disconnects cancel outstanding
+work. Streaming requests receive SSE comments while waiting for agent headers or
+the first LLM frame, under a single dispatch deadline.
 
 ## System Architecture
 
@@ -57,22 +54,25 @@ before the agents so it can negotiate both protocol generations.
 │  │                              │                               │  │
 │  │  ┌──────────────────────────────────────────────────────┐  │  │
 │  │  │           Management Services                        │  │  │
-│  │  │  • Agent Manager (registration, discovery)           │  │  │
-│  │  │  • Model Download Manager (HF + ModelScope)          │  │  │
-│  │  │  • Prompt Cache Manager                              │  │  │
-│  │  │  • Conversation Manager                              │  │  │
-│  │  └──────────────────────────────────────────────────────┘  │  │
+│  │  │  • Agent Manager (registration, events, leases)      │  │  │
+│  │  │  • Inference Scheduler (FIFO queue + leases)         │  │  │
+│  │  │  • Server Lifecycle / Startup                      │  │  │
+│  │  │  • Token Stats + Metrics Snapshot                  │  │  │
+│  │  └──────────────────────────────────────────────────────┘  │
 │  └────────────────────────────────────────────────────────────┘  │
 │                              │                                     │
 │         PostgreSQL Database  │                                     │
 │  • Models                    │                                     │
-│  • Conversations             │                                     │
-│  • APIKeys                   │                                     │
+│  • Agents                    │                                     │
+│  • ServerInstances           │                                     │
+│  • InferenceLeases           │                                     │
+│  • ResponseRecords           │                                     │
 │  • PromptCache (metadata)    │                                     │
 │  • DownloadJobs              │                                     │
-│  • ServerInstances           │                                     │
-│  • Agents                    │                                     │
-│  • AudioJobs, BatchJobs, Files                                     │
+│  • TokenUsageSamples         │                                     │
+│  • BenchmarkDefinitions/Runs                                     │
+│  • AudioJobs, BatchJobs, Files                                   │
+│  (no users / API keys — removed in b7f2d3e9c1a4)                 │
 └──────────────────────────────────────────────────────────────────┘
          │
          │ REST + WebSocket
@@ -129,13 +129,18 @@ before the agents so it can negotiate both protocol generations.
 **Responsibilities:**
 - Serve React WebUI
 - OpenAI-compatible API endpoints
-- Agent registration and discovery
-- Model download management
-- Conversation state management
+- Agent registration and lifecycle/event handling
+- FIFO inference scheduling and PostgreSQL lease management
+- Server instance lifecycle (start/stop/health mirror)
 - File storage management
-- Batch processing
-- Audio processing (via system Whisper)
+- Batch + audio job records (processing is delegated to agents)
 - Prompt cache metadata tracking
+- Token usage stats and Prometheus-style metrics
+
+Note: model downloads are executed by the **agent**, not the broker. The
+backend's `app/services/models.py` `model_manager` singleton is currently
+unused by any route (only `guess_model_type` is imported); `DownloadJob` rows
+are updated from agent `download.progress` events.
 
 **Key Features:**
 - Multi-agent support (manual selection)
@@ -358,41 +363,30 @@ Response: {
 }
 ```
 
-**Model Management**
+**Model Management** (agent routes are under `/models`, not `/api/models`)
 ```
-GET /api/models
-Response: {
-  "models": [
-    {
-      "filename": "llama-3-8b.Q4_K_M.gguf",
-      "path": "/models/llama-3-8b.Q4_K_M.gguf",
-      "size_bytes": 4916677728,
-      "architecture": "llama",
-      "quantization": "Q4_K_M"
-    }
-  ]
-}
+GET /models
+Response: { "models": [ { "filename": "...", "path": "...", "size_bytes": 0 } ] }
 
-POST /api/models/download
+POST /models/download
 Body: {
   "source": "huggingface",
   "repo_id": "TheBloke/Llama-3-8B-Instruct-GGUF",
   "filename": "llama-3-8b-instruct.Q4_K_M.gguf"
 }
-Response: { "job_id": "uuid", "status": "downloading" }
+Response: { "status": "completed" | "already_exists" | "in_progress",
+            "path": "...", "job_id": "..." }
+(The download is awaited inside the request; it does not return an async job id
+that must be polled.)
 
-DELETE /api/models/{filename}
-Response: { "deleted": true }
+DELETE /models/{filename}
+Response: { "status": "deleted" }   (404 if missing)
 ```
 
 **Health Check**
 ```
-GET /api/health
-Response: {
-  "status": "healthy",
-  "uptime_seconds": 3600,
-  "running_servers": 2
-}
+GET /health
+Response: { "status": "healthy" }
 ```
 
 ### WebSocket Events
@@ -588,8 +582,7 @@ services:
 ### llama.cpp Server Crash
 
 **Detection:**
-- Agent monitors subprocess health
-- Health check every 10 seconds
+- Agent monitors subprocess health (`LlamaServerManager.HEALTH_CHECK_INTERVAL`, default 30s)
 
 **Recovery:**
 1. Agent detects crash
@@ -602,27 +595,47 @@ services:
 
 **Agent Behavior:**
 1. Agent continues running all llama.cpp servers
-2. Agent retries WebSocket connection every 30 seconds
-3. Agent buffers events in memory (max 1000 events)
-4. When Frontend reconnects:
-   - Agent replays buffered events
-   - Re-synchronizes state
+2. Agent retries the WebSocket connection every `WS_RECONNECT_INTERVAL` seconds (default 5)
+3. Agent re-registers with the broker every `REREGISTER_INTERVAL` seconds (default 60)
+4. When the connection is re-established:
+   - Buffered events are **not** replayed (stale `server.started`/`server.stopped`
+     replay caused state flapping; see `websocket._send_events`)
+   - Fresh state is re-synchronized from the registration's `running_server_ids`
 
 ## Security Considerations
 
+**Current state: there is NO application-level authentication anywhere.**
+Verified — the backend has no `get_current_user`, bearer token, API key check, or
+auth middleware (`backend/app/api/deps.py` only provides `get_db`), and the agent
+routes have no auth dependency either. The broker and every agent are trusted
+purely by network position. Treat any routable port as fully trusted-and-controllable.
+
 **Internal Network Trust:**
-- No authentication between Frontend and Agent
-- Assumes trusted internal network
-- Firewall rules should restrict access
+- No authentication between the broker and agents.
+- `POST /api/v1/agents/register` accepts any `name`/`host`/`port`, so a client
+  that can reach the broker can redirect all inference for an agent name to an
+  attacker-controlled host (prompt/data interception) — see review finding.
+- `POST /api/v1/agents/{id}/command` forwards an arbitrary method/path/body to
+  the agent, bypassing broker-side guards.
+- Firewall rules MUST restrict access to the broker and to agent port 8080.
 
 **External Access:**
-- Frontend exposes API to external clients
-- Agent should NEVER be exposed externally
-- All external traffic goes through Frontend
+- The broker exposes its API to external clients.
+- Agents should NEVER be exposed externally.
+- All external traffic goes through the broker (and, in production, Traefik).
+- `CORS_ALLOW_ALL_ORIGINS` defaults to `True` with `allow_credentials=True`
+  (`backend/app/core/config.py:29`, `main.py:109`); set it to an explicit origin
+  list for any non-loopback deployment.
 
 **Data Protection:**
-- No secrets in logs
-- HTTPS at Frontend level (Traefik)
+- HTTPS/TLS terminates at Traefik in production.
+- Secrets are NOT reliably kept out of logs today: the agent logs full engine
+  command lines at INFO (which include `--api-key` for Gufo, `gufo_server.py:344`
+  and the llama equivalent at `llama_server.py:388`), the proxy logs full request
+  bodies on upstream 400s (`proxy.py:188`), and the broker logs full chat request
+  JSON at debug level (`v1_chat_completions.py:792`). Those command lines are
+  also pushed into the log ring and streamed to the WebUI. Redaction is a known
+  gap.
 
 ## Monitoring & Observability
 

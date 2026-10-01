@@ -17,8 +17,16 @@ Welcome to Inference Matrix! This guide covers using the WebUI and API for model
 
 ### Opening the WebUI
 
-1. Open your browser to http://localhost:5173 (local development) or your configured FRONTEND_HOST
+1. Open your browser to http://localhost:5173 (Vite dev server) or http://localhost:8000 (production, frontend served by FastAPI)
 2. You'll see the dashboard with model status and quick actions
+
+> The WebUI sidebar contains exactly these pages: **Dashboard** (`/`),
+> **Models** (`/models`), **Agents** (`/agents`), **Server Instances**
+> (`/server-instances`), **Chat** (`/chat`), **Responses API** (`/responses`),
+> **Text Completion** (`/completions`), **Embeddings** (`/embeddings`),
+> **Transcriptions** (`/audio`), **Files** (`/files`), and **Benchmarks**
+> (`/benchmarks`). There is **no** Settings, GPU, Cache, Monitoring, or Logs page;
+> the sections below that mention those have been corrected.
 
 ### Dashboard Overview
 
@@ -204,26 +212,12 @@ The **Servers** page shows:
 
 ### GPU Configuration
 
-Navigate to **Settings > GPU**:
-
-**Global Settings:**
-- **GPU Layers**: Default layers to offload (0-100)
-- **Context Size**: Default context window
-- **Batch Size**: Default batch size for processing
-
-**Per-Model Overrides:**
-- Click model name to set custom values
-- Override global defaults
-- Save for automatic application on load
-
-### Prompt Cache
-
-The **Cache** page shows:
-- **Active Caches**: Cached prompt prefixes
-- **Hit Rate**: Cache effectiveness
-- **Size**: Cache memory usage
-- **Age**: When cache was created
-- **Actions**: Clear cache, Force cache
+There is **no `Settings > GPU` page**. Default GPU settings come from environment
+variables (`DEFAULT_GPU_LAYERS`, `DEFAULT_CONTEXT_SIZE`, `DEFAULT_BATCH_SIZE` in
+`backend/app/core/config.py`). Per-server overrides are set when you create or edit
+a server instance: on the **Server Instances** page, use **Start Server** or the
+edit dialog, and choose the engine-specific settings fields (llama.cpp, Halogen,
+Halogen-Flash, or Gufo).
 
 **Cache Strategies:**
 - **Chat Completions**: Automatic conversation caching
@@ -231,7 +225,11 @@ The **Cache** page shows:
 
 ### System Monitoring
 
-The **Monitoring** dashboard shows:
+> There is **no dedicated `Monitoring` page**. Live status (agent connection,
+> running servers, token rates, queue depth, slots) is shown in the top status bar
+> and the **Dashboard** (`/`), and per-server logs are in the bottom log panel on
+> **Server Instances**. Prometheus metrics are exposed at
+> `GET /api/v1/metrics` (see `docs/monitoring-guide.md`).
 
 **Real-time Metrics:**
 - **VRAM Usage**: Per-model GPU memory
@@ -248,23 +246,28 @@ The **Monitoring** dashboard shows:
 
 ### Backup & Restore
 
-**Create Backup:**
-1. Go to **Settings > Backup**
-2. Click **Create Backup**
-3. Select components:
-   - Database (conversations, API keys, configs)
-   - Model metadata
-   - Download job state
-4. Download backup file
+There is **no in-app backup UI**. Back up the PostgreSQL database directly with
+`pg_dump`. The database holds all broker metadata: agents, models, server
+instances, inference leases, response records, prompt-cache rows, download jobs,
+token usage samples, benchmark definitions/runs, and file records.
 
-**Restore Backup:**
-1. Go to **Settings > Backup**
-2. Click **Restore**
-3. Upload backup file
-4. Select components to restore
-5. Confirm restore
+```bash
+# Dump from the postgres container (compose service name: postgres)
+docker compose exec -T postgres \
+  pg_dump -U inference -d inference_matrix | gzip > matrix-$(date +%Y%m%d).sql.gz
 
-**Note**: Models themselves (GGUF files) are not included in backups. Re-download or restore from separate model backup.
+# Restore into an empty database
+gunzip -c matrix-20261001.sql.gz | \
+  docker compose exec -T postgres psql -U inference -d inference_matrix
+```
+
+Also back up the model files themselves (the GGUFs under `MODELS_PATH`) and the
+uploaded-files directory (`FILES_PATH`) separately — the database only references
+them by path.
+
+**Note**: there is no `app.services.backup` module and no Settings → Backup page.
+The `backup-restore` agent skill references commands that do not exist yet; use
+`pg_dump` as above.
 
 ---
 
@@ -371,14 +374,15 @@ If an agent goes offline:
 **Via API:**
 
 ```bash
-# List all agents
-curl http://localhost:8000/api/agents
+# List all agents (broker API is under /api/v1)
+curl http://localhost:8000/api/v1/agents
 
-# Get specific agent
-curl http://localhost:8000/api/agents/agent-1
+# Get a specific agent (by backend UUID)
+curl http://localhost:8000/api/v1/agents/<agent-uuid>
 
-# Get agent GPU info
-curl http://localhost:8000/api/agents/agent-1/gpu
+# GPU info is included in the agent's `gpu_info` field (from the list/get above);
+# there is no separate /agents/{id}/gpu endpoint. For live per-agent GPU sampling,
+# query the agent directly: GET http://<agent-host>:8080/gpu or /gpu/usage
 ```
 
 ### Troubleshooting Agents
@@ -530,7 +534,9 @@ Batch status:
 
 ### Getting Help
 
-1. **Check Logs**: Settings > Logs
+1. **Check Logs**: use the bottom log panel on **Server Instances**, or
+   `docker compose logs -f <service>` / `journalctl` on the host. There is no
+   **Settings > Logs** page.
 2. **View Documentation**: docs/ folder in repository
 3. **API Reference**: http://localhost:8000/docs
 4. **GitHub Issues**: Report bugs or request features

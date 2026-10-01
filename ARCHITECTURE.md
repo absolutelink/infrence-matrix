@@ -102,8 +102,7 @@ The frontend is served from `app.frontend("/", directory=FRONTEND_DIR)`
 Core tables (all UUID PKs unless noted):
 
 - **Agent** — registered inference host. `name` (unique), `platform`
-  (`llamacpp`/`halogen`/...), `type`, `inference_slot_protocol` (v3 supports
-  acknowledged, fenced reservations; v0–v2 use legacy admission), `host`,
+  (`llamacpp`/`halogen`/`halogen-flash`/`gufo`), `type`, `host`,
   `port`, `status`, `gpu_info` (JSON), `last_seen`,
   `websocket_connected`.
 - **Model** — GGUF registry. `name` (unique), `path`, `size_bytes` (BigInteger),
@@ -186,11 +185,13 @@ Required env at import: `AGENT_ID`, `FRONTEND_URL`, `MODELS_PATH` (see AGENTS.md
 
 ### 3.2 Registration & connection (`services/frontend_client.py`)
 
-- `POST {FRONTEND_URL}/api/v1/agents/register` with `agent_id`, `name`, `host`,
-  `port`, `gpu_info`, `inference_slot_protocol` (v3 for fenced reservations),
-  and a report of the **running server set**
+- `POST {FRONTEND_URL}/api/v1/agents/register` with `agent_id`, `name`,
+  `platform`, `type`, `host`, `port`, `gpu_info`, and a report of the
+  **running server set**
   (`running_server_ids` / `healthy_server_ids` / `server_statuses` with
-  `slot_generation` + `effective_capacity`).
+  `slot_generation` + `effective_capacity`). There is no
+  `inference_slot_protocol` field: the version negotiation was removed and all
+  agents use the single reserved-slot admission path.
 - The backend dedupes by **name** (the agent-declared `agent_id` is not persisted;
   backend UUIDs are authoritative) and reconciles the reported running set against
   its `ServerInstance` rows — anything not reported as running is marked stopped
@@ -250,18 +251,20 @@ port and streams SSE back. Notable behaviors:
 - **Slot generation fencing** (`_check_generation`) — requests carrying an
   `X-Inference-Slot-Generation` are rejected if the process generation changed,
   preventing a stale lease from touching a recycled process.
-- **Capacity enforcement** — optional; coordinates with `inference_operations.py`
-  for agent-owned admission. Protocol v3's
+- **Capacity enforcement** — coordinates with `inference_operations.py` for
+  agent-owned admission. The reserved-slot path
   `POST /proxy/{server_id}/reservations/{request_id}` accepts an available slot
   immediately or reports busy; it **does not queue at the agent**. Its in-memory
   operation registry tracks the `request_id`, server generation, one-use
-  `X-Inference-Reservation-ID`, and a 15s expiry for unconsumed reservations.
-  Dispatch and cancel carry the attempt ID, so a late request cannot consume or
-  cancel a newer attempt. `/proxy/{server_id}/operations/...` supports status,
-  cancellation, and backend reconciliation. Legacy/unreserved requests can still
-  use the agent-side wait.
+  `X-Inference-Reservation-ID`, and a 15s expiry (`RESERVATION_TTL_SECONDS`) for
+  unconsumed reservations. Dispatch and cancel carry the attempt ID, so a late
+  request cannot consume or cancel a newer attempt.
+  `/proxy/{server_id}/operations/...` supports status, cancellation, and backend
+  reconciliation. The agent still contains a non-reserved wait path (emitting
+  `: inference slot queued` SSE comments) for requests that arrive without a
+  reservation; the current backend scheduler always reserves first.
 - **Connect retries** with backoff (`CONNECT_RETRY_DELAYS`) before connecting to
-  the engine; protocol-v3 inference is not replayed after dispatch when a read
+  the engine; reserved inference is not replayed after dispatch when a read
   times out, because no response bytes does not prove the engine did no work.
 - An upstream HTTP error in a stream becomes an SSE `data:` error frame instead
   of a raw JSON body masquerading as a successful empty completion.
@@ -312,19 +315,14 @@ is_cancelled?)` returns an `InferenceLeaseHandle`:
 2. Loop until deadline:
    - If client disconnected → cancel lease, raise `InferenceRequestCancelled`.
    - `_admission_open()` — advisory-lock-gated admission check.
-   - `_candidates(...)` → running, healthy servers first. With a protocol-v3
-     agent, `_claim()` briefly locks the server and compatible FIFO head to check
-     capacity and mark the request `reserving` with a fresh attempt ID. It then
-     contacts the agent **outside any DB row-lock transaction**. On acceptance,
-     a second short, fenced transaction checks request/attempt/server generation
-     and transitions to `active`. Busy/error returns to `queued`; disconnected
-     or stale attempts are cancelled or recovered. `reserving` requests retain
-     their place at the compatible FIFO head and count toward pending capacity.
-   - **Mixed-version admission:** protocol-v0 agents use a DB-backed active-lease
-     capacity guard under a short server-row lock. Protocol-v1/v2 agents claim
-     an active backend lease before waiting for capacity locally at the agent.
-     Only v3 reserved inference has the **single-queue** guarantee. Deploy the
-     backend before v3 agents; all versions can coexist during rollout.
+   - `_candidates(...)` → running, healthy servers first. `_claim()` briefly locks
+     the server and compatible FIFO head to check capacity and mark the request
+     `reserving` with a fresh attempt ID. It then contacts the agent **outside any
+     DB row-lock transaction**. On acceptance, a second short, fenced transaction
+     checks request/attempt/server generation and transitions to `active`.
+     Busy/error returns to `queued`; disconnected or stale attempts are cancelled
+     or recovered. `reserving` requests retain their place at the compatible FIFO
+     head and count toward pending capacity.
    - If only `starting`/`stopped` candidates: take the per-agent advisory lock and
      `_prepare_target()` (dispatch start / wait ready), then claim.
    - Otherwise sleep `SCHEDULER_POLL_SECONDS`.
@@ -341,7 +339,7 @@ is_cancelled?)` returns an `InferenceLeaseHandle`:
 
 ### 4.3 `InferenceLeaseHandle`
 
-Holds `server`, `lease_id`, `slot_generation`, optional v3 `reservation_id`, a
+Holds `server`, `lease_id`, `slot_generation`, the `reservation_id` attempt UUID, a
 `lost` event, and background renewal + disconnect-monitor tasks. Key methods:
 
 - `guard(awaitable, cancelled?)` — runs one upstream operation, cancelling it if
@@ -349,10 +347,10 @@ Holds `server`, `lease_id`, `slot_generation`, optional v3 `reservation_id`, a
   `InferenceRequestCancelled`.
 - `mark_upstream_started()` — lets the renewal loop renew a stream owned outside
   `guard` (used by SSE streaming).
-- `dispatch_headers()` — carries request ID, generation, and, for v3, the
-  reservation attempt ID through the agent proxy.
+- `dispatch_headers()` — carries request ID, generation, and the reservation
+  attempt ID through the agent proxy.
 - `release(outcome)` / `cancel()` — outcome-aware terminal transitions; cancellation
-  is fenced by the reservation token. Legacy capacity retains a settling cooldown.
+  is fenced by the reservation token.
 
 ### 4.4 Streaming lease lifecycle
 
@@ -451,10 +449,11 @@ the backend image (`app.frontend`).
   `https://matrix.thelink.family` via Traefik + Let's Encrypt.
 - Inference agent types on `core@10.100.2.111` (Podman, root space).
 - PostgreSQL 16 for metadata.
-- Confirm `GET /api/v1/agents` reports `inference_slot_protocol: 3` for agents
-  serving inference before attributing live queue behavior to the v3 handoff.
-  A registered value of `0`, `1`, or `2` selects legacy admission even when the
-  broker and database migration are current.
+- There is no `inference_slot_protocol` to check. `GET /api/v1/agents` and
+  `GET /api/v1/agents/{id}` report `platform`, `type`, `status`, and
+  `websocket_connected`; all agents use the single reserved-slot admission path,
+  so live queue behavior is attributed to the backend scheduler, not a
+  negotiated protocol generation.
 
 ### 7.3 Compose caveat
 
@@ -492,7 +491,7 @@ through the backend (TLS via Traefik). Secrets kept out of logs.
   keep running processes and re-register to re-sync.
 - **Client disconnect mid-stream**: the `is_cancelled` monitor fences the lease
   and cancels the agent operation; the HTTP middleware separately tracks request
-  activity until its stream closes. Unconsumed v3 reservations also expire
+  activity until its stream closes. Unconsumed reservations also expire
   independently on the agent.
 
 ### 8.3 Observability
@@ -525,12 +524,12 @@ through the backend (TLS via Traefik). Secrets kept out of logs.
    rows are a mirror, reconciled at agent (re-)registration.
 2. Backend-generated UUIDs are authoritative server/agent identity; agent-declared
    `agent_id` is not persisted.
-3. Inference admission is FIFO and lease-backed in PostgreSQL; v3 `reserving`
+3. Inference admission is FIFO and lease-backed in PostgreSQL; `reserving`
    claims must be fenced by both reservation ID and server generation. Terminal
    leases (`released`/`cancelled`/`expired`/`failed`) must never appear in
    queued/active admission queries.
 4. A slot is held from agent reservation through upstream completion/cancellation,
-   never solely by an idle downstream SSE connection. The v3 agent may not put
+   never solely by an idle downstream SSE connection. The agent may not put
    an already-admitted request into a second capacity queue.
 5. `slot_generation` fences recycled processes from stale leases.
 6. Backend route/schema changes require `bash scripts/generate-client.sh`; never

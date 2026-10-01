@@ -1,5 +1,18 @@
 # FastAPI Project - Docker Compose Deployment
 
+> **This guide is inherited from the upstream `fastapi/full-stack-fastapi-template`
+> and does not match this repository.** Inference Matrix has **no users, no API
+> keys, no `SECRET_KEY`, no `FIRST_SUPERUSER`, and no SMTP/email** configuration
+> (the `users`/`api_keys` tables were dropped in migration `b7f2d3e9c1a4` and the
+> corresponding settings are absent from `backend/app/core/config.py`). The
+> Compose service names in `compose.deploy.yml` (`db`, `backend`, `adminer`) are
+> also not defined in this repo's `compose.yml` (`postgres`, `frontend`, `agent`).
+> Treat every `SECRET_KEY` / `FIRST_SUPERUSER` / `SMTP_*` instruction below as
+> not-applicable, and read the deploy caveat in the Deploy section before running
+> any command. Use AGENTS.md "Deployment Debugging" for the actual production
+> topology (`matrix-app` container on `core@10.100.2.100`, agents on
+> `core@10.100.2.111`).
+
 You can deploy the project to your own remote server with Docker Compose. The deployment configuration includes Traefik to handle HTTPS and route incoming traffic to the application.
 
 ## Preparation
@@ -48,6 +61,13 @@ export FIRST_SUPERUSER_PASSWORD="$(python -c 'import secrets; print(secrets.toke
 To use an authenticated email provider, also set `SMTP_PASSWORD`.
 
 ## Deploy
+
+> **Caveat: the commands below do not currently work in this repo.** The
+> `compose.deploy.yml` overrides `db`, `adminer`, and `backend`, none of which
+> are defined in `compose.yml` (which uses `postgres`/`frontend`/`agent`), and
+> `backend` points at a non-existent `backend/Dockerfile`. This file is inherited
+> from the upstream full-stack template and has not been reconciled with the
+> renamed services. See the Compose caveat in AGENTS.md.
 
 ```bash
 cd /root/code/app/

@@ -384,26 +384,55 @@ Generates speech from text (TTS).
 
 ## Agent Service API
 
+> **Path correction:** the agent mounts its routers **without** an `/api` prefix
+> (`agent/app/main.py:29-34`). The real agent endpoints are
+> `POST /servers/prepare`, `POST /servers/start`, `POST /servers/stop`,
+> `POST /servers/delete`, `GET /servers/list`, `GET /servers/status/{id}`,
+> `GET /servers/metadata/{id}`, `GET /servers/logs/{id}`,
+> `GET /models`, `POST /models/download`, `GET /models/status/{filename}`,
+> `DELETE /models/{filename}`, `POST /benchmarks/run`, `GET /gpu`,
+> `GET /gpu/usage`, `POST /proxy/{server_id}/...`, `WS /ws/status`, and
+> `GET /health`. The `/api/...` prefixes shown throughout the rest of this
+> section are stale. For exact request/response shapes, treat the code
+> (`agent/app/api/routes/*`) and the broker's OpenAPI spec
+> (`backend/app` → `/api/v1/openapi.json`, mirrored to
+> `frontend/openapi.json`) as authoritative.
+>
+> **Registration is a *broker* endpoint**, not an agent one:
+> `POST {FRONTEND_URL}/api/v1/agents/register`. The registration body also
+> includes `platform`, `type`, and the running-server report
+> (`running_server_ids`, `healthy_server_ids`, `server_statuses[]` with
+> `slot_generation` + `effective_capacity`), and there is **no**
+> `inference_slot_protocol` field (removed in `2359429`).
+
 ### Agent Registration
 
 #### Register Agent
 
-**POST** `/api/agents/register`
+**POST** `/api/v1/agents/register` (broker)
 
-Called by Agent on startup to register with Frontend.
+Called by Agent on startup to register with the broker.
 
 **Request Body:**
 ```json
 {
   "agent_id": "agent-uuid",
   "name": "inference-agent-1",
+  "platform": "llamacpp",
+  "type": "generic",
   "host": "agent-hostname",
   "port": 8080,
   "gpu_info": {
     "name": "NVIDIA RTX 4090",
     "vram_total": 24576000000,
     "backend": "cuda"
-  }
+  },
+  "running_server_ids": ["..."],
+  "healthy_server_ids": ["..."],
+  "server_statuses": [
+    { "id": "...", "status": "running", "health_status": "healthy",
+      "port": 8081, "slot_generation": 3, "effective_capacity": 2 }
+  ]
 }
 ```
 

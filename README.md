@@ -45,14 +45,30 @@ Drop-in replacement for OpenAI API with full compatibility:
 - **Real-time monitoring** - VRAM usage, tokens/sec, queue depth
 - **GPU configuration** - Per-model GPU layer settings
 - **Conversation history** - Tree-structured for /v1/responses
-- **Backup/restore** - Database and configurations
 
 ### 💾 Data Persistence
 
 - **PostgreSQL** for metadata storage
 - **Tree-structured conversations** for Responses API
-- **Prompt cache tracking** with TTL management
-- **Full backup/restore** capabilities
+- **OpenAI `prompt_cache_key` pass-through** to engines (per-process caching)
+
+> **Backup is `pg_dump` only.** There is no `app.services.backup` module and no
+> in-app backup/restore feature; see the corrected procedure in
+> `docs/user-guide.md` → Backup & Restore.
+>
+> **Prompt cache is metadata-only and currently dormant.** The `prompt_cache`
+> table exists but no live route writes to it — the backend `cache.py` and
+> `llama_server.py` modules that would are dead code (see AGENTS.md). Actual
+> prompt caching is handled inside each engine process, not by the broker.
+
+### 🔒 Security
+
+There is **no authentication anywhere** in the broker or the agent. Any network
+client that can reach the ports can register agents, start/stop servers, forward
+arbitrary commands, and read/write files. Both are trusted purely by network
+position — firewall them and never expose the agent directly. See
+`docs/architecture.md` → Security Considerations for the full list of exposed
+surfaces.
 
 ## Quick Start
 
@@ -68,14 +84,24 @@ Edit `.env` with your settings:
 ```bash
 POSTGRES_PASSWORD=your_secure_password
 DEFAULT_GPU_LAYERS=35
-MODELS_PATH=/models
 ```
+
+> The broker builds its database URL from `POSTGRES_USER` / `POSTGRES_PASSWORD` /
+> `POSTGRES_DB` / `POSTGRES_HOST` / `POSTGRES_PORT` (`backend/app/core/config.py`).
+> A single `DATABASE_URL` is **ignored** (`extra="ignore"`), and `MODELS_PATH` /
+> `FILES_PATH` / `CACHE_PATH` default to absolute in-container paths
+> (`/models`, `/files`, `/cache`) that must be volume-mounted, not set to host
+> paths. See the Compose caveat below.
 
 ### 2. Start services
 
-```bash
-docker compose up -d
-```
+> **Caveat: the Compose stack in this repo does not currently come up as written.**
+> `compose.yml` names its services `postgres`/`frontend`/`agent`, while
+> `compose.override.yml` and `compose.deploy.yml` reference `db`/`backend`/
+> `adminer`/`proxy` (with a non-existent `backend/Dockerfile`) and collide on
+> ports 8000/8080. `docker compose up -d` will fail until these are reconciled.
+> For now, run the backend and frontend locally (see `development.md`) or build
+> and run the single root `Dockerfile`.
 
 ### 3. Access the application
 
@@ -228,19 +254,22 @@ Auto-configured with sensible defaults:
 
 ## Backup & Restore
 
-### Create backup
+There is no `app.services.backup` module and no in-app backup feature. Back up the
+PostgreSQL database with `pg_dump` and the model/file directories separately:
+
 ```bash
-docker compose exec backend \
-  python -m app.services.backup create \
-  --output /backups/backup-$(date +%Y%m%d).tar.gz
+# Dump the database (compose service: postgres)
+docker compose exec -T postgres \
+  pg_dump -U inference -d inference_matrix | gzip > matrix-$(date +%Y%m%d).sql.gz
+
+# Restore into an empty database
+gunzip -c matrix-20261001.sql.gz | \
+  docker compose exec -T postgres psql -U inference -d inference_matrix
+
+# Back up model + uploaded-file volumes separately (GGUFs are not in the DB)
 ```
 
-### Restore backup
-```bash
-docker compose exec backend \
-  python -m app.services.backup restore \
-  /backups/backup-20240101.tar.gz
-```
+See `docs/user-guide.md` → Backup & Restore for details.
 
 ## Troubleshooting
 
@@ -306,7 +335,7 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ### Prometheus Metrics
 
-Access metrics at: `http://localhost:8000/metrics`
+Access metrics at: `http://localhost:8000/api/v1/metrics`
 
 **Available metrics:**
 - Agent count and status
@@ -314,7 +343,8 @@ Access metrics at: `http://localhost:8000/metrics`
 - Inference request latency (histogram)
 - Tokens generated
 - VRAM usage per GPU
-- Prompt cache size
+- Prompt cache size (`inference_matrix_cache_size_bytes` — defined but never
+  populated, so it always reports 0; see the dormant prompt-cache note above)
 
 **Prometheus configuration:**
 ```yaml
@@ -322,14 +352,14 @@ scrape_configs:
   - job_name: 'inference-matrix'
     static_configs:
       - targets: ['frontend:8000']
-    metrics_path: '/metrics'
+    metrics_path: '/api/v1/metrics'
 ```
 
 ### Real-Time Monitoring
 
 - **WebUI Dashboard** - Live agent status, GPU usage, server health
 - **WebSocket Events** - Real-time updates for server lifecycle, downloads, GPU metrics
-- **Health Checks** - `/api/health` on both frontend and agent services
+- **Health Checks** - `GET /api/v1/utils/health-check/` on the broker and `GET /health` on the agent
 
 ### Logging
 

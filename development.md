@@ -52,6 +52,20 @@ The build is written to `backend/app/frontend` and served by FastAPI at <http://
 
 ## Full Stack with Docker Compose
 
+> **Warning — the Compose files in this repo are inconsistent and the commands in
+> this section are known-broken as written.** `compose.yml` defines the services
+> `postgres`, `frontend`, and `agent`. `compose.override.yml` (and
+> `compose.deploy.yml`) reference `db`, `adminer`, `backend`, `proxy`, and
+> `playwright`, which are **not** defined in the base. `db`/`adminer` have no
+> `image:` or `build:`, and `backend` points at `backend/Dockerfile`, which does
+> not exist. `docker compose -f compose.yml -f compose.override.yml config`
+> therefore fails, and the ports also collide (`frontend` and `backend` both map
+> `8000`; `agent` and `adminer` both map `8080`). These instructions are inherited
+> from the upstream full-stack template and have not been reconciled with the
+> renamed services. Until the Compose files are fixed, use the local
+> development workflow at the top of this file (`uv run fastapi dev` + `bun run
+> dev`) or build/run the single root `Dockerfile` directly.
+
 To run the backend and built frontend in Docker Compose:
 
 ```bash
