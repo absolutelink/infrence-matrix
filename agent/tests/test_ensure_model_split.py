@@ -37,9 +37,9 @@ async def test_ensure_model_split_all_present_returns_primary(tmp_models: Path) 
         "job_id": "job-1",
     }
     # No download should occur when all parts are present.
-    model_manager.download_model_parts = AsyncMock(side_effect=AssertionError(
-        "should not download when all parts present"
-    ))
+    model_manager.download_model_parts = AsyncMock(
+        side_effect=AssertionError("should not download when all parts present")
+    )
 
     result = await servers._ensure_model(f"/models/{repo}/model.gguf", source)
     assert result == str(repo_dir / "model-00001-of-00002.gguf")
@@ -90,3 +90,90 @@ async def test_ensure_model_missing_no_source_raises(
     with pytest.raises(HTTPException) as exc:
         await servers._ensure_model("/models/absent.gguf", None)
     assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_ensure_model_gufo_aux_downloads_when_missing(
+    tmp_models: Path,
+) -> None:
+    """A Gufo aux source dict (path + repo_id + filenames + server_id)
+    downloads the file to ``MODELS_PATH/repo/file`` when it is missing and
+    returns that path (== the engine_options path the binary uses)."""
+    repo = "aux-org/mmproj"
+    aux_path = f"/models/{repo}/vision.gguf"
+    aux = {
+        "key": "mmproj",
+        "path": aux_path,
+        "source": "huggingface",
+        "repo_id": repo,
+        "filename": "vision.gguf",
+        "filenames": ["vision.gguf"],
+        "job_id": "server-abc-mmproj",
+        "server_id": "abc",
+    }
+    expected = str(tmp_models / repo / "vision.gguf")
+    mock = AsyncMock(return_value=expected)
+    model_manager.download_model_parts = mock
+
+    result = await servers._ensure_model(aux_path, aux)
+
+    assert result == expected
+    mock.assert_awaited_once()
+    assert mock.await_args.kwargs["repo_id"] == repo
+    assert mock.await_args.kwargs["filenames"] == ["vision.gguf"]
+    assert mock.await_args.kwargs["server_id"] == "abc"
+
+
+@pytest.mark.asyncio
+async def test_ensure_model_gufo_aux_split_uses_primary(
+    tmp_models: Path,  # noqa: ARG001
+) -> None:
+    repo = "aux-org/mtp"
+    aux_path = f"/models/{repo}/mtp.gguf"
+    aux = {
+        "key": "mtp_model",
+        "path": aux_path,
+        "source": "huggingface",
+        "repo_id": repo,
+        "filename": "mtp-00001-of-00002.gguf",
+        "filenames": [
+            "mtp-00001-of-00002.gguf",
+            "mtp-00002-of-00002.gguf",
+        ],
+        "job_id": "server-xyz-mtp_model",
+        "server_id": "xyz",
+    }
+    expected = str(tmp_models / repo / "mtp-00001-of-00002.gguf")
+    mock = AsyncMock(return_value=expected)
+    model_manager.download_model_parts = mock
+
+    result = await servers._ensure_model(aux_path, aux)
+
+    assert result == expected
+    assert mock.await_args.kwargs["filenames"] == aux["filenames"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_model_gufo_aux_already_present_skips_download(
+    tmp_models: Path,
+) -> None:
+    repo = "aux-org/present"
+    aux_path = f"/models/{repo}/mm.gguf"
+    (tmp_models / repo).mkdir(parents=True)
+    (tmp_models / repo / "mm.gguf").write_bytes(b"x")
+    aux = {
+        "key": "mmproj",
+        "path": aux_path,
+        "source": "huggingface",
+        "repo_id": repo,
+        "filename": "mm.gguf",
+        "filenames": ["mm.gguf"],
+        "job_id": "server-1-mmproj",
+        "server_id": "1",
+    }
+    mock = AsyncMock(side_effect=AssertionError("should not download when present"))
+    model_manager.download_model_parts = mock
+
+    result = await servers._ensure_model(aux_path, aux)
+
+    assert result == str(tmp_models / repo / "mm.gguf")

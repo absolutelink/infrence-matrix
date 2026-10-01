@@ -52,6 +52,13 @@ READY_POLL_INTERVAL = 1.0
 
 SPLIT_PART_RE = re.compile(r"^(?P<base>.+)-(?P<idx>\d+)-of-(?P<total>\d+)\.gguf$")
 
+# Gufo engine_options keys that reference auxiliary GGUF files by their
+# library Model.path. Unlike llama.cpp (mmproj_source / draft_source) and
+# Halogen (full repo download), Gufo passes these paths straight to the
+# binary as flags, so each referenced file must be downloaded to that exact
+# path before the process starts.
+GUFO_AUX_KEYS = ("mmproj", "dflash_model", "dspark_model", "mtp_model")
+
 
 def resolve_model_filenames(model: Model) -> list[str]:
     """Return the ordered list of GGUF part filenames for a model.
@@ -93,6 +100,57 @@ def pick_primary_filename(filenames: list[str]) -> str:
         if m and int(m.group("idx")) == 1:
             return name
     return filenames[0]
+
+
+async def attach_aux_sources(payload: dict[str, Any]) -> None:
+    """Resolve Gufo engine_options aux file paths to download sources.
+
+    Mutates ``payload["aux_sources"]`` to a list of source dicts (same shape
+    as the mmproj/draft source dicts: source, repo_id, filename, filenames,
+    job_id, server_id, plus "path" = the engine_options path the binary uses).
+    Only Gufo has aux-by-path; other engines get an empty list. A missing
+    Model row or a model without a source_repo_id is skipped (must be
+    pre-placed manually). Never raises on odd payloads.
+    """
+    payload.setdefault("aux_sources", [])
+    config = payload.get("config") or {}
+    if config.get("engine") != "gufo":
+        return
+    engine_options = config.get("engine_options") or {}
+    server_id = str(config.get("id", ""))
+    aux_sources: list[dict[str, Any]] = []
+    async with AsyncSessionMaker() as session:
+        for key in GUFO_AUX_KEYS:
+            raw = engine_options.get(key)
+            if not isinstance(raw, str) or not raw.strip() or raw == "default":
+                continue
+            path = raw.strip()
+            aux_model = (
+                (await session.execute(select(Model).where(Model.path == path)))
+                .scalars()
+                .first()
+            )
+            if aux_model is None or not aux_model.source_repo_id:
+                logger.warning(
+                    "Gufo aux %s path %s has no downloadable source; skipping",
+                    key,
+                    path,
+                )
+                continue
+            filenames = resolve_model_filenames(aux_model)
+            aux_sources.append(
+                {
+                    "key": key,
+                    "path": path,
+                    "source": aux_model.source,
+                    "repo_id": aux_model.source_repo_id,
+                    "filename": pick_primary_filename(filenames),
+                    "filenames": filenames,
+                    "job_id": f"server-{server_id}-{key}",
+                    "server_id": server_id,
+                }
+            )
+    payload["aux_sources"] = aux_sources
 
 
 async def _send_start_with_gate(
@@ -285,6 +343,7 @@ async def dispatch_start(
     agent_id: str, server_id: str, payload: dict[str, Any]
 ) -> None:
     """Send the start command to the agent, marking failure on the row."""
+    await attach_aux_sources(payload)
     expected_generation = int(payload["config"].get("slot_generation", 0))
     try:
         response = await _send_start_with_gate(
@@ -392,6 +451,7 @@ async def initialize_server(
     accidentally started or advertised.
     """
     server_uuid = uuid_module.UUID(server_id)
+    await attach_aux_sources(request)
 
     async with AsyncSessionMaker() as session:
         instance = (

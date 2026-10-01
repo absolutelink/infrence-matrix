@@ -68,6 +68,9 @@ class ServerStartRequest(BaseModel):
     mmproj_source: dict[str, Any] | None = None
     # Same shape as source, for the dflash draft model
     draft_source: dict[str, Any] | None = None
+    # Gufo engine_options aux files (mmproj / dflash / dspark / mtp), each
+    # resolved to a download source plus the exact "path" the binary uses.
+    aux_sources: list[dict[str, Any]] | None = None
 
 
 STRICT_PLATFORMS = ("halogen", "halogen-flash", "gufo")
@@ -133,6 +136,9 @@ async def prepare_server(request: ServerStartRequest) -> dict:
             draft_model_path = await _ensure_model(
                 request.config.draft_model_path, request.draft_source
             )
+        for aux in request.aux_sources or []:
+            if aux.get("path"):
+                await _ensure_model(aux["path"], aux)
         return {
             "status": "prepared",
             "server_id": request.config.id,
@@ -368,6 +374,12 @@ async def start_server(request: ServerStartRequest) -> dict:
             draft_model_path = await _ensure_model(
                 request.config.draft_model_path, request.draft_source
             )
+
+        # Gufo aux files (mmproj / dflash / dspark / mtp) are referenced by
+        # engine_options path and must exist at that exact path before spawn.
+        for aux in request.aux_sources or []:
+            if aux.get("path"):
+                await _ensure_model(aux["path"], aux)
 
         # The agent owns port allocation: pick a free random port unless the
         # caller pinned one explicitly.
