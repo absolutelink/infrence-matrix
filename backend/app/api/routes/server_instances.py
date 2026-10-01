@@ -641,7 +641,7 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
                     InferenceLease.status == "active",
                 )
             )
-            if active_leases.scalar_one_or_none() is not None:
+            if active_leases.first() is not None:
                 raise HTTPException(
                     status_code=409,
                     detail="Server has active inference requests and cannot restart",
