@@ -12,7 +12,7 @@ import {
   Trash2,
   Zap,
 } from "lucide-react"
-import { useMemo, useState } from "react"
+import { useMemo, useRef, useState } from "react"
 import { toast } from "sonner"
 
 import { AgentsService, ServerInstancesService } from "@/client"
@@ -98,156 +98,169 @@ export function useColumns(): ColumnDef<ServerInstance>[] {
     return map
   }, [status])
 
-  return [
-    {
-      accessorKey: "alias",
-      header: "Alias",
-      cell: ({ row }) => {
-        const instance = row.original
-        return (
-          <div>
-            <div className="font-medium">{instance.alias || "—"}</div>
-            <div className="text-xs text-muted-foreground">
-              {instance.engine === "halogen" ||
-              instance.engine === "halogen-flash"
-                ? instance.engine === "halogen-flash"
-                  ? "Halogen Flash"
-                  : "Halogen"
-                : instance.model_name || "Unknown"}
-            </div>
-          </div>
-        )
-      },
-    },
-    {
-      accessorKey: "agent_name",
-      header: "Agent",
-      cell: ({ row }) => {
-        const instance = row.original
-        return (
-          <div>
-            <div className="font-medium">
-              {instance.agent_name || "Unknown"}
-            </div>
-            <div className="text-xs text-muted-foreground">
-              {instance.agent_host}:{instance.agent_port}
-            </div>
-          </div>
-        )
-      },
-    },
-    {
-      accessorKey: "status",
-      header: "Status",
-      cell: ({ row }) => {
-        const instance = row.original
-        const statusColors: Record<
-          string,
-          "default" | "secondary" | "destructive" | "outline"
-        > = {
-          running: "default",
-          starting: "secondary",
-          stopping: "secondary",
-          stopped: "secondary",
-          healthy: "default",
-          unhealthy: "destructive",
-          initialization_failed: "destructive",
-          metadata_gathering: "secondary",
-          preparing: "secondary",
-          uninitialized: "outline",
-          unknown: "outline",
-        }
+  // Keep the latest lookup maps in refs so the column definitions (and their
+  // cell render functions) stay referentially stable across data refreshes.
+  // Otherwise TanStack Table rebuilds the column model every refresh, which
+  // remounts cells (e.g. the actions dropdown) and drops their open state.
+  const throughputRef = useRef(throughputById)
+  throughputRef.current = throughputById
+  const queueRef = useRef(queueById)
+  queueRef.current = queueById
 
-        const statusVariant = statusColors[instance.status] || "outline"
-        const healthVariant = statusColors[instance.health_status] || "outline"
-        const statusLabel =
-          instance.status === "starting"
-            ? "booting"
-            : instance.status === "metadata_gathering"
-              ? "gathering metadata"
-              : instance.status
+  return useMemo<ColumnDef<ServerInstance>[]>(
+    () => [
+      {
+        accessorKey: "alias",
+        header: "Alias",
+        cell: ({ row }) => {
+          const instance = row.original
+          return (
+            <div>
+              <div className="font-medium">{instance.alias || "—"}</div>
+              <div className="text-xs text-muted-foreground">
+                {instance.engine === "halogen" ||
+                instance.engine === "halogen-flash"
+                  ? instance.engine === "halogen-flash"
+                    ? "Halogen Flash"
+                    : "Halogen"
+                  : instance.model_name || "Unknown"}
+              </div>
+            </div>
+          )
+        },
+      },
+      {
+        accessorKey: "agent_name",
+        header: "Agent",
+        cell: ({ row }) => {
+          const instance = row.original
+          return (
+            <div>
+              <div className="font-medium">
+                {instance.agent_name || "Unknown"}
+              </div>
+              <div className="text-xs text-muted-foreground">
+                {instance.agent_host}:{instance.agent_port}
+              </div>
+            </div>
+          )
+        },
+      },
+      {
+        accessorKey: "status",
+        header: "Status",
+        cell: ({ row }) => {
+          const instance = row.original
+          const statusColors: Record<
+            string,
+            "default" | "secondary" | "destructive" | "outline"
+          > = {
+            running: "default",
+            starting: "secondary",
+            stopping: "secondary",
+            stopped: "secondary",
+            healthy: "default",
+            unhealthy: "destructive",
+            initialization_failed: "destructive",
+            metadata_gathering: "secondary",
+            preparing: "secondary",
+            uninitialized: "outline",
+            unknown: "outline",
+          }
 
-        return (
-          <div className="flex flex-col items-start gap-1">
-            <div className="flex gap-2">
-              <Badge variant={statusVariant}>{statusLabel}</Badge>
-              <Badge variant={healthVariant} className="text-xs">
-                {instance.health_status}
-              </Badge>
-            </div>
-            {instance.last_health_check && (
-              <span
-                className="text-[11px] text-muted-foreground"
-                title="Last updated"
-              >
-                Updated{" "}
-                {new Date(instance.last_health_check).toLocaleTimeString()}
-              </span>
-            )}
-            {instance.error_message && (
-              <span
-                className="max-w-64 truncate text-xs text-destructive"
-                title={instance.error_message}
-              >
-                {instance.error_message}
-              </span>
-            )}
-          </div>
-        )
-      },
-    },
-    {
-      id: "throughput",
-      header: "Throughput",
-      cell: ({ row }) => {
-        const stats = throughputById.get(row.original.id)
-        return (
-          <div className="flex flex-col gap-1 text-xs">
-            <div className="flex items-center gap-1">
-              <Zap className="h-3 w-3 text-emerald-500" />
-              <span>{formatRate(stats?.decode)} tok/s</span>
-            </div>
-            <div className="flex items-center gap-1">
-              <Rocket className="h-3 w-3 text-sky-500" />
-              <span>{formatRate(stats?.prefill)} tok/s</span>
-            </div>
-          </div>
-        )
-      },
-    },
-    {
-      id: "slots_queue",
-      header: "Slots / Queue",
-      cell: ({ row }) => {
-        const slot = queueById.get(row.original.id)
-        const active = slot?.active ?? 0
-        const capacity = slot?.capacity ?? 0
-        const queued = slot?.queued ?? 0
-        return (
-          <div className="flex flex-col gap-1 text-xs">
-            <div className="flex items-center gap-1">
-              <span className="font-medium">
-                {active}/{capacity}
-              </span>
-              <span className="text-muted-foreground">slots</span>
-            </div>
-            <div className="flex items-center gap-1">
-              <ListOrdered className="h-3 w-3" />
-              <span>{queued} queued</span>
-            </div>
-          </div>
-        )
-      },
-    },
-    {
-      id: "actions",
-      cell: ({ row }) => {
-        const instance = row.original
+          const statusVariant = statusColors[instance.status] || "outline"
+          const healthVariant =
+            statusColors[instance.health_status] || "outline"
+          const statusLabel =
+            instance.status === "starting"
+              ? "booting"
+              : instance.status === "metadata_gathering"
+                ? "gathering metadata"
+                : instance.status
 
-        return <InstanceActions instance={instance} />
+          return (
+            <div className="flex flex-col items-start gap-1">
+              <div className="flex gap-2">
+                <Badge variant={statusVariant}>{statusLabel}</Badge>
+                <Badge variant={healthVariant} className="text-xs">
+                  {instance.health_status}
+                </Badge>
+              </div>
+              {instance.last_health_check && (
+                <span
+                  className="text-[11px] text-muted-foreground"
+                  title="Last updated"
+                >
+                  Updated{" "}
+                  {new Date(instance.last_health_check).toLocaleTimeString()}
+                </span>
+              )}
+              {instance.error_message && (
+                <span
+                  className="max-w-64 truncate text-xs text-destructive"
+                  title={instance.error_message}
+                >
+                  {instance.error_message}
+                </span>
+              )}
+            </div>
+          )
+        },
       },
-    },
-  ]
+      {
+        id: "throughput",
+        header: "Throughput",
+        cell: ({ row }) => {
+          const stats = throughputRef.current.get(row.original.id)
+          return (
+            <div className="flex flex-col gap-1 text-xs">
+              <div className="flex items-center gap-1">
+                <Zap className="h-3 w-3 text-emerald-500" />
+                <span>{formatRate(stats?.decode)} tok/s</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <Rocket className="h-3 w-3 text-sky-500" />
+                <span>{formatRate(stats?.prefill)} tok/s</span>
+              </div>
+            </div>
+          )
+        },
+      },
+      {
+        id: "slots_queue",
+        header: "Slots / Queue",
+        cell: ({ row }) => {
+          const slot = queueRef.current.get(row.original.id)
+          const active = slot?.active ?? 0
+          const capacity = slot?.capacity ?? 0
+          const queued = slot?.queued ?? 0
+          return (
+            <div className="flex flex-col gap-1 text-xs">
+              <div className="flex items-center gap-1">
+                <span className="font-medium">
+                  {active}/{capacity}
+                </span>
+                <span className="text-muted-foreground">slots</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <ListOrdered className="h-3 w-3" />
+                <span>{queued} queued</span>
+              </div>
+            </div>
+          )
+        },
+      },
+      {
+        id: "actions",
+        cell: ({ row }) => {
+          const instance = row.original
+
+          return <InstanceActions instance={instance} />
+        },
+      },
+    ],
+    [],
+  )
 }
 
 function InstanceActions({ instance }: { instance: ServerInstance }) {
