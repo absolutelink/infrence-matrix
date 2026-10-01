@@ -408,7 +408,7 @@ export function GufoSettingsFields({ options, onChange, models = [] }: Props) {
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             {modelPathSelect("dflash_model", "DFlash2 draft model", "dflash")}
             {modelPathSelect("dspark_model", "DSpark support model", "llm")}
-            {modelPathSelect("mtp_model", "MTP draft model", "llm")}
+            {modelPathSelect("mtp_model", "MTP draft model", "mtp")}
           </div>
           {numberFields([
             ["draft_tokens", "Draft tokens per step", 1, "1"],
