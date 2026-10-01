@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import type { Model } from "@/client"
 import { ModelsService, ServerInstancesService } from "@/client"
+import { ModelSelect } from "@/components/Models/ModelSelect"
 import {
   type GufoOptions,
   GufoSettingsFields,
@@ -25,13 +26,6 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { LoadingButton } from "@/components/ui/loading-button"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
 import {
   Sheet,
   SheetContent,
@@ -93,6 +87,7 @@ export function EditServerDialog({
     },
     enabled: isOpen,
   })
+  const allModels = (modelsQuery.data ?? []) as Model[]
 
   const prevOpenRef = useRef(false)
   useEffect(() => {
@@ -222,69 +217,42 @@ export function EditServerDialog({
             ) : (
               <div className="col-span-2">
                 <Label>dflash draft model</Label>
-                <Select value={dflashModelId} onValueChange={setDflashModelId}>
-                  <SelectTrigger className="mt-1">
-                    <SelectValue placeholder="None (standard MTP)" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="none">None</SelectItem>
-                    {((modelsQuery.data ?? []) as Model[])
-                      .filter((model) => model.model_type === "dflash")
-                      .map((model) => (
-                        <SelectItem
-                          key={model.id ?? model.name}
-                          value={model.id ?? model.name}
-                        >
-                          {model.name}
-                        </SelectItem>
-                      ))}
-                  </SelectContent>
-                </Select>
+                <ModelSelect
+                  className="mt-1"
+                  models={allModels}
+                  modelType="dflash"
+                  value={dflashModelId}
+                  onValueChange={setDflashModelId}
+                  placeholder="None (standard MTP)"
+                  extraItems={[{ value: "none", label: "None" }]}
+                />
               </div>
             )}
             {(instance.engine === "llamacpp" || instance.engine === "gufo") && (
               <div className="col-span-2">
                 <Label>Model</Label>
-                <Select value={modelId} onValueChange={setModelId}>
-                  <SelectTrigger className="mt-1">
-                    <SelectValue placeholder="Select a model" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {((modelsQuery.data ?? []) as Model[])
-                      .filter((model) => model.model_type === "llm")
-                      .map((model) => (
-                        <SelectItem
-                          key={model.id ?? model.name}
-                          value={model.id ?? model.name}
-                        >
-                          {model.name}
-                        </SelectItem>
-                      ))}
-                  </SelectContent>
-                </Select>
+                <ModelSelect
+                  className="mt-1"
+                  models={allModels}
+                  modelType="llm"
+                  value={modelId}
+                  onValueChange={setModelId}
+                  placeholder="Select a model"
+                />
               </div>
             )}
             {instance.engine === "llamacpp" && (
               <div className="col-span-2">
                 <Label>mmproj (vision projector)</Label>
-                <Select value={mmprojModelId} onValueChange={setMmprojModelId}>
-                  <SelectTrigger className="mt-1">
-                    <SelectValue placeholder="None (no --mmproj flag)" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="none">None</SelectItem>
-                    {((modelsQuery.data ?? []) as Model[])
-                      .filter((model) => model.model_type === "mmproj")
-                      .map((model) => (
-                        <SelectItem
-                          key={model.id ?? model.name}
-                          value={model.id ?? model.name}
-                        >
-                          {model.name}
-                        </SelectItem>
-                      ))}
-                  </SelectContent>
-                </Select>
+                <ModelSelect
+                  className="mt-1"
+                  models={allModels}
+                  modelType="mmproj"
+                  value={mmprojModelId}
+                  onValueChange={setMmprojModelId}
+                  placeholder="None (no --mmproj flag)"
+                  extraItems={[{ value: "none", label: "None" }]}
+                />
               </div>
             )}
             {instance.engine === "llamacpp" && (

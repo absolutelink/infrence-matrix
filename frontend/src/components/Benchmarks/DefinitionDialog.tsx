@@ -4,6 +4,7 @@ import { toast } from "sonner"
 
 import type { Model, ServerInstanceResponse } from "@/client"
 import { AgentsService, ModelsService, ServerInstancesService } from "@/client"
+import { ModelSelect } from "@/components/Models/ModelSelect"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
@@ -148,15 +149,7 @@ export function DefinitionDialog({
       ),
   })
 
-  const models = ((modelsQuery.data ?? []) as Model[]).filter(
-    (model) => model.model_type === "llm",
-  )
-  const mmprojModels = ((modelsQuery.data ?? []) as Model[]).filter(
-    (model) => model.model_type === "mmproj",
-  )
-  const dflashModels = ((modelsQuery.data ?? []) as Model[]).filter(
-    (model) => model.model_type === "dflash",
-  )
+  const allModels = (modelsQuery.data ?? []) as Model[]
   const agents = (agentsQuery.data ?? []) as Array<{
     id: string
     name: string
@@ -188,19 +181,15 @@ export function DefinitionDialog({
           </div>
           <div className="col-span-2">
             <Label>dflash draft model</Label>
-            <Select value={dflashModelId} onValueChange={setDflashModelId}>
-              <SelectTrigger className="mt-1">
-                <SelectValue placeholder="None (standard MTP)" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="none">None</SelectItem>
-                {dflashModels.map((model) => (
-                  <SelectItem key={model.id} value={model.id as string}>
-                    {model.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <ModelSelect
+              className="mt-1"
+              models={allModels}
+              modelType="dflash"
+              value={dflashModelId}
+              onValueChange={setDflashModelId}
+              placeholder="None (standard MTP)"
+              extraItems={[{ value: "none", label: "None" }]}
+            />
           </div>
           <div className="col-span-2">
             <Label htmlFor="benchmark-description">Description</Label>
@@ -213,18 +202,14 @@ export function DefinitionDialog({
           </div>
           <div className="col-span-2">
             <Label>Model</Label>
-            <Select value={modelId} onValueChange={setModelId}>
-              <SelectTrigger className="mt-1">
-                <SelectValue placeholder="Select a model" />
-              </SelectTrigger>
-              <SelectContent>
-                {models.map((model) => (
-                  <SelectItem key={model.id} value={model.id as string}>
-                    {model.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <ModelSelect
+              className="mt-1"
+              models={allModels}
+              modelType="llm"
+              value={modelId}
+              onValueChange={setModelId}
+              placeholder="Select a model"
+            />
           </div>
           <div className="col-span-2">
             <Label>Agent</Label>
@@ -243,19 +228,15 @@ export function DefinitionDialog({
           </div>
           <div className="col-span-2">
             <Label>mmproj (vision projector)</Label>
-            <Select value={mmprojModelId} onValueChange={setMmprojModelId}>
-              <SelectTrigger className="mt-1">
-                <SelectValue placeholder="None" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="none">None</SelectItem>
-                {mmprojModels.map((model) => (
-                  <SelectItem key={model.id} value={model.id as string}>
-                    {model.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <ModelSelect
+              className="mt-1"
+              models={allModels}
+              modelType="mmproj"
+              value={mmprojModelId}
+              onValueChange={setMmprojModelId}
+              placeholder="None"
+              extraItems={[{ value: "none", label: "None" }]}
+            />
           </div>
           <div>
             <Label htmlFor="benchmark-gpu">GPU layers</Label>

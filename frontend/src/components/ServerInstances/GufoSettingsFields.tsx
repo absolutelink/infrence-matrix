@@ -1,5 +1,11 @@
 import { Info } from "lucide-react"
 import type { Model } from "@/client"
+import {
+  ModelPathFallbackItem,
+  ModelSelect,
+  type ModelSelectExtraItem,
+  modelBasename,
+} from "@/components/Models/ModelSelect"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -296,30 +302,28 @@ export function GufoSettingsFields({ options, onChange, models = [] }: Props) {
   ) => {
     const current = options[key] as string | undefined
     const isLibraryValue = models.some((model) => model.path === current)
+    const extraItems: ModelSelectExtraItem[] = [
+      { value: "default", label: "Server default" },
+    ]
+    if (current && current !== "default" && !isLibraryValue) {
+      extraItems.push({
+        value: current,
+        label: <ModelPathFallbackItem path={current} />,
+        triggerText: modelBasename(current),
+      })
+    }
     return (
       <div>
         <OptionLabel name={key} label={label} />
-        <Select
+        <ModelSelect
+          className="mt-1"
+          models={models}
+          modelType={modelType}
+          valueKey="path"
           value={current ?? "default"}
           onValueChange={(value) => setEnum(key, value)}
-        >
-          <SelectTrigger className="mt-1">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="default">Server default</SelectItem>
-            {models
-              .filter((model) => model.model_type === modelType)
-              .map((model) => (
-                <SelectItem key={model.id} value={model.path as string}>
-                  {model.name}
-                </SelectItem>
-              ))}
-            {current !== undefined && !isLibraryValue && (
-              <SelectItem value={current}>{current}</SelectItem>
-            )}
-          </SelectContent>
-        </Select>
+          extraItems={extraItems}
+        />
       </div>
     )
   }
@@ -400,7 +404,7 @@ export function GufoSettingsFields({ options, onChange, models = [] }: Props) {
             ])}
             {enumSelect("draft_policy", "Draft policy", ["fixed", "adaptive"])}
           </div>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div className="space-y-4">
             {modelPathSelect("dflash_model", "DFlash2 draft model", "dflash")}
             {modelPathSelect("dspark_model", "DSpark support model", "llm")}
             {modelPathSelect("mtp_model", "MTP draft model", "mtp")}
