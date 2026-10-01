@@ -177,3 +177,62 @@ async def test_ensure_model_gufo_aux_already_present_skips_download(
     result = await servers._ensure_model(aux_path, aux)
 
     assert result == str(tmp_models / repo / "mm.gguf")
+
+
+@pytest.mark.asyncio
+async def test_prepare_rewrites_gufo_aux_engine_option_to_subfolder_path(
+    tmp_models: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: Qwen3.8-Flash-Next MTP downloads into a repo SUBFOLDER, but
+    engine_options recorded the library Model.path (repo root). prepare_server
+    must rewrite engine_options[key] to the actual on-disk (subfolder) path so
+    the gufo binary reads the file where it landed."""
+    from app.core.config import settings
+
+    # Allow the gufo engine on this test agent platform.
+    monkeypatch.setattr(settings, "AGENT_PLATFORM", "gufo")
+
+    repo = "org/qwen3.8-flash-next"
+    # Library path points at the repo root; the file actually lives in mtp/.
+    stale_root_path = f"/models/{repo}/mtp.gguf"
+    subfolder_path = str(tmp_models / repo / "mtp" / "mtp.gguf")
+    aux = {
+        "key": "mtp_model",
+        "path": stale_root_path,
+        "source": "huggingface",
+        "repo_id": repo,
+        "filename": "mtp/mtp.gguf",
+        "filenames": ["mtp/mtp.gguf"],
+        "job_id": "server-flash-mtp_model",
+        "server_id": "flash",
+    }
+    # Simulate the download landing in the subfolder.
+    (tmp_models / repo / "mtp").mkdir(parents=True)
+    (tmp_models / repo / "mtp" / "mtp.gguf").write_bytes(b"x")
+
+    request = servers.ServerStartRequest(
+        config=servers.ServerSpec(
+            id="flash",
+            model_path=f"/models/{repo}/base.gguf",
+            engine="gufo",
+            engine_options={"mtp_model": stale_root_path},
+        ),
+        source={
+            "source": "huggingface",
+            "repo_id": repo,
+            "filename": "base.gguf",
+            "filenames": ["base.gguf"],
+            "job_id": "server-flash",
+            "server_id": "flash",
+        },
+        aux_sources=[aux],
+    )
+    # Avoid downloading the main base model; it is not the focus here.
+    (tmp_models / repo / "base.gguf").write_bytes(b"b")
+
+    result = await servers.prepare_server(request)
+
+    assert result["status"] == "prepared"
+    # The stale root path must have been replaced by the real subfolder path.
+    assert request.config.engine_options["mtp_model"] == subfolder_path
+    assert request.config.engine_options["mtp_model"] != stale_root_path

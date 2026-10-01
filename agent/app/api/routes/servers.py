@@ -138,7 +138,15 @@ async def prepare_server(request: ServerStartRequest) -> dict:
             )
         for aux in request.aux_sources or []:
             if aux.get("path"):
-                await _ensure_model(aux["path"], aux)
+                resolved = await _ensure_model(aux["path"], aux)
+                # The file may live in a repo SUBFOLDER (e.g. the Qwen3.8-Flash-Next
+                # MTP sidecar under ``mtp/``), so its on-disk path differs from the
+                # library ``Model.path`` recorded in engine_options. Rewrite the
+                # option to the actual resolved path so the binary reads the file
+                # where it was downloaded, not the repo-root path.
+                key = aux.get("key")
+                if key:
+                    request.config.engine_options[key] = resolved
         return {
             "status": "prepared",
             "server_id": request.config.id,
@@ -379,7 +387,16 @@ async def start_server(request: ServerStartRequest) -> dict:
         # engine_options path and must exist at that exact path before spawn.
         for aux in request.aux_sources or []:
             if aux.get("path"):
-                await _ensure_model(aux["path"], aux)
+                resolved = await _ensure_model(aux["path"], aux)
+                # The file may live in a repo SUBFOLDER (e.g. the Qwen3.8-Flash-Next
+                # MTP sidecar under ``mtp/``), so its on-disk path differs from the
+                # library ``Model.path`` recorded in engine_options. Rewrite the
+                # option to the actual resolved path so the binary reads the file
+                # where it was downloaded, not the repo-root path. This must happen
+                # before GufoServerConfig is built from engine_options below.
+                key = aux.get("key")
+                if key:
+                    request.config.engine_options[key] = resolved
 
         # The agent owns port allocation: pick a free random port unless the
         # caller pinned one explicitly.
