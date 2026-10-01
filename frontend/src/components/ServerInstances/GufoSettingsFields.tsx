@@ -1,5 +1,6 @@
 import { Info } from "lucide-react"
 import type { Model } from "@/client"
+import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
@@ -53,7 +54,7 @@ export type GufoOptions = {
   max_output_bytes?: number
   max_buffered_output_bytes?: number
   max_buffered_output_total?: number
-  cache_disk?: string
+  cache_disk?: boolean
   cache_disk_bytes?: number
   cache_disk_staging_bytes?: number
   sessions?: number
@@ -131,7 +132,7 @@ const descriptions: Record<string, string> = {
   max_buffered_output_total:
     "The same stream buffer budget across all requests.",
   cache_disk:
-    "Directory for the opt-in restart-safe continuation cache. Repeated or shared prompts get much faster after restarts; costs disk space.",
+    "Restart-safe continuation cache stored in this agent's cache directory under a per-server subfolder. Repeated or shared prompts get much faster after restarts; costs disk space.",
   cache_disk_bytes: "Retained disk-cache byte budget.",
   cache_disk_staging_bytes:
     "RAM limit for queued snapshots and each disk read. 0 = auto (at most 1 GiB and 1/8 of available RAM). Must fit alongside the cache budget.",
@@ -433,7 +434,19 @@ export function GufoSettingsFields({ options, onChange, models = [] }: Props) {
           Disk cache
         </summary>
         <div className="space-y-4 pb-4">
-          {textFields([["cache_disk", "Cache directory"]] as const)}
+          <div className="flex items-center gap-2 text-sm">
+            <Checkbox
+              id="gufo-cache-disk"
+              checked={options.cache_disk === true}
+              onCheckedChange={(checked) => {
+                const next = { ...options }
+                if (checked === true) next.cache_disk = true
+                else delete next.cache_disk
+                onChange(next)
+              }}
+            />
+            <OptionLabel name="cache_disk" label="Enable disk cache" />
+          </div>
           {numberFields([
             ["cache_disk_bytes", "Cache size (bytes)", 0, "1"],
             ["cache_disk_staging_bytes", "Staging bytes", 0, "1"],

@@ -246,7 +246,7 @@ class GufoServerOptions(BaseModel):
     max_buffered_output_total: int | None = Field(default=None, ge=1)
 
     # Disk cache
-    cache_disk: str | None = None
+    cache_disk: bool | None = None
     cache_disk_bytes: int | None = Field(default=None, ge=0)
     cache_disk_staging_bytes: int | None = Field(default=None, ge=0)
 

@@ -44,7 +44,7 @@ def test_gufo_agent_accepts_gufo_engine(monkeypatch) -> None:
 
 def test_build_command_always_includes_serve_llm_host_port_model() -> None:
     config = GufoServerConfig(model_path="/models/m.gguf", port=8123)
-    cmd = build_command(config)
+    cmd = build_command(config, "test-server")
     assert cmd[:8] == [
         "gufo",
         "serve",
@@ -76,7 +76,7 @@ def test_build_command_maps_value_enum_and_bool_flags() -> None:
             "verbose": False,
         },
     )
-    cmd = build_command(config)
+    cmd = build_command(config, "test-server")
     joined = " ".join(cmd)
     assert "--context 131072" in joined
     assert "--think on" in joined
@@ -100,9 +100,36 @@ def test_build_command_maps_forced_served_model_name() -> None:
         port=8123,
         options={"served_model_name": "my-alias"},
     )
-    cmd = build_command(config)
+    cmd = build_command(config, "test-server")
     joined = " ".join(cmd)
     assert "--served-model-name my-alias" in joined
+
+
+def test_build_command_disk_cache_checkbox_uses_agent_cache_dir(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr("app.services.gufo_server.settings.CACHE_PATH", str(tmp_path))
+    config = GufoServerConfig(
+        model_path="/models/m.gguf",
+        port=8123,
+        options={"cache_disk": True, "cache_disk_bytes": 1024},
+    )
+    cmd = build_command(config, "srv-42")
+    joined = " ".join(cmd)
+    assert f"--cache-disk {tmp_path / 'srv-42'}" in joined
+    assert "--cache-disk-bytes 1024" in joined
+    assert (tmp_path / "srv-42").is_dir()
+
+
+def test_build_command_disk_cache_disabled_omits_flag(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("app.services.gufo_server.settings.CACHE_PATH", str(tmp_path))
+    for value in (False, None, "default"):
+        config = GufoServerConfig(
+            model_path="/models/m.gguf", port=8123, options={"cache_disk": value}
+        )
+        cmd = build_command(config, "srv-off")
+        assert "--cache-disk" not in cmd
+    assert not (tmp_path / "srv-off").exists()
 
 
 def test_effective_capacity_uses_sessions() -> None:

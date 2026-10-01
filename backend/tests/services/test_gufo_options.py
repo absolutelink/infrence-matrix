@@ -38,6 +38,7 @@ def test_gufo_options_omit_none_and_keep_set_values() -> None:
             "draft_policy": "adaptive",
             "draft_tokens": 7,
             "sessions": 4,
+            "cache_disk": True,
             "api_key": None,
         }
     ) == {
@@ -51,7 +52,15 @@ def test_gufo_options_omit_none_and_keep_set_values() -> None:
         "draft_policy": "adaptive",
         "draft_tokens": 7,
         "sessions": 4,
+        "cache_disk": True,
     }
+
+
+def test_gufo_cache_disk_rejects_directory_string() -> None:
+    # cache_disk is now a boolean enable flag; the agent derives the
+    # directory from its own CACHE_PATH, so paths must not be accepted.
+    with pytest.raises(ValidationError):
+        validate_gufo_options({"cache_disk": "/cache/srv-1"})
 
 
 def test_gufo_options_reject_unknown_keys() -> None:

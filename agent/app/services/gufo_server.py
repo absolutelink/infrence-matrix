@@ -6,6 +6,7 @@ import signal
 import subprocess
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -55,7 +56,6 @@ VALUE_FLAGS: dict[str, str] = {
     "max_buffered_output_bytes": "--max-buffered-output-bytes",
     "max_buffered_output_total": "--max-buffered-output-total",
     # Disk cache
-    "cache_disk": "--cache-disk",
     "cache_disk_bytes": "--cache-disk-bytes",
     "cache_disk_staging_bytes": "--cache-disk-staging-bytes",
     # Server options
@@ -81,7 +81,7 @@ class GufoServerConfig:
     slot_generation: int = 0
 
 
-def build_command(config: GufoServerConfig) -> list[str]:
+def build_command(config: GufoServerConfig, server_id: str) -> list[str]:
     """Assemble the ``gufo serve llm`` argv from a server config."""
     cmd = [
         settings.GUFO_SERVER_PATH,
@@ -99,6 +99,10 @@ def build_command(config: GufoServerConfig) -> list[str]:
         value = options.get(key)
         if value is not None:
             cmd.extend([flag, str(value)])
+    if options.get("cache_disk") is True:
+        cache_dir = Path(settings.CACHE_PATH) / server_id
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cmd.extend(["--cache-disk", str(cache_dir)])
     for key, flag in BOOL_FLAGS.items():
         if options.get(key) is True:
             cmd.append(flag)
@@ -340,7 +344,7 @@ class GufoServerManager:
         if len(self.servers) >= settings.GUFO_MAX_INSTANCES:
             raise RuntimeError("Gufo instance limit reached")
 
-        cmd = build_command(config)
+        cmd = build_command(config, server_id)
         logger.info("Starting gufo server %s: %s", server_id, " ".join(cmd))
 
         proc: subprocess.Popen | None = None
