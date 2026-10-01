@@ -86,11 +86,11 @@ export function useColumns(): ColumnDef<ServerInstance>[] {
   const queueById = useMemo(() => {
     const map = new Map<
       string,
-      { active: number; capacity: number; queued: number }
+      { available: number; capacity: number; queued: number }
     >()
     for (const server of status?.servers ?? []) {
       map.set(server.id, {
-        active: server.active,
+        available: server.available,
         capacity: server.capacity,
         queued: server.queued,
       })
@@ -231,14 +231,14 @@ export function useColumns(): ColumnDef<ServerInstance>[] {
         header: "Slots / Queue",
         cell: ({ row }) => {
           const slot = queueRef.current.get(row.original.id)
-          const active = slot?.active ?? 0
+          const available = slot?.available ?? 0
           const capacity = slot?.capacity ?? 0
           const queued = slot?.queued ?? 0
           return (
             <div className="flex flex-col gap-1 text-xs">
               <div className="flex items-center gap-1">
                 <span className="font-medium">
-                  {active}/{capacity}
+                  {available}/{capacity}
                 </span>
                 <span className="text-muted-foreground">slots</span>
               </div>
