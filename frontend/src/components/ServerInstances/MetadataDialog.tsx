@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query"
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 
 import { ServerInstancesService } from "@/client"
@@ -97,25 +97,31 @@ export function MetadataDialog({
     default: "",
   })
 
+  const prevOpenRef = useRef(false)
   useEffect(() => {
-    if (!isOpen) return
-    const discovered = (metadata.capabilities ?? {}) as Record<string, unknown>
-    setDescription(
-      typeof metadata.description === "string" ? metadata.description : "",
-    )
-    setOwnedBy(typeof metadata.owned_by === "string" ? metadata.owned_by : "")
-    const discoveredContext =
-      metadata.max_context_length ??
-      metadata.context_length ??
-      metadata.max_model_len
-    setMaxContextLength(
-      typeof discoveredContext === "number" ? String(discoveredContext) : "",
-    )
-    const caps = Object.fromEntries(
-      capabilityNames.map((name) => [name, discovered[name] === true]),
-    )
-    setCapabilities(caps)
-    setReasoning(readReasoningConfig(metadata, caps.reasoning === true))
+    if (isOpen && !prevOpenRef.current) {
+      const discovered = (metadata.capabilities ?? {}) as Record<
+        string,
+        unknown
+      >
+      setDescription(
+        typeof metadata.description === "string" ? metadata.description : "",
+      )
+      setOwnedBy(typeof metadata.owned_by === "string" ? metadata.owned_by : "")
+      const discoveredContext =
+        metadata.max_context_length ??
+        metadata.context_length ??
+        metadata.max_model_len
+      setMaxContextLength(
+        typeof discoveredContext === "number" ? String(discoveredContext) : "",
+      )
+      const caps = Object.fromEntries(
+        capabilityNames.map((name) => [name, discovered[name] === true]),
+      )
+      setCapabilities(caps)
+      setReasoning(readReasoningConfig(metadata, caps.reasoning === true))
+    }
+    prevOpenRef.current = isOpen
   }, [isOpen, metadata])
 
   const toggleReasoning = (enabled: boolean) => {

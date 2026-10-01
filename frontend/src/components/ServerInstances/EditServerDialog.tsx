@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import type { Model } from "@/client"
 import { ModelsService, ServerInstancesService } from "@/client"
@@ -90,8 +90,9 @@ export function EditServerDialog({
     enabled: isOpen,
   })
 
+  const prevOpenRef = useRef(false)
   useEffect(() => {
-    if (isOpen) {
+    if (isOpen && !prevOpenRef.current) {
       setModelId(instance.model_id)
       setAlias(instance.alias)
       setGpuLayers(String(instance.gpu_layers))
@@ -111,6 +112,7 @@ export function EditServerDialog({
       setServerOptions(instance.server_options || {})
       setEngineOptions(instance.engine_options || {})
     }
+    prevOpenRef.current = isOpen
   }, [isOpen, instance])
 
   const wasRunning = instance.status === "running"
