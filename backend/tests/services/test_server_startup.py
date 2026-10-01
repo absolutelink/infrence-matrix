@@ -12,6 +12,7 @@ from app.services.server_startup import (
     ServerStartupError,
     build_start_payload,
     ensure_server_ready_by_id,
+    flash_pinned_ports,
     initialize_server,
     pick_primary_filename,
     resolve_model_filenames,
@@ -542,3 +543,165 @@ class TestInitializeServer:
             row = await session.get(ServerInstance, instance.id)
         assert row.status == "initialization_failed"
         assert not row.model_metadata
+
+
+class TestFlashPortPinning:
+    """Halogen Flash derives its disk prompt-cache fingerprint from its server
+    variables, ports included, so the pair allocated on the first start must be
+    persisted and pinned on every later boot."""
+
+    def _flash_instance(
+        self,
+        db,
+        config: dict[str, str] | None = None,
+        status: str = "stopped",
+    ) -> tuple[ServerInstance, Model]:
+        agent = Agent(
+            name=f"flash-test-agent-{uuid_module.uuid4().hex[:8]}",
+            host="127.0.0.1",
+            port=8080,
+            status="online",
+        )
+        db.add(agent)
+        db.commit()
+        db.refresh(agent)
+        model = _make_model(db, "flash-model.hgn")
+        instance = ServerInstance(
+            model_id=model.id,
+            agent_id=agent.id,
+            alias=f"flash-alias-{model.id.hex[:8]}",
+            engine="halogen-flash",
+            process_command="halogen-flash-server",
+            status=status,
+            config=config or {},
+        )
+        db.add(instance)
+        db.commit()
+        db.refresh(instance)
+        return instance, model
+
+    def test_pinned_ports_read_from_config(self, db) -> None:
+        instance, _ = self._flash_instance(db, {"port": "8210", "engine_port": "8211"})
+        assert flash_pinned_ports(instance) == (8210, 8211)
+
+    def test_pinned_ports_absent(self, db) -> None:
+        instance, _ = self._flash_instance(db)
+        assert flash_pinned_ports(instance) == (None, None)
+
+    def test_pinned_ports_invalid(self, db) -> None:
+        instance, _ = self._flash_instance(
+            db, {"port": "not-a-port", "engine_port": "8211"}
+        )
+        assert flash_pinned_ports(instance) == (None, None)
+
+    def test_payload_pins_persisted_ports(self, db) -> None:
+        instance, model = self._flash_instance(
+            db, {"port": "8210", "engine_port": "8211"}
+        )
+        payload = build_start_payload(instance, model)
+        assert payload["config"]["port"] == 8210
+        assert payload["config"]["engine_port"] == 8211
+
+    def test_payload_omits_ports_on_first_start(self, db) -> None:
+        instance, model = self._flash_instance(db)
+        payload = build_start_payload(instance, model)
+        assert "port" not in payload["config"]
+        assert "engine_port" not in payload["config"]
+
+    def test_llamacpp_payload_unaffected(self, db) -> None:
+        instance, model = self._flash_instance(db)
+        instance.engine = "llamacpp"
+        payload = build_start_payload(instance, model)
+        assert "port" not in payload["config"]
+        assert "engine_port" not in payload["config"]
+        db.rollback()
+
+
+class TestFlashPortPersistence:
+    """Start dispatches must persist the Flash port pair for later boots."""
+
+    def _flash_instance(
+        self,
+        db,
+        status: str = "stopped",
+    ) -> tuple[ServerInstance, Model]:
+        agent = Agent(
+            name=f"flash-persist-agent-{uuid_module.uuid4().hex[:8]}",
+            host="127.0.0.1",
+            port=8080,
+            status="online",
+        )
+        db.add(agent)
+        db.commit()
+        db.refresh(agent)
+        model = _make_model(db, f"flash-{uuid_module.uuid4().hex[:8]}.hgn")
+        instance = ServerInstance(
+            model_id=model.id,
+            agent_id=agent.id,
+            alias=f"flash-persist-{model.id.hex[:8]}",
+            engine="halogen-flash",
+            process_command="halogen-flash-server",
+            status=status,
+        )
+        db.add(instance)
+        db.commit()
+        db.refresh(instance)
+        return instance, model
+
+    async def test_dispatch_start_persists_both_ports(self, db) -> None:
+        from app.services import server_startup as ss
+
+        instance, _ = self._flash_instance(db, status="starting")
+        payload = {
+            "config": {
+                "id": str(instance.id),
+                "engine": "halogen-flash",
+                "slot_generation": instance.slot_generation,
+            }
+        }
+
+        async def fake_gate(_agent_id, _payload, _timeout):
+            return {"port": 8210, "engine_port": 8211, "slot_generation": 0}
+
+        with patch.object(ss, "_send_start_with_gate", new=fake_gate):
+            await ss.dispatch_start("agent-1", str(instance.id), payload)
+
+        async with AsyncSessionMaker() as session:
+            row = await session.get(ServerInstance, instance.id)
+        assert row.config["port"] == "8210"
+        assert row.config["engine_port"] == "8211"
+
+    async def test_initialize_server_persists_ports(self, db) -> None:
+        from app.services import server_startup as ss
+
+        instance, _ = self._flash_instance(db)
+        request = {
+            "config": {
+                "id": str(instance.id),
+                "engine": "halogen-flash",
+                "slot_generation": 0,
+            }
+        }
+
+        async def fake_gate(_agent_id, _payload, _timeout, **_kwargs):
+            return {"port": 8220, "engine_port": 8221}
+
+        async def fake_send(_agent_id, _method, path, _payload, **_kwargs):
+            if path.endswith(f"/servers/metadata/{instance.id}"):
+                return {"data": [{"id": "flash-model"}]}
+            return {}
+
+        with (
+            patch.object(ss, "_send_start_with_gate", new=fake_gate),
+            patch(
+                "app.services.server_startup.agent_manager.send_to_agent",
+                new=fake_send,
+            ),
+        ):
+            await initialize_server("agent-1", str(instance.id), request)
+
+        async with AsyncSessionMaker() as session:
+            row = await session.get(ServerInstance, instance.id)
+        assert row.config["port"] == "8220"
+        assert row.config["engine_port"] == "8221"
+        assert row.status == "stopped"

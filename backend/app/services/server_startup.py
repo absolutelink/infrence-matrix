@@ -204,6 +204,28 @@ async def _send_start_with_gate(
             await connection.commit()
 
 
+def flash_pinned_ports(instance: ServerInstance) -> tuple[int | None, int | None]:
+    """Return the (api, engine) ports previously allocated for a Flash server.
+
+    Halogen Flash hashes its server variables (ports included) into the
+    on-disk prompt-cache fingerprint, so the pair allocated on the first
+    start is persisted in the instance's JSON ``config`` and pinned on
+    every later boot. Returns ``(None, None)`` when nothing was persisted
+    yet, or when the stored values are not valid ports.
+    """
+    cfg = instance.config or {}
+    raw_api = cfg.get("port")
+    raw_engine = cfg.get("engine_port")
+    try:
+        api_port = int(raw_api) if raw_api else None
+        engine_port = int(raw_engine) if raw_engine else None
+    except TypeError, ValueError:
+        return (None, None)
+    if not (api_port and engine_port):
+        return (None, None)
+    return (api_port, engine_port)
+
+
 def build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any]:
     """Build the agent /servers/start payload from instance + model.
 
@@ -249,6 +271,12 @@ def build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any
         if instance.engine not in ("halogen", "halogen-flash") and model.source_repo_id
         else None,
     }
+    if instance.engine == "halogen-flash":
+        api_port, engine_port = flash_pinned_ports(instance)
+        if api_port:
+            payload["config"]["port"] = api_port
+        if engine_port:
+            payload["config"]["engine_port"] = engine_port
     if mmproj is not None:
         mmproj_model, mmproj_filenames = mmproj
         payload["config"]["mmproj_path"] = mmproj_model.path
@@ -360,6 +388,9 @@ async def dispatch_start(
         # agent-allocated port is echoed back and kept in the JSON config
         # for display only (not a column).
         allocated_port = response.get("port") if isinstance(response, dict) else None
+        allocated_engine_port = (
+            response.get("engine_port") if isinstance(response, dict) else None
+        )
         response_generation = (
             response.get("slot_generation") if isinstance(response, dict) else None
         )
@@ -383,10 +414,13 @@ async def dispatch_start(
                 if effective_capacity is not None:
                     server.effective_capacity = max(int(effective_capacity), 1)
                 if allocated_port:
-                    server.config = {
+                    new_config = {
                         **(server.config or {}),
                         "port": str(allocated_port),
                     }
+                    if allocated_engine_port:
+                        new_config["engine_port"] = str(allocated_engine_port)
+                    server.config = new_config
                 session.add(server)
                 await session.commit()
                 logger.info(f"Server {server_id} marked as running (dispatch ack)")
@@ -446,6 +480,27 @@ async def dispatch_prepare(
         logger.warning(f"Failed to prepare files for server {server_id}: {e}")
 
 
+async def persist_flash_ports(server_id: str, api_port: Any, engine_port: Any) -> None:
+    """Persist a Halogen Flash (api, engine) port pair on the instance row.
+
+    The pair must survive restarts because Flash's disk prompt-cache
+    fingerprint is derived from its server variables, ports included.
+    """
+    if not api_port or not engine_port:
+        return
+    async with AsyncSessionMaker() as session:
+        instance = await session.get(ServerInstance, uuid_module.UUID(str(server_id)))
+        if instance is None:
+            return
+        instance.config = {
+            **(instance.config or {}),
+            "port": str(api_port),
+            "engine_port": str(engine_port),
+        }
+        session.add(instance)
+        await session.commit()
+
+
 async def initialize_server(
     agent_id: str, server_id: str, request: dict[str, Any]
 ) -> None:
@@ -499,12 +554,20 @@ async def initialize_server(
         )
         await set_status("metadata_gathering")
 
-        await _send_start_with_gate(
+        start_response = await _send_start_with_gate(
             agent_id,
             request,
             START_DISPATCH_TIMEOUT,
             allowed_statuses={"metadata_gathering"},
         )
+        if request.get("config", {}).get("engine") == "halogen-flash" and isinstance(
+            start_response, dict
+        ):
+            await persist_flash_ports(
+                server_id,
+                start_response.get("port"),
+                start_response.get("engine_port"),
+            )
         metadata_response = await agent_manager.send_to_agent(
             agent_id,
             "GET",

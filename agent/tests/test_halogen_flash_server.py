@@ -2,6 +2,7 @@
 
 import os
 from unittest.mock import AsyncMock, Mock, patch
+from uuid import uuid4
 
 import pytest
 
@@ -194,3 +195,140 @@ def test_halogen_capacity_uses_actual_kv_slots():
 
     assert manager.get_effective_capacity("default") == 1
     assert manager.get_effective_capacity("configured") == 6
+
+
+def _flash_start_request(**overrides):
+    from app.api.routes.servers import ServerSpec, ServerStartRequest
+
+    base = {
+        "id": f"flash-{uuid4().hex[:8]}",
+        "model_path": HALOGEN_FLASH_CHECKPOINT,
+        "engine": "halogen-flash",
+    }
+    base.update(overrides)
+    return ServerStartRequest(config=ServerSpec(**base))
+
+
+@pytest.fixture(autouse=True)
+def _clear_server_manager_state():
+    from app.services.server_manager import server_manager
+
+    yield
+    server_manager.servers.clear()
+    server_manager.configs.clear()
+    server_manager.slot_generations.clear()
+
+
+def _capture_start(captured: dict):
+    """Record the started config and register it so capacity lookups succeed."""
+
+    async def _start(sid, cfg):
+        from app.services.server_manager import server_manager
+
+        captured["config"] = cfg
+        server_manager.configs[sid] = cfg
+        server_manager.servers[sid] = Mock()
+        return True
+
+    return _start
+
+
+@pytest.mark.asyncio
+async def test_flash_first_start_allocates_static_range_ports(monkeypatch):
+    from app.api.routes import servers as servers_route
+
+    monkeypatch.setattr(
+        "app.api.routes.servers.settings.AGENT_PLATFORM", "halogen-flash"
+    )
+    captured: dict = {}
+
+    with (
+        patch(
+            "app.api.routes.servers.model_manager.download_repository",
+            new=AsyncMock(),
+        ),
+        patch.object(
+            servers_route.server_manager,
+            "start_server",
+            new=AsyncMock(side_effect=_capture_start(captured)),
+        ),
+    ):
+        response = await servers_route.start_server(_flash_start_request())
+
+    config = captured["config"]
+    assert (
+        servers_route.FLASH_PORT_START <= config.api_port < servers_route.FLASH_PORT_END
+    )
+    assert (
+        servers_route.FLASH_PORT_START
+        <= config.engine_port
+        < servers_route.FLASH_PORT_END
+    )
+    assert config.api_port != config.engine_port
+    assert response["port"] == config.api_port
+    assert response["engine_port"] == config.engine_port
+
+
+@pytest.mark.asyncio
+async def test_flash_restart_reuses_pinned_ports_from_backend(monkeypatch):
+    from app.api.routes import servers as servers_route
+
+    monkeypatch.setattr(
+        "app.api.routes.servers.settings.AGENT_PLATFORM", "halogen-flash"
+    )
+    captured: dict = {}
+
+    with (
+        patch(
+            "app.api.routes.servers.model_manager.download_repository",
+            new=AsyncMock(),
+        ),
+        patch.object(
+            servers_route.server_manager,
+            "start_server",
+            new=AsyncMock(side_effect=_capture_start(captured)),
+        ),
+        patch.object(
+            servers_route,
+            "_allocate_port",
+            side_effect=AssertionError("must not allocate when ports are pinned"),
+        ),
+    ):
+        response = await servers_route.start_server(
+            _flash_start_request(port=8210, engine_port=8211)
+        )
+
+    config = captured["config"]
+    assert config.api_port == 8210
+    assert config.engine_port == 8211
+    assert response["port"] == 8210
+    assert response["engine_port"] == 8211
+
+
+@pytest.mark.asyncio
+async def test_llamacpp_ports_stay_in_ephemeral_range():
+    from app.api.routes import servers as servers_route
+
+    captured: dict = {}
+
+    with (
+        patch(
+            "app.api.routes.servers._ensure_model",
+            new=AsyncMock(return_value="/models/x.gguf"),
+        ),
+        patch.object(
+            servers_route.server_manager,
+            "start_server",
+            new=AsyncMock(side_effect=_capture_start(captured)),
+        ),
+    ):
+        await servers_route.start_server(
+            _flash_start_request(engine="llamacpp", model_path="/models/x.gguf")
+        )
+
+    config = captured["config"]
+    assert (
+        servers_route.EPHEMERAL_PORT_START
+        <= config.port
+        < servers_route.EPHEMERAL_PORT_END
+    )

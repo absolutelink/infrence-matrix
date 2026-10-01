@@ -33,6 +33,15 @@ router = APIRouter(prefix="/servers", tags=["servers"])
 EPHEMERAL_PORT_START = 8090
 EPHEMERAL_PORT_END = 8190
 
+# Halogen Flash derives its on-disk prompt-cache fingerprint from its server
+# variables, including its ports. Random per-start ports would invalidate the
+# disk cache on every boot, so Flash servers use a dedicated static range
+# (kept clear of the ephemeral llama-server range above): the backend
+# allocates the pair on first start, persists it, and pins the same ports on
+# every subsequent boot.
+FLASH_PORT_START = 8200
+FLASH_PORT_END = 8290
+
 
 class ServerSpec(BaseModel):
     id: str
@@ -41,6 +50,10 @@ class ServerSpec(BaseModel):
     engine_options: dict = Field(default_factory=dict)
     # Omit to let the agent allocate a free random port
     port: int | None = None
+    # Halogen Flash engine (internal, unpublished) port. Like `port`, omit to
+    # let the agent allocate one; the backend pins the previously allocated
+    # value on restarts so the Flash cache fingerprint stays stable.
+    engine_port: int | None = None
     gpu_layers: int = 35
     context_size: int = 4096
     batch_size: int = 512
@@ -169,11 +182,16 @@ class ServerDeleteRequest(BaseModel):
     server_id: str
 
 
-def _allocate_port() -> int:
-    """Pick a random free port in the ephemeral llama-server range."""
+def _allocate_port(
+    start: int = EPHEMERAL_PORT_START,
+    end: int = EPHEMERAL_PORT_END,
+    exclude: set[int] | None = None,
+) -> int:
+    """Pick a random free port in the given range, skipping `exclude`."""
     import random
 
-    candidates = list(range(EPHEMERAL_PORT_START, EPHEMERAL_PORT_END))
+    excluded = exclude or set()
+    candidates = [port for port in range(start, end) if port not in excluded]
     random.shuffle(candidates)
     for port in candidates:
         try:
@@ -184,7 +202,7 @@ def _allocate_port() -> int:
             continue
     raise HTTPException(
         status_code=503,
-        detail=f"No free ports in {EPHEMERAL_PORT_START}-{EPHEMERAL_PORT_END}",
+        detail=f"No free ports in {start}-{end}",
     )
 
 
@@ -337,6 +355,7 @@ async def start_server(request: ServerStartRequest) -> dict:
                     "server_id": request.config.id,
                     "model_path": existing.model_path,
                     "port": existing.port,
+                    "engine_port": getattr(existing, "engine_port", None),
                     "slot_generation": existing.slot_generation,
                     "effective_capacity": server_manager.get_effective_capacity(
                         request.config.id
@@ -399,8 +418,21 @@ async def start_server(request: ServerStartRequest) -> dict:
                     request.config.engine_options[key] = resolved
 
         # The agent owns port allocation: pick a free random port unless the
-        # caller pinned one explicitly.
-        port = request.config.port or _allocate_port()
+        # caller pinned one explicitly. Halogen Flash is the exception that
+        # must never randomize on restart: its disk prompt cache fingerprint
+        # includes the ports, so the backend pins the previously allocated
+        # pair and the agent only allocates (from the dedicated static Flash
+        # range) on the very first start.
+        if request.config.engine == "halogen-flash":
+            port = request.config.port or _allocate_port(
+                FLASH_PORT_START, FLASH_PORT_END
+            )
+            engine_port = request.config.engine_port or _allocate_port(
+                FLASH_PORT_START, FLASH_PORT_END, exclude={port}
+            )
+        else:
+            port = request.config.port or _allocate_port()
+            engine_port = request.config.engine_port
 
         if request.config.engine == "halogen":
             from app.services.halogen_server import HalogenServerConfig
@@ -409,7 +441,7 @@ async def start_server(request: ServerStartRequest) -> dict:
                 model_path=HALOGEN_CHECKPOINT,
                 port=port,
                 api_port=port,
-                engine_port=_allocate_port(),
+                engine_port=engine_port or _allocate_port(),
                 options=request.config.engine_options,
                 slot_generation=request.config.slot_generation,
             )
@@ -418,7 +450,7 @@ async def start_server(request: ServerStartRequest) -> dict:
                 model_path=HALOGEN_FLASH_CHECKPOINT,
                 port=port,
                 api_port=port,
-                engine_port=_allocate_port(),
+                engine_port=engine_port,
                 options=request.config.engine_options,
                 slot_generation=request.config.slot_generation,
             )
@@ -457,6 +489,7 @@ async def start_server(request: ServerStartRequest) -> dict:
             "server_id": request.config.id,
             "model_path": model_path,
             "port": port,
+            "engine_port": engine_port,
             "slot_generation": request.config.slot_generation,
             "effective_capacity": server_manager.get_effective_capacity(
                 request.config.id
