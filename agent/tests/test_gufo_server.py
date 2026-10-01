@@ -91,6 +91,20 @@ def test_build_command_maps_value_enum_and_bool_flags() -> None:
     assert "--verbose" not in cmd
 
 
+def test_build_command_maps_forced_served_model_name() -> None:
+    # The backend always injects served_model_name = instance.alias for gufo;
+    # the agent must surface it as --served-model-name so gufo advertises the
+    # alias instead of the GGUF filename.
+    config = GufoServerConfig(
+        model_path="/models/Big-Model-Q8.gguf",
+        port=8123,
+        options={"served_model_name": "my-alias"},
+    )
+    cmd = build_command(config)
+    joined = " ".join(cmd)
+    assert "--served-model-name my-alias" in joined
+
+
 def test_effective_capacity_uses_sessions() -> None:
     manager = GufoServerManager()
     manager.configs["s1"] = GufoServerConfig(

@@ -17,7 +17,6 @@ import {
 
 export type GufoOptions = {
   context?: number
-  served_model_name?: string
   mmproj?: string
   max_tokens?: number
   temperature?: number
@@ -76,8 +75,6 @@ type NumberField = readonly [keyof GufoOptions, string, number, string]
 const descriptions: Record<string, string> = {
   context:
     "Maximum context capacity in tokens per session. 0 uses the model's native context. Memory use depends on the model and the number of resident sessions.",
-  served_model_name:
-    "The model identifier exposed to clients in /v1/models. Cosmetic; it does not change which weights are loaded.",
   mmproj:
     "Qwen BF16 vision sidecar for image input. Auto-discovered beside the model when left unset.",
   max_tokens:
@@ -339,10 +336,7 @@ export function GufoSettingsFields({ options, onChange, models = [] }: Props) {
           Model &amp; context
         </summary>
         <div className="space-y-4 pb-4">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            {modelPathSelect("mmproj", "Vision sidecar (mmproj)", "mmproj")}
-            {textFields([["served_model_name", "Served model name"]] as const)}
-          </div>
+          {modelPathSelect("mmproj", "Vision sidecar (mmproj)", "mmproj")}
           {numberFields([["context", "Context tokens per session", 0, "1024"]])}
         </div>
       </details>

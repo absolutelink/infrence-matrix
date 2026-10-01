@@ -216,11 +216,17 @@ def build_start_payload(instance: ServerInstance, model: Model) -> dict[str, Any
     primary_filename = pick_primary_filename(filenames)
     mmproj = _find_mmproj(instance, model)
     dflash = _find_dflash(instance, model)
+    engine_options = dict(instance.engine_options or {})
+    if instance.engine == "gufo":
+        # Gufo advertises its model ID from the GGUF filename unless
+        # --served-model-name is passed; the broker routes by the instance
+        # alias, so always serve the alias regardless of stored options.
+        engine_options["served_model_name"] = instance.alias
     payload: dict[str, Any] = {
         "config": {
             "id": str(instance.id),
             "engine": instance.engine,
-            "engine_options": instance.engine_options or {},
+            "engine_options": engine_options,
             "model_path": model.path,
             "gpu_layers": instance.gpu_layers,
             "context_size": instance.context_size,

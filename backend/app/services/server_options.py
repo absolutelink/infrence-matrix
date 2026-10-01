@@ -204,7 +204,6 @@ class GufoServerOptions(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # Model & context
-    served_model_name: str | None = None
     context: int | None = Field(default=None, ge=0)
     mmproj: str | None = None
 

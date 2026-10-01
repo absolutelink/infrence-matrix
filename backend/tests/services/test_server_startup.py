@@ -145,6 +145,66 @@ class TestBuildStartPayload:
         assert "mmproj_path" not in payload["config"]
         assert "mmproj_source" not in payload
 
+    def test_gufo_payload_forces_served_model_name_to_alias(self, db) -> None:
+        model = _make_model(db, "gufo-model.Q4_K_M.gguf")
+        instance = ServerInstance(
+            model_id=model.id,
+            agent_id=self._agent(db).id,
+            alias="gufo-alias",
+            engine="gufo",
+            process_command="gufo",
+            engine_options={"served_model_name": "stale-name", "context": 4096},
+            status="stopped",
+        )
+        db.add(instance)
+        db.commit()
+        db.refresh(instance)
+
+        payload = build_start_payload(instance, model)
+        engine_options = payload["config"]["engine_options"]
+        assert engine_options["served_model_name"] == "gufo-alias"
+        # Other stored options are untouched.
+        assert engine_options["context"] == 4096
+        # The stored instance row must not be mutated.
+        assert instance.engine_options["served_model_name"] == "stale-name"
+
+    def test_gufo_payload_adds_served_model_name_when_absent(self, db) -> None:
+        model = _make_model(db, "gufo-bare-model.Q4_K_M.gguf")
+        instance = ServerInstance(
+            model_id=model.id,
+            agent_id=self._agent(db).id,
+            alias="gufo-bare-alias",
+            engine="gufo",
+            process_command="gufo",
+            status="stopped",
+        )
+        db.add(instance)
+        db.commit()
+        db.refresh(instance)
+
+        payload = build_start_payload(instance, model)
+        assert payload["config"]["engine_options"] == {
+            "served_model_name": "gufo-bare-alias"
+        }
+
+    def test_non_gufo_engine_options_passed_through(self, db) -> None:
+        model = _make_model(db, "llamacpp-model.Q4_K_M.gguf")
+        instance = ServerInstance(
+            model_id=model.id,
+            agent_id=self._agent(db).id,
+            alias="llamacpp-alias",
+            engine="llamacpp",
+            process_command="llama-server",
+            engine_options={"served_model_name": "whatever"},
+            status="stopped",
+        )
+        db.add(instance)
+        db.commit()
+        db.refresh(instance)
+
+        payload = build_start_payload(instance, model)
+        assert payload["config"]["engine_options"] == {"served_model_name": "whatever"}
+
 
 class TestResolveModelFilenames:
     def _model(self, **kwargs: object) -> Model:
