@@ -1,22 +1,36 @@
 import { useMutation, useQuery } from "@tanstack/react-query"
 import {
-  Activity,
   ChevronDown,
   Gauge,
   ListOrdered,
   MemoryStick,
+  Rocket,
   Server,
   Trash2,
+  Zap,
 } from "lucide-react"
 import { toast } from "sonner"
 
 import { AgentsService, QueueService } from "@/client"
 import { Button } from "@/components/ui/button"
 import { useQueueStatus } from "@/hook/useQueueStatus"
+import { useTokenStats } from "@/hook/useTokenStats"
 import { uniqueGpuSnapshots } from "@/lib/gpuMetrics"
+
+const formatTokens = (n: number) => {
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  return `${n}`
+}
+
+const formatRate = (rate: number | null | undefined) =>
+  rate === null || rate === undefined ? "—" : rate.toFixed(1)
 
 export function QueueStatusBar() {
   const { status, connected } = useQueueStatus()
+  const { data: tokenData } = useTokenStats()
+
   const clearQueueMutation = useMutation({
     mutationFn: () => QueueService.clearInferenceQueue(),
     onSuccess: (result) => {
@@ -47,10 +61,12 @@ export function QueueStatusBar() {
     : null
   const formatBytes = (bytes: number) => `${(bytes / 1073741824).toFixed(1)} GB`
 
+  const live = tokenData?.global.live
+  const day = tokenData?.global.last_24h
+
   if (!status) {
     return (
       <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
-        <Activity className="h-3.5 w-3.5 animate-pulse" />
         <span>Connecting to scheduler</span>
       </div>
     )
@@ -61,6 +77,20 @@ export function QueueStatusBar() {
   return (
     <details className="group relative ml-auto">
       <summary className="flex cursor-pointer list-none items-center gap-3 rounded-md px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
+        <span
+          className="flex items-center gap-1.5"
+          title="Latest llama-server decode throughput metrics scrape"
+        >
+          <Zap className="h-3.5 w-3.5 text-emerald-500" />
+          {formatRate(live?.decode_tokens_per_second)} tok/s
+        </span>
+        <span
+          className="flex items-center gap-1.5"
+          title="Latest llama-server prefill throughput metrics scrape"
+        >
+          <Rocket className="h-3.5 w-3.5 text-sky-500" />
+          {formatRate(live?.prefill_tokens_per_second)} tok/s
+        </span>
         <span className="flex items-center gap-1.5">
           <span
             className={`h-1.5 w-1.5 rounded-full ${busy ? "bg-amber-500" : "bg-emerald-500"}`}
@@ -71,18 +101,6 @@ export function QueueStatusBar() {
           <ListOrdered className="h-3.5 w-3.5" />
           {status.queued} queued
         </span>
-        {gpuUtilization !== null && (
-          <span className="flex items-center gap-1.5">
-            <Gauge className="h-3.5 w-3.5" />
-            {gpuUtilization.toFixed(0)}% GPU
-          </span>
-        )}
-        {totalVram > 0 && (
-          <span className="flex items-center gap-1.5">
-            <MemoryStick className="h-3.5 w-3.5" />
-            {formatBytes(usedVram)} / {formatBytes(totalVram)}
-          </span>
-        )}
         <ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
       </summary>
       <div className="absolute right-0 top-full z-20 mt-2 w-96 rounded-lg border bg-popover p-4 text-popover-foreground shadow-lg">
@@ -95,6 +113,21 @@ export function QueueStatusBar() {
           </div>
           <Server className="h-4 w-4 text-muted-foreground" />
         </div>
+
+        {day && (
+          <div className="mb-3 grid grid-cols-3 gap-2 text-xs">
+            <WindowCard label="Last 24h" totals={tokenData!.global.last_24h} />
+            <WindowCard
+              label="Last 7 days"
+              totals={tokenData!.global.last_7d}
+            />
+            <WindowCard
+              label="Last 30 days"
+              totals={tokenData!.global.last_30d}
+            />
+          </div>
+        )}
+
         {gpuSnapshots.length > 0 && (
           <div className="mb-3 rounded-md bg-muted/60 px-2.5 py-2 text-xs">
             <div className="flex items-center justify-between">
@@ -115,6 +148,7 @@ export function QueueStatusBar() {
             </div>
           </div>
         )}
+
         <div className="space-y-2">
           {status.servers.length === 0 ? (
             <p className="text-xs text-muted-foreground">No running servers</p>
@@ -138,13 +172,14 @@ export function QueueStatusBar() {
                   {server.state === "booting"
                     ? "Waiting for llama.cpp health"
                     : server.telemetry_known
-                      ? `${server.available} slots available`
+                      ? `${server.available} slots available · ${server.queued} queued`
                       : "Using health status; telemetry unavailable"}
                 </div>
               </div>
             ))
           )}
         </div>
+
         <div className="mt-4 border-t pt-3">
           <Button
             type="button"
@@ -165,5 +200,30 @@ export function QueueStatusBar() {
         )}
       </div>
     </details>
+  )
+}
+
+function WindowCard({
+  label,
+  totals,
+}: {
+  label: string
+  totals: {
+    prompt_tokens: number
+    completion_tokens: number
+    total_tokens: number
+  }
+}) {
+  return (
+    <div className="rounded-md bg-muted/60 px-2.5 py-2">
+      <p className="font-medium text-muted-foreground">{label}</p>
+      <p className="mt-0.5 text-sm font-semibold">
+        {formatTokens(totals.total_tokens)}
+      </p>
+      <p className="mt-0.5 text-[11px] text-muted-foreground">
+        {formatTokens(totals.prompt_tokens)} in /{" "}
+        {formatTokens(totals.completion_tokens)} out
+      </p>
+    </div>
   )
 }

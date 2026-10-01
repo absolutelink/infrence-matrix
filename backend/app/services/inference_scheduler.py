@@ -1460,15 +1460,13 @@ class InferenceScheduler:
                     )
                 ).scalars()
             )
-            queued = int(
-                (
-                    await session.execute(
-                        select(func.count(InferenceLease.id)).where(
-                            InferenceLease.status.in_(["queued", "reserving"])
-                        )
-                    )
-                ).scalar_one()
-            )
+            queued_rows = (
+                await session.execute(
+                    select(InferenceLease.model_id, func.count(InferenceLease.id))
+                    .where(InferenceLease.status.in_(["queued", "reserving"]))
+                    .group_by(InferenceLease.model_id)
+                )
+            ).all()
             active_leases = list(
                 (
                     await session.execute(
@@ -1478,6 +1476,10 @@ class InferenceScheduler:
                     )
                 ).scalars()
             )
+        queued_by_model: dict[uuid.UUID, int] = {
+            model_id: int(count) for model_id, count in queued_rows
+        }
+        queued = sum(queued_by_model.values())
 
         lease_counts: dict[uuid.UUID, int] = {}
         stale_lease_counts: dict[uuid.UUID, int] = {}
@@ -1514,6 +1516,7 @@ class InferenceScheduler:
                     "active": active,
                     "stale_active": stale_lease_counts.get(server.id, 0),
                     "available": available,
+                    "queued": queued_by_model.get(server.model_id, 0),
                     "telemetry_known": not booting,
                     "state": "booting" if booting else "ready",
                 }

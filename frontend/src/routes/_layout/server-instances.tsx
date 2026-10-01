@@ -5,7 +5,7 @@ import { Suspense, useState } from "react"
 
 import { ServerInstancesService } from "@/client"
 import { DataTable } from "@/components/Common/DataTable"
-import { columns } from "@/components/ServerInstances/columns"
+import { useColumns } from "@/components/ServerInstances/columns"
 import { StartServerDialog } from "@/components/ServerInstances/StartServerDialog"
 import { Button } from "@/components/ui/button"
 
@@ -36,6 +36,7 @@ export const Route = createFileRoute("/_layout/server-instances")({
 
 function ServerInstancesTableContent() {
   const { data: instances } = useSuspenseQuery(getServerInstancesQueryOptions())
+  const columns = useColumns()
 
   if (!instances || instances.length === 0) {
     return (

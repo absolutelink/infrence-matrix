@@ -7,6 +7,7 @@ export type QueueServerStatus = {
   capacity: number
   active: number
   available: number
+  queued: number
   telemetry_known: boolean
   state: "booting" | "ready"
 }

@@ -1360,6 +1360,12 @@ async def test_status_snapshot_separates_expired_active_leases(db):
         server=server,
         expires_at=datetime.now(UTC) - timedelta(minutes=1),
     )
+    _make_lease(
+        db,
+        model,
+        f"queued-{uuid.uuid4().hex}",
+        status="queued",
+    )
 
     snapshot = await InferenceScheduler().status_snapshot()
     data = snapshot["data"]
@@ -1368,8 +1374,10 @@ async def test_status_snapshot_separates_expired_active_leases(db):
     )
 
     assert data["stale_active"] == 1
+    assert data["queued"] == 1
     assert data["reconciliation_running"] is False
     assert data["last_reconciliation_at"] is None
     assert server_status["stale_active"] == 1
     assert server_status["active"] == 1
     assert server_status["available"] == 0
+    assert server_status["queued"] == 1

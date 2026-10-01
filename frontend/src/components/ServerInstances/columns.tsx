@@ -1,18 +1,18 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query"
 import type { ColumnDef } from "@tanstack/react-table"
 import {
-  Activity,
-  Cpu,
-  MemoryStick,
+  ListOrdered,
   MoreHorizontal,
   Pencil,
   Play,
   Power,
   RefreshCw,
+  Rocket,
   Terminal,
   Trash2,
+  Zap,
 } from "lucide-react"
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import { toast } from "sonner"
 
 import { AgentsService, ServerInstancesService } from "@/client"
@@ -31,6 +31,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { useQueueStatus } from "@/hook/useQueueStatus"
+import { useTokenStats } from "@/hook/useTokenStats"
 
 type ServerInstance = {
   id: string
@@ -60,156 +62,193 @@ type ServerInstance = {
   model_metadata?: Record<string, unknown>
 }
 
-export const columns: ColumnDef<ServerInstance>[] = [
-  {
-    accessorKey: "alias",
-    header: "Alias",
-    cell: ({ row }) => {
-      const instance = row.original
-      return (
-        <div>
-          <div className="font-medium">{instance.alias || "—"}</div>
-          <div className="text-xs text-muted-foreground">
-            {instance.engine === "halogen" ||
-            instance.engine === "halogen-flash"
-              ? instance.engine === "halogen-flash"
-                ? "Halogen Flash"
-                : "Halogen"
-              : instance.model_name || "Unknown"}
-          </div>
-        </div>
-      )
-    },
-  },
-  {
-    accessorKey: "agent_name",
-    header: "Agent",
-    cell: ({ row }) => {
-      const instance = row.original
-      return (
-        <div>
-          <div className="font-medium">{instance.agent_name || "Unknown"}</div>
-          <div className="text-xs text-muted-foreground">
-            {instance.agent_host}:{instance.agent_port}
-          </div>
-        </div>
-      )
-    },
-  },
-  {
-    accessorKey: "status",
-    header: "Status",
-    cell: ({ row }) => {
-      const instance = row.original
-      const statusColors: Record<
-        string,
-        "default" | "secondary" | "destructive" | "outline"
-      > = {
-        running: "default",
-        starting: "secondary",
-        stopping: "secondary",
-        stopped: "secondary",
-        healthy: "default",
-        unhealthy: "destructive",
-        initialization_failed: "destructive",
-        metadata_gathering: "secondary",
-        preparing: "secondary",
-        uninitialized: "outline",
-        unknown: "outline",
-      }
+const formatRate = (rate: number | null | undefined) =>
+  rate === null || rate === undefined ? "—" : rate.toFixed(1)
 
-      const statusVariant = statusColors[instance.status] || "outline"
-      const healthVariant = statusColors[instance.health_status] || "outline"
-      const statusLabel =
-        instance.status === "starting"
-          ? "booting"
-          : instance.status === "metadata_gathering"
-            ? "gathering metadata"
-            : instance.status
+export function useColumns(): ColumnDef<ServerInstance>[] {
+  const { status } = useQueueStatus()
+  const { data: tokenData } = useTokenStats()
 
-      return (
-        <div className="flex flex-col items-start gap-1">
-          <div className="flex gap-2">
-            <Badge variant={statusVariant}>{statusLabel}</Badge>
-            <Badge variant={healthVariant} className="text-xs">
-              {instance.health_status}
-            </Badge>
-          </div>
-          {instance.last_health_check && (
-            <span
-              className="text-[11px] text-muted-foreground"
-              title="Last updated"
-            >
-              Updated{" "}
-              {new Date(instance.last_health_check).toLocaleTimeString()}
-            </span>
-          )}
-          {instance.error_message && (
-            <span
-              className="max-w-64 truncate text-xs text-destructive"
-              title={instance.error_message}
-            >
-              {instance.error_message}
-            </span>
-          )}
-        </div>
-      )
-    },
-  },
-  {
-    accessorKey: "resources",
-    header: "Resources",
-    cell: ({ row }) => {
-      const instance = row.original
+  const throughputById = useMemo(() => {
+    const map = new Map<
+      string,
+      { decode: number | null | undefined; prefill: number | null | undefined }
+    >()
+    for (const server of tokenData?.servers ?? []) {
+      map.set(server.id, {
+        decode: server.decode_tokens_per_second,
+        prefill: server.prefill_tokens_per_second,
+      })
+    }
+    return map
+  }, [tokenData])
 
-      const ramGB = instance.ram_usage_bytes
-        ? (instance.ram_usage_bytes / 1073741824).toFixed(2)
-        : null
-      const vramGB = instance.vram_usage_bytes
-        ? (instance.vram_usage_bytes / 1073741824).toFixed(2)
-        : null
+  const queueById = useMemo(() => {
+    const map = new Map<
+      string,
+      { active: number; capacity: number; queued: number }
+    >()
+    for (const server of status?.servers ?? []) {
+      map.set(server.id, {
+        active: server.active,
+        capacity: server.capacity,
+        queued: server.queued,
+      })
+    }
+    return map
+  }, [status])
 
-      return (
-        <div className="flex flex-col gap-1 text-xs">
-          {instance.cpu_usage_percent !== null && (
-            <div className="flex items-center gap-1">
-              <Cpu className="h-3 w-3" />
-              <span>{instance.cpu_usage_percent.toFixed(1)}%</span>
+  return [
+    {
+      accessorKey: "alias",
+      header: "Alias",
+      cell: ({ row }) => {
+        const instance = row.original
+        return (
+          <div>
+            <div className="font-medium">{instance.alias || "—"}</div>
+            <div className="text-xs text-muted-foreground">
+              {instance.engine === "halogen" ||
+              instance.engine === "halogen-flash"
+                ? instance.engine === "halogen-flash"
+                  ? "Halogen Flash"
+                  : "Halogen"
+                : instance.model_name || "Unknown"}
             </div>
-          )}
-          {ramGB && (
-            <div className="flex items-center gap-1">
-              <MemoryStick className="h-3 w-3" />
-              <span>{ramGB} GB</span>
-            </div>
-          )}
-          {vramGB && (
-            <div className="flex items-center gap-1">
-              <Activity className="h-3 w-3" />
-              <span>{vramGB} GB VRAM</span>
-            </div>
-          )}
-          {!instance.cpu_usage_percent && !ramGB && !vramGB && (
-            <span className="text-muted-foreground">N/A</span>
-          )}
-        </div>
-      )
+          </div>
+        )
+      },
     },
-  },
-  {
-    accessorKey: "started_at",
-    header: "Uptime",
-    cell: () => null,
-  },
-  {
-    id: "actions",
-    cell: ({ row }) => {
-      const instance = row.original
+    {
+      accessorKey: "agent_name",
+      header: "Agent",
+      cell: ({ row }) => {
+        const instance = row.original
+        return (
+          <div>
+            <div className="font-medium">
+              {instance.agent_name || "Unknown"}
+            </div>
+            <div className="text-xs text-muted-foreground">
+              {instance.agent_host}:{instance.agent_port}
+            </div>
+          </div>
+        )
+      },
+    },
+    {
+      accessorKey: "status",
+      header: "Status",
+      cell: ({ row }) => {
+        const instance = row.original
+        const statusColors: Record<
+          string,
+          "default" | "secondary" | "destructive" | "outline"
+        > = {
+          running: "default",
+          starting: "secondary",
+          stopping: "secondary",
+          stopped: "secondary",
+          healthy: "default",
+          unhealthy: "destructive",
+          initialization_failed: "destructive",
+          metadata_gathering: "secondary",
+          preparing: "secondary",
+          uninitialized: "outline",
+          unknown: "outline",
+        }
 
-      return <InstanceActions instance={instance} />
+        const statusVariant = statusColors[instance.status] || "outline"
+        const healthVariant = statusColors[instance.health_status] || "outline"
+        const statusLabel =
+          instance.status === "starting"
+            ? "booting"
+            : instance.status === "metadata_gathering"
+              ? "gathering metadata"
+              : instance.status
+
+        return (
+          <div className="flex flex-col items-start gap-1">
+            <div className="flex gap-2">
+              <Badge variant={statusVariant}>{statusLabel}</Badge>
+              <Badge variant={healthVariant} className="text-xs">
+                {instance.health_status}
+              </Badge>
+            </div>
+            {instance.last_health_check && (
+              <span
+                className="text-[11px] text-muted-foreground"
+                title="Last updated"
+              >
+                Updated{" "}
+                {new Date(instance.last_health_check).toLocaleTimeString()}
+              </span>
+            )}
+            {instance.error_message && (
+              <span
+                className="max-w-64 truncate text-xs text-destructive"
+                title={instance.error_message}
+              >
+                {instance.error_message}
+              </span>
+            )}
+          </div>
+        )
+      },
     },
-  },
-]
+    {
+      id: "throughput",
+      header: "Throughput",
+      cell: ({ row }) => {
+        const stats = throughputById.get(row.original.id)
+        return (
+          <div className="flex flex-col gap-1 text-xs">
+            <div className="flex items-center gap-1">
+              <Zap className="h-3 w-3 text-emerald-500" />
+              <span>{formatRate(stats?.decode)} tok/s</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <Rocket className="h-3 w-3 text-sky-500" />
+              <span>{formatRate(stats?.prefill)} tok/s</span>
+            </div>
+          </div>
+        )
+      },
+    },
+    {
+      id: "slots_queue",
+      header: "Slots / Queue",
+      cell: ({ row }) => {
+        const slot = queueById.get(row.original.id)
+        const active = slot?.active ?? 0
+        const capacity = slot?.capacity ?? 0
+        const queued = slot?.queued ?? 0
+        return (
+          <div className="flex flex-col gap-1 text-xs">
+            <div className="flex items-center gap-1">
+              <span className="font-medium">
+                {active}/{capacity}
+              </span>
+              <span className="text-muted-foreground">slots</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <ListOrdered className="h-3 w-3" />
+              <span>{queued} queued</span>
+            </div>
+          </div>
+        )
+      },
+    },
+    {
+      id: "actions",
+      cell: ({ row }) => {
+        const instance = row.original
+
+        return <InstanceActions instance={instance} />
+      },
+    },
+  ]
+}
 
 function InstanceActions({ instance }: { instance: ServerInstance }) {
   const queryClient = useQueryClient()
