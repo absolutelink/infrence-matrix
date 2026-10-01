@@ -48,9 +48,28 @@ docker build \
 **Use case:** ROCmFP4 inference on AMD Strix Halo hardware. See the recipe
 README for required device mappings and permissions.
 
+### 4. Gufo (`recipes/gufo/`)
+
+Agent image for the [Gufo](https://github.com/gufo-org/gufo) Strix Halo
+inference engine, based on `ghcr.io/gufo-org/toolboxes/gufo-runtime:0.3.0`.
+The published image is `agent-gufo` and serves text LLM models through
+`gufo serve llm` with user-selected GGUF models. Registers as
+`platform=gufo, type=gufo`.
+
+```bash
+docker build \
+  --build-arg AGENT_IMAGE=ghcr.io/<owner>/agent:main \
+  -t inference-matrix-agent:gufo \
+  -f recipes/gufo/Dockerfile .
+```
+
+**Use case:** Optimized text inference on AMD Strix Halo (`gfx1151`) with
+unified memory, including DFlash2/DSpark/MTP speculative decoding. See the
+recipe README for device, SELinux, and permission requirements.
+
 ## Future Recipes (Planned)
 
-### 4. Halogen ROCm (`recipes/halogen-rocm/`)
+### Halogen ROCm (`recipes/halogen-rocm/`)
 
 Agent image for Halogen on AMD Strix Halo. The published image is
 `agent-halogen-rocm` and runs one isolated Halogen process per server instance.

@@ -4,6 +4,10 @@ import { toast } from "sonner"
 import type { Model } from "@/client"
 import { ModelsService, ServerInstancesService } from "@/client"
 import {
+  type GufoOptions,
+  GufoSettingsFields,
+} from "@/components/ServerInstances/GufoSettingsFields"
+import {
   type HalogenFlashOptions,
   HalogenFlashSettingsFields,
 } from "@/components/ServerInstances/HalogenFlashSettingsFields"
@@ -44,8 +48,8 @@ interface EditServerDialogProps {
     id: string
     model_id: string
     model_name: string | null
-    engine?: "llamacpp" | "halogen" | "halogen-flash"
-    engine_options?: HalogenOptions | HalogenFlashOptions
+    engine?: "llamacpp" | "halogen" | "halogen-flash" | "gufo"
+    engine_options?: HalogenOptions | HalogenFlashOptions | GufoOptions
     mmproj_model_id?: string | null
     dflash_model_id?: string | null
     status: string
@@ -78,7 +82,7 @@ export function EditServerDialog({
   const [mtpDraftMax, setMtpDraftMax] = useState("0")
   const [serverOptions, setServerOptions] = useState<ServerOptions>({})
   const [engineOptions, setEngineOptions] = useState<
-    HalogenOptions | HalogenFlashOptions
+    HalogenOptions | HalogenFlashOptions | GufoOptions
   >({})
 
   const modelsQuery = useQuery({
@@ -123,7 +127,10 @@ export function EditServerDialog({
         path: { server_id: instance.id },
         body: {
           alias: alias.trim() || instance.alias,
-          model_id: instance.engine !== "llamacpp" ? undefined : modelId,
+          model_id:
+            instance.engine === "llamacpp" || instance.engine === "gufo"
+              ? modelId
+              : undefined,
           gpu_layers: Number(gpuLayers),
           context_size: Number(contextSize),
           ...(vramRequired.trim()
@@ -193,7 +200,7 @@ export function EditServerDialog({
             {instance.engine === "halogen" ? (
               <div className="col-span-2">
                 <HalogenSettingsFields
-                  options={engineOptions}
+                  options={engineOptions as HalogenOptions}
                   onChange={setEngineOptions}
                 />
               </div>
@@ -202,6 +209,14 @@ export function EditServerDialog({
                 <HalogenFlashSettingsFields
                   options={engineOptions as HalogenFlashOptions}
                   onChange={setEngineOptions}
+                />
+              </div>
+            ) : instance.engine === "gufo" ? (
+              <div className="col-span-2">
+                <GufoSettingsFields
+                  options={engineOptions as GufoOptions}
+                  onChange={setEngineOptions}
+                  models={(modelsQuery.data ?? []) as Model[]}
                 />
               </div>
             ) : (
@@ -227,7 +242,7 @@ export function EditServerDialog({
                 </Select>
               </div>
             )}
-            {instance.engine === "llamacpp" && (
+            {(instance.engine === "llamacpp" || instance.engine === "gufo") && (
               <div className="col-span-2">
                 <Label>Model</Label>
                 <Select value={modelId} onValueChange={setModelId}>

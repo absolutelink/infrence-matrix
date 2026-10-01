@@ -68,15 +68,18 @@ class ServerStartRequest(BaseModel):
     draft_source: dict[str, str] | None = None
 
 
+STRICT_PLATFORMS = ("halogen", "halogen-flash", "gufo")
+
+
 def _validate_engine_platform(engine: str) -> None:
     """Reject engine requests that do not match this agent image."""
     platform = settings.AGENT_PLATFORM
-    if platform in ("halogen", "halogen-flash") and engine != platform:
+    if platform in STRICT_PLATFORMS and engine != platform:
         raise HTTPException(
             status_code=400,
             detail=f"Agent platform={platform} only supports engine={platform}",
         )
-    if platform not in ("halogen", "halogen-flash") and engine != "llamacpp":
+    if platform not in STRICT_PLATFORMS and engine != "llamacpp":
         raise HTTPException(
             status_code=400,
             detail=f"Agent platform={platform} only supports engine=llamacpp",
@@ -350,6 +353,15 @@ async def start_server(request: ServerStartRequest) -> dict:
                 port=port,
                 api_port=port,
                 engine_port=_allocate_port(),
+                options=request.config.engine_options,
+                slot_generation=request.config.slot_generation,
+            )
+        elif request.config.engine == "gufo":
+            from app.services.gufo_server import GufoServerConfig
+
+            config = GufoServerConfig(
+                model_path=model_path,
+                port=port,
                 options=request.config.engine_options,
                 slot_generation=request.config.slot_generation,
             )

@@ -19,7 +19,7 @@ class AgentRegisterRequest(BaseModel):
     agent_id: str
     name: str
     platform: str = Field(
-        default="llamacpp", pattern=r"^(llamacpp|halogen|halogen-flash)$"
+        default="llamacpp", pattern=r"^(llamacpp|halogen|halogen-flash|gufo)$"
     )
     type: str = "generic"
     host: str

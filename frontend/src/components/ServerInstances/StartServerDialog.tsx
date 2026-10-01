@@ -4,6 +4,10 @@ import { toast } from "sonner"
 import type { Model, StartServerRequest } from "@/client"
 import { AgentsService, ModelsService, ServerInstancesService } from "@/client"
 import {
+  type GufoOptions,
+  GufoSettingsFields,
+} from "@/components/ServerInstances/GufoSettingsFields"
+import {
   type HalogenFlashOptions,
   HalogenFlashSettingsFields,
 } from "@/components/ServerInstances/HalogenFlashSettingsFields"
@@ -54,10 +58,10 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
   const [mtpDraftMax, setMtpDraftMax] = useState("0")
   const [serverOptions, setServerOptions] = useState<ServerOptions>({})
   const [engine, setEngine] = useState<
-    "llamacpp" | "halogen" | "halogen-flash"
+    "llamacpp" | "halogen" | "halogen-flash" | "gufo"
   >("llamacpp")
   const [engineOptions, setEngineOptions] = useState<
-    HalogenOptions | HalogenFlashOptions
+    HalogenOptions | HalogenFlashOptions | GufoOptions
   >({})
 
   const modelsQuery = useQuery({
@@ -94,7 +98,7 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
           Number(vramRequired) * 1024 * 1024 * 1024,
         )
       }
-      if (engine === "llamacpp") {
+      if (engine === "llamacpp" || engine === "gufo") {
         body.model_id = modelId
       }
       if (agentId && agentId !== "auto") {
@@ -135,11 +139,15 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
     platform?: string
     type?: string
   }>
-  const compatibleAgents = agents.filter((agent) =>
-    engine === "halogen" || engine === "halogen-flash"
-      ? agent.platform === engine && agent.type === "rocm"
-      : agent.platform !== "halogen",
-  )
+  const compatibleAgents = agents.filter((agent) => {
+    if (engine === "gufo") {
+      return agent.platform === "gufo" && agent.type === "gufo"
+    }
+    if (engine === "halogen" || engine === "halogen-flash") {
+      return agent.platform === engine && agent.type === "rocm"
+    }
+    return agent.platform !== "halogen" && agent.platform !== "gufo"
+  })
 
   return (
     <Sheet
@@ -167,9 +175,12 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
               <Select
                 value={engine}
                 onValueChange={(value) => {
-                  setEngine(value as "llamacpp" | "halogen" | "halogen-flash")
+                  setEngine(
+                    value as "llamacpp" | "halogen" | "halogen-flash" | "gufo",
+                  )
                   setAgentId("")
                   setServerOptions({})
+                  setEngineOptions({})
                 }}
               >
                 <SelectTrigger className="mt-1">
@@ -179,6 +190,7 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
                   <SelectItem value="llamacpp">llama.cpp</SelectItem>
                   <SelectItem value="halogen">Halogen</SelectItem>
                   <SelectItem value="halogen-flash">Halogen Flash</SelectItem>
+                  <SelectItem value="gufo">Gufo</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -194,13 +206,19 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
             </div>
             {engine === "halogen" ? (
               <HalogenSettingsFields
-                options={engineOptions}
+                options={engineOptions as HalogenOptions}
                 onChange={setEngineOptions}
               />
             ) : engine === "halogen-flash" ? (
               <HalogenFlashSettingsFields
                 options={engineOptions as HalogenFlashOptions}
                 onChange={setEngineOptions}
+              />
+            ) : engine === "gufo" ? (
+              <GufoSettingsFields
+                options={engineOptions as GufoOptions}
+                onChange={setEngineOptions}
+                models={(modelsQuery.data ?? []) as Model[]}
               />
             ) : (
               <ServerSettingsFields
@@ -228,7 +246,7 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
                 </Select>
               </div>
             )}
-            {engine === "llamacpp" && (
+            {(engine === "llamacpp" || engine === "gufo") && (
               <div>
                 <Label>Model</Label>
                 <Select value={modelId} onValueChange={setModelId}>
@@ -341,7 +359,7 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
             onClick={() => startMutation.mutate()}
             loading={startMutation.isPending}
             disabled={
-              (engine === "llamacpp" && !modelId) ||
+              ((engine === "llamacpp" || engine === "gufo") && !modelId) ||
               !alias.trim() ||
               (engine === "llamacpp" &&
                 validateServerOptions(serverOptions) !== null)

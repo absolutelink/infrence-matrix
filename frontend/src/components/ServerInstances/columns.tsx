@@ -39,7 +39,7 @@ type ServerInstance = {
   model_id: string
   model_name: string | null
   alias: string
-  engine?: "llamacpp" | "halogen" | "halogen-flash"
+  engine?: "llamacpp" | "halogen" | "halogen-flash" | "gufo"
   engine_options?: HalogenOptions
   status: string
   health_status: string
@@ -123,7 +123,9 @@ export function useColumns(): ColumnDef<ServerInstance>[] {
                   ? instance.engine === "halogen-flash"
                     ? "Halogen Flash"
                     : "Halogen"
-                  : instance.model_name || "Unknown"}
+                  : instance.engine === "gufo"
+                    ? `${instance.model_name || "Unknown"} · Gufo`
+                    : instance.model_name || "Unknown"}
               </div>
             </div>
           )

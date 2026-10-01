@@ -1566,7 +1566,7 @@ export type ServerInstanceResponse = {
     /**
      * Engine
      */
-    engine?: 'llamacpp' | 'halogen' | 'halogen-flash';
+    engine?: 'llamacpp' | 'halogen' | 'halogen-flash' | 'gufo';
     /**
      * Engine Options
      */
@@ -1964,7 +1964,7 @@ export type StartServerRequest = {
     /**
      * Engine
      */
-    engine?: 'llamacpp' | 'halogen' | 'halogen-flash';
+    engine?: 'llamacpp' | 'halogen' | 'halogen-flash' | 'gufo';
     /**
      * Engine Options
      */
@@ -2126,7 +2126,7 @@ export type UpdateServerRequest = {
     /**
      * Engine
      */
-    engine?: 'llamacpp' | 'halogen' | 'halogen-flash' | null;
+    engine?: 'llamacpp' | 'halogen' | 'halogen-flash' | 'gufo' | null;
     /**
      * Engine Options
      */

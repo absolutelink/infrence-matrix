@@ -1274,7 +1274,7 @@ export class V16 {
      *
      * Args:
      * file: File to upload
-     * purpose: File purpose (batch, retrieval, assistants)
+     * purpose: File purpose (one of ALLOWED_PURPOSES)
      */
     public static uploadFile<ThrowOnError extends boolean = true>(options: Options<v1FilesUploadFileData, ThrowOnError>) {
         return (options.client ?? client).post<v1FilesUploadFileResponses, v1FilesUploadFileErrors, ThrowOnError>({

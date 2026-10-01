@@ -41,10 +41,23 @@ HALOGEN_FLASH_PATHS = {
     "v1/completions",
     "v1/chat/completions",
 }
+GUFO_PATHS = {
+    "health",
+    "ready",
+    "metrics",
+    "v1/models",
+    "v1/completions",
+    "v1/chat/completions",
+    "v1/responses",
+}
 
 
 def _is_supported_halogen_flash_path(path: str) -> bool:
     return path in HALOGEN_FLASH_PATHS
+
+
+def _is_supported_gufo_path(path: str) -> bool:
+    return path in GUFO_PATHS
 
 
 @router.get("/{server_id}/operations/{request_id}")
@@ -158,6 +171,13 @@ async def proxy_request(
             raise HTTPException(
                 404,
                 "Endpoint is not supported by halogen-flash-server",
+            )
+
+    if settings.AGENT_PLATFORM == "gufo":
+        if not _is_supported_gufo_path(path):
+            raise HTTPException(
+                404,
+                "Endpoint is not supported by gufo",
             )
 
     inference_request = path in {

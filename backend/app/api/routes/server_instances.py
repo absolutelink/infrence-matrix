@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
@@ -24,6 +24,7 @@ from app.services.server_lifecycle import (
 )
 from app.services.server_options import (
     ServerOptions,
+    validate_gufo_options,
     validate_halogen_flash_options,
     validate_halogen_options,
     validate_server_options,
@@ -83,7 +84,7 @@ class ServerInstanceResponse(BaseModel):
     dflash_model_id: str | None = None
     dflash_model_name: str | None = None
     alias: str
-    engine: Literal["llamacpp", "halogen", "halogen-flash"] = "llamacpp"
+    engine: Literal["llamacpp", "halogen", "halogen-flash", "gufo"] = "llamacpp"
     engine_options: dict = Field(default_factory=dict)
     status: str
     health_status: str
@@ -127,7 +128,7 @@ class StartServerRequest(BaseModel):
     server_options: ServerOptions = Field(default_factory=ServerOptions)
     # Public name clients use in OpenAI-compatible requests
     alias: str = Field(..., min_length=1, max_length=255)
-    engine: Literal["llamacpp", "halogen", "halogen-flash"] = "llamacpp"
+    engine: Literal["llamacpp", "halogen", "halogen-flash", "gufo"] = "llamacpp"
     engine_options: dict = Field(default_factory=dict)
 
 
@@ -135,7 +136,7 @@ class UpdateServerRequest(BaseModel):
     """Editable server settings. All fields optional."""
 
     alias: str | None = Field(None, min_length=1, max_length=255)
-    engine: Literal["llamacpp", "halogen", "halogen-flash"] | None = None
+    engine: Literal["llamacpp", "halogen", "halogen-flash", "gufo"] | None = None
     engine_options: dict | None = None
     # Swap the model this server serves (requires stop + restart when running)
     model_id: str | None = None
@@ -364,6 +365,8 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
                     col(Agent.platform)
                     == ("halogen" if request.engine == "halogen" else "halogen-flash")
                 )
+            elif request.engine == "gufo":
+                agent_query = agent_query.where(col(Agent.platform) == "gufo")
             result = await session.execute(agent_query.limit(1))
             agent = result.scalar_one_or_none()
 
@@ -372,7 +375,27 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
                 status_code=503, detail="No online agent available to start server"
             )
 
-        if request.engine in ("halogen", "halogen-flash"):
+        if request.engine == "gufo":
+            if agent.platform != "gufo" or agent.type != "gufo":
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "gufo servers require an agent with platform=gufo and type=gufo"
+                    ),
+                )
+            if request.server_options.model_dump(exclude_none=True):
+                raise HTTPException(
+                    status_code=400,
+                    detail="llama.cpp server_options are not valid for Gufo",
+                )
+            try:
+                engine_options = validate_gufo_options(request.engine_options)
+            except ValidationError as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Invalid gufo engine_options: {exc.errors()[0]}",
+                ) from exc
+        elif request.engine in ("halogen", "halogen-flash"):
             expected_platform = request.engine
             if agent.platform != expected_platform or agent.type != "rocm":
                 raise HTTPException(
@@ -394,11 +417,16 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
             )
         else:
             # Preserve compatibility with existing custom llama.cpp platform
-            # labels; only Halogen is a distinct engine contract.
+            # labels; only Halogen and Gufo are distinct engine contracts.
             if agent.platform in ("halogen", "halogen-flash"):
                 raise HTTPException(
                     status_code=400,
                     detail="Halogen agents require engine=halogen",
+                )
+            if agent.platform == "gufo":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Gufo agents require engine=gufo",
                 )
             engine_options = {}
 
@@ -422,6 +450,16 @@ async def start_server(request: StartServerRequest) -> dict[str, Any]:
             raise HTTPException(
                 status_code=400,
                 detail="Halogen servers do not support mmproj or dflash models",
+            )
+        if request.engine == "gufo" and (
+            request.mmproj_model_id or request.dflash_model_id
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Gufo servers pass mmproj and draft model paths through "
+                    "engine_options, not model selections"
+                ),
             )
         mmproj_model = await _resolve_mmproj_model(session, request.mmproj_model_id)
         dflash_model = await _resolve_dflash_model(session, request.dflash_model_id)
@@ -578,6 +616,8 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
                 if instance.engine == "halogen"
                 else validate_halogen_flash_options(request.engine_options)
                 if instance.engine == "halogen-flash"
+                else validate_gufo_options(request.engine_options)
+                if instance.engine == "gufo"
                 else {}
             )
 

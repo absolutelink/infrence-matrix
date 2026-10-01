@@ -193,3 +193,81 @@ def validate_halogen_flash_options(options: dict | HalogenFlashServerOptions) ->
     return HalogenFlashServerOptions.model_validate(options).model_dump(
         exclude_none=True
     )
+
+
+class GufoServerOptions(BaseModel):
+    """Startup settings supported by ``gufo serve llm``.
+
+    None means the flag is omitted and gufo applies its own default.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Model & context
+    served_model_name: str | None = None
+    context: int | None = Field(default=None, ge=0)
+    mmproj: str | None = None
+
+    # Sampling defaults
+    max_tokens: int | None = Field(default=None, ge=-1)
+    temperature: float | None = Field(default=None, ge=0)
+    top_k: int | None = Field(default=None, ge=0)
+    top_p: float | None = Field(default=None, ge=0, le=1)
+    min_p: float | None = Field(default=None, ge=0, le=1)
+    min_keep: int | None = Field(default=None, ge=0)
+    seed: int | None = Field(default=None, ge=-1)
+    repeat_penalty: float | None = Field(default=None, ge=0)
+    repeat_last_n: int | None = Field(default=None, ge=0)
+    frequency_penalty: float | None = None
+    presence_penalty: float | None = None
+
+    # Reasoning defaults
+    think: Literal["on", "off", "auto"] | None = None
+    reasoning_effort: (
+        Literal["auto", "minimal", "low", "medium", "high", "xhigh", "max"] | None
+    ) = None
+    preserve_thinking: Literal["on", "off", "auto"] | None = None
+
+    # Speculative decoding
+    speculative: Literal["dflash2", "dspark", "mtp", "off"] | None = None
+    dflash_model: str | None = None
+    dspark_model: str | None = None
+    mtp_model: str | None = None
+    draft_policy: Literal["fixed", "adaptive"] | None = None
+    draft_tokens: int | None = Field(default=None, ge=1)
+    min_draft_tokens: int | None = Field(default=None, ge=1)
+
+    # Scheduling and server-protection limits
+    prefill_chunk: int | None = Field(default=None, ge=1)
+    max_pending: int | None = Field(default=None, ge=0)
+    max_pending_per_client: int | None = Field(default=None, ge=0)
+    request_timeout_ms: int | None = Field(default=None, ge=0)
+    max_output_bytes: int | None = Field(default=None, ge=1)
+    max_buffered_output_bytes: int | None = Field(default=None, ge=1)
+    max_buffered_output_total: int | None = Field(default=None, ge=1)
+
+    # Disk cache
+    cache_disk: str | None = None
+    cache_disk_bytes: int | None = Field(default=None, ge=0)
+    cache_disk_staging_bytes: int | None = Field(default=None, ge=0)
+
+    # Server options
+    sessions: int | None = Field(default=None, ge=1)
+    max_connections: int | None = Field(default=None, ge=1)
+    max_request_bytes: int | None = Field(default=None, ge=1)
+    api_key: str | None = None
+    verbose: bool | None = None
+    log_progress: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_dependencies(self) -> GufoServerOptions:
+        if self.reasoning_effort not in (None, "auto") and self.think == "off":
+            raise ValueError("reasoning_effort cannot be set while think is off")
+        return self
+
+
+def validate_gufo_options(options: dict | GufoServerOptions) -> dict:
+    """Validate and normalize Gufo startup settings."""
+    if isinstance(options, GufoServerOptions):
+        return options.model_dump(exclude_none=True)
+    return GufoServerOptions.model_validate(options).model_dump(exclude_none=True)
