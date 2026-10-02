@@ -37,6 +37,20 @@ class _SlotReservation:
     generation: int | None = None
 
 
+_BODY_FRAMING_HEADERS = frozenset({"content-length", "transfer-encoding"})
+
+
+def _strip_body_framing(headers: dict) -> dict:
+    """Remove body-framing headers so httpx recomputes them from our own body.
+
+    The agent may mutate the request body (e.g. inject ``model`` for gufo),
+    changing its byte length. A forwarded inbound ``Content-Length`` or
+    ``Transfer-Encoding`` would then disagree with the actual body and abort
+    the h11 request.
+    """
+    return {k: v for k, v in headers.items() if k.lower() not in _BODY_FRAMING_HEADERS}
+
+
 class ServerProxy:
     """Proxies requests to llama.cpp servers.
 
@@ -115,6 +129,13 @@ class ServerProxy:
         operation_id: str | None = None,
     ) -> httpx.Response:
         """Proxy HTTP request to llama.cpp."""
+        # When we supply our own json body (possibly mutated from the inbound
+        # request, e.g. gufo model injection), strip any inbound body-framing
+        # headers so httpx recomputes Content-Length from the actual bytes.
+        # Otherwise a stale declared length aborts with "Too much data for
+        # declared Content-Length" before the request reaches the upstream.
+        if json is not None:
+            headers = _strip_body_framing(headers)
         reservation = _SlotReservation(
             acquired=capacity_reserved, generation=expected_slot_generation
         )

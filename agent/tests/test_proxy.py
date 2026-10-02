@@ -23,6 +23,7 @@ from app.services.llama_server import ServerConfig
 from app.services.proxy import (
     ProxyOperationExists,
     ServerProxy,
+    _strip_body_framing,
 )
 
 
@@ -1229,6 +1230,82 @@ async def test_gufo_responses_is_capacity_enforced_and_model_filled(monkeypatch)
     assert captured["enforce_capacity"] is True
     assert captured["body"]["model"] == "gufo-alias"
 
+    del proxy_route.server_manager.servers[server_id]
+    del proxy_route.server_manager.configs[server_id]
+
+
+class TestBodyFramingHeaderStrip:
+    def test_strips_content_length_and_transfer_encoding_case_insensitive(self) -> None:
+        headers = {
+            "Content-Length": "5",
+            "X-Keep": "yes",
+            "transfer-encoding": "chunked",
+            "Authorization": "Bearer x",
+        }
+        stripped = _strip_body_framing(headers)
+        assert "Content-Length" not in stripped
+        assert "transfer-encoding" not in stripped
+        assert stripped["X-Keep"] == "yes"
+        assert stripped["Authorization"] == "Bearer x"
+
+    def test_non_framing_headers_untouched(self) -> None:
+        headers = {"Accept": "application/json", "X-Custom": "value"}
+        assert _strip_body_framing(headers) == headers
+
+
+@pytest.mark.asyncio
+async def test_buffered_proxy_recomputes_content_length_after_body_mutation(
+    monkeypatch,
+):
+    """Regression: gufo model injection grows the body; a stale inbound
+    Content-Length must not be forwarded, or h11 aborts with
+    'Too much data for declared Content-Length'."""
+    from app.api.routes import proxy as proxy_route
+
+    server_id = "gufo-framing-server"
+    monkeypatch.setattr(settings, "AGENT_PLATFORM", "gufo")
+    proxy_route.server_manager.servers[server_id] = Mock()
+    proxy_route.server_manager.configs[server_id] = Mock(
+        port=8091, api_port=8091, slot_generation=1,
+        options={"served_model_name": "my-model"},
+    )
+
+    captured_request: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_request["content_length"] = request.headers.get("content-length")
+        captured_request["body"] = request.content
+        return httpx.Response(200, json={"ok": True})
+
+    original_client = proxy_route.proxy.client
+    proxy_route.proxy.client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler)
+    )
+
+    inbound_body = {"input": "hello"}
+    inbound_headers = {
+        "content-length": str(len(inbound_body)),  # stale, shorter than mutated body
+        "content-type": "application/json",
+    }
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        result = await client.post(
+            f"/proxy/{server_id}/v1/responses",
+            headers=inbound_headers,
+            json=inbound_body,
+        )
+
+    assert result.status_code == 200
+    # The upstream request must have a Content-Length matching the actual
+    # mutated body (which now includes "model":"my-model").
+    actual_len = len(captured_request["body"])
+    assert captured_request["content_length"] == str(actual_len)
+    assert b"my-model" in captured_request["body"]
+
+    await proxy_route.proxy.client.aclose()
+    proxy_route.proxy.client = original_client
     del proxy_route.server_manager.servers[server_id]
     del proxy_route.server_manager.configs[server_id]
 
