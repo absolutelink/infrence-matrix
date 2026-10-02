@@ -5,7 +5,7 @@
 # the Matrix agent provides the Python runtime and the Gufo engine plus its
 # Nix store closure are copied in from the runtime image.
 ARG AGENT_IMAGE=ghcr.io/absolutelink/agent:main
-ARG GUFO_RUNTIME_IMAGE=ghcr.io/gufo-org/toolboxes/gufo-runtime:0.3.0
+ARG GUFO_RUNTIME_IMAGE=ghcr.io/gufo-org/toolboxes/gufo-runtime:latest
 
 FROM ${GUFO_RUNTIME_IMAGE} AS gufo-runtime
 

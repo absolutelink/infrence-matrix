@@ -13,6 +13,7 @@ from sqlmodel import select
 from app.db.session import engine as async_engine
 from app.models import Agent, InferenceLease, Model, ServerInstance
 from app.services.inference_scheduler import (
+    DISCONNECT_MONITOR_STOP_TIMEOUT_SECONDS,
     InferenceLeaseHandle,
     InferenceLeaseLost,
     InferenceRequestCancelled,
@@ -1381,3 +1382,134 @@ async def test_status_snapshot_separates_expired_active_leases(db):
     assert server_status["active"] == 1
     assert server_status["available"] == 0
     assert server_status["queued"] == 1
+
+
+def _wedged_disconnect_task(shutdown: asyncio.Event) -> asyncio.Task[None]:
+    """A disconnect task that ignores cancellation until ``shutdown`` is set.
+
+    Models a half-closed ASGI ``receive()`` that does not respond to ``.cancel()``
+    promptly, so the release/cancel teardown must rely on the bounded timeout
+    rather than the task finishing.
+    """
+
+    async def wedged() -> None:
+        try:
+            await shutdown.wait()
+        except asyncio.CancelledError:
+            # Ignore the cancel and keep blocking until the test shuts us down.
+            await shutdown.wait()
+
+    return asyncio.create_task(wedged())
+
+
+def _mock_session_context():
+    session = AsyncMock()
+    session.execute.return_value.rowcount = 1
+    session_context = AsyncMock()
+    session_context.__aenter__.return_value = session
+    session_context.__aexit__.return_value = None
+    return session, session_context
+
+
+@pytest.mark.asyncio
+async def test_release_stops_renewal_when_disconnect_monitor_wedges(caplog):
+    """A wedged disconnect teardown must not block the DB release.
+
+    Regression: ``_stop_disconnect_monitor()`` used to run before the renewal
+    task was cancelled. If the disconnect task ignored cancellation, the renewal
+    loop kept advancing ``lease_expires_at`` forever and the slot never freed.
+    The fix cancels renewal first and bounds the disconnect teardown.
+    """
+    caplog.set_level(logging.WARNING)
+    shutdown = asyncio.Event()
+    session, session_context = _mock_session_context()
+    handle = InferenceLeaseHandle(
+        "request-wedge",
+        SimpleNamespace(id=uuid.uuid4(), agent_id=uuid.uuid4()),
+        uuid.uuid4(),
+        slot_generation=4,
+        reservation_id=uuid.uuid4(),
+    )
+    handle.mark_upstream_started()
+    handle.start_renewal()
+    disconnect_task = _wedged_disconnect_task(shutdown)
+    handle._disconnect_task = disconnect_task
+    renewal_task = handle._renewal_task
+    assert renewal_task is not None and not renewal_task.done()
+
+    try:
+        with (
+            patch(
+                "app.services.inference_scheduler.AsyncSessionMaker",
+                return_value=session_context,
+            ),
+            patch(
+                "app.services.inference_scheduler.DISCONNECT_MONITOR_STOP_TIMEOUT_SECONDS",
+                0.2,
+            ),
+        ):
+            await asyncio.wait_for(
+                handle.release("completed"),
+                timeout=DISCONNECT_MONITOR_STOP_TIMEOUT_SECONDS + 1.0,
+            )
+    finally:
+        shutdown.set()
+        await asyncio.gather(disconnect_task, renewal_task, return_exceptions=True)
+
+    # Renewal loop stopped and DB release ran despite the wedged disconnect task.
+    assert handle._renewal_task is None
+    assert renewal_task.done()
+    session.execute.assert_awaited_once()
+    session.commit.assert_awaited_once()
+    assert (
+        "inference_disconnect_monitor_stop_timeout request_id=request-wedge"
+        in caplog.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancel_stops_renewal_when_disconnect_monitor_wedges(caplog):
+    """The cancel path must also cancel renewal before the disconnect teardown."""
+    caplog.set_level(logging.WARNING)
+    shutdown = asyncio.Event()
+    session, session_context = _mock_session_context()
+    handle = InferenceLeaseHandle(
+        "request-wedge-cancel",
+        SimpleNamespace(id=uuid.uuid4(), agent_id=uuid.uuid4()),
+        uuid.uuid4(),
+        slot_generation=4,
+        reservation_id=uuid.uuid4(),
+    )
+    handle.start_renewal()
+    disconnect_task = _wedged_disconnect_task(shutdown)
+    handle._disconnect_task = disconnect_task
+    renewal_task = handle._renewal_task
+    assert renewal_task is not None and not renewal_task.done()
+
+    try:
+        with (
+            patch(
+                "app.services.inference_scheduler.AsyncSessionMaker",
+                return_value=session_context,
+            ),
+            patch(
+                "app.services.inference_scheduler.DISCONNECT_MONITOR_STOP_TIMEOUT_SECONDS",
+                0.2,
+            ),
+        ):
+            await asyncio.wait_for(
+                handle.cancel(),
+                timeout=DISCONNECT_MONITOR_STOP_TIMEOUT_SECONDS + 1.0,
+            )
+    finally:
+        shutdown.set()
+        await asyncio.gather(disconnect_task, renewal_task, return_exceptions=True)
+
+    assert handle._renewal_task is None
+    assert renewal_task.done()
+    session.execute.assert_awaited_once()
+    session.commit.assert_awaited_once()
+    assert (
+        "inference_disconnect_monitor_stop_timeout request_id=request-wedge-cancel"
+        in caplog.text
+    )
