@@ -184,6 +184,7 @@ async def proxy_request(
         "v1/chat/completions",
         "v1/completions",
         "v1/embeddings",
+        "v1/responses",
     }
     if (
         inference_request

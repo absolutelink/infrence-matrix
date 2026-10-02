@@ -42,6 +42,10 @@ from app.api.routes.v1.responses.translator import (
     TranslationError,
     allowed_tool_names,
     build_response_resource,
+    decode_gufo_stream_event,
+    gufo_buffered_to_output_items,
+    gufo_native_payload,
+    gufo_usage_to_spec,
     input_items_to_llama_messages,
     tools_to_llama,
 )
@@ -308,15 +312,23 @@ async def _complete(
     reasoning_effort: str | None = None,
     started_mono: float | None = None,
 ) -> ResponseResource:
-    payload = _llama_payload(
-        request, history, stream=False, reasoning_effort=reasoning_effort
-    )
+    is_gufo = getattr(lease.server, "engine", None) == "gufo"
+    if is_gufo:
+        payload = gufo_native_payload(
+            request, history, stream=False, reasoning_effort=reasoning_effort
+        )
+        upstream_path = f"/proxy/{server_id}/v1/responses"
+    else:
+        payload = _llama_payload(
+            request, history, stream=False, reasoning_effort=reasoning_effort
+        )
+        upstream_path = f"/proxy/{server_id}/v1/chat/completions"
     started = started_mono if started_mono is not None else time.monotonic()
     response = await lease.guard(
         agent_manager.send_to_agent(
             agent_id,
             "POST",
-            f"/proxy/{server_id}/v1/chat/completions",
+            upstream_path,
             payload,
             timeout=1800.0,
             headers={
@@ -325,45 +337,62 @@ async def _complete(
         )
     )
 
-    choice = (response.get("choices") or [{}])[0]
-    message = choice.get("message") or {}
-    finish_reason = choice.get("finish_reason")
-    usage_data = {
-        **(response.get("usage") or {}),
-        "timings": response.get("timings") or {},
-    }
+    if is_gufo:
+        # gufo's native buffered response already carries final, correctly
+        # ordered spec output items; pass them through instead of rebuilding
+        # via StreamState (which would reorder calls before the message).
+        # allowed_tools suppression is a no-op here: gufo's native path
+        # rejects allowed_tools upstream, so no suppression set is applied.
+        items = gufo_buffered_to_output_items(response)
+        phase = _last_assistant_phase(request)
+        if phase:
+            for item in items:
+                if item.get("type") == "message" and "phase" not in item:
+                    item["phase"] = phase
+        output_items = items
+        usage = gufo_usage_to_spec(response.get("usage") or {})
+        incomplete = response.get("status") == "incomplete"
+        usage_data = {"timings": response.get("timings") or {}}
+    else:
+        state = StreamState(ev.SSEmitter(), request.model)
+        state.assistant_phase = _last_assistant_phase(request)
+        allowed = allowed_tool_names(request)
 
-    seq = ev.SSEmitter()
-    state = StreamState(seq, request.model)
-    state.assistant_phase = _last_assistant_phase(request)
-    allowed = allowed_tool_names(request)
+        choice = (response.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        finish_reason = choice.get("finish_reason")
+        usage_data = {
+            **(response.get("usage") or {}),
+            "timings": response.get("timings") or {},
+        }
 
-    reasoning_content = message.get("reasoning_content") or ""
-    if reasoning_content:
-        state.add_reasoning_delta(reasoning_content)
-        state.finish_reasoning()
+        reasoning_content = message.get("reasoning_content") or ""
+        if reasoning_content:
+            state.add_reasoning_delta(reasoning_content)
+            state.finish_reasoning()
 
-    content = message.get("content") or ""
-    if content:
-        state.add_text_delta(content)
+        content = message.get("content") or ""
+        if content:
+            state.add_text_delta(content)
 
-    for tc in message.get("tool_calls") or []:
-        index = tc.get("index", len(state._calls))
-        state.add_tool_call_delta(index, tc)
-    state.apply_allowed_tools(allowed)
+        for tc in message.get("tool_calls") or []:
+            index = tc.get("index", len(state._calls))
+            state.add_tool_call_delta(index, tc)
+        state.apply_allowed_tools(allowed)
 
-    state.finish_calls()
-    state.finish_message()
+        state.finish_calls()
+        state.finish_message()
 
-    incomplete = finish_reason == "length"
-    usage = _build_usage(usage_data, len(content), state.reasoning_tokens)
+        output_items = state.output_items
+        incomplete = finish_reason == "length"
+        usage = _build_usage(usage_data, len(content), state.reasoning_tokens)
 
     result = build_response_resource(
         request,
         response_id,
         created_at,
         status="incomplete" if incomplete else "completed",
-        output=_coerced_output_items(state.output_items),
+        output=_coerced_output_items(output_items),
         usage=usage,
     )
     result.completed_at = int(time.time())
@@ -561,6 +590,7 @@ async def _stream_events(
 ) -> AsyncIterator[str]:
     started = started_mono if started_mono is not None else time.monotonic()
     telemetry_recorded = False
+    is_gufo = getattr(lease.server, "engine", None) == "gufo" if lease else False
     # Stash the serving server up front: the mid-body release sets the
     # lease to None, and later except handlers must keep attribution.
     sample_server = lease.server if lease is not None else None
@@ -633,8 +663,14 @@ async def _stream_events(
         final_usage_data: dict[str, Any] = {}
         finish_reason: str | None = None
 
-        payload = _llama_payload(
-            request, history, stream=True, reasoning_effort=reasoning_effort
+        payload = (
+            gufo_native_payload(
+                request, history, stream=True, reasoning_effort=reasoning_effort
+            )
+            if is_gufo
+            else _llama_payload(
+                request, history, stream=True, reasoning_effort=reasoning_effort
+            )
         )
 
         # Hold the client connection while any in-flight startup completes
@@ -660,7 +696,9 @@ async def _stream_events(
                 readiness.cancel()
             await asyncio.gather(readiness, return_exceptions=True)
         proxy_url = (
-            f"http://{agent.host}:{agent.port}/proxy/{server_id}/v1/chat/completions"
+            f"http://{agent.host}:{agent.port}/proxy/{server_id}/v1/responses"
+            if is_gufo
+            else f"http://{agent.host}:{agent.port}/proxy/{server_id}/v1/chat/completions"
         )
         if lease is not None:
             lease.mark_upstream_started()
@@ -707,68 +745,108 @@ async def _stream_events(
                 upstream_status,
             )
             upstream.raise_for_status()
-            async with aclosing(
-                _upstream_lines_with_keepalive(upstream, lease, deadline)
-            ) as upstream_stream:
-                async for line in upstream_stream:
-                    if line is None:
-                        yield ": keep-alive\n\n"
-                        continue
-                    upstream_lines += 1
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].lstrip()
-                    if data.strip() == "[DONE]":
-                        done_marker_seen = True
-                        break
-                    try:
-                        chunk = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
+            if is_gufo:
+                # gufo emits typed OpenResponses SSE events (no [DONE]
+                # sentinel); the terminal response.completed/incomplete is
+                # the completion marker. Feed deltas into the same
+                # StreamState so broker IDs/sequence numbers are our own.
+                gufo_calls: dict[str, dict[str, Any]] = {}
+                async with aclosing(
+                    _upstream_lines_with_keepalive(upstream, lease, deadline)
+                ) as upstream_stream:
+                    async for line in upstream_stream:
+                        if line is None:
+                            yield ": keep-alive\n\n"
+                            continue
+                        upstream_lines += 1
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].lstrip()
+                        try:
+                            event = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        terminal, usage_data, incomplete = decode_gufo_stream_event(
+                            state, event, gufo_calls
+                        )
+                        if usage_data is not None:
+                            final_usage_data = usage_data
+                        for frame in seq.drain_frames():
+                            emitted_frames += 1
+                            yield frame
+                            deadline[0] = (
+                                time.monotonic() + SSE_KEEPALIVE_INTERVAL_SECONDS
+                            )
+                        if terminal:
+                            if incomplete:
+                                finish_reason = "length"
+                            done_marker_seen = True
+                            break
+            else:
+                async with aclosing(
+                    _upstream_lines_with_keepalive(upstream, lease, deadline)
+                ) as upstream_stream:
+                    async for line in upstream_stream:
+                        if line is None:
+                            yield ": keep-alive\n\n"
+                            continue
+                        upstream_lines += 1
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].lstrip()
+                        if data.strip() == "[DONE]":
+                            done_marker_seen = True
+                            break
+                        try:
+                            chunk = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
 
-                    if "error" in chunk:
-                        raise RuntimeError(f"LLM error: {chunk['error']}")
+                        if "error" in chunk:
+                            raise RuntimeError(f"LLM error: {chunk['error']}")
 
-                    usage_data = chunk.get("usage")
-                    if isinstance(usage_data, dict) and usage_data:
-                        final_usage_data = {
-                            **usage_data,
-                            "timings": chunk.get("timings") or {},
-                        }
-                    if "tokens_evaluated" in chunk or "tokens_predicted" in chunk:
-                        final_usage_data = {
-                            "prompt_tokens": chunk.get("tokens_evaluated", 0),
-                            "completion_tokens": chunk.get("tokens_predicted", 0),
-                        }
+                        usage_data = chunk.get("usage")
+                        if isinstance(usage_data, dict) and usage_data:
+                            final_usage_data = {
+                                **usage_data,
+                                "timings": chunk.get("timings") or {},
+                            }
+                        if "tokens_evaluated" in chunk or "tokens_predicted" in chunk:
+                            final_usage_data = {
+                                "prompt_tokens": chunk.get("tokens_evaluated", 0),
+                                "completion_tokens": chunk.get("tokens_predicted", 0),
+                            }
 
-                    choices = chunk.get("choices") or []
-                    if not choices:
-                        continue
-                    choice = choices[0]
-                    delta = choice.get("delta") or {}
-                    fr = choice.get("finish_reason")
-                    if fr:
-                        finish_reason = fr
+                        choices = chunk.get("choices") or []
+                        if not choices:
+                            continue
+                        choice = choices[0]
+                        delta = choice.get("delta") or {}
+                        fr = choice.get("finish_reason")
+                        if fr:
+                            finish_reason = fr
 
-                    reasoning_delta = delta.get("reasoning_content") or ""
-                    if reasoning_delta:
-                        state.add_reasoning_delta(reasoning_delta)
-                    if fr == "reasoning_content":
-                        state.finish_reasoning()
+                        reasoning_delta = delta.get("reasoning_content") or ""
+                        if reasoning_delta:
+                            state.add_reasoning_delta(reasoning_delta)
+                        if fr == "reasoning_content":
+                            state.finish_reasoning()
 
-                    content_delta = delta.get("content") or ""
-                    if content_delta:
-                        fallback_chars += len(content_delta)
-                        state.add_text_delta(content_delta)
+                        content_delta = delta.get("content") or ""
+                        if content_delta:
+                            fallback_chars += len(content_delta)
+                            state.add_text_delta(content_delta)
 
-                    for tc in delta.get("tool_calls") or []:
-                        state.add_tool_call_delta(tc.get("index", 0), tc)
+                        for tc in delta.get("tool_calls") or []:
+                            state.add_tool_call_delta(tc.get("index", 0), tc)
 
-                    # Emit the item/delta events built during this chunk
-                    for frame in seq.drain_frames():
-                        emitted_frames += 1
-                        yield frame
-                        deadline[0] = time.monotonic() + SSE_KEEPALIVE_INTERVAL_SECONDS
+                        # Emit the item/delta events built during this chunk
+                        for frame in seq.drain_frames():
+                            emitted_frames += 1
+                            yield frame
+                            deadline[0] = (
+                                time.monotonic() + SSE_KEEPALIVE_INTERVAL_SECONDS
+                            )
             if not done_marker_seen:
                 raise RuntimeError("LLM stream ended without a completion marker")
             finished_body = True
@@ -801,7 +879,12 @@ async def _stream_events(
         # work is complete at this point, so a cancel during release or the
         # final sends must not downgrade a finished inference to cancelled.
         success_latency_ms = (time.monotonic() - started) * 1000.0
-        usage = _build_usage(final_usage_data, fallback_chars, state.reasoning_tokens)
+        if is_gufo:
+            usage = gufo_usage_to_spec(final_usage_data)
+        else:
+            usage = _build_usage(
+                final_usage_data, fallback_chars, state.reasoning_tokens
+            )
         record_request_telemetry(
             sample_server,
             usage,

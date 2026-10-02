@@ -1197,6 +1197,43 @@ async def test_gufo_proxy_preserves_client_model_field(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_gufo_responses_is_capacity_enforced_and_model_filled(monkeypatch):
+    """Native /v1/responses must be an inference request: capacity enforced and
+    served_model_name injected, exactly like chat/completions."""
+    from app.api.routes import proxy as proxy_route
+
+    server_id = "gufo-responses-server"
+    monkeypatch.setattr(settings, "AGENT_PLATFORM", "gufo")
+    proxy_route.server_manager.servers[server_id] = Mock()
+    proxy_route.server_manager.configs[server_id] = Mock(
+        port=8091, slot_generation=1, options={"served_model_name": "gufo-alias"}
+    )
+    captured: dict = {}
+
+    async def _capture(_server_id, _method, _path, _headers, body=None, **kwargs):
+        captured["body"] = body
+        captured["enforce_capacity"] = kwargs.get("enforce_capacity")
+        return Mock(is_error=False, json=lambda: {"ok": True})
+
+    monkeypatch.setattr(proxy_route.proxy, "proxy_request", _capture)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        result = await client.post(
+            f"/proxy/{server_id}/v1/responses",
+            json={"input": "Hello"},
+        )
+
+    assert result.status_code == 200
+    assert captured["enforce_capacity"] is True
+    assert captured["body"]["model"] == "gufo-alias"
+
+    del proxy_route.server_manager.servers[server_id]
+    del proxy_route.server_manager.configs[server_id]
+
+
+@pytest.mark.asyncio
 async def test_metrics_are_returned_as_prometheus_text(monkeypatch):
     from app.api.routes import proxy as proxy_route
 

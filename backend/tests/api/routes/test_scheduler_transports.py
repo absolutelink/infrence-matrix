@@ -140,6 +140,146 @@ def _has_text_delta(frames: list[str]) -> bool:
 
 
 @pytest.mark.asyncio
+async def test_responses_gufo_native_buffered_uses_responses_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """engine=gufo buffered /v1/responses must call the agent's native
+    /v1/responses with a native payload (input + store=false), not chat."""
+    events: list[str] = []
+    lease = FakeLease(events, server=SimpleNamespace(engine="gufo"))
+    captured: dict[str, Any] = {}
+
+    async def fake_send(_agent_id, _method, path, payload, **_kwargs):
+        captured["path"] = path
+        captured["payload"] = payload
+        return {
+            "id": "resp_g",
+            "object": "response",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [
+                        {"type": "output_text", "text": "hi", "annotations": []}
+                    ],
+                }
+            ],
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 3,
+                "total_tokens": 13,
+                "input_tokens_details": {"cached_tokens": 4},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            },
+            "timings": {"prompt_ms": 1},
+        }
+
+    monkeypatch.setattr(responses_router.agent_manager, "send_to_agent", fake_send)
+    result = await responses_router._complete(
+        CreateResponseBody(model="qwen", input="hi", store=False),
+        "server-1",
+        "agent-1",
+        [],
+        "resp-1",
+        1,
+        lease,
+    )
+    assert captured["path"] == "/proxy/server-1/v1/responses"
+    assert captured["payload"]["store"] is False
+    assert "messages" not in captured["payload"]
+    assert captured["payload"]["input"][0]["role"] == "user"
+    assert result.status == "completed"
+    assert result.usage.input_tokens == 10
+    assert result.usage.output_tokens == 3
+    assert result.output[0].content[0].text == "hi"
+
+
+@pytest.mark.asyncio
+async def test_responses_llamacpp_buffered_still_uses_chat_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: non-gufo engines keep the chat/completions translation path."""
+    events: list[str] = []
+    lease = FakeLease(events, server=SimpleNamespace(engine="llamacpp"))
+    captured: dict[str, Any] = {}
+
+    async def fake_send(_agent_id, _method, path, payload, **_kwargs):
+        captured["path"] = path
+        captured["payload"] = payload
+        return {
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 2},
+        }
+
+    monkeypatch.setattr(responses_router.agent_manager, "send_to_agent", fake_send)
+    result = await responses_router._complete(
+        CreateResponseBody(model="m", input="hi", store=False),
+        "server-1",
+        "agent-1",
+        [],
+        "resp-1",
+        1,
+        lease,
+    )
+    assert captured["path"] == "/proxy/server-1/v1/chat/completions"
+    assert "messages" in captured["payload"]
+    assert result.output[0].content[0].text == "ok"
+
+
+@pytest.mark.asyncio
+async def test_responses_gufo_native_stream_uses_responses_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Streaming engine=gufo must open the agent's native /v1/responses SSE and
+    translate typed events (no [DONE] sentinel) into broker frames."""
+    events: list[str] = []
+    lease = FakeLease(events, server=SimpleNamespace(engine="gufo"))
+    gufo_lines = [
+        'data: {"type":"response.created","response":{"id":"resp_g"}}',
+        'data: {"type":"response.in_progress","response":{"id":"resp_g"}}',
+        'data: {"type":"response.output_text.delta","delta":"Hel"}',
+        'data: {"type":"response.output_text.delta","delta":"lo"}',
+        'data: {"type":"response.completed","response":{"id":"resp_g","status":"completed",'
+        '"usage":{"input_tokens":8,"output_tokens":2,"total_tokens":10}}}',
+    ]
+    client = FakeClient(FakeStreamResponse(gufo_lines, events))
+    _install_client(monkeypatch, responses_router, client)
+    monkeypatch.setattr(
+        responses_router,
+        "ensure_server_ready_by_id",
+        AsyncMock(return_value=SimpleNamespace(agent_id="agent-id")),
+    )
+    monkeypatch.setattr(
+        responses_router.agent_manager,
+        "get_agent",
+        AsyncMock(return_value=SimpleNamespace(host="agent", port=8080)),
+    )
+    stream = _responses_stream(lease)
+    try:
+        await _initial_responses_frames(stream)
+        frames = [frame async for frame in stream]
+    finally:
+        await stream.aclose()
+    assert client.stream_calls[0]["url"].endswith("/proxy/server-id/v1/responses")
+    assert _has_text_delta_value(frames, "Hel")
+    assert _has_text_delta_value(frames, "lo")
+    assert any(frame.startswith("event: response.completed") for frame in frames)
+    assert frames[-1] == "data: [DONE]\n\n"
+    await _drain_release_tasks()
+
+
+def _has_text_delta_value(frames: list[str], value: str) -> bool:
+    return any(
+        frame.startswith("event: response.output_text.delta")
+        and json.loads(frame.split("data: ", 1)[1])["delta"] == value
+        for frame in frames
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("blocked_phase", ["readiness", "headers"])
 async def test_responses_keepalive_before_setup_completes(
     monkeypatch: pytest.MonkeyPatch, blocked_phase: str
@@ -668,3 +808,61 @@ async def test_responses_websocket_propagates_disconnect_and_releases(
     }
     assert "responses_ws_stream_close" in caplog.text
     assert "close_reason=client_disconnect" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_responses_ws_gufo_native_uses_responses_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WS transport for engine=gufo opens the agent's native /v1/responses and
+    translates typed events (no [DONE]) into broker WS messages."""
+    disconnected = asyncio.Event()
+    server = SimpleNamespace(
+        id="server-id", agent_id="agent-id", model_id="model-id", engine="gufo"
+    )
+    model = SimpleNamespace(id="model-id")
+    lease = InferenceLeaseHandle("request-id", server, uuid.uuid4(), slot_generation=5)
+    lease.release = AsyncMock()
+
+    async def acquire(*_args: Any, **kwargs: Any) -> InferenceLeaseHandle:
+        return lease
+
+    gufo_lines = [
+        'data: {"type":"response.output_text.delta","delta":"He"}',
+        'data: {"type":"response.output_text.delta","delta":"y"}',
+        'data: {"type":"response.completed","response":{"status":"completed",'
+        '"usage":{"input_tokens":4,"output_tokens":2,"total_tokens":6}}}',
+    ]
+    client = FakeClient(FakeStreamResponse(gufo_lines))
+    _install_client(monkeypatch, responses_ws, client)
+    monkeypatch.setattr(
+        responses_ws, "resolve_target", AsyncMock(return_value=(server, model, None))
+    )
+    monkeypatch.setattr(responses_ws.inference_scheduler, "acquire", acquire)
+    monkeypatch.setattr(
+        responses_ws.agent_manager,
+        "get_agent",
+        AsyncMock(return_value=SimpleNamespace(host="agent", port=8080)),
+    )
+    sent: list[str] = []
+
+    async def send_text(text: str) -> None:
+        sent.append(text)
+
+    websocket = SimpleNamespace(send_text=send_text)
+    request = CreateResponseBody(model="model", input="hello", store=False)
+
+    result = await responses_ws._stream_to_ws(
+        websocket, request, disconnected=disconnected
+    )
+
+    assert client.stream_calls[0]["url"].endswith("/proxy/server-id/v1/responses")
+    assert result["status"] == "completed"
+    assert result["usage"]["input_tokens"] == 4
+    deltas = [
+        json.loads(m)["delta"]
+        for m in sent
+        if json.loads(m).get("type") == "response.output_text.delta"
+    ]
+    assert deltas == ["He", "y"]
+    lease.release.assert_awaited()

@@ -46,6 +46,9 @@ from app.api.routes.v1.responses.translator import (
     StreamState,
     TranslationError,
     build_response_resource,
+    decode_gufo_stream_event,
+    gufo_native_payload,
+    gufo_usage_to_spec,
 )
 from app.core.db import engine
 from app.services.agent_manager import agent_manager
@@ -98,11 +101,19 @@ def _capped_payload(
     request: CreateResponseBody,
     history: list[dict[str, Any]],
     reasoning_effort: str | None = None,
+    is_gufo: bool = False,
 ) -> dict[str, Any]:
     """WS llama payload with the generation cap applied when the request
     set no max_output_tokens. Bounds turn duration for the harness's 30s
     terminal timer (and UI responsiveness): a thinking model at ~12 tok/s
     blows through that on reasoning alone."""
+    if is_gufo:
+        payload = gufo_native_payload(
+            request, history, stream=True, reasoning_effort=reasoning_effort
+        )
+        if request.max_output_tokens is None:
+            payload["max_output_tokens"] = WS_MAX_TOKENS
+        return payload
     payload = _llama_payload(
         request, history, stream=True, reasoning_effort=reasoning_effort
     )
@@ -168,6 +179,7 @@ async def _stream_to_ws(
         )
         lease_request_id = lease.request_id
         server = lease.server
+        is_gufo = getattr(server, "engine", None) == "gufo"
         agent = await agent_manager.get_agent(str(server.agent_id))
         if not agent:
             raise TargetError(503, "no_agent_available", "Agent not found")
@@ -203,10 +215,12 @@ async def _stream_to_ws(
                 _error_event(400, "unsupported_capability", str(e), "reasoning.effort")
             )
             return None
-        payload = _capped_payload(request, history, reasoning_effort)
+        payload = _capped_payload(request, history, reasoning_effort, is_gufo=is_gufo)
 
         proxy_url = (
-            f"http://{agent.host}:{agent.port}/proxy/{server.id}/v1/chat/completions"
+            f"http://{agent.host}:{agent.port}/proxy/{server.id}/v1/responses"
+            if is_gufo
+            else f"http://{agent.host}:{agent.port}/proxy/{server.id}/v1/chat/completions"
         )
         lease.mark_upstream_started()
         finish_reason: str | None = None
@@ -233,6 +247,7 @@ async def _stream_to_ws(
             )
             upstream.raise_for_status()
             lines = upstream.aiter_lines()
+            gufo_calls: dict[str, dict[str, Any]] = {}
             while True:
                 try:
                     line = await lease.guard(anext(lines), cancelled=disconnected)
@@ -242,6 +257,27 @@ async def _stream_to_ws(
                 if not line.startswith("data:"):
                     continue
                 data = line[5:].lstrip()
+                if is_gufo:
+                    # gufo emits typed OpenResponses SSE (no [DONE] sentinel);
+                    # response.completed/incomplete is the completion marker.
+                    try:
+                        event = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    terminal, usage_data, incomplete = decode_gufo_stream_event(
+                        state, event, gufo_calls
+                    )
+                    if usage_data is not None:
+                        final_usage = usage_data
+                    events = seq.drain_events()
+                    emitted_events += len(events)
+                    await _send_events(websocket, events)
+                    if terminal:
+                        if incomplete:
+                            finish_reason = "length"
+                        done_marker_seen = True
+                        break
+                    continue
                 if data.strip() == "[DONE]":
                     done_marker_seen = True
                     break
@@ -305,7 +341,10 @@ async def _stream_to_ws(
         # work is complete at this point, so a cancel during release or the
         # final sends must not downgrade a finished inference to cancelled.
         success_latency_ms = (time.monotonic() - started) * 1000.0
-        usage = _build_usage(final_usage, fallback_chars, state.reasoning_tokens)
+        if is_gufo:
+            usage = gufo_usage_to_spec(final_usage)
+        else:
+            usage = _build_usage(final_usage, fallback_chars, state.reasoning_tokens)
         record_request_telemetry(
             server,
             usage,
