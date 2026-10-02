@@ -49,6 +49,7 @@ from app.api.routes.v1.responses.translator import (
     decode_gufo_stream_event,
     gufo_native_payload,
     gufo_usage_to_spec,
+    uses_native_responses,
 )
 from app.core.db import engine
 from app.services.agent_manager import agent_manager
@@ -101,15 +102,19 @@ def _capped_payload(
     request: CreateResponseBody,
     history: list[dict[str, Any]],
     reasoning_effort: str | None = None,
-    is_gufo: bool = False,
+    engine: str | None = None,
 ) -> dict[str, Any]:
     """WS llama payload with the generation cap applied when the request
     set no max_output_tokens. Bounds turn duration for the harness's 30s
     terminal timer (and UI responsiveness): a thinking model at ~12 tok/s
     blows through that on reasoning alone."""
-    if is_gufo:
+    if uses_native_responses(engine):
         payload = gufo_native_payload(
-            request, history, stream=True, reasoning_effort=reasoning_effort
+            request,
+            history,
+            stream=True,
+            reasoning_effort=reasoning_effort,
+            engine=engine,
         )
         if request.max_output_tokens is None:
             payload["max_output_tokens"] = WS_MAX_TOKENS
@@ -179,7 +184,8 @@ async def _stream_to_ws(
         )
         lease_request_id = lease.request_id
         server = lease.server
-        is_gufo = getattr(server, "engine", None) == "gufo"
+        engine = getattr(server, "engine", None)
+        is_native = uses_native_responses(engine)
         agent = await agent_manager.get_agent(str(server.agent_id))
         if not agent:
             raise TargetError(503, "no_agent_available", "Agent not found")
@@ -215,11 +221,11 @@ async def _stream_to_ws(
                 _error_event(400, "unsupported_capability", str(e), "reasoning.effort")
             )
             return None
-        payload = _capped_payload(request, history, reasoning_effort, is_gufo=is_gufo)
+        payload = _capped_payload(request, history, reasoning_effort, engine=engine)
 
         proxy_url = (
             f"http://{agent.host}:{agent.port}/proxy/{server.id}/v1/responses"
-            if is_gufo
+            if is_native
             else f"http://{agent.host}:{agent.port}/proxy/{server.id}/v1/chat/completions"
         )
         lease.mark_upstream_started()
@@ -257,9 +263,10 @@ async def _stream_to_ws(
                 if not line.startswith("data:"):
                     continue
                 data = line[5:].lstrip()
-                if is_gufo:
-                    # gufo emits typed OpenResponses SSE (no [DONE] sentinel);
-                    # response.completed/incomplete is the completion marker.
+                if is_native:
+                    # The native engine emits typed OpenResponses SSE (no
+                    # [DONE] sentinel); response.completed/incomplete is the
+                    # completion marker.
                     try:
                         event = json.loads(data)
                     except json.JSONDecodeError:
@@ -341,7 +348,7 @@ async def _stream_to_ws(
         # work is complete at this point, so a cancel during release or the
         # final sends must not downgrade a finished inference to cancelled.
         success_latency_ms = (time.monotonic() - started) * 1000.0
-        if is_gufo:
+        if is_native:
             usage = gufo_usage_to_spec(final_usage)
         else:
             usage = _build_usage(final_usage, fallback_chars, state.reasoning_tokens)

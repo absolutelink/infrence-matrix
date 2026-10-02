@@ -1234,6 +1234,45 @@ async def test_gufo_responses_is_capacity_enforced_and_model_filled(monkeypatch)
     del proxy_route.server_manager.configs[server_id]
 
 
+@pytest.mark.asyncio
+async def test_halogen_flash_responses_is_allowed_and_capacity_enforced(monkeypatch):
+    """Native /v1/responses must be allowed on halogen-flash and treated as an
+    inference request (capacity enforced), like gufo. halogen-flash is
+    single-model and never rejects a model name, so the agent must NOT inject
+    served_model_name here the way the gufo branch does."""
+    from app.api.routes import proxy as proxy_route
+
+    server_id = "flash-responses-server"
+    monkeypatch.setattr(settings, "AGENT_PLATFORM", "halogen-flash")
+    proxy_route.server_manager.servers[server_id] = Mock()
+    proxy_route.server_manager.configs[server_id] = Mock(
+        port=8091, slot_generation=1, options={"served_model_name": "flash-alias"}
+    )
+    captured: dict = {}
+
+    async def _capture(_server_id, _method, _path, _headers, body=None, **kwargs):
+        captured["body"] = body
+        captured["enforce_capacity"] = kwargs.get("enforce_capacity")
+        return Mock(is_error=False, json=lambda: {"ok": True})
+
+    monkeypatch.setattr(proxy_route.proxy, "proxy_request", _capture)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        result = await client.post(
+            f"/proxy/{server_id}/v1/responses",
+            json={"input": "Hello"},
+        )
+
+    assert result.status_code == 200
+    assert captured["enforce_capacity"] is True
+    assert "model" not in captured["body"]
+
+    del proxy_route.server_manager.servers[server_id]
+    del proxy_route.server_manager.configs[server_id]
+
+
 class TestBodyFramingHeaderStrip:
     def test_strips_content_length_and_transfer_encoding_case_insensitive(self) -> None:
         headers = {

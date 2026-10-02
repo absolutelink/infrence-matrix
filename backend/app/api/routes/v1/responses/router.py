@@ -48,6 +48,7 @@ from app.api.routes.v1.responses.translator import (
     gufo_usage_to_spec,
     input_items_to_llama_messages,
     tools_to_llama,
+    uses_native_responses,
 )
 from app.core.db import engine
 from app.models import Model, ResponseRecord, ServerInstance
@@ -312,10 +313,15 @@ async def _complete(
     reasoning_effort: str | None = None,
     started_mono: float | None = None,
 ) -> ResponseResource:
-    is_gufo = getattr(lease.server, "engine", None) == "gufo"
-    if is_gufo:
+    engine = getattr(lease.server, "engine", None)
+    is_native = uses_native_responses(engine)
+    if is_native:
         payload = gufo_native_payload(
-            request, history, stream=False, reasoning_effort=reasoning_effort
+            request,
+            history,
+            stream=False,
+            reasoning_effort=reasoning_effort,
+            engine=engine,
         )
         upstream_path = f"/proxy/{server_id}/v1/responses"
     else:
@@ -337,12 +343,12 @@ async def _complete(
         )
     )
 
-    if is_gufo:
-        # gufo's native buffered response already carries final, correctly
+    if is_native:
+        # The native buffered response already carries final, correctly
         # ordered spec output items; pass them through instead of rebuilding
         # via StreamState (which would reorder calls before the message).
-        # allowed_tools suppression is a no-op here: gufo's native path
-        # rejects allowed_tools upstream, so no suppression set is applied.
+        # allowed_tools suppression is a no-op here: the native path rejects
+        # allowed_tools upstream, so no suppression set is applied.
         items = gufo_buffered_to_output_items(response)
         phase = _last_assistant_phase(request)
         if phase:
@@ -590,7 +596,8 @@ async def _stream_events(
 ) -> AsyncIterator[str]:
     started = started_mono if started_mono is not None else time.monotonic()
     telemetry_recorded = False
-    is_gufo = getattr(lease.server, "engine", None) == "gufo" if lease else False
+    engine = getattr(lease.server, "engine", None) if lease else None
+    is_native = uses_native_responses(engine)
     # Stash the serving server up front: the mid-body release sets the
     # lease to None, and later except handlers must keep attribution.
     sample_server = lease.server if lease is not None else None
@@ -665,9 +672,13 @@ async def _stream_events(
 
         payload = (
             gufo_native_payload(
-                request, history, stream=True, reasoning_effort=reasoning_effort
+                request,
+                history,
+                stream=True,
+                reasoning_effort=reasoning_effort,
+                engine=engine,
             )
-            if is_gufo
+            if is_native
             else _llama_payload(
                 request, history, stream=True, reasoning_effort=reasoning_effort
             )
@@ -697,7 +708,7 @@ async def _stream_events(
             await asyncio.gather(readiness, return_exceptions=True)
         proxy_url = (
             f"http://{agent.host}:{agent.port}/proxy/{server_id}/v1/responses"
-            if is_gufo
+            if is_native
             else f"http://{agent.host}:{agent.port}/proxy/{server_id}/v1/chat/completions"
         )
         if lease is not None:
@@ -745,10 +756,10 @@ async def _stream_events(
                 upstream_status,
             )
             upstream.raise_for_status()
-            if is_gufo:
-                # gufo emits typed OpenResponses SSE events (no [DONE]
-                # sentinel); the terminal response.completed/incomplete is
-                # the completion marker. Feed deltas into the same
+            if is_native:
+                # The native engine emits typed OpenResponses SSE events (no
+                # [DONE] sentinel); the terminal response.completed/incomplete
+                # is the completion marker. Feed deltas into the same
                 # StreamState so broker IDs/sequence numbers are our own.
                 gufo_calls: dict[str, dict[str, Any]] = {}
                 async with aclosing(
@@ -879,7 +890,7 @@ async def _stream_events(
         # work is complete at this point, so a cancel during release or the
         # final sends must not downgrade a finished inference to cancelled.
         success_latency_ms = (time.monotonic() - started) * 1000.0
-        if is_gufo:
+        if is_native:
             usage = gufo_usage_to_spec(final_usage_data)
         else:
             usage = _build_usage(

@@ -33,6 +33,17 @@ class TranslationError(Exception):
     """Raised when input items cannot be represented in llama.cpp chat format."""
 
 
+# Engines that expose a native OpenResponses endpoint. Both are OpenResponses-
+# shaped on the wire (typed SSE events, ``input`` array, Responses usage
+# object), so the ``*_native_*`` helpers below serve every engine in this set.
+NATIVE_RESPONSES_ENGINES = frozenset({"gufo", "halogen-flash"})
+
+
+def uses_native_responses(engine: Any) -> bool:
+    """True when the broker should call the engine's native /v1/responses."""
+    return engine in NATIVE_RESPONSES_ENGINES
+
+
 def _part_text(part: Any) -> str | None:
     """Extract text from a content part; non-text parts have no llama form."""
     if isinstance(part, str):
@@ -422,10 +433,11 @@ def _native_tools(request: CreateResponseBody) -> list[dict[str, Any]]:
 
 
 def _native_tool_choice(request: CreateResponseBody) -> Any:
-    """Map the broker tool_choice to gufo's accepted value.
+    """Map the broker tool_choice to the native engine's accepted value.
 
-    allowed_tools has no gufo equivalent: hard-error rather than silently
-    widening to auto (parity decision: no fallback).
+    allowed_tools has no equivalent on either native engine's
+    ``/v1/responses``: hard-error rather than silently widening to auto
+    (parity decision: no fallback).
     """
     choice = request.tool_choice
     if isinstance(choice, str):
@@ -435,8 +447,7 @@ def _native_tool_choice(request: CreateResponseBody) -> Any:
     )
     if ctype == "allowed_tools":
         raise TranslationError(
-            "tool_choice='allowed_tools' is not supported by gufo's native "
-            "/v1/responses"
+            "tool_choice='allowed_tools' is not supported by the native /v1/responses"
         )
     if ctype == "function":
         name = getattr(choice, "name", None) or (
@@ -471,20 +482,29 @@ def gufo_native_payload(
     history: list[dict[str, Any]],
     stream: bool,
     reasoning_effort: str | None = None,
+    engine: str = "gufo",
 ) -> dict[str, Any]:
-    """Assemble the gufo native ``POST /v1/responses`` body.
+    """Assemble the native ``POST /v1/responses`` body.
 
-    Only the field subset gufo accepts is emitted; broker-only fields
+    Shared by every engine in ``NATIVE_RESPONSES_ENGINES`` (gufo and
+    halogen-flash): both take the same OpenResponses-shaped body. Only the
+    field subset those engines accept is emitted; broker-only fields
     (metadata, include, max_tool_calls, prompt_cache_key, service_tier,
     truncation, top_logprobs) are intentionally dropped. ``store`` is forced
-    false because gufo has no server-side conversation storage — the broker
-    persists the turn in its own DB.
+    false because neither engine has server-side conversation storage — the
+    broker persists the turn in its own DB.
     """
     payload: dict[str, Any] = {
         "input": input_items_to_gufo_native(request, history),
         "stream": stream,
         "store": False,
     }
+    if engine == "halogen-flash":
+        # halogen-flash is single-model and ignores the field ("Requests are
+        # never rejected for naming a different one" — docs/FLAGS.md,
+        # HALOGEN_MODEL_ID), but echoing the broker's model keeps the request
+        # shaped like a standard Responses call.
+        payload["model"] = request.model
     if request.instructions is not None:
         payload["instructions"] = request.instructions
     if request.max_output_tokens is not None:
@@ -560,10 +580,12 @@ def decode_gufo_stream_event(
     event: dict[str, Any],
     gufo_calls: dict[str, dict[str, Any]],
 ) -> tuple[bool, dict[str, Any] | None, bool]:
-    """Feed one gufo native Responses SSE event into a StreamState.
+    """Feed one native Responses SSE event into a StreamState.
 
-    gufo emits typed OpenResponses events (response.output_text.delta,
-    response.reasoning_summary_text.delta, response.output_item.added,
+    The native engines emit typed OpenResponses events
+    (response.output_text.delta, response.reasoning_text.delta and — only
+    when the request asked for a summary — the
+    response.reasoning_summary_text.* family, response.output_item.added,
     response.function_call_arguments.delta, and a terminal
     response.completed/incomplete/failed). Deltas drive the same
     StreamState used by the chat path so broker item IDs and sequence
@@ -571,8 +593,8 @@ def decode_gufo_stream_event(
 
     Returns ``(terminal, usage_data, incomplete)``. ``terminal`` is True on
     response.completed / response.incomplete (the caller stops reading);
-    ``usage_data`` carries gufo's usage + timings for the terminal event.
-    response.failed raises RuntimeError.
+    ``usage_data`` carries the native usage + timings for the terminal
+    event. response.failed raises RuntimeError.
     """
     etype = event.get("type")
     if etype == "response.output_text.delta":
@@ -580,7 +602,10 @@ def decode_gufo_stream_event(
         if delta:
             state.add_text_delta(delta)
         return False, None, False
-    if etype == "response.reasoning_summary_text.delta":
+    if etype in (
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_text.delta",
+    ):
         delta = event.get("delta") or ""
         if delta:
             # add_reasoning_delta opens the item and emits the broker's
@@ -588,9 +613,9 @@ def decode_gufo_stream_event(
             # render as the live thinking stream), with correct
             # item_id/output_index.
             state.add_reasoning_delta(delta)
-            # Also emit the gufo-native reasoning_summary_text.delta twin so
-            # OpenAI-SDK summary consumers keep working. Emitted after
-            # add_reasoning_delta so the reasoning item already exists.
+            # Also emit the native summary twin so OpenAI-SDK summary
+            # consumers keep working. Emitted after add_reasoning_delta so
+            # the reasoning item already exists.
             ev.reasoning_summary_text_delta(
                 state.seq,
                 state._reasoning_id or "",

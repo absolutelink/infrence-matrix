@@ -26,7 +26,9 @@ from app.services.halogen_server import HalogenServerConfig, HalogenServerManage
 def test_flash_proxy_allows_documented_routes_only() -> None:
     assert _is_supported_halogen_flash_path("v1/chat/completions")
     assert _is_supported_halogen_flash_path("v1/completions")
-    assert not _is_supported_halogen_flash_path("v1/responses")
+    # halogen-flash-server speaks the OpenAI Responses API natively since
+    # 0.4.0 (README "Codex and the Responses API").
+    assert _is_supported_halogen_flash_path("v1/responses")
     assert not _is_supported_halogen_flash_path("v1/embeddings")
 
 

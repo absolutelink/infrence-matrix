@@ -14,6 +14,7 @@ from app.api.routes.v1.responses.translator import (
     gufo_native_payload,
     gufo_usage_to_spec,
     input_items_to_gufo_native,
+    uses_native_responses,
 )
 
 
@@ -297,6 +298,48 @@ class TestNativePayload:
         assert payload["text"]["format"]["strict"] is True
 
 
+class TestNativeEngineSelection:
+    def test_gufo_and_halogen_flash_are_native_responses_engines(self) -> None:
+        assert uses_native_responses("gufo")
+        assert uses_native_responses("halogen-flash")
+
+    def test_other_engines_are_not_native_responses_engines(self) -> None:
+        assert not uses_native_responses("llamacpp")
+        assert not uses_native_responses("halogen")
+        assert not uses_native_responses(None)
+
+    def test_halogen_flash_payload_carries_model(self) -> None:
+        payload = gufo_native_payload(
+            _req(model="halogen-qwen3.8-flash-next", input="hi"),
+            [],
+            stream=False,
+            engine="halogen-flash",
+        )
+        assert payload["model"] == "halogen-qwen3.8-flash-next"
+        assert payload["store"] is False
+
+    def test_halogen_flash_payload_forwards_reasoning_summary(self) -> None:
+        """Codex-style requests ask for a summary; halogen-flash only emits the
+        response.reasoning_summary_* family when the request does, so the
+        field must survive the broker's payload build."""
+        payload = gufo_native_payload(
+            _req(
+                input="hi",
+                reasoning={"effort": "high", "summary": "auto"},
+            ),
+            [],
+            stream=False,
+            reasoning_effort="high",
+            engine="halogen-flash",
+        )
+        assert payload["reasoning"] == {"effort": "high"}
+
+    def test_gufo_payload_omits_model(self) -> None:
+        """Default (gufo) payload keeps the pre-existing shape: no model key."""
+        payload = gufo_native_payload(_req(input="hi"), [], stream=False)
+        assert "model" not in payload
+
+
 class TestUsageMapping:
     def test_maps_input_output_cached_reasoning(self) -> None:
         usage = gufo_usage_to_spec(
@@ -396,6 +439,26 @@ class TestStreamDecoder:
         assert "response.reasoning_summary_text.delta" in by_type
         assert by_type["response.reasoning.delta"]["delta"] == "hello"
         assert by_type["response.reasoning_summary_text.delta"]["delta"] == "hello"
+
+    def test_native_reasoning_text_delta_is_decoded_as_reasoning(self) -> None:
+        """halogen-flash streams raw thinking as response.reasoning_text.delta
+        (it only emits reasoning_summary_text when a summary is requested).
+        Both must drive the same reasoning item."""
+        state, seq = _state()
+        decode_gufo_stream_event(
+            state,
+            {"type": "response.reasoning_text.delta", "delta": "ponder"},
+            {},
+        )
+        state.finish_reasoning()
+        assert state.output_items[0]["type"] == "reasoning"
+        frames = seq.drain_frames()
+        types = {
+            frame.split("\n", 1)[0][len("event: ") :]
+            for frame in frames
+            if frame.startswith("event: ")
+        }
+        assert "response.reasoning.delta" in types
 
     def test_function_call_flow(self) -> None:
         state, _ = _state()

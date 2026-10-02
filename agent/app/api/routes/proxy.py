@@ -40,6 +40,7 @@ HALOGEN_FLASH_PATHS = {
     "v1/models",
     "v1/completions",
     "v1/chat/completions",
+    "v1/responses",
 }
 GUFO_PATHS = {
     "health",

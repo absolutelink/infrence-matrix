@@ -230,6 +230,66 @@ async def test_responses_llamacpp_buffered_still_uses_chat_endpoint(
 
 
 @pytest.mark.asyncio
+async def test_responses_halogen_flash_native_buffered_uses_responses_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """engine=halogen-flash buffered /v1/responses must call the agent's native
+    /v1/responses with the shared native payload (input + store=false + model),
+    not chat."""
+    events: list[str] = []
+    lease = FakeLease(events, server=SimpleNamespace(engine="halogen-flash"))
+    captured: dict[str, Any] = {}
+
+    async def fake_send(_agent_id, _method, path, payload, **_kwargs):
+        captured["path"] = path
+        captured["payload"] = payload
+        return {
+            "id": "resp_hf",
+            "object": "response",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [
+                        {"type": "output_text", "text": "hi", "annotations": []}
+                    ],
+                }
+            ],
+            "usage": {
+                "input_tokens": 11,
+                "output_tokens": 4,
+                "total_tokens": 15,
+                "input_tokens_details": {"cached_tokens": 5},
+                "output_tokens_details": {"reasoning_tokens": 1},
+            },
+            "timings": {"prompt_ms": 2},
+        }
+
+    monkeypatch.setattr(responses_router.agent_manager, "send_to_agent", fake_send)
+    result = await responses_router._complete(
+        CreateResponseBody(model="halogen-qwen3.8-flash-next", input="hi", store=False),
+        "server-1",
+        "agent-1",
+        [],
+        "resp-1",
+        1,
+        lease,
+    )
+    assert captured["path"] == "/proxy/server-1/v1/responses"
+    assert captured["payload"]["store"] is False
+    assert captured["payload"]["model"] == "halogen-qwen3.8-flash-next"
+    assert "messages" not in captured["payload"]
+    assert captured["payload"]["input"][0]["role"] == "user"
+    assert result.status == "completed"
+    assert result.usage.input_tokens == 11
+    assert result.usage.output_tokens == 4
+    assert result.output[0].content[0].text == "hi"
+
+
+@pytest.mark.asyncio
 async def test_responses_gufo_native_stream_uses_responses_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -264,6 +324,49 @@ async def test_responses_gufo_native_stream_uses_responses_endpoint(
     finally:
         await stream.aclose()
     assert client.stream_calls[0]["url"].endswith("/proxy/server-id/v1/responses")
+    assert _has_text_delta_value(frames, "Hel")
+    assert _has_text_delta_value(frames, "lo")
+    assert any(frame.startswith("event: response.completed") for frame in frames)
+    assert frames[-1] == "data: [DONE]\n\n"
+    await _drain_release_tasks()
+
+
+@pytest.mark.asyncio
+async def test_responses_halogen_flash_native_stream_uses_responses_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Streaming engine=halogen-flash must open the agent's native /v1/responses
+    SSE and translate typed events (no [DONE] sentinel) into broker frames."""
+    events: list[str] = []
+    lease = FakeLease(events, server=SimpleNamespace(engine="halogen-flash"))
+    flash_lines = [
+        'data: {"type":"response.created","response":{"id":"resp_hf"}}',
+        'data: {"type":"response.in_progress","response":{"id":"resp_hf"}}',
+        'data: {"type":"response.output_text.delta","delta":"Hel"}',
+        'data: {"type":"response.output_text.delta","delta":"lo"}',
+        'data: {"type":"response.completed","response":{"id":"resp_hf","status":"completed",'
+        '"usage":{"input_tokens":9,"output_tokens":2,"total_tokens":11}}}',
+    ]
+    client = FakeClient(FakeStreamResponse(flash_lines, events))
+    _install_client(monkeypatch, responses_router, client)
+    monkeypatch.setattr(
+        responses_router,
+        "ensure_server_ready_by_id",
+        AsyncMock(return_value=SimpleNamespace(agent_id="agent-id")),
+    )
+    monkeypatch.setattr(
+        responses_router.agent_manager,
+        "get_agent",
+        AsyncMock(return_value=SimpleNamespace(host="agent", port=8080)),
+    )
+    stream = _responses_stream(lease)
+    try:
+        await _initial_responses_frames(stream)
+        frames = [frame async for frame in stream]
+    finally:
+        await stream.aclose()
+    assert client.stream_calls[0]["url"].endswith("/proxy/server-id/v1/responses")
+    assert client.stream_calls[0]["json"]["model"] == "model"
     assert _has_text_delta_value(frames, "Hel")
     assert _has_text_delta_value(frames, "lo")
     assert any(frame.startswith("event: response.completed") for frame in frames)
@@ -811,6 +914,69 @@ async def test_responses_websocket_propagates_disconnect_and_releases(
 
 
 @pytest.mark.asyncio
+async def test_responses_ws_halogen_flash_native_uses_responses_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WS transport for engine=halogen-flash opens the agent's native
+    /v1/responses and translates typed events (no [DONE]) into broker WS
+    messages."""
+    disconnected = asyncio.Event()
+    server = SimpleNamespace(
+        id="server-id",
+        agent_id="agent-id",
+        model_id="model-id",
+        engine="halogen-flash",
+    )
+    model = SimpleNamespace(id="model-id")
+    lease = InferenceLeaseHandle("request-id", server, uuid.uuid4(), slot_generation=5)
+    lease.release = AsyncMock()
+
+    async def acquire(*_args: Any, **_kwargs: Any) -> InferenceLeaseHandle:
+        return lease
+
+    flash_lines = [
+        'data: {"type":"response.output_text.delta","delta":"He"}',
+        'data: {"type":"response.output_text.delta","delta":"y"}',
+        'data: {"type":"response.completed","response":{"status":"completed",'
+        '"usage":{"input_tokens":6,"output_tokens":2,"total_tokens":8}}}',
+    ]
+    client = FakeClient(FakeStreamResponse(flash_lines))
+    _install_client(monkeypatch, responses_ws, client)
+    monkeypatch.setattr(
+        responses_ws, "resolve_target", AsyncMock(return_value=(server, model, None))
+    )
+    monkeypatch.setattr(responses_ws.inference_scheduler, "acquire", acquire)
+    monkeypatch.setattr(
+        responses_ws.agent_manager,
+        "get_agent",
+        AsyncMock(return_value=SimpleNamespace(host="agent", port=8080)),
+    )
+    sent: list[str] = []
+
+    async def send_text(text: str) -> None:
+        sent.append(text)
+
+    websocket = SimpleNamespace(send_text=send_text)
+    request = CreateResponseBody(model="model", input="hello", store=False)
+
+    result = await responses_ws._stream_to_ws(
+        websocket, request, disconnected=disconnected
+    )
+
+    assert client.stream_calls[0]["url"].endswith("/proxy/server-id/v1/responses")
+    assert client.stream_calls[0]["json"]["model"] == "model"
+    assert result["status"] == "completed"
+    assert result["usage"]["input_tokens"] == 6
+    deltas = [
+        json.loads(m)["delta"]
+        for m in sent
+        if json.loads(m).get("type") == "response.output_text.delta"
+    ]
+    assert deltas == ["He", "y"]
+    lease.release.assert_awaited()
+
+
+@pytest.mark.asyncio
 async def test_responses_ws_gufo_native_uses_responses_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -824,7 +990,7 @@ async def test_responses_ws_gufo_native_uses_responses_endpoint(
     lease = InferenceLeaseHandle("request-id", server, uuid.uuid4(), slot_generation=5)
     lease.release = AsyncMock()
 
-    async def acquire(*_args: Any, **kwargs: Any) -> InferenceLeaseHandle:
+    async def acquire(*_args: Any, **_kwargs: Any) -> InferenceLeaseHandle:
         return lease
 
     gufo_lines = [
