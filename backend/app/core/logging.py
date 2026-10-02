@@ -13,3 +13,8 @@ logging.basicConfig(
 
 # Create logger instance
 logger = logging.getLogger("inference_matrix")
+
+# websockets' keepalive ping timeout on a disconnecting UI client surfaces as an
+# "exception in shielded future" ERROR traceback from asyncio; the disconnect is
+# handled by our own reconnect logic, so silence the noise.
+logging.getLogger("asyncio").setLevel(logging.CRITICAL)
