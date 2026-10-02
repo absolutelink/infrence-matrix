@@ -1,5 +1,7 @@
 """Unit tests for the gufo native /v1/responses translation helpers."""
 
+import json
+
 import pytest
 
 from app.api.routes.v1.responses import events as ev
@@ -371,6 +373,29 @@ class TestStreamDecoder:
         )
         state.finish_reasoning()
         assert state.output_items[0]["type"] == "reasoning"
+
+    def test_reasoning_delta_emits_both_event_kinds(self) -> None:
+        """Native reasoning must stream live: the broker's canonical
+        response.reasoning.delta (OpenWebUI thinking stream) AND the
+        gufo-native response.reasoning_summary_text.delta twin."""
+        state, seq = _state()
+        decode_gufo_stream_event(
+            state,
+            {"type": "response.reasoning_summary_text.delta", "delta": "hello"},
+            {},
+        )
+        frames = seq.drain_frames()
+        by_type: dict[str, dict] = {}
+        for frame in frames:
+            if not frame.startswith("event: "):
+                continue
+            etype = frame.split("\n", 1)[0][len("event: ") :]
+            payload = json.loads(frame.split("data: ", 1)[1])
+            by_type.setdefault(etype, payload)
+        assert "response.reasoning.delta" in by_type
+        assert "response.reasoning_summary_text.delta" in by_type
+        assert by_type["response.reasoning.delta"]["delta"] == "hello"
+        assert by_type["response.reasoning_summary_text.delta"]["delta"] == "hello"
 
     def test_function_call_flow(self) -> None:
         state, _ = _state()

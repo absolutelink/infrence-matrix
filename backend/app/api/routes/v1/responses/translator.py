@@ -583,7 +583,22 @@ def decode_gufo_stream_event(
     if etype == "response.reasoning_summary_text.delta":
         delta = event.get("delta") or ""
         if delta:
+            # add_reasoning_delta opens the item and emits the broker's
+            # canonical response.reasoning.delta (what clients like OpenWebUI
+            # render as the live thinking stream), with correct
+            # item_id/output_index.
             state.add_reasoning_delta(delta)
+            # Also emit the gufo-native reasoning_summary_text.delta twin so
+            # OpenAI-SDK summary consumers keep working. Emitted after
+            # add_reasoning_delta so the reasoning item already exists.
+            ev.reasoning_summary_text_delta(
+                state.seq,
+                state._reasoning_id or "",
+                state.output_index,
+                0,
+                0,
+                delta,
+            )
         return False, None, False
     if etype == "response.output_item.added":
         item = event.get("item") or {}
