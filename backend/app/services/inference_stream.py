@@ -11,6 +11,41 @@ FIRST_FRAME_TIMEOUT_SECONDS = 150.0
 KEEPALIVE_SECONDS = 10.0
 logger = logging.getLogger(__name__)
 
+# Strong references to detached lease-release tasks so they are not garbage
+# collected before completing. Kept at module scope because the owning stream
+# generator may already be gone (cancelled/closed) when the release finishes.
+_release_tasks: set[asyncio.Task[None]] = set()
+
+
+def release_lease_background(
+    lease: InferenceLeaseHandle, outcome: str = "completed"
+) -> asyncio.Task[None]:
+    """Finalize a lease off the client-facing stream path.
+
+    The client must never wait on the DB write that releases the inference
+    slot. Under concurrent load that write can stall on the async connection
+    pool (``DB_POOL_TIMEOUT``), which would delay the terminal ``[DONE]``
+    marker and look exactly like an inference stall. The upstream slot is
+    already free the moment its stream closes, so we hand the release to an
+    independent task that survives the generator being cancelled. Returns
+    the task so callers can await it before follow-up work that must be
+    ordered after the release (e.g. persistence).
+    """
+
+    async def _run() -> None:
+        try:
+            await asyncio.shield(lease.release(outcome))
+        except Exception:
+            logger.exception(
+                "background_lease_release_failed request_id=%s",
+                lease.request_id,
+            )
+
+    task = asyncio.get_running_loop().create_task(_run())
+    _release_tasks.add(task)
+    task.add_done_callback(_release_tasks.discard)
+    return task
+
 
 async def lines_with_keepalive(
     lines: AsyncIterator[str],

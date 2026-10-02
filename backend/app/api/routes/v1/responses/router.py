@@ -53,6 +53,7 @@ from app.services.inference_scheduler import (
     InferenceLeaseHandle,
     inference_scheduler,
 )
+from app.services.inference_stream import release_lease_background
 from app.services.inference_target import resolve_inference_target
 from app.services.reasoning_metadata import (
     ReasoningPolicyError,
@@ -67,10 +68,6 @@ from app.services.server_startup import (
 from app.services.token_stats import record_request_telemetry
 
 logger = logging.getLogger(__name__)
-
-# A missing output limit is otherwise forwarded as unlimited generation. This
-# is especially costly for Responses requests carrying large tool definitions.
-DEFAULT_MAX_OUTPUT_TOKENS = 1024
 
 # Keep intermediaries from treating a slow prompt prefill as a dead SSE
 # connection. This is a transport comment, not an OpenResponses event.
@@ -215,11 +212,11 @@ def _llama_payload(
         payload["frequency_penalty"] = request.frequency_penalty
     if reasoning_effort is not None:
         payload["reasoning_effort"] = reasoning_effort
-    payload["max_tokens"] = (
-        request.max_output_tokens
-        if request.max_output_tokens is not None
-        else DEFAULT_MAX_OUTPUT_TOKENS
-    )
+    # Only forward an explicit cap: defaulting to a small limit truncates
+    # long outputs mid-stream (finish_reason "length"), matching the chat
+    # completions pass-through semantics.
+    if request.max_output_tokens is not None:
+        payload["max_tokens"] = request.max_output_tokens
     if request.text and request.text.format and request.text.format.type != "text":
         fmt = request.text.format
         if fmt.type == "json_schema" and getattr(fmt, "schema_", None):
@@ -815,8 +812,11 @@ async def _stream_events(
         )
         telemetry_recorded = True
 
+        release_task: asyncio.Task[None] | None = None
         if lease is not None:
-            await lease.release()
+            # Release off the client-facing path: the terminal SSE frames
+            # below must not be gated on the DB write.
+            release_task = release_lease_background(lease, "completed")
             lease = None
 
         state.apply_allowed_tools(allowed)
@@ -858,6 +858,10 @@ async def _stream_events(
         )
 
         if persist:
+            # Keep the release-before-persist ordering without gating the
+            # client-visible frames on the DB write.
+            if release_task is not None:
+                await release_task
             await asyncio.to_thread(
                 _persist_response,
                 request=request,

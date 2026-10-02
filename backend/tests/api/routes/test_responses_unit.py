@@ -888,15 +888,12 @@ class TestConformanceStreamingEvents:
         payload = _capped_payload(req, [])
         assert payload["max_tokens"] == WS_MAX_TOKENS
 
-    def test_responses_payload_gets_default_generation_cap(self) -> None:
-        from app.api.routes.v1.responses.router import (
-            DEFAULT_MAX_OUTPUT_TOKENS,
-            _llama_payload,
-        )
+    def test_responses_payload_has_no_default_generation_cap(self) -> None:
+        from app.api.routes.v1.responses.router import _llama_payload
 
         req = CreateResponseBody(model="m", input="hi")
         payload = _llama_payload(req, [], stream=True)
-        assert payload["max_tokens"] == DEFAULT_MAX_OUTPUT_TOKENS
+        assert "max_tokens" not in payload
 
     def test_responses_payload_respects_request_cap(self) -> None:
         from app.api.routes.v1.responses.router import _llama_payload

@@ -23,7 +23,11 @@ from app.services.inference_scheduler import (
     InferenceLeaseHandle,
     inference_scheduler,
 )
-from app.services.inference_stream import lines_with_keepalive, upstream_with_keepalive
+from app.services.inference_stream import (
+    lines_with_keepalive,
+    release_lease_background,
+    upstream_with_keepalive,
+)
 from app.services.inference_target import resolve_inference_target
 from app.services.reasoning_metadata import (
     ReasoningPolicyError,
@@ -39,38 +43,6 @@ from app.services.token_stats import record_request_telemetry
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-# Strong references to detached lease-release tasks so they are not garbage
-# collected before completing. Kept at module scope because the owning stream
-# generator may already be gone (cancelled/closed) when the release finishes.
-_release_tasks: set[asyncio.Task[None]] = set()
-
-
-def _release_lease_background(
-    lease: InferenceLeaseHandle, outcome: str = "completed"
-) -> None:
-    """Finalize a lease off the client-facing stream path.
-
-    The client must never wait on the DB write that releases the inference
-    slot. Under concurrent load that write can stall on the async connection
-    pool (``DB_POOL_TIMEOUT``), which would delay the terminal ``[DONE]``
-    marker and look exactly like an inference stall. The upstream slot is
-    already free the moment its stream closes, so we hand the release to an
-    independent task that survives the generator being cancelled.
-    """
-
-    async def _run() -> None:
-        try:
-            await asyncio.shield(lease.release(outcome))
-        except Exception:
-            logger.exception(
-                "background_lease_release_failed request_id=%s",
-                lease.request_id,
-            )
-
-    task = asyncio.get_running_loop().create_task(_run())
-    _release_tasks.add(task)
-    task.add_done_callback(_release_tasks.discard)
 
 
 class ChatMessage(BaseModel):
@@ -542,7 +514,7 @@ async def _stream_completion_via_agent(
         # below is never gated on the DB write, which can stall on the async
         # connection pool under concurrent load and look like an inference
         # stall. Mark released now so the finally block does not double-release.
-        _release_lease_background(lease, "completed")
+        release_lease_background(lease, "completed")
         lease_released = True
 
         if include_usage:

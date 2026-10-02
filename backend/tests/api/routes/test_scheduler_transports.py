@@ -15,10 +15,17 @@ from app.api.routes.v1 import v1_completions
 from app.api.routes.v1.responses import router as responses_router
 from app.api.routes.v1.responses import ws as responses_ws
 from app.api.routes.v1.responses.schemas import CreateResponseBody
+from app.services import inference_stream
 from app.services.inference_scheduler import (
     InferenceLeaseHandle,
     InferenceRequestCancelled,
 )
+
+
+async def _drain_release_tasks() -> None:
+    """Let detached background lease releases finish."""
+    while inference_stream._release_tasks:
+        await asyncio.gather(*list(inference_stream._release_tasks))
 
 
 class FakeStreamResponse:
@@ -177,6 +184,7 @@ async def test_responses_keepalive_before_setup_completes(
         assert _has_text_delta(frames)
         assert any(frame.startswith("event: response.completed") for frame in frames)
         assert frames[-1] == "data: [DONE]\n\n"
+        await _drain_release_tasks()
         assert events == ["upstream_closed", "released"]
         assert len(client.stream_calls) == 1
     finally:
@@ -232,6 +240,7 @@ async def test_responses_discarded_lines_do_not_suppress_keepalive(
         frames = [frame async for frame in stream]
         assert _has_text_delta(frames)
         assert any(frame.startswith("event: response.completed") for frame in frames)
+        await _drain_release_tasks()
         assert events == ["upstream_closed", "released"]
     finally:
         await stream.aclose()
@@ -534,7 +543,7 @@ async def test_completion_stream_reports_agent_failure_instead_of_done(
 
 
 @pytest.mark.asyncio
-async def test_responses_sse_releases_before_terminal_event_and_persistence(
+async def test_responses_sse_releases_before_persistence_without_gating_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
@@ -584,11 +593,11 @@ async def test_responses_sse_releases_before_terminal_event_and_persistence(
         lease=lease,
     ):
         if frame.startswith("event: response.completed"):
-            assert "released" in events
             events.append("terminal")
         frames.append(frame)
 
-    assert events == ["released", "terminal", "persisted"]
+    assert "terminal" in events
+    assert events.index("released") < events.index("persisted")
     assert lease.upstream_started
     assert frames[-1] == "data: [DONE]\n\n"
     assert client.stream_calls[0]["headers"] == {
