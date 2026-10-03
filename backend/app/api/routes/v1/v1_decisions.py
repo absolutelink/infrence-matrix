@@ -99,7 +99,7 @@ async def decide(
     if raw.startswith('"') and raw.endswith('"'):
         try:
             decision = str(json.loads(raw))
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             decision = raw.strip('"')
 
     probabilities: dict[str, float] = {}

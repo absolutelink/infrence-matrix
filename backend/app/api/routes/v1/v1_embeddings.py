@@ -88,7 +88,10 @@ async def create_embedding(
         # An NPU alias's capability is implied by the model being enabled on
         # the instance; do not gate it on the Flash checkpoint's metadata,
         # which describes the big model, not the NPU embedder.
-        if not target.npu_model and metadata_capability(instance, "embeddings") is False:
+        if (
+            not target.npu_model
+            and metadata_capability(instance, "embeddings") is False
+        ):
             raise HTTPException(
                 400, f"Model '{request.model}' does not support embeddings"
             )
