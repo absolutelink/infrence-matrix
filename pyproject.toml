@@ -11,7 +11,9 @@ github-actions = [
 
 [tool.uv.workspace]
 members = [
-    "backend",
+    "admin/backend",
+    "provider/lib",
+    "provider/mock",
     "spike/litellm-fidelity",
 ]
 
@@ -20,11 +22,10 @@ extend-exclude = [
     "img/",
     "uv.lock",
     "bun.lock",
-    "backend/coverage/",
-    "backend/htmlcov/",
-    "backend/app/frontend/",
-    "frontend/dist/",
-    "frontend/public/assets/images/",
+    "admin/backend/app/frontend/",
+    "admin/frontend/dist/",
+    "admin/frontend/public/assets/images/",
+    "legacy/",
 ]
 
 [tool.typos.default]

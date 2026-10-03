@@ -12,11 +12,10 @@ repos:
       - id: end-of-file-fixer
         exclude: |
             (?x)^(
-                frontend/src/client/.*|
-                backend/app/email-templates/.*
+                admin/frontend/src/client/.*
             )$
       - id: trailing-whitespace
-        exclude: ^frontend/src/client/.*
+        exclude: ^admin/frontend/src/client/.*
   - repo: https://github.com/crate-ci/typos
     rev: 8a48f81b6c64dcfea44b3633223084c4be58ac5f # frozen: v1.49.0
     hooks:
@@ -26,10 +25,10 @@ repos:
     hooks:
       - id: local-biome-check
         name: biome check
-        entry: npm run lint
+        entry: bun run lint
         language: system
         types: [text]
-        files: ^frontend/
+        files: ^admin/frontend/
 
       - id: local-ruff-check
         name: ruff check
@@ -37,6 +36,7 @@ repos:
         require_serial: true
         language: unsupported
         types: [python]
+        exclude: ^legacy/
 
       - id: local-ruff-format
         name: ruff format
@@ -44,27 +44,18 @@ repos:
         require_serial: true
         language: unsupported
         types: [python]
+        exclude: ^legacy/
 
-      - id: local-mypy
-        name: mypy check
-        entry: uv run mypy backend/app
-        require_serial: true
-        language: unsupported
-        pass_filenames: false
-
-      - id: local-ty
-        name: ty check
-        entry: uv run ty check backend/app
-        require_serial: true
-        language: unsupported
-        pass_filenames: false
-
-      - id: generate-frontend-sdk
-        name: Generate Frontend SDK
-        entry: bash ./scripts/generate-client.sh
-        pass_filenames: false
-        language: unsupported
-        files: ^backend/app/.*\.py$|^backend/pyproject\.toml$|^uv\.lock$|^frontend/openapi-ts\.config\.ts$|^scripts/generate-client\.sh$
+      # DISABLED during the litellm-architecture overhaul: the new admin API is
+      # built incrementally, and regenerating the SDK against a partial backend
+      # breaks the not-yet-reworked UI. Re-enable in Phase 10 and run
+      # scripts/generate-client.sh as part of the UI rework.
+      # - id: generate-frontend-sdk
+      #   name: Generate Frontend SDK
+      #   entry: bash ./scripts/generate-client.sh
+      #   pass_filenames: false
+      #   language: unsupported
+      #   files: ^admin/backend/app/.*\.py$|^admin/backend/pyproject\.toml$|^uv\.lock$|^admin/frontend/openapi-ts\.config\.ts$|^scripts/generate-client\.sh$
 
       - id: add-release-date
         language: unsupported

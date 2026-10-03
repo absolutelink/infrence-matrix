@@ -3,13 +3,13 @@ FROM oven/bun:1 AS frontend-build
 WORKDIR /app
 
 COPY package.json bun.lock /app/
-COPY frontend/package.json /app/frontend/
+COPY admin/frontend/package.json /app/admin/frontend/
 
-WORKDIR /app/frontend
+WORKDIR /app/admin/frontend
 
 RUN bun install
 
-COPY ./frontend /app/frontend
+COPY ./admin/frontend /app/admin/frontend
 
 ARG VITE_API_URL=
 
@@ -38,24 +38,24 @@ ENV PATH="/app/.venv/bin:$PATH"
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --frozen --no-install-workspace --package app
+    uv sync --frozen --no-install-workspace --package matrix-admin
 
-COPY ./backend/scripts /app/backend/scripts
+COPY ./admin/backend/scripts /app/admin/backend/scripts
 
-COPY ./backend/pyproject.toml ./backend/alembic.ini /app/backend/
-COPY ./backend/alembic /app/backend/alembic
+COPY ./admin/backend/pyproject.toml ./admin/backend/alembic.ini /app/admin/backend/
+COPY ./admin/backend/alembic /app/admin/backend/alembic
 
-COPY ./backend/app /app/backend/app
+COPY ./admin/backend/app /app/admin/backend/app
 
-COPY --from=frontend-build /app/backend/app/frontend /app/backend/app/frontend
+COPY --from=frontend-build /app/admin/backend/app/frontend /app/admin/backend/app/frontend
 
 # Sync the project
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --frozen --package app
+    uv sync --frozen --package matrix-admin
 
-WORKDIR /app/backend/
+WORKDIR /app/admin/backend/
 
 # Install entrypoint script
 COPY docker/entrypoint.sh /entrypoint.sh
@@ -68,5 +68,8 @@ RUN chmod +x /etc/entrypoint.d/*.sh
 # Set entrypoint
 ENTRYPOINT ["/entrypoint.sh"]
 
-# Run FastAPI server
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4", "--ws-ping-interval", "30", "--ws-ping-timeout", "60"]
+# Run FastAPI server. Single worker: the scheduler keeps in-process state
+# (WebSocket registry, request queues) backed by Redis for cross-restart
+# reconciliation. Do not raise worker count without completing the Redis
+# scheduler interface.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--ws-ping-interval", "30", "--ws-ping-timeout", "60"]

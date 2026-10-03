@@ -67,3 +67,7 @@ docker-compose*.yml
 .cache/
 .mypy_cache/
 .ruff_cache/
+
+# Legacy porting reference (not built)
+legacy/
+spike/

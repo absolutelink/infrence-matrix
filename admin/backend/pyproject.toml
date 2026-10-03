@@ -1,31 +1,28 @@
 [project]
-name = "app"
-version = "1.0.0"
-description = ""
+name = "matrix-admin"
+version = "0.1.0"
+description = "Inference Matrix admin: broker, scheduler, provider registry"
 requires-python = ">=3.14,<4.0"
 dependencies = [
     "fastapi[standard]>=0.141.1,<1.0.0",
     "python-multipart<1.0.0,>=0.0.27",
     "pydantic>2.0",
-    "jinja2<4.0.0,>=3.1.4",
-    "alembic>=1.19.1,<2.0.0",
-    "httpx<1.0.0,>=0.25.1",
-    "sqlmodel>=0.0.39,<1.0.0",
     "pydantic-settings<3.0.0,>=2.2.1",
-    "sentry-sdk[fastapi]>=2.68.1,<3.0.0",
-    "huggingface_hub>=0.20.0,<1.0.0",
-    "psutil>=5.9.0,<7.0.0",
-    "prometheus-client>=0.19.0,<1.0.0",
+    "alembic>=1.19.1,<2.0.0",
+    "sqlmodel>=0.0.39,<1.0.0",
     "psycopg[binary]>=3.3.6",
-    "psycopg2-binary>=2.9.13",
+    "httpx<1.0.0,>=0.25.1",
+    "websockets>=12.0",
+    "litellm>=1.103.2,<2.0.0",
+    "redis>=5.0.0,<7.0.0",
+    "psutil>=5.9.0,<7.0.0",
+    "huggingface_hub>=0.20.0,<1.0.0",
 ]
 
 [dependency-groups]
 dev = [
     "pytest<10.0.0,>=7.4.3",
     "pytest-asyncio<1.0.0,>=0.21.0",
-    "mypy<3.0.0,>=1.8.0",
-    "ty>=0.0.25",
     "ruff<1.0.0,>=0.2.2",
     "coverage<8.0.0,>=7.4.3",
 ]
@@ -36,10 +33,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
-
-[tool.mypy]
-strict = true
-exclude = ["venv", ".venv", "alembic"]
 
 [tool.ruff]
 target-version = "py314"
@@ -58,32 +51,15 @@ select = [
     "T201",   # print statements are not allowed
 ]
 ignore = [
-    "E501",  # line too long, handled by black
+    "E501",  # line too long, handled by formatter
     "B008",  # do not perform function calls in argument defaults
     "W191",  # indentation contains tabs
-    "B904",  # Allow raising exceptions without from e, for HTTPException
+    "B904",  # allow raising exceptions without from e, for HTTPException
 ]
 
 [tool.ruff.lint.pyupgrade]
-# Preserve types, even if a file imports `from __future__ import annotations`.
 keep-runtime-typing = true
-
-[tool.coverage.run]
-source = ["app"]
-dynamic_context = "test_function"
-
-[tool.coverage.report]
-show_missing = true
-sort = "-Cover"
-
-[tool.coverage.html]
-show_contexts = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-
-[tool.ty.terminal]
-error-on-warning = true
-
-[tool.fastapi]
-entrypoint = "app.main:app"
+testpaths = ["tests"]

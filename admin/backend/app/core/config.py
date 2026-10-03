@@ -1,0 +1,89 @@
+"""Admin settings.
+
+URL layout (see docs/architecture.md):
+  /                 Swagger UI (built-in)
+  /openapi.json     OpenAPI schema
+  /admin            React UI (served from app/frontend build)
+  /admin/api/*      Admin management API
+  /v1/*             Public OpenAI-compatible inference API
+  /provider/ws      Provider instances dial in here (bidirectional WS)
+
+Auth model: trusted LAN. /admin/api and /v1 are unauthenticated.
+Registration tokens and per-instance secrets protect only the provider WS.
+"""
+
+import warnings
+from pathlib import Path
+from typing import Literal, Self
+
+from pydantic import Field, PostgresDsn, computed_field, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=Path(__file__).resolve().parents[4] / ".env",
+        env_ignore_empty=True,
+        extra="ignore",
+    )
+
+    PROJECT_NAME: str = "Inference Matrix"
+    FASTAPI_ENV: Literal["development", "production"] = "development"
+
+    HOST: str = "0.0.0.0"
+    PORT: int = 8000
+
+    # Version gate: provider instances must match this exactly (hard fail).
+    # Overridden at build time from the git commit id.
+    VERSION: str = "dev"
+
+    # --- Database -----------------------------------------------------
+    POSTGRES_USER: str = "inference"
+    POSTGRES_PASSWORD: str = Field(default="", min_length=0)
+    POSTGRES_DB: str = "inference_matrix"
+    POSTGRES_HOST: str = "postgres"
+    POSTGRES_PORT: int = 5432
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def DATABASE_URL(self) -> PostgresDsn:
+        return PostgresDsn.build(
+            scheme="postgresql+psycopg",
+            username=self.POSTGRES_USER,
+            password=self.POSTGRES_PASSWORD,
+            host=self.POSTGRES_HOST,
+            port=self.POSTGRES_PORT,
+            path=self.POSTGRES_DB,
+        )
+
+    # --- Redis (scheduler queues, VRAM ledger, metrics ownership) -----
+    REDIS_URL: str = "redis://redis:6379/0"
+
+    # --- Provider connection supervision ------------------------------
+    # An instance whose WS is dead is marked disconnected immediately; this
+    # is only the stale-row sweep interval for bookkeeping.
+    INSTANCE_SWEEP_INTERVAL_SECONDS: float = 30.0
+    INSTANCE_STALE_AFTER_SECONDS: float = 120.0
+
+    # CORS: the UI is served same-origin from this app; allow Vite dev server.
+    CORS_ALLOW_ALL_ORIGINS: bool = True
+
+    def _check_default_secret(self, var_name: str, value: str | None) -> None:
+        if value == "changethis":
+            message = (
+                f'The value of {var_name} is "changethis", '
+                "for security, please change it, at least for deployments."
+            )
+            if self.FASTAPI_ENV == "development":
+                warnings.warn(message, stacklevel=1)
+            else:
+                raise ValueError(message)
+
+    @model_validator(mode="after")
+    def _enforce_non_default_secrets(self) -> Self:
+        if self.FASTAPI_ENV == "production":
+            self._check_default_secret("POSTGRES_PASSWORD", self.POSTGRES_PASSWORD)
+        return self
+
+
+settings = Settings()  # type: ignore[call-arg]

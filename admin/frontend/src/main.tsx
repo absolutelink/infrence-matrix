@@ -23,7 +23,7 @@ const queryClient = new QueryClient({
   mutationCache: new MutationCache({}),
 })
 
-const router = createRouter({ routeTree })
+const router = createRouter({ routeTree, basepath: "/admin" })
 declare module "@tanstack/react-router" {
   interface Register {
     router: typeof router

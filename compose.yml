@@ -15,67 +15,72 @@ services:
       timeout: 5s
       retries: 5
 
-  # Frontend Service (WebUI + API on same port)
-  frontend:
+  # Redis: scheduler queues, VRAM ledger, metrics ownership registry
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Admin: FastAPI backend + React UI (served under /admin) in one container
+  admin:
     build:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "8000:8000"  # Both WebUI and API
+      - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql+psycopg://inference:${POSTGRES_PASSWORD:-changethis}@postgres/inference_matrix
-      - AGENT_DISCOVERY_ENABLED=true
-    volumes:
-      - ./models:/models:ro
+      - FASTAPI_ENV=production
+      - POSTGRES_USER=inference
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changethis}
+      - POSTGRES_DB=inference_matrix
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - REDIS_URL=redis://redis:6379/0
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/admin/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
 
-  # Agent Service (Inference Hardware)
-  agent:
+  # Mock provider: full-path local development with no hardware.
+  # The provider dials the admin WS; admin points litellm back at :8081.
+  provider-mock:
     build:
-      context: ./agent
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: provider/mock/Dockerfile
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "8081:8081"
     environment:
-      - AGENT_ID=${AGENT_ID:-agent-1}
-      - AGENT_NAME=${AGENT_NAME:-GPU-Agent-1}
-      - FRONTEND_URL=http://frontend:8000
-      - LLAMA_SERVER_PATH=/usr/local/bin/llama-server
-      - DEFAULT_GPU_LAYERS=${DEFAULT_GPU_LAYERS:-35}
-      - MODELS_PATH=/models
-      - CACHE_PATH=/cache
+      - MACHINE_UID=${MOCK_MACHINE_UID:-mock-machine-1}
+      - PROVIDER_REGISTRATION_TOKEN=${MOCK_PROVIDER_TOKEN:-mock-registration-token}
+      - ADMIN_BASE_URL=http://admin:8000
+      - PROVIDER_PORT=8081
+      - CACHE_DIR=/cache
+      - MODELS_DIR=/models
+      - METRICS_CATEGORIES=gpu_usage vram os_ram cpu storage
     volumes:
-      - ./models:/models
-      - ./cache:/cache
-    devices:
-      - /dev/nvidia0:/dev/nvidia0
-      - /dev/nvidiactl:/dev/nvidiactl
-      - /dev/nvidia-uvm:/dev/nvidia-uvm
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      - mock_cache:/cache
+      - mock_models:/models
     depends_on:
-      - frontend
+      admin:
+        condition: service_healthy
 
 volumes:
   postgres_data:
-  models:
-  cache:
+  redis_data:
+  mock_cache:
+  mock_models:

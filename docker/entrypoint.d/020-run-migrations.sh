@@ -5,7 +5,7 @@ set -e
 
 echo "Running database migrations..."
 
-cd /app/backend
+cd /app/admin/backend
 
 # Build database URL from environment variables and export for alembic
 export SQLALCHEMY_URL="postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-}@${POSTGRES_HOST:-localhost}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-app}"
