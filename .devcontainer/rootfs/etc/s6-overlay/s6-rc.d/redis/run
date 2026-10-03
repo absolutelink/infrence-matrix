@@ -1,0 +1,21 @@
+#!/command/with-contenv /bin/sh
+set -e
+
+# Ensure data and run directories exist with correct permissions
+DATA_DIR="/var/lib/redis"
+RUN_DIR="/var/run/redis"
+LOG_DIR="/var/log/redis"
+mkdir -p "$DATA_DIR" "$RUN_DIR" "$LOG_DIR"
+chown -R redis:redis "$DATA_DIR" "$RUN_DIR" "$LOG_DIR" 2>/dev/null || true
+
+# Start Redis in the foreground
+echo "Starting Redis..."
+exec redis-server \
+    --daemonize no \
+    --bind 0.0.0.0 \
+    --port 6379 \
+    --dir "$DATA_DIR" \
+    --pidfile "$RUN_DIR/redis.pid" \
+    --logfile "" \
+    --save "" \
+    --appendonly no
