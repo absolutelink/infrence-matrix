@@ -10,7 +10,10 @@ github-actions = [
 ]
 
 [tool.uv.workspace]
-members = ["backend"]
+members = [
+    "backend",
+    "spike/litellm-fidelity",
+]
 
 [tool.typos.files]
 extend-exclude = [
