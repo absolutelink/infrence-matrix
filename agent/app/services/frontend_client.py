@@ -88,7 +88,20 @@ class FrontendClient:
 
     async def _get_gpu_info(self) -> dict:
         """Get GPU information."""
-        return aggregate_gpu_info(_sample_gpu(), settings.GPU_BACKEND)
+        info = aggregate_gpu_info(_sample_gpu(), settings.GPU_BACKEND)
+        if settings.AGENT_PLATFORM == "halogen-flash":
+            from app.services.npu_probe import probe_npu
+
+            try:
+                info["npu"] = await asyncio.to_thread(probe_npu)
+            except Exception as exc:  # never fail registration on the probe
+                logger.warning(f"NPU probe failed: {exc}")
+                info["npu"] = {
+                    "available": False,
+                    "checks": {},
+                    "reasons": [f"probe error: {exc}"],
+                }
+        return info
 
     async def start_background_tasks(self) -> None:
         """Start background tasks: register with frontend, then connect WebSocket."""

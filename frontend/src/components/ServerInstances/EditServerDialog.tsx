@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import type { Model } from "@/client"
-import { ModelsService, ServerInstancesService } from "@/client"
+import { AgentsService, ModelsService, ServerInstancesService } from "@/client"
 import { ModelSelect } from "@/components/Models/ModelSelect"
 import {
   type GufoOptions,
@@ -55,6 +55,7 @@ interface EditServerDialogProps {
     vram_required_bytes?: number | null
     inactivity_timeout_seconds: number
     server_options?: ServerOptions
+    agent_id?: string
   }
 }
 
@@ -88,6 +89,23 @@ export function EditServerDialog({
     enabled: isOpen,
   })
   const allModels = (modelsQuery.data ?? []) as Model[]
+
+  const agentsQuery = useQuery({
+    queryKey: ["agents"],
+    queryFn: async () => {
+      const response = await AgentsService.listAgents()
+      return response.data.agents || []
+    },
+    enabled: isOpen && instance.engine === "halogen-flash",
+  })
+  const npuInfo = (
+    (agentsQuery.data ?? []) as Array<{
+      id: string
+      gpu_info?: { npu?: { available?: boolean; reasons?: string[] } }
+    }>
+  ).find((agent) => agent.id === instance.agent_id)?.gpu_info?.npu
+  const npuAvailable = npuInfo?.available === true
+  const npuReasons = npuInfo?.reasons ?? []
 
   const prevOpenRef = useRef(false)
   useEffect(() => {
@@ -204,6 +222,8 @@ export function EditServerDialog({
                 <HalogenFlashSettingsFields
                   options={engineOptions as HalogenFlashOptions}
                   onChange={setEngineOptions}
+                  npuAvailable={npuAvailable}
+                  npuReasons={npuReasons}
                 />
               </div>
             ) : instance.engine === "gufo" ? (

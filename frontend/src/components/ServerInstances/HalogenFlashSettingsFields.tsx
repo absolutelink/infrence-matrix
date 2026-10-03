@@ -60,14 +60,50 @@ export type HalogenFlashOptions = {
   grammar?: number
   vision_tower?: number
   vision_max_pixels?: number
+  npu_models?: string[]
 }
 
 type Props = {
   options: HalogenFlashOptions
   onChange: (options: HalogenFlashOptions) => void
+  npuAvailable?: boolean
+  npuReasons?: string[]
 }
 
 type NumberField = readonly [keyof HalogenFlashOptions, string, number, string]
+
+export const NPU_MODEL_CHOICES = [
+  {
+    id: "qwen3-embedding-0.6b",
+    suffix: "embed",
+    label: "Embeddings",
+    description: "qwen3-embedding-0.6b — /v1/embeddings on the NPU.",
+  },
+  {
+    id: "qwen3-reranker-0.6b",
+    suffix: "rerank",
+    label: "Rerank",
+    description: "qwen3-reranker-0.6b — /v1/rerank on the NPU.",
+  },
+  {
+    id: "decider-0.8b",
+    suffix: "decide",
+    label: "Decisions",
+    description: "decider-0.8b — /v1/decisions single-pass classification.",
+  },
+  {
+    id: "qwen3guard-gen-0.6b",
+    suffix: "guard",
+    label: "Moderation",
+    description: "qwen3guard-gen-0.6b — /v1/moderations on the NPU.",
+  },
+  {
+    id: "qwen3.5-2b",
+    suffix: "nano",
+    label: "Nano generation",
+    description: "qwen3.5-2b — short chat/completions jobs on the NPU.",
+  },
+] as const
 
 const descriptions: Record<string, string> = {
   kv_slots: "Maximum number of conversations generating at once.",
@@ -145,7 +181,25 @@ function OptionLabel({ name, label }: { name: string; label: string }) {
   )
 }
 
-export function HalogenFlashSettingsFields({ options, onChange }: Props) {
+export function HalogenFlashSettingsFields({
+  options,
+  onChange,
+  npuAvailable = false,
+  npuReasons = [],
+}: Props) {
+  const enabledNpu = new Set(options.npu_models ?? [])
+
+  const toggleNpuModel = (id: string, checked: boolean) => {
+    const next = new Set(enabledNpu)
+    if (checked) next.add(id)
+    else next.delete(id)
+    const list = NPU_MODEL_CHOICES.map((c) => c.id).filter((m) => next.has(m))
+    const updated = { ...options }
+    if (list.length) updated.npu_models = list
+    else delete updated.npu_models
+    onChange(updated)
+  }
+
   const setNumber = (key: keyof HalogenFlashOptions, value: string) => {
     const next = { ...options }
     if (value === "") delete next[key]
@@ -376,6 +430,73 @@ export function HalogenFlashSettingsFields({ options, onChange }: Props) {
             {toggle("vision_tower", "Enable vision")}
           </div>
           {numberFields([["vision_max_pixels", "Vision max pixels", 1, "1"]])}
+        </div>
+      </details>
+
+      <details className="rounded-md border px-4">
+        <summary className="cursor-pointer py-3 font-medium">
+          NPU small models (Ryzen AI)
+        </summary>
+        <div className="space-y-4 pb-4">
+          {!npuAvailable ? (
+            <p className="text-sm text-muted-foreground">
+              The selected agent&apos;s host does not report a usable NPU.
+              Enabling these models will fail at start unless the host has the
+              NPU driver, XRT with its NPU plugin, and the GPU fabric clock held
+              at its top speed.
+            </p>
+          ) : null}
+          {npuReasons.length > 0 ? (
+            <ul className="list-disc space-y-1 pl-5 text-xs text-muted-foreground">
+              {npuReasons.map((reason) => (
+                <li key={reason}>{reason}</li>
+              ))}
+            </ul>
+          ) : null}
+          <div className="grid gap-3 sm:grid-cols-2">
+            {NPU_MODEL_CHOICES.map((choice) => (
+              <div key={choice.id} className="flex items-start gap-2 text-sm">
+                <Checkbox
+                  id={`halogen-flash-npu-${choice.suffix}`}
+                  disabled={!npuAvailable && !enabledNpu.has(choice.id)}
+                  checked={enabledNpu.has(choice.id)}
+                  onCheckedChange={(checked) =>
+                    toggleNpuModel(choice.id, checked === true)
+                  }
+                />
+                <div>
+                  <Label htmlFor={`halogen-flash-npu-${choice.suffix}`}>
+                    {choice.label}
+                    <span className="ml-1 font-mono text-xs text-muted-foreground">
+                      -{choice.suffix}
+                    </span>
+                  </Label>
+                  <p className="text-xs text-muted-foreground">
+                    {choice.description}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+          {enabledNpu.size > 0 ? (
+            <p className="text-xs text-muted-foreground">
+              Enabled models are served on the same port as the Flash model and
+              are reachable as{" "}
+              <span className="font-mono">
+                {Array.from(enabledNpu)
+                  .map(
+                    (id) =>
+                      `&lt;alias&gt;-${
+                        NPU_MODEL_CHOICES.find((c) => c.id === id)?.suffix ??
+                        "?"
+                      }`,
+                  )
+                  .join(", ")}
+              </span>
+              . Saving changes restarts the server and downloads the model
+              files.
+            </p>
+          ) : null}
         </div>
       </details>
     </div>

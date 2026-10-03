@@ -594,6 +594,7 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
         model_changed = False
         mmproj_changed = False
         dflash_changed = False
+        prev_npu_models = list((instance.engine_options or {}).get("npu_models") or [])
 
         if request.alias is not None and request.alias != instance.alias:
             existing_alias = await session.execute(
@@ -623,6 +624,14 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
                 if instance.engine == "gufo"
                 else {}
             )
+
+        # NPU small models are read by the engine at process start
+        # (HALOGEN_NPU_MODELS), so a change requires a restart and a
+        # re-prepare to download any newly enabled model files.
+        npu_changed = (
+            list((instance.engine_options or {}).get("npu_models") or [])
+            != prev_npu_models
+        )
 
         if request.model_id is not None and request.model_id != str(instance.model_id):
             new_model = await session.get(Model, uuid_module.UUID(request.model_id))
@@ -676,7 +685,7 @@ async def update_server(server_id: str, request: UpdateServerRequest) -> dict[st
             if instance.mtp_draft_max is not None
             else None,
         }
-        needs_start = model_changed or mmproj_changed or dflash_changed
+        needs_start = model_changed or mmproj_changed or dflash_changed or npu_changed
         if was_running and (request.restart or needs_start):
             active_leases = await session.execute(
                 select(col(InferenceLease.id)).where(

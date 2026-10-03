@@ -3,7 +3,10 @@ ARG AGENT_IMAGE=ghcr.io/absolutelink/agent:main
 
 FROM ${AGENT_IMAGE} AS agent
 
-FROM ghcr.io/peonist-ai/halogen-flash-server:latest
+# Pinned for NPU small-model support (HALOGEN_NPU_MODELS, /opt/halogen/npu pins).
+# Bump deliberately: the agent's NPU download step reads the pins file this image
+# ships, so the tag and the agent's expectations must stay in step.
+FROM ghcr.io/peonist-ai/halogen-flash-server:0.16.2
 
 USER root
 

@@ -34,13 +34,21 @@ import {
 import { useQueueStatus } from "@/hook/useQueueStatus"
 import { useTokenStats } from "@/hook/useTokenStats"
 
+const NPU_SUFFIX: Record<string, string> = {
+  "qwen3-embedding-0.6b": "embed",
+  "qwen3-reranker-0.6b": "rerank",
+  "qwen3.5-2b": "nano",
+  "decider-0.8b": "decide",
+  "qwen3guard-gen-0.6b": "guard",
+}
+
 type ServerInstance = {
   id: string
   model_id: string
   model_name: string | null
   alias: string
   engine?: "llamacpp" | "halogen" | "halogen-flash" | "gufo"
-  engine_options?: HalogenOptions
+  engine_options?: HalogenOptions | { npu_models?: string[] }
   status: string
   health_status: string
   error_message: string | null
@@ -125,6 +133,9 @@ export function useColumns(): ColumnDef<ServerInstance>[] {
         header: "Alias",
         cell: ({ row }) => {
           const instance = row.original
+          const npuModels =
+            (instance.engine_options as { npu_models?: string[] } | undefined)
+              ?.npu_models ?? []
           return (
             <div>
               <div className="font-medium">{instance.alias || "—"}</div>
@@ -138,6 +149,15 @@ export function useColumns(): ColumnDef<ServerInstance>[] {
                     ? `${instance.model_name || "Unknown"} · Gufo`
                     : instance.model_name || "Unknown"}
               </div>
+              {npuModels.length > 0 ? (
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {npuModels.map((id) => (
+                    <Badge key={id} variant="outline" className="text-[10px]">
+                      NPU · {NPU_SUFFIX[id] ?? id}
+                    </Badge>
+                  ))}
+                </div>
+              ) : null}
             </div>
           )
         },

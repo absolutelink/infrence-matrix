@@ -58,6 +58,12 @@ class Settings(BaseSettings):
     MODELS_PATH: str = "/models"
     CACHE_PATH: str = "/cache"
 
+    # Halogen-flash NPU (Ryzen AI) host requirements
+    NPU_DEVICE_PATH: str = "/dev/accel/accel0"
+    NPU_XRT_LIB_DIR: str = "/opt/xilinx/xrt/lib"
+    NPU_PINS_FILE: str = "/opt/halogen/npu/models.txt"
+    NPU_BINARY_PATH: str = "/usr/local/bin/halogen-npu"
+
     # WebSocket
     WS_HEARTBEAT_INTERVAL: int = 30
     WS_PING_INTERVAL: int = 30

@@ -8,6 +8,7 @@ from sqlmodel import Session, col, select
 
 from app.api.deps import get_db
 from app.models import ServerInstance
+from app.services.npu_aliases import NPU_SUFFIXES, client_name
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ def list_models(db: Session = Depends(get_db)) -> ModelsList:
     instances = db.exec(statement).all()
 
     model_data = []
+    listed_ids = set()
     for instance in instances:
         if not instance.alias:
             continue
@@ -63,6 +65,28 @@ def list_models(db: Session = Depends(get_db)) -> ModelsList:
                 owned_by=owned_by if isinstance(owned_by, str) else "inference-matrix",
             )
         )
+        listed_ids.add(instance.alias)
+
+    # NPU small-model virtual aliases (<alias>-embed, <alias>-rerank, ...)
+    # are discoverable per flash instance, deduped across instances.
+    for instance in instances:
+        if not instance.alias or getattr(instance, "engine", None) != "halogen-flash":
+            continue
+        for upstream_id in (instance.engine_options or {}).get("npu_models") or []:
+            suffix = NPU_SUFFIXES.get(upstream_id)
+            if suffix is None:
+                continue
+            name = client_name(instance.alias, upstream_id)
+            if name in listed_ids:
+                continue
+            listed_ids.add(name)
+            model_data.append(
+                ModelData(
+                    id=name,
+                    created=0,
+                    owned_by="inference-matrix-npu",
+                )
+            )
 
     return ModelsList(data=model_data)
 

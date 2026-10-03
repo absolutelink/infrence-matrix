@@ -2,7 +2,9 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.services.npu_aliases import STOCK_NPU_MODEL_IDS
 
 
 class ServerOptions(BaseModel):
@@ -182,8 +184,26 @@ class HalogenFlashServerOptions(BaseModel):
     grammar: int | None = Field(default=None, ge=0, le=1)
     vision_tower: int | None = Field(default=None, ge=0, le=1)
     vision_max_pixels: int | None = Field(default=None, ge=1)
+    npu_models: list[str] | None = None
 
     model_config = ConfigDict(extra="forbid")
+
+    @field_validator("npu_models")
+    @classmethod
+    def _validate_npu_models(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("npu_models must not be empty")
+        unknown = [m for m in value if m not in STOCK_NPU_MODEL_IDS]
+        if unknown:
+            raise ValueError(
+                "unknown NPU models: "
+                + ", ".join(unknown)
+                + "; supported: "
+                + ", ".join(STOCK_NPU_MODEL_IDS)
+            )
+        return list(dict.fromkeys(value))
 
 
 def validate_halogen_flash_options(options: dict | HalogenFlashServerOptions) -> dict:

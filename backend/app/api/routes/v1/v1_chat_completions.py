@@ -338,6 +338,7 @@ async def _stream_completion_via_agent(
     request: ChatCompletionRequest,
     request_id: str,
     lease: InferenceLeaseHandle,
+    npu_model: str | None = None,
 ) -> AsyncGenerator[str]:
     """Stream completion via Agent proxy."""
     messages = _convert_messages_to_llama_format(request.messages)
@@ -346,6 +347,10 @@ async def _stream_completion_via_agent(
         "messages": messages,
         "stream": True,
     }
+    # An NPU virtual alias (``<alias>-nano`` etc.) must be rewritten to the
+    # upstream model id so halogen routes to the NPU instead of Flash.
+    if npu_model:
+        payload["model"] = npu_model
     if request.temperature is not None:
         payload["temperature"] = request.temperature
     if request.max_tokens is not None:
@@ -849,6 +854,7 @@ async def create_chat_completion(
                 request,
                 request_id,
                 lease,
+                npu_model=target.npu_model,
             ),
             media_type="text/event-stream",
             headers={
@@ -869,6 +875,8 @@ async def create_chat_completion(
             "messages": _convert_messages_to_llama_format(request.messages),
             "stream": False,
         }
+        if target.npu_model:
+            non_stream_payload["model"] = target.npu_model
         if request.temperature is not None:
             non_stream_payload["temperature"] = request.temperature
         if request.max_tokens is not None:

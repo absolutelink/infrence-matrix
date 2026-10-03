@@ -29,7 +29,13 @@ def test_flash_proxy_allows_documented_routes_only() -> None:
     # halogen-flash-server speaks the OpenAI Responses API natively since
     # 0.4.0 (README "Codex and the Responses API").
     assert _is_supported_halogen_flash_path("v1/responses")
-    assert not _is_supported_halogen_flash_path("v1/embeddings")
+    # The NPU small models (0.16.0) add embeddings, rerank and moderation
+    # on the same port; docs/NPU.md has the request shapes.
+    assert _is_supported_halogen_flash_path("v1/embeddings")
+    assert _is_supported_halogen_flash_path("v1/rerank")
+    assert _is_supported_halogen_flash_path("v1/moderations")
+    assert not _is_supported_halogen_flash_path("v1/messages")
+    assert not _is_supported_halogen_flash_path("v1/images/generations")
 
 
 def test_flash_agent_rejects_other_engines(monkeypatch) -> None:

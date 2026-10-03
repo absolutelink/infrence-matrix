@@ -76,7 +76,19 @@ async def create_embedding(
     db.close()
 
     if instance is not None:
-        if metadata_capability(instance, "embeddings") is False:
+        if (
+            getattr(instance, "engine", None) == "halogen-flash"
+            and not target.npu_model
+        ):
+            raise HTTPException(
+                400,
+                f"Model '{request.model}' is a halogen-flash server; request "
+                "embeddings via its '<alias>-embed' NPU model name",
+            )
+        # An NPU alias's capability is implied by the model being enabled on
+        # the instance; do not gate it on the Flash checkpoint's metadata,
+        # which describes the big model, not the NPU embedder.
+        if not target.npu_model and metadata_capability(instance, "embeddings") is False:
             raise HTTPException(
                 400, f"Model '{request.model}' does not support embeddings"
             )
@@ -118,6 +130,7 @@ async def create_embedding(
                 {
                     "input": inputs,
                     "encoding_format": request.encoding_format,
+                    **({"model": target.npu_model} if target.npu_model else {}),
                 },
                 timeout=1800.0,
                 headers={

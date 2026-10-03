@@ -1,6 +1,7 @@
 """Manages model downloads from HuggingFace and ModelScope."""
 
 import asyncio
+import hashlib
 import re
 import threading
 import time
@@ -147,6 +148,7 @@ class ModelManager:
         self.models_path = Path(settings.MODELS_PATH)
         self.models_path.mkdir(parents=True, exist_ok=True)
         self._download_tasks: dict[str, asyncio.Task] = {}
+        self._npu_locks: dict[str, asyncio.Lock] = {}
 
     # -- download ------------------------------------------------------------
 
@@ -262,6 +264,131 @@ class ModelManager:
             return await task
         finally:
             self._download_tasks.pop(download_key, None)
+
+    async def download_npu_files(
+        self,
+        dir_id: str,
+        files: list[tuple[str, int, str]],
+        repo_id: str,
+        revision: str | None = None,
+        job_id: str | None = None,
+        server_id: str | None = None,
+    ) -> str:
+        """Fetch one NPU model directory's files into ``MODELS_PATH/npu/<dir_id>``.
+
+        ``files`` are ``(relative_path, size, sha256)`` records from the image's
+        pins file. Each file is downloaded from ``repo_id`` into the model's own
+        directory (not the default ``MODELS_PATH/<repo_id>`` layout), emitting
+        download.started/progress/completed events per file so the UI shows
+        progress. Existing files of the exact expected size are skipped so the
+        step is idempotent across re-dispatched starts.
+        """
+        if not files:
+            raise ValueError(f"no files to download for NPU model '{dir_id}'")
+        local_dir = (self.models_path / "npu" / dir_id).resolve()
+        effective_job_id = job_id or f"npu-{dir_id}"
+        # Serialize per-directory so two re-dispatched starts cannot race the
+        # unlink-and-redownload of a stale file.
+        lock = self._npu_locks.setdefault(dir_id, asyncio.Lock())
+        async with lock:
+            for relative_path, size, sha256 in files:
+                target = (local_dir / relative_path).resolve()
+                if not target.is_relative_to(local_dir):
+                    raise ValueError(
+                        f"NPU file path '{relative_path}' escapes "
+                        f"{local_dir} for '{dir_id}'"
+                    )
+                if target.exists() and self._matches_pin(target, size, sha256):
+                    continue
+                if target.exists():
+                    # Size matches but the hash does not (or vice versa): a torn
+                    # or wrong-release file. Remove it so the download replaces
+                    # it.
+                    logger.warning(
+                        f"NPU file {target} does not match its pin; re-downloading"
+                    )
+                    target.unlink()
+                await self._download_npu_file(
+                    repo_id,
+                    relative_path,
+                    local_dir,
+                    target,
+                    revision,
+                    effective_job_id,
+                    server_id,
+                )
+        return str(local_dir)
+
+    @staticmethod
+    def _matches_pin(path: Path, size: int, sha256: str | None) -> bool:
+        """A pinned file matches only when its size and sha256 both agree."""
+        if path.stat().st_size != size:
+            return False
+        if not sha256:
+            return True
+        digest = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest() == sha256
+
+    async def _download_npu_file(
+        self,
+        repo_id: str,
+        relative_path: str,
+        local_dir: Path,
+        target: Path,
+        revision: str | None,
+        job_id: str,
+        server_id: str | None,
+    ) -> None:
+        from huggingface_hub import hf_hub_download
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tqdm_class = _make_tqdm_class(job_id, relative_path, server_id)
+        logger.info(f"Downloading NPU file {relative_path} from {repo_id}")
+        publish_event(
+            "download.started",
+            {
+                "job_id": job_id,
+                "filename": relative_path,
+                "repo_id": repo_id,
+                "server_id": server_id or "",
+            },
+        )
+        try:
+            await asyncio.to_thread(
+                lambda: hf_hub_download(
+                    repo_id=repo_id,
+                    filename=relative_path,
+                    revision=revision,
+                    local_dir=str(local_dir),
+                    tqdm_class=tqdm_class,
+                )
+            )
+        except Exception as error:
+            logger.error(f"NPU download failed for {relative_path}: {error}")
+            publish_event(
+                "download.failed",
+                {
+                    "job_id": job_id,
+                    "filename": relative_path,
+                    "repo_id": repo_id,
+                    "server_id": server_id or "",
+                    "error": str(error),
+                },
+            )
+            raise
+        publish_event(
+            "download.completed",
+            {
+                "job_id": job_id,
+                "filename": relative_path,
+                "repo_id": repo_id,
+                "server_id": server_id or "",
+                "path": str(target),
+            },
+        )
 
     async def _download_repository_to_disk(
         self, repo_id: str, job_id: str | None, server_id: str | None = None

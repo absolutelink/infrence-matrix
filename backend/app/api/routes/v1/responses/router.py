@@ -1106,6 +1106,16 @@ async def resolve_target(
         except (LookupError, ValueError) as e:
             raise TargetError(404, "model_not_found", str(e)) from e
 
+    if target.npu_model is not None:
+        # NPU small models do not serve the Responses API; generation runs
+        # on /v1/chat/completions and the other NPU kinds have their own
+        # dedicated routes.
+        raise TargetError(
+            400,
+            "unsupported_capability",
+            f"Model '{model_ref}' is an NPU model and does not support /v1/responses",
+        )
+
     if target.server is not None:
         return target.server, target.model, target.preferred_server_id
 

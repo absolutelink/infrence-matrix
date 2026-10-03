@@ -466,6 +466,16 @@ async def create_completion(
         raise HTTPException(404, str(e)) from e
     model = target.model
     server = target.server
+    if target.npu_model is not None:
+        # NPU small models do not serve the legacy text-completions route;
+        # generation runs on /v1/chat/completions and the other kinds have
+        # dedicated routes. Reject rather than silently run on the Flash
+        # engine.
+        raise HTTPException(
+            400,
+            f"Model '{request.model}' is an NPU model and does not support "
+            "/v1/completions",
+        )
     db.close()
     if server is None:
         try:

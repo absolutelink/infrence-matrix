@@ -139,6 +139,12 @@ class HalogenFlashServerManager(HalogenServerManager):
             if config.options.get(key) is not None:
                 env[variable] = str(config.options[key])
 
+        # npu_models is a list: join with commas so the engine reads a bare
+        # comma-separated id list, not a Python repr.
+        npu_models = config.options.get("npu_models")
+        if npu_models:
+            env["HALOGEN_NPU_MODELS"] = ",".join(str(m) for m in npu_models)
+
         command = ["stdbuf", "-oL", "-eL", settings.HALOGEN_ENTRYPOINT, "all"]
         logger.info(
             "Starting Halogen Flash %s on API port %s (engine port %s)",

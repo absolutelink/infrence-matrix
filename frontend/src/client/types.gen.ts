@@ -660,6 +660,66 @@ export type CreateResponseBody = {
 };
 
 /**
+ * DecisionRequest
+ */
+export type DecisionRequest = {
+    /**
+     * Model
+     *
+     * NPU decision virtual name, e.g. 'myflash-decide'
+     */
+    model: string;
+    /**
+     * Agent Id
+     */
+    agent_id?: string | null;
+    /**
+     * Text
+     *
+     * The text to judge
+     */
+    text: string;
+    /**
+     * Question
+     *
+     * The question asked of the text
+     */
+    question: string;
+    /**
+     * Options
+     *
+     * 2 to 10 answer options
+     */
+    options: Array<string>;
+    /**
+     * System
+     *
+     * Optional system message carrying the question instead of the schema description
+     */
+    system?: string | null;
+};
+
+/**
+ * DecisionResponse
+ */
+export type DecisionResponse = {
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Decision
+     */
+    decision: string;
+    /**
+     * Probabilities
+     */
+    probabilities: {
+        [key: string]: number;
+    };
+};
+
+/**
  * DeleteFileResponse
  *
  * Delete file response.
@@ -1392,6 +1452,60 @@ export type ModelsList = {
 };
 
 /**
+ * ModerationRequest
+ */
+export type ModerationRequest = {
+    /**
+     * Model
+     *
+     * NPU moderation virtual name, e.g. 'myflash-guard'
+     */
+    model: string;
+    /**
+     * Agent Id
+     */
+    agent_id?: string | null;
+    /**
+     * Input
+     */
+    input?: string | Array<string> | null;
+    /**
+     * Messages
+     *
+     * Chat-shaped conversation; judges the last reply
+     */
+    messages?: Array<{
+        [key: string]: unknown;
+    }> | null;
+    /**
+     * Strict
+     *
+     * Flag 'Controversial' as well as 'Unsafe'
+     */
+    strict?: boolean | null;
+};
+
+/**
+ * ModerationResponse
+ */
+export type ModerationResponse = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Results
+     */
+    results: Array<{
+        [key: string]: unknown;
+    }>;
+};
+
+/**
  * OutputTextContentParam
  */
 export type OutputTextContentParam = {
@@ -1517,6 +1631,93 @@ export type RefusalContentParam = {
      * Refusal
      */
     refusal: string;
+};
+
+/**
+ * RerankRequest
+ *
+ * Broker-shaped rerank request.
+ */
+export type RerankRequest = {
+    /**
+     * Model
+     *
+     * NPU rerank virtual name, e.g. 'myflash-rerank'
+     */
+    model: string;
+    /**
+     * Agent Id
+     */
+    agent_id?: string | null;
+    /**
+     * Query
+     */
+    query: string;
+    /**
+     * Documents
+     */
+    documents: Array<string>;
+    /**
+     * Top N
+     */
+    top_n?: number | null;
+    /**
+     * Instruct
+     *
+     * Replaces the model's default task line
+     */
+    instruct?: string | null;
+    /**
+     * Return Documents
+     */
+    return_documents?: boolean;
+};
+
+/**
+ * RerankResponse
+ */
+export type RerankResponse = {
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Results
+     */
+    results: Array<RerankResult>;
+    usage: RerankUsage;
+};
+
+/**
+ * RerankResult
+ */
+export type RerankResult = {
+    /**
+     * Index
+     */
+    index: number;
+    /**
+     * Relevance Score
+     */
+    relevance_score: number;
+    /**
+     * Document
+     */
+    document?: string | null;
+};
+
+/**
+ * RerankUsage
+ */
+export type RerankUsage = {
+    /**
+     * Prompt Tokens
+     */
+    prompt_tokens?: number;
+    /**
+     * Total Tokens
+     */
+    total_tokens?: number;
 };
 
 /**
@@ -3549,6 +3750,81 @@ export type v1EmbeddingsCreateEmbeddingResponses = {
 };
 
 export type v1EmbeddingsCreateEmbeddingResponse = v1EmbeddingsCreateEmbeddingResponses[keyof v1EmbeddingsCreateEmbeddingResponses];
+
+export type v1RerankRerankData = {
+    body: RerankRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/rerank';
+};
+
+export type v1RerankRerankErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type v1RerankRerankError = v1RerankRerankErrors[keyof v1RerankRerankErrors];
+
+export type v1RerankRerankResponses = {
+    /**
+     * Successful Response
+     */
+    200: RerankResponse;
+};
+
+export type v1RerankRerankResponse = v1RerankRerankResponses[keyof v1RerankRerankResponses];
+
+export type v1DecisionsDecideData = {
+    body: DecisionRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/decisions';
+};
+
+export type v1DecisionsDecideErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type v1DecisionsDecideError = v1DecisionsDecideErrors[keyof v1DecisionsDecideErrors];
+
+export type v1DecisionsDecideResponses = {
+    /**
+     * Successful Response
+     */
+    200: DecisionResponse;
+};
+
+export type v1DecisionsDecideResponse = v1DecisionsDecideResponses[keyof v1DecisionsDecideResponses];
+
+export type v1ModerationsModerateData = {
+    body: ModerationRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/moderations';
+};
+
+export type v1ModerationsModerateErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type v1ModerationsModerateError = v1ModerationsModerateErrors[keyof v1ModerationsModerateErrors];
+
+export type v1ModerationsModerateResponses = {
+    /**
+     * Successful Response
+     */
+    200: ModerationResponse;
+};
+
+export type v1ModerationsModerateResponse = v1ModerationsModerateResponses[keyof v1ModerationsModerateResponses];
 
 export type v1ResponsesCreateResponseData = {
     body: CreateResponseBody;

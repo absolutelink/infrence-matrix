@@ -11,7 +11,7 @@ import {
   Wrench,
 } from "lucide-react"
 import { useRef, useState } from "react"
-import { ServerInstancesService, V15 } from "@/client"
+import { ServerInstancesService, V1ResponsesService } from "@/client"
 import { useLogPanel } from "@/components/ServerInstances/LogPanelContext"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
@@ -321,7 +321,7 @@ function ResponsesPage() {
 
     try {
       if (!stream) {
-        const response = (await V15.createResponse({
+        const response = (await V1ResponsesService.v1.createResponse({
           body: buildRequestBody(inputItems) as never,
         })) as unknown as Record<string, unknown>
         const output = (response.output as Record<string, unknown>[]) || []

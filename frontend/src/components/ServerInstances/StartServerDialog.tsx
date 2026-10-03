@@ -131,6 +131,12 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
     status: string
     platform?: string
     type?: string
+    gpu_info?: {
+      npu?: {
+        available?: boolean
+        reasons?: string[]
+      }
+    }
   }>
   const compatibleAgents = agents.filter((agent) => {
     if (engine === "gufo") {
@@ -141,6 +147,14 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
     }
     return agent.platform !== "halogen" && agent.platform !== "gufo"
   })
+
+  const selectedAgent =
+    agentId && agentId !== "auto"
+      ? compatibleAgents.find((agent) => agent.id === agentId)
+      : compatibleAgents[0]
+  const npuInfo = selectedAgent?.gpu_info?.npu
+  const npuAvailable = npuInfo?.available === true
+  const npuReasons = npuInfo?.reasons ?? []
 
   return (
     <Sheet
@@ -206,6 +220,8 @@ export function StartServerDialog({ isOpen, onClose }: StartServerDialogProps) {
               <HalogenFlashSettingsFields
                 options={engineOptions as HalogenFlashOptions}
                 onChange={setEngineOptions}
+                npuAvailable={npuAvailable}
+                npuReasons={npuReasons}
               />
             ) : engine === "gufo" ? (
               <GufoSettingsFields

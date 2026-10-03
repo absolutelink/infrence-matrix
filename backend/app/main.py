@@ -14,9 +14,12 @@ from app.api.routes.v1 import (
     batches_router,
     chat_completions_router,
     completions_router,
+    decisions_router,
     embeddings_router,
     files_router,
     models_router,
+    moderations_router,
+    rerank_router,
     responses_router,
     responses_ws_router,
 )
@@ -127,6 +130,9 @@ app.include_router(models_router, prefix="/v1", tags=["v1/models"])
 app.include_router(chat_completions_router, prefix="/v1", tags=["v1/chat"])
 app.include_router(completions_router, prefix="/v1", tags=["v1/completions"])
 app.include_router(embeddings_router, prefix="/v1", tags=["v1/embeddings"])
+app.include_router(rerank_router, prefix="/v1", tags=["v1/rerank"])
+app.include_router(decisions_router, prefix="/v1", tags=["v1/decisions"])
+app.include_router(moderations_router, prefix="/v1", tags=["v1/moderations"])
 app.include_router(responses_router, prefix="/v1", tags=["v1/responses"])
 # Responses API WebSocket (spec transport): mounted at /v1 directly so the
 # handshake is not wrapped by the APIRouter include indirection.

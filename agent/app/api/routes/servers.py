@@ -104,6 +104,43 @@ def _validate_engine_platform(engine: str) -> None:
         )
 
 
+async def _prepare_npu_models(engine_options: dict, server_id: str) -> list[str]:
+    """Pre-download the NPU small models named in ``engine_options``.
+
+    Reads the image's pins file to learn each model's repo, revision, files,
+    and shared ``devices/`` program, then fetches them into
+    ``MODELS_PATH/npu/<id>/`` with per-file progress events. Returns the list
+    of upstream model ids requested (empty when NPU is not enabled).
+    """
+    npu_models = engine_options.get("npu_models") or []
+    if not npu_models:
+        return []
+    from app.services.npu_models import load_npu_pins, resolve_npu_download_set
+
+    try:
+        records = load_npu_pins(settings.NPU_PINS_FILE)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Cannot read NPU pins file {settings.NPU_PINS_FILE}: {exc}",
+        ) from exc
+    try:
+        plan = resolve_npu_download_set(records, list(npu_models))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    for dir_id, (repo_id, revision, files) in plan.items():
+        await model_manager.download_npu_files(
+            dir_id,
+            files,
+            repo_id,
+            revision=revision,
+            job_id=f"halogen-flash-npu-{server_id}",
+            server_id=server_id,
+        )
+    return list(npu_models)
+
+
 @router.post("/prepare")
 async def prepare_server(request: ServerStartRequest) -> dict:
     """Download the model and projector without starting llama-server."""
@@ -127,11 +164,15 @@ async def prepare_server(request: ServerStartRequest) -> dict:
                 job_id=f"halogen-flash-{request.config.id}",
                 server_id=request.config.id,
             )
+            npu_prepared = await _prepare_npu_models(
+                request.config.engine_options, request.config.id
+            )
             return {
                 "status": "prepared",
                 "server_id": request.config.id,
                 "model_path": HALOGEN_FLASH_CHECKPOINT,
                 "tokenizer_path": HALOGEN_FLASH_TOKENIZER,
+                "npu_models": npu_prepared,
             }
         model_path = await _ensure_model(request.config.model_path, request.source)
         mmproj_path = None
@@ -376,6 +417,7 @@ async def start_server(request: ServerStartRequest) -> dict:
                 job_id=f"halogen-flash-{request.config.id}",
                 server_id=request.config.id,
             )
+            await _prepare_npu_models(request.config.engine_options, request.config.id)
             model_path = HALOGEN_FLASH_CHECKPOINT
         else:
             model_path = await _ensure_model(request.config.model_path, request.source)

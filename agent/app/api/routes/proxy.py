@@ -41,6 +41,9 @@ HALOGEN_FLASH_PATHS = {
     "v1/completions",
     "v1/chat/completions",
     "v1/responses",
+    "v1/embeddings",
+    "v1/rerank",
+    "v1/moderations",
 }
 GUFO_PATHS = {
     "health",
@@ -186,6 +189,8 @@ async def proxy_request(
         "v1/completions",
         "v1/embeddings",
         "v1/responses",
+        "v1/rerank",
+        "v1/moderations",
     }
     if (
         inference_request
