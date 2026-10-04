@@ -15,6 +15,9 @@ members = [
     "provider/lib",
     "provider/mock",
     "provider/llama-cpp",
+    "provider/gufo",
+    "provider/halogen",
+    "provider/halogen-flash",
     "spike/litellm-fidelity",
 ]
 

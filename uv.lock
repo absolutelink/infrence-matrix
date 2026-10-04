@@ -10,6 +10,9 @@ resolution-markers = [
 members = [
     "fidelity-spike",
     "matrix-admin",
+    "matrix-provider-gufo",
+    "matrix-provider-halogen",
+    "matrix-provider-halogen-flash",
     "matrix-provider-lib",
     "matrix-provider-llama-cpp",
     "matrix-provider-mock",
@@ -1081,6 +1084,111 @@ dev = [
     { name = "pytest", specifier = ">=7.4.3,<10.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.21.0,<1.0.0" },
     { name = "ruff", specifier = ">=0.2.2,<1.0.0" },
+]
+
+[[package]]
+name = "matrix-provider-gufo"
+version = "0.1.0"
+source = { editable = "provider/gufo" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "huggingface-hub" },
+    { name = "matrix-provider-lib" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.141.0" },
+    { name = "httpx", specifier = ">=0.27.0" },
+    { name = "huggingface-hub", specifier = ">=0.20.0" },
+    { name = "matrix-provider-lib", editable = "provider/lib" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=7.4.0" },
+    { name = "pytest-asyncio", specifier = ">=0.21.0" },
+    { name = "ruff", specifier = ">=0.2.0" },
+]
+
+[[package]]
+name = "matrix-provider-halogen"
+version = "0.1.0"
+source = { editable = "provider/halogen" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "huggingface-hub" },
+    { name = "matrix-provider-lib" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.141.0" },
+    { name = "httpx", specifier = ">=0.27.0" },
+    { name = "huggingface-hub", specifier = ">=0.20.0" },
+    { name = "matrix-provider-lib", editable = "provider/lib" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=7.4.0" },
+    { name = "pytest-asyncio", specifier = ">=0.21.0" },
+    { name = "ruff", specifier = ">=0.2.0" },
+]
+
+[[package]]
+name = "matrix-provider-halogen-flash"
+version = "0.1.0"
+source = { editable = "provider/halogen-flash" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "huggingface-hub" },
+    { name = "matrix-provider-lib" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.141.0" },
+    { name = "httpx", specifier = ">=0.27.0" },
+    { name = "huggingface-hub", specifier = ">=0.20.0" },
+    { name = "matrix-provider-lib", editable = "provider/lib" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=7.4.0" },
+    { name = "pytest-asyncio", specifier = ">=0.21.0" },
+    { name = "ruff", specifier = ">=0.2.0" },
 ]
 
 [[package]]

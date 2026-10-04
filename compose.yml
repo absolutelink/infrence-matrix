@@ -79,8 +79,100 @@ services:
       admin:
         condition: service_healthy
 
+  # ── Hardware provider examples (Phase 8) ──────────────────────────────
+  # These need real engines/hardware and are NOT started by default.
+  # Uncomment on a machine that provides the backend binary (see each
+  # provider Dockerfile note: real-engine images layer the binary onto
+  # this package image, or mount it and set <TYPE>_SERVER_PATH).
+  # Create the Machine (uid) + ProviderDefinition (with registration
+  # token) in the admin UI first; deploy admin before providers
+  # (version hard-fail).
+  #
+  # provider-gufo:
+  #   build:
+  #     context: .
+  #     dockerfile: provider/gufo/Dockerfile
+  #   restart: unless-stopped
+  #   ports:
+  #     - "8082:8081"
+  #   environment:
+  #     - MACHINE_UID=strix-halo-1
+  #     - PROVIDER_REGISTRATION_TOKEN=<gufo-definition-token>
+  #     - ADMIN_BASE_URL=http://admin:8000
+  #     - PROVIDER_PORT=8081
+  #     - CACHE_DIR=/cache
+  #     - MODELS_DIR=/models
+  #     - GUFO_SERVER_PATH=/opt/gufo/bin/gufo
+  #     - METRICS_CATEGORIES=gpu_usage vram os_ram cpu storage
+  #   volumes:
+  #     - gufo_cache:/cache
+  #     - gufo_models:/models
+  #   depends_on:
+  #     admin:
+  #       condition: service_healthy
+  #
+  # provider-halogen:
+  #   build:
+  #     context: .
+  #     dockerfile: provider/halogen/Dockerfile
+  #   restart: unless-stopped
+  #   ports:
+  #     - "8083:8081"
+  #   environment:
+  #     - MACHINE_UID=rocm-1
+  #     - PROVIDER_REGISTRATION_TOKEN=<halogen-definition-token>
+  #     - ADMIN_BASE_URL=http://admin:8000
+  #     - PROVIDER_PORT=8081
+  #     - CACHE_DIR=/cache
+  #     - MODELS_DIR=/models
+  #     - HALOGEN_SERVER_PATH=/opt/halogen/entrypoint.sh
+  #     - METRICS_CATEGORIES=gpu_usage vram os_ram cpu storage
+  #   volumes:
+  #     - halogen_cache:/cache
+  #     - halogen_models:/models
+  #   depends_on:
+  #     admin:
+  #       condition: service_healthy
+  #
+  # provider-halogen-flash:
+  #   build:
+  #     context: .
+  #     dockerfile: provider/halogen-flash/Dockerfile
+  #   restart: unless-stopped
+  #   ports:
+  #     - "8084:8081"
+  #   environment:
+  #     - MACHINE_UID=ryzen-ai-1
+  #     - PROVIDER_REGISTRATION_TOKEN=<halogen-flash-definition-token>
+  #     - ADMIN_BASE_URL=http://admin:8000
+  #     - PROVIDER_PORT=8081
+  #     - CACHE_DIR=/cache
+  #     - MODELS_DIR=/models
+  #     - HALOGEN_FLASH_SERVER_PATH=/opt/halogen-flash/entrypoint.sh
+  #     # NPU pinning (optional; probe degrades gracefully without them)
+  #     - NPU_DEVICE_PATH=/dev/accel/accel0
+  #     - NPU_XRT_LIB_DIR=/opt/xilinx/xrt/lib
+  #     - NPU_PINS_FILE=/opt/halogen/npu/models.txt
+  #     - NPU_BINARY_PATH=/usr/local/bin/halogen-npu
+  #     - METRICS_CATEGORIES=gpu_usage vram os_ram cpu storage
+  #   volumes:
+  #     - flash_cache:/cache
+  #     - flash_models:/models
+  #   devices:
+  #     - /dev/accel/accel0
+  #   depends_on:
+  #     admin:
+  #       condition: service_healthy
+
 volumes:
   postgres_data:
   redis_data:
   mock_cache:
   mock_models:
+  # Declare these when uncommenting a hardware provider example above.
+  # gufo_cache:
+  # gufo_models:
+  # halogen_cache:
+  # halogen_models:
+  # flash_cache:
+  # flash_models:

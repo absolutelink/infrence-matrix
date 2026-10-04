@@ -263,3 +263,368 @@ Spawn env: `LD_LIBRARY_PATH` defaults to the binary's directory
   **only while the admin has assigned ownership** via the
   `metrics.assign` WS command (revoked by `metrics.unassign`).
   Admin-side ownership lease: see `admin/backend/docs/redis-keys.md`.
+
+## Overriding usage normalization (the `calculate_usage` pattern)
+
+Some backends are **not spec-compliant on usage**: they report chat-style
+counts (`prompt_tokens`/`completion_tokens`), native timing keys
+(`tokens_evaluated`, `timings.cache_n`), partial detail objects, or
+nothing in-stream. The admin's `persist_turn` reads exactly one shape —
+the OpenResponses spec usage dict on the terminal
+`response.completed`/`response.incomplete` event:
+
+```json
+{
+  "input_tokens": 100, "output_tokens": 8, "total_tokens": 108,
+  "input_tokens_details":  {"cached_tokens": 80},
+  "output_tokens_details": {"reasoning_tokens": 0},
+  "completion_tokens_details": {"prompt_per_second": 1412.21,
+                                "predicted_per_second": 36.25}
+}
+```
+
+The override lives in the **driver's stream generator**, not in the lib:
+before yielding the terminal event, the driver normalizes whatever the
+backend emitted into the shape above. Rules (canonical implementation:
+`provider_halogen_flash.usage.calculate_usage`):
+
+1. **Trust reported values verbatim — including reported zeros.** A
+   backend that reports `cached_tokens: 0` must not have that replaced
+   by a timing fallback.
+2. **Estimate only when nothing was reported.** If the raw blob contains
+   no count keys at all, output tokens are estimated from accumulated
+   streamed characters (`chars // 4`); input is left 0.
+3. **Fallback ladder for cached tokens:** `prompt_tokens_details` /
+   `input_tokens_details` → `timings.cache_n` → 0.
+4. **Reasoning tokens:** the backend's reported detail wins over the
+   driver's own count of reasoning deltas.
+5. **Rates land in `completion_tokens_details`**
+   (`prompt_per_second` / `predicted_per_second`) — that's where the
+   admin's `TokenUsageSample` reads them.
+
+The function is *also* exposed on `BackendOverrides.calculate_usage` so
+the hook is visible at the app-factory level, but the authoritative call
+site is the driver (the generic `/v1` layer never recomputes usage — it
+passes the driver's normalized events through). New providers with a
+non-compliant backend should copy this: a pure
+`calculate_usage(raw, fallback_chars=…, reasoning_tokens=…) -> dict` in
+`usage.py`, unit-tested with a (raw shape → spec shape) table, called
+from the driver right before yielding the terminal event.
+
+## gufo provider (provider/gufo)
+
+`GufoBackend` (provider_gufo/driver.py) manages one
+`gufo serve llm` subprocess. gufo is **multi-model** (one instance can
+serve several model names) and speaks **native OpenResponses** — the
+driver passes events through unmodified except for rate enrichment.
+
+### backend_config schema
+
+```json
+{
+  "model":  {"source": "hf", "repo": "...", "file": "model.gguf"},
+  "backend_port": 8082,
+  "options": {
+    "context": 131072,
+    "served_model_name": "my-alias",
+    "mmproj":       {"source": "hf", "repo": "...", "file": "mmproj.gguf"},
+    "dflash_model": {"source": "hf", "repo": "...", "file": "draft.gguf"},
+    "dspark_model": "...", "mtp_model": "...",
+    "cache_disk": true, "cache_disk_bytes": 1073741824,
+    "sessions": 4,
+    "temperature": 0.7, "top_k": 40, "top_p": 0.9,
+    "think": "on", "reasoning_effort": "high",
+    "speculative": "dflash2", "draft_policy": "adaptive",
+    "api_key": "...", "verbose": true, "log_progress": false
+  }
+}
+```
+
+- `model` accepts the same descriptor shapes as llama-cpp
+  (`{"path": ...}` or HF `{"source","repo","file"}`), resolved via
+  `provider_lib.downloader.ensure_artifact` (repo layout + FLAT
+  `MODELS_DIR/<file>` candidates).
+- Aux spec files (**mmproj / dflash_model / dspark_model / mtp_model**)
+  may be *artifact descriptors* in `options`; the driver resolves each
+  through the downloader and rewrites the option to the concrete local
+  path before spawn (legacy "aux by path" semantics). Plain strings pass
+  through untouched.
+- `backend_port` optional; default `PROVIDER_PORT + 1`. Health:
+  `GET /health` on that port. Binary from env `GUFO_SERVER_PATH`
+  (default `gufo`).
+- The subprocess runs in its own session (`start_new_session=True`);
+  `stop()` kills the whole process group.
+
+### Command mapping (command.py)
+
+Base argv: `gufo serve llm --host 127.0.0.1 --port <backend_port>
+--model <resolved model path>`, then per-key from `options`:
+
+| Option | CLI | Notes |
+| --- | --- | --- |
+| `context` | `--context <v>` | |
+| `served_model_name` | `--served-model-name <v>` | gufo otherwise advertises the GGUF filename |
+| `mmproj` | `--mmproj <path>` | descriptor resolved first |
+| sampling (`max_tokens temperature top_k top_p min_p min_keep seed repeat_penalty repeat_last_n frequency_penalty presence_penalty`) | `--<flag> <v>` | each only when present and not None |
+| reasoning (`think reasoning_effort preserve_thinking`) | `--<flag> <v>` | tri-state/enum values passed as strings |
+| speculative (`speculative dflash_model dspark_model mtp_model draft_policy draft_tokens min_draft_tokens`) | `--<flag> <v>` | aux descriptors resolved to paths |
+| limits (`prefill_chunk max_pending max_pending_per_client request_timeout_ms max_output_bytes max_buffered_output_bytes max_buffered_output_total`) | `--<flag> <v>` | |
+| `cache_disk_bytes` / `cache_disk_staging_bytes` | `--<flag> <v>` | |
+| `cache_disk: true` | `--cache-disk <CACHE_DIR>/<instance_id>` | directory created on demand; anything else omits the flag |
+| server (`sessions max_connections max_request_bytes api_key`) | `--<flag> <v>` | `sessions` = GPU concurrency |
+| `verbose` / `log_progress` | `--verbose` / `--log-progress` | **bool-only**: emitted only when `true`; false/None omitted so gufo keeps its default |
+
+**Per-request `model` forwarding:** unlike llama-cpp (single-model
+server), the driver forwards the request body's `model` field to the
+upstream `/v1/responses` / `/v1/chat/completions` **as-is** — gufo
+routes to the requested served model itself.
+
+**Rate gauges (rates.py):** gufo exposes instantaneous throughput on
+`GET /metrics` as Prometheus *gauges* instead of `*_seconds_total`
+counters. Before yielding a terminal `response.completed`/`incomplete`,
+the driver scrapes `/metrics` and merges
+`llamacpp:prompt_tokens_seconds` / `llamacpp:predicted_tokens_seconds`
+into the usage's `completion_tokens_details` as `prompt_per_second` /
+`predicted_per_second` (gauges take precedence; counter-derived
+lifetime averages are the fallback; scrape failures are silent — rates
+are telemetry, never a request failure).
+
+**Effective capacity:** `options.sessions` (default 1) is the engine's
+GPU-session concurrency, reported in the `backend.start` ack's
+`detail.effective_capacity`. The lifecycle capacity itself comes from
+`provider_definition.capacity` (admin-side scheduling contract).
+
+## halogen provider (provider/halogen)
+
+`HalogenBackend` (provider_halogen/driver.py) manages one halogen
+process. Halogen is **env-configured** (not argv): `backend_config`
+holds the semantic config and `env.py` maps it to `HALOGEN_*`
+environment variables. The process exposes **two ports**: an
+OpenAI-compatible **API port** (all HTTP traffic) and a private
+**engine port** (referenced only via `HALOGEN_ENGINE`).
+
+### backend_config schema
+
+```json
+{
+  "model":     {"source": "hf", "repo": "peonist-ai/halogen-qwen3.8-27b", "file": "qwen3.8-27b-p1w4d-d2.hgn"},
+  "tokenizer": {"source": "hf", "repo": "peonist-ai/halogen-qwen3.8-27b", "file": "tokenizer"},
+  "api_port": 8082,
+  "engine_port": 8083,
+  "options": {
+    "kv_slots": 4,
+    "drafter": "mtp",
+    "cache_mb": 2048,
+    "cache_reserve_mb": 256,
+    "slot_ctx": 4096,
+    "cache_align": 16,
+    "max_tokens_cap": 8192,
+    "queue_timeout": 300,
+    "w4a4": 1, "w4a4_excl": "attn",
+    "keepalive_timeout": 60, "sse_keepalive_s": 15
+  }
+}
+```
+
+- `model` = the `.hgn` **checkpoint**, `tokenizer` = the tokenizer
+  **directory**. Both accept `{"path": ...}` (file *or* directory, no
+  download) or HF descriptors resolved via the lib downloader.
+- Ports: `api_port` defaults to `PROVIDER_PORT + 1`, `engine_port` to
+  `PROVIDER_PORT + 2`. Health = `GET /health` on the **API port**.
+- Binary/entrypoint from env `HALOGEN_SERVER_PATH` (default
+  `halogen-server`); spawned as
+  `stdbuf -oL -eL <entrypoint> all` with stderr merged into stdout
+  (single log pipe, legacy anti-deadlock), in its own process group.
+
+### Env mapping (env.py)
+
+Fixed (always set):
+
+| Env | Value |
+| --- | --- |
+| `HALOGEN_API_PORT` | `api_port` |
+| `HALOGEN_PORT` | `engine_port` |
+| `HALOGEN_BIND` | `127.0.0.1` |
+| `HALOGEN_ENGINE` | `127.0.0.1:<engine_port>` |
+| `HALOGEN_CHECKPOINT` | resolved checkpoint path |
+| `HALOGEN_TOKENIZER` | resolved tokenizer path |
+
+From `options` (each emitted **only when present and not None**,
+stringified):
+
+| Option | Env |
+| --- | --- |
+| `drafter` | `HALOGEN_DRAFTER` |
+| `cache_align` | `HALOGEN_CACHE_ALIGN` |
+| `kv_slots` | `HALOGEN_KV_SLOTS` |
+| `slot_ctx` | `HALOGEN_SLOT_CTX` |
+| `cache_mb` | `HALOGEN_CACHE_MB` |
+| `cache_reserve_mb` | `HALOGEN_CACHE_RESERVE_MB` |
+| `max_tokens_cap` | `HALOGEN_MAX_TOKENS_CAP` |
+| `queue_timeout` | `HALOGEN_QUEUE_TIMEOUT` |
+| `w4a4` | `HALOGEN_W4A4` |
+| `w4a4_excl` | `HALOGEN_W4A4_EXCL` |
+| `keepalive_timeout` | `HALOGEN_KEEPALIVE_TIMEOUT` |
+| `sse_keepalive_s` | `HALOGEN_SSE_KEEPALIVE_S` |
+
+**Capacity:** the engine's request slots = `options.kv_slots` (default
+1), reported as `detail.effective_capacity` in the `backend.start` ack
+(plus `api_port`/`engine_port`). The lifecycle capacity comes from
+`provider_definition.capacity`.
+
+**Streaming:** the driver proxies SSE from the API port's
+`/v1/responses` / `/v1/chat/completions` with the standard
+close-on-`GeneratorExit` semantics (early consumer close cancels the
+upstream request and frees the slot).
+
+## halogen-flash provider (provider/halogen-flash)
+
+`HalogenFlashBackend` (provider_halogen_flash/driver.py) manages one
+halogen-flash process. Key differences from plain halogen:
+
+- The backend speaks **native `/v1/responses`** (OpenResponses SSE); the
+  driver mostly passes events through.
+- The backend is **NOT spec-compliant on usage** — this package carries
+  the canonical `calculate_usage` override (see "Overriding usage
+  normalization" above).
+- **Static ports** keep the engine's disk-cache fingerprint stable.
+- **NPU small-model pinning** (Ryzen AI), gated by a host probe.
+
+### backend_config schema
+
+```json
+{
+  "model":     {"source": "hf", "repo": "peonist-ai/halogen-qwen3.8-flash-next", "file": "qwen38-flash-next-w4b.hgn"},
+  "tokenizer": {"source": "hf", "repo": "peonist-ai/halogen-qwen3.8-flash-next", "file": "tokenizer"},
+  "api_port": 8200,
+  "engine_port": 8201,
+  "options": {
+    "kv_slots": 8, "kv_pool_positions": 524288, "kv_pool_fit": 1,
+    "host_reserve_gib": 20, "ctx": 131072, "max_tok": 16384,
+    "rope_yarn": 4, "admit_chunk": 4096, "indexer_budget": 64,
+    "cache_dir_enabled": true, "cache_disk_gib": 64, "cache_prune_old": 1,
+    "prompt_cache": 2, "cache_inplace": 1, "prefill_chunk": 8192,
+    "npu_models": ["qwen3-embedding-0.6b", "qwen3.5-2b"],
+    "vision_tower": 1, "vision_max_pixels": 1048576
+  }
+}
+```
+
+### Env mapping (env.py)
+
+Fixed wiring is identical to halogen (`HALOGEN_API_PORT`,
+`HALOGEN_PORT`, `HALOGEN_BIND`, `HALOGEN_ENGINE`, `HALOGEN_CHECKPOINT`,
+`HALOGEN_TOKENIZER`). The 43 semantic `options` → env mappings (each
+emitted only when present and not None):
+
+| Option | Env | Group |
+| --- | --- | --- |
+| `kv_slots` | `HALOGEN_KV_SLOTS` | KV cache & admission |
+| `kv_pool_positions` | `HALOGEN_KV_POOL_POSITIONS` | |
+| `kv_pool_fit` | `HALOGEN_KV_POOL_FIT` | |
+| `host_reserve_gib` | `HALOGEN_HOST_RESERVE_GIB` | |
+| `ctx` | `HALOGEN_CTX` | context / length |
+| `max_tok` | `HALOGEN_MAX_TOK` | |
+| `rope_yarn` | `HALOGEN_ROPE_YARN` | |
+| `admit_chunk` | `HALOGEN_ADMIT_CHUNK` | |
+| `indexer_budget` | `HALOGEN_INDEXER_BUDGET` | |
+| `max_tokens_cap` | `HALOGEN_MAX_TOKENS_CAP` | |
+| `max_tokens_default` | `HALOGEN_MAX_TOKENS_DEFAULT` | |
+| `queue_timeout` | `HALOGEN_QUEUE_TIMEOUT` | timeouts / keepalive |
+| `keepalive_timeout` | `HALOGEN_KEEPALIVE_TIMEOUT` | |
+| `sse_keepalive_s` | `HALOGEN_SSE_KEEPALIVE_S` | |
+| `temperature` | `HALOGEN_TEMPERATURE` | sampling defaults |
+| `top_p` | `HALOGEN_TOP_P` | |
+| `top_k` | `HALOGEN_TOP_K` | |
+| `min_p` | `HALOGEN_MIN_P` | |
+| `presence_penalty` | `HALOGEN_PRESENCE_PENALTY` | |
+| `frequency_penalty` | `HALOGEN_FREQUENCY_PENALTY` | |
+| `reasoning_effort` | `HALOGEN_REASONING_EFFORT` | reasoning |
+| `enable_thinking` | `HALOGEN_ENABLE_THINKING` | |
+| `max_thinking_tokens` | `HALOGEN_MAX_THINKING_TOKENS` | |
+| `thinking_answer_room` | `HALOGEN_THINKING_ANSWER_ROOM` | |
+| `drafter_default` | `HALOGEN_DRAFTER_DEFAULT` | speculative decoding |
+| `mtp_depth` | `HALOGEN_MTP_DEPTH` | |
+| `pld` | `HALOGEN_PLD` | |
+| `spec_adapt` | `HALOGEN_SPEC_ADAPT` | |
+| `prompt_cache` | `HALOGEN_PROMPT_CACHE` | prompt cache |
+| `cache_inplace` | `HALOGEN_CACHE_INPLACE` | |
+| `prefill_chunk` | `HALOGEN_PREFILL_CHUNK` | |
+| `cache_entries` | `HALOGEN_CACHE_ENTRIES` | |
+| `cache_branches` | `HALOGEN_CACHE_BRANCHES` | |
+| `cache_snap3` | `HALOGEN_CACHE_SNAP3` | |
+| `cache_full` | `HALOGEN_CACHE_FULL` | |
+| `cache_disk_gib` | `HALOGEN_CACHE_DISK_GIB` | |
+| `cache_prune_old` | `HALOGEN_CACHE_PRUNE_OLD` | |
+| `composable_context` | `HALOGEN_COMPOSABLE_CONTEXT` | composable context |
+| `composable_context_floor` | `HALOGEN_COMPOSABLE_CONTEXT_FLOOR` | |
+| `composable_context_bytes` | `HALOGEN_COMPOSABLE_CONTEXT_BYTES` | |
+| `grammar` | `HALOGEN_GRAMMAR` | structured output |
+| `vision_tower` | `HALOGEN_VISION_TOWER` | vision |
+| `vision_max_pixels` | `HALOGEN_VISION_MAX_PIXELS` | |
+
+Plus two conditional vars:
+
+| Condition | Env |
+| --- | --- |
+| `options.cache_dir_enabled` is `true` | `HALOGEN_CACHE_DIR = <CACHE_DIR>/halogen-flash` (created on start) |
+| `options.npu_models` non-empty **and** the NPU probe passes | `HALOGEN_NPU_MODELS = <id>,<id>` (bare comma list, never a Python repr) |
+
+Binary from env `HALOGEN_FLASH_SERVER_PATH` (default
+`halogen-flash-server`); same `stdbuf -oL -eL <entrypoint> all` spawn
+as halogen. Health = `GET /health` on the API port.
+
+### Static ports for the disk-cache fingerprint
+
+The Flash engine hashes its server variables — **ports included** —
+into its on-disk prompt-cache fingerprint. Random per-start ports would
+invalidate the disk cache on every boot, so the `(api, engine)` pair is
+**pinned**:
+
+1. Explicit `api_port` + `engine_port` in `backend_config` win (the
+   admin persists the pair in the definition — Phase 9's fingerprint
+   flow may re-derive it).
+2. Otherwise `derive_static_ports(MACHINE_UID)` hashes the machine uid
+   (SHA-256) into the dedicated static range **8200–8289**
+   (`FLASH_PORT_START`/`FLASH_PORT_END`, 45 adjacent pairs), giving the
+   same stability property the legacy backend got from allocate-once-
+   and-persist: the same machine always boots Flash on the same pair.
+3. `PROVIDER_PORT` never participates in the pair (it's the instance's
+   own admin-facing surface).
+
+### NPU small-model pinning
+
+`npu.py` ports the legacy `npu_models` + `npu_probe` knowledge:
+
+- `NPU_SUFFIXES` maps upstream ids (`qwen3-embedding-0.6b`,
+  `qwen3-reranker-0.6b`, `qwen3.5-2b`, `decider-0.8b`,
+  `qwen3guard-gen-0.6b`) to client-facing suffixes
+  (`<alias>-embed`, …); `client_name()`/`split_client_name()` convert
+  both ways.
+- `parse_npu_pins()` / `resolve_npu_download_set()` read the image's
+  pins file (`NPU_PINS_FILE`, default `/opt/halogen/npu/models.txt`)
+  and plan downloads into `MODELS_DIR/npu/<id>/`, honoring shared
+  `devices/` programs (a model running on another's device program
+  pulls the owner's `devices/*` files into the owner's dir).
+- `probe_npu(device_path, xrt_lib_dir, binary_path)` gates pinning:
+  device node (`NPU_DEVICE_PATH`) writable, XRT libs with the
+  `xdna` plugin present (`NPU_XRT_LIB_DIR`), and the engine binary
+  (`NPU_BINARY_PATH`) answering its usage contract (exit 1 +
+  `usage: halogen-npu`). The GPU fabric-clock state is *reported*
+  (`fabric_clock_held`) but never gates (start-time requirement, not a
+  capability).
+- **No NPU present → graceful degradation:** the probe returns
+  `available: false`, the driver logs the reasons and **omits
+  `HALOGEN_NPU_MODELS`** — start proceeds without NPU models, never
+  an error. A crashing probe degrades the same way. The probe result is
+  also included in the registration hardware report under `npu` so the
+  admin UI can gate NPU options per machine.
+
+### Usage override (the canonical example)
+
+See "Overriding usage normalization" above; the implementation is
+`provider_halogen_flash/usage.py` and the driver applies it in
+`stream_responses` right before yielding `response.completed`/
+`response.incomplete`, accumulating `output_text.delta` characters and
+reasoning-delta tokens for the estimate inputs. Table-tested with every
+observed raw shape in `tests/test_calculate_usage.py`.

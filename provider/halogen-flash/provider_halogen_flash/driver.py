@@ -1,0 +1,450 @@
+"""HalogenFlashBackend: BackendDriver over a managed halogen-flash-server.
+
+Ported from the legacy agent's halogen-flash manager, re-shaped to the
+Phase 4 `BackendDriver` contract.
+
+Halogen Flash specifics:
+
+- **Native /v1/responses.** The backend itself speaks OpenResponses
+  SSE; the driver mostly passes events through unchanged.
+- **Usage normalization override.** The backend is NOT spec-compliant
+  on usage (it reports chat-style counts, native timing keys, partial
+  details, or nothing). Before the terminal event is yielded, the
+  driver accumulates streamed characters / reasoning-delta tokens and
+  runs `calculate_usage` (see `provider_halogen_flash.usage`) so the
+  admin's `persist_turn` receives correct spec token counts. This is
+  the canonical provider-override pattern.
+- **Static ports for the disk-cache fingerprint.** The engine hashes
+  its server variables — ports included — into its on-disk prompt-cache
+  fingerprint; `resolve_ports()` pins a stable (api, engine) pair per
+  machine (explicit in backend_config, else derived from MACHINE_UID in
+  the dedicated 8200–8289 range).
+- **NPU small-model pinning.** `options.npu_models` (upstream ids) is
+  exported as HALOGEN_NPU_MODELS only when the host NPU probe passes;
+  without an NPU the env is omitted gracefully (the ids are dropped
+  with a log line, never an error).
+"""
+
+import asyncio
+import contextlib
+import functools
+import json
+import logging
+import os
+import shutil
+import signal
+import subprocess
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
+from pathlib import Path
+from typing import Any
+
+import httpx
+from provider_lib.backend import BackendDriver
+from provider_lib.config import ProviderSettings
+from provider_lib.downloader import ensure_artifact
+
+from provider_halogen_flash.env import (
+    build_argv,
+    build_env,
+    effective_capacity,
+    resolve_ports,
+)
+from provider_halogen_flash.log_ring import CursorLogRing
+from provider_halogen_flash.npu import probe_npu
+from provider_halogen_flash.usage import calculate_usage
+
+logger = logging.getLogger("provider.halogen_flash")
+
+ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
+LogCallback = Callable[[str, str], Awaitable[None]]
+
+_LOG_BUFFER_LINES = 2000
+_HEALTH_POLL_INTERVAL = 0.25
+_STDERR_TAIL_LINES = 5
+
+_TERMINAL_TYPES = ("response.completed", "response.incomplete")
+
+
+class HalogenFlashBackend(BackendDriver):
+    """Owns one halogen-flash (api+engine) process for this instance."""
+
+    def __init__(
+        self,
+        settings: ProviderSettings,
+        backend_config: dict[str, Any],
+        *,
+        progress_cb: ProgressCallback | None = None,
+        log_cb: LogCallback | None = None,
+        npu_probe: Callable[[], dict[str, Any]] | None = None,
+    ) -> None:
+        self._settings = settings
+        self._config = backend_config or {}
+        self._progress_cb = progress_cb
+        self._log_cb = log_cb
+        self._binary = settings.HALOGEN_FLASH_SERVER_PATH
+        self._npu_probe = npu_probe
+        self._ports = resolve_ports(self._config, settings.MACHINE_UID)
+        self._proc: subprocess.Popen[str] | None = None
+        self._log_ring = CursorLogRing(_LOG_BUFFER_LINES)
+        self._log_reader: asyncio.Task[None] | None = None
+        self._client: httpx.AsyncClient | None = None
+
+    def apply_config(self, backend_config: dict[str, Any]) -> None:
+        """Adopt a (possibly updated) backend_config before start."""
+        self._config = backend_config or {}
+        self._ports = resolve_ports(self._config, self._settings.MACHINE_UID)
+
+    @property
+    def api_port(self) -> int:
+        return self._ports[0]
+
+    @property
+    def engine_port(self) -> int:
+        return self._ports[1]
+
+    @property
+    def backend_port(self) -> int:
+        return self._ports[0]
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.api_port}"
+
+    @property
+    def process(self) -> subprocess.Popen[str] | None:
+        return self._proc
+
+    @property
+    def effective_capacity(self) -> int:
+        return effective_capacity(self._config.get("options") or {})
+
+    # ------------------------------------------------------------------
+    # NPU gating
+    # ------------------------------------------------------------------
+    async def _npu_models_for_env(self) -> list[str] | None:
+        """Return the requested NPU model ids if the host can run them.
+
+        Degrades gracefully: no NPU detected (or no pins file) -> None,
+        with the reason logged. The request never fails on a machine
+        without an NPU. The probe does blocking I/O (device checks,
+        subprocess) so it runs in a worker thread.
+        """
+        opts = self._config.get("options") or {}
+        requested = opts.get("npu_models")
+        if not requested:
+            return None
+        probe = self._npu_probe
+        if probe is None:
+            probe = functools.partial(
+                probe_npu,
+                device_path=self._settings.NPU_DEVICE_PATH,
+                xrt_lib_dir=self._settings.NPU_XRT_LIB_DIR,
+                binary_path=self._settings.NPU_BINARY_PATH,
+            )
+        try:
+            result = await asyncio.to_thread(probe)
+        except Exception:  # noqa: BLE001 - probe must never break start
+            logger.warning("NPU probe crashed; omitting NPU models", exc_info=True)
+            return None
+        if not result.get("available"):
+            logger.info(
+                "NPU not available on this host (%s); omitting npu_models=%s",
+                "; ".join(result.get("reasons") or ["unknown"]),
+                list(requested),
+            )
+            return None
+        return list(requested)
+
+    # ------------------------------------------------------------------
+    # Artifact resolution
+    # ------------------------------------------------------------------
+    async def _resolve_artifact(self, descriptor: Any, kind: str) -> str:
+        """Resolve a halogen-flash artifact to a local path.
+
+        The tokenizer is a DIRECTORY artifact, so `{"path": ...}` is
+        checked with exists() (file or dir) here instead of the lib's
+        file-only local path; HF repo descriptors still go through
+        `ensure_artifact`.
+        """
+        if descriptor is None:
+            raise RuntimeError(f"backend_config missing '{kind}' artifact")
+        if isinstance(descriptor, str):
+            p = Path(descriptor)
+            if not p.exists():
+                raise RuntimeError(f"local {kind} path not found: {descriptor}")
+            return str(p)
+        if isinstance(descriptor, dict) and descriptor.get("path"):
+            p = Path(str(descriptor["path"]))
+            if not p.exists():
+                raise RuntimeError(f"local {kind} path not found: {p}")
+            return str(p)
+        return await ensure_artifact(
+            descriptor,
+            models_dir=self._settings.MODELS_DIR,
+            progress_cb=self._progress_cb,
+        )
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+    async def start(self) -> None:
+        """Resolve artifacts, probe NPU, spawn the server, wait for health."""
+        if self._proc is not None and self._proc.poll() is None:
+            return
+        # The argv wraps the entrypoint in stdbuf, so a missing binary
+        # would otherwise surface as a confusing stdbuf exit; check first.
+        if not shutil.which(self._binary) and not Path(self._binary).exists():
+            raise RuntimeError(f"halogen-flash entrypoint not found: {self._binary}")
+        checkpoint = await self._resolve_artifact(self._config.get("model"), "model")
+        tokenizer = await self._resolve_artifact(
+            self._config.get("tokenizer"), "tokenizer"
+        )
+        api_port, engine_port = self._ports
+        cache_dir = Path(self._settings.CACHE_DIR) / "halogen-flash"
+        env = build_env(
+            self._config.get("options") or {},
+            api_port=api_port,
+            engine_port=engine_port,
+            checkpoint_path=checkpoint,
+            tokenizer_path=tokenizer,
+            cache_dir=cache_dir,
+            npu_models=await self._npu_models_for_env(),
+        )
+        cmd = build_argv(self._binary)
+        logger.info(
+            "starting halogen-flash: %s (api=%s engine=%s)",
+            " ".join(cmd),
+            api_port,
+            engine_port,
+        )
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env,
+                start_new_session=True,
+                bufsize=1,
+            )
+        except OSError as exc:
+            raise RuntimeError(
+                f"failed to spawn halogen-flash ({self._binary}): {exc}"
+            ) from exc
+
+        self._proc = proc
+        self._start_log_reader()
+        try:
+            await self._wait_for_health()
+        except BaseException:
+            await self.stop()
+            raise
+
+    async def _wait_for_health(self) -> None:
+        timeout = float(self._settings.SERVER_START_HEALTH_TIMEOUT)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            proc = self._proc
+            if proc is None:
+                raise RuntimeError("halogen-flash process disappeared")
+            exit_code = proc.poll()
+            if exit_code is not None:
+                await self._drain_final_output()
+                raise RuntimeError(self._early_exit_message(exit_code))
+            try:
+                async with httpx.AsyncClient(timeout=2.0) as client:
+                    resp = await client.get(f"{self.base_url}/health")
+                if resp.status_code == 200:
+                    logger.info("halogen-flash API healthy on port %s", self.api_port)
+                    return
+            except Exception:  # noqa: BLE001 - not up yet
+                pass
+            await asyncio.sleep(_HEALTH_POLL_INTERVAL)
+        raise TimeoutError(
+            f"halogen-flash failed to become healthy within {timeout:.0f}s"
+        )
+
+    def _early_exit_message(self, exit_code: int | None) -> str:
+        lines = [e.line for e in self._log_ring.tail(100)]
+        detail = "\n".join(lines[-_STDERR_TAIL_LINES:])
+        message = f"halogen-flash exited with code {exit_code}"
+        if detail:
+            message = f"{message}: {detail}"
+        return message
+
+    # ------------------------------------------------------------------
+    # Log capture
+    # ------------------------------------------------------------------
+    def _start_log_reader(self) -> None:
+        proc = self._proc
+        if proc is None or proc.stdout is None:
+            return
+        self._log_reader = asyncio.create_task(self._read_log_lines(proc.stdout))
+
+    async def _read_log_lines(self, stream: Any) -> None:
+        proc = self._proc
+        try:
+            while proc is not None and proc.poll() is None:
+                line = await asyncio.to_thread(stream.readline)
+                if not line:
+                    break
+                self._append_log("stdout", line.rstrip())
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("halogen-flash log reader failed")
+
+    async def _drain_final_output(self) -> None:
+        proc = self._proc
+        if proc is None or proc.stdout is None:
+            return
+        # Join the live reader task first: two concurrent readers on the
+        # same merged pipe can split lines.
+        if self._log_reader is not None:
+            self._log_reader.cancel()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(
+                    asyncio.gather(self._log_reader, return_exceptions=True),
+                    timeout=10,
+                )
+            self._log_reader = None
+        try:
+            text = await asyncio.to_thread(proc.stdout.read)
+        except Exception:  # noqa: BLE001
+            return
+        if text:
+            for line in text.splitlines():
+                if line:
+                    self._append_log("stdout", line)
+
+    def _append_log(self, stream_name: str, line: str) -> None:
+        self._log_ring.append(stream_name, line)
+        if self._log_cb is not None:
+            with contextlib.suppress(RuntimeError):
+                asyncio.get_running_loop().create_task(self._log_cb(stream_name, line))
+
+    def get_logs(self, tail: int = 100) -> list[dict[str, str]]:
+        return [{"stream": e.stream, "line": e.line} for e in self._log_ring.tail(tail)]
+
+    # ------------------------------------------------------------------
+    # Health / models
+    # ------------------------------------------------------------------
+    async def health(self) -> bool:
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return False
+        try:
+            client = self._http_client()
+            resp = await client.get(f"{self.base_url}/health", timeout=5.0)
+            return resp.status_code == 200
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def list_models(self) -> list[dict[str, Any]]:
+        client = self._http_client()
+        resp = await client.get(f"{self.base_url}/v1/models", timeout=10.0)
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"halogen-flash /v1/models returned HTTP {resp.status_code}"
+            )
+        data = resp.json().get("data", [])
+        return list(data)
+
+    def _http_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=None)
+        return self._client
+
+    # ------------------------------------------------------------------
+    # Streaming: native OpenResponses passthrough + usage override
+    # ------------------------------------------------------------------
+    def stream_responses(
+        self, request: dict[str, Any]
+    ) -> AsyncIterator[dict[str, Any]]:
+        return self._stream_native_responses(request)
+
+    async def _stream_native_responses(
+        self, request: dict[str, Any]
+    ) -> AsyncIterator[dict[str, Any]]:
+        body = dict(request)
+        body["stream"] = True
+        # Accumulators for the usage override: what the stream itself
+        # produced, used only when the backend under-reports.
+        text_chars = 0
+        reasoning_tokens = 0
+        client = self._http_client()
+        async with client.stream(
+            "POST", f"{self.base_url}/v1/responses", json=body
+        ) as resp:
+            if resp.status_code != 200:
+                detail = await resp.aread()
+                raise RuntimeError(
+                    f"upstream /v1/responses returned HTTP {resp.status_code}: "
+                    f"{detail.decode(errors='replace')[:500]}"
+                )
+            async for raw in resp.aiter_lines():
+                line = raw.strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[len("data:") :].strip()
+                if not data or data == "[DONE]":
+                    continue
+                try:
+                    event = json.loads(data)
+                except ValueError:
+                    logger.debug("skipping unparseable SSE data: %r", data[:120])
+                    continue
+                etype = event.get("type")
+                if etype == "response.output_text.delta":
+                    text_chars += len(event.get("delta") or "")
+                elif etype in (
+                    "response.reasoning_text.delta",
+                    "response.reasoning_summary_text.delta",
+                ):
+                    # Rough token estimate from reasoning deltas: ~4 chars.
+                    reasoning_tokens += len(event.get("delta") or "") // 4
+                if etype in _TERMINAL_TYPES and isinstance(event.get("response"), dict):
+                    response = event["response"]
+                    raw_usage = response.get("usage")
+                    if not isinstance(raw_usage, dict):
+                        raw_usage = response
+                    event["response"]["usage"] = calculate_usage(
+                        raw_usage,
+                        fallback_chars=text_chars,
+                        reasoning_tokens=reasoning_tokens,
+                    )
+                yield event
+
+    # ------------------------------------------------------------------
+    # Teardown
+    # ------------------------------------------------------------------
+    async def stop(self) -> None:
+        proc = self._proc
+        self._proc = None
+        if proc is not None and proc.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            try:
+                await asyncio.to_thread(proc.wait, 30)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                await asyncio.to_thread(proc.wait)
+        if self._log_reader is not None:
+            self._log_reader.cancel()
+            with contextlib.suppress(Exception):
+                # gather(return_exceptions=True) absorbs the reader task's
+                # CancelledError (a bare wait_for would re-raise it out of
+                # stop() and break the lifecycle's STOPPING→STOPPED path).
+                await asyncio.wait_for(
+                    asyncio.gather(self._log_reader, return_exceptions=True),
+                    timeout=10,
+                )
+            self._log_reader = None
+
+    async def aclose(self) -> None:
+        await self.stop()
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+        self._client = None

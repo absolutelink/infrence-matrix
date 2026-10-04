@@ -1,7 +1,9 @@
 # Inference Matrix — Implementation Status
 
 **Overhaul branch:** `litellm-architecture-overhaul`
-**Last updated:** 2026-10-04 (Phase 7 complete: chat completions + models + stubs)
+**Last updated:** 2026-10-04 (Phase 8 complete: gufo / halogen /
+halogen-flash provider ports — fake-driver-tested; hardware validation
+deferred)
 
 This file tracks the litellm-based architecture overhaul (see
 [ARCHITECTURE.md](ARCHITECTURE.md)). Each phase lists its features with
@@ -20,7 +22,7 @@ starting a feature, read the linked protocol/doc first.
 | 5 | llama-cpp provider + model downloader + machine metrics + ownership | ✅ Complete |
 | 6 | Scheduler + `/v1/responses` via litellm + SSE emitter + persistence | 🟡 In progress |
 | 7 | `/v1/chat/completions` + `/v1/models` + 501 stubs | ✅ Complete |
-| 8 | gufo / halogen / halogen-flash provider ports | ⬜ Pending |
+| 8 | gufo / halogen / halogen-flash provider ports | ✅ Complete |
 | 9 | `provider.config.update` / fingerprint / cache-clear flow | ⬜ Pending |
 | 10 | Admin UI rework | ⬜ Pending |
 | 11 | Docs consolidation + full E2E validation | ⬜ Pending |
@@ -338,21 +340,71 @@ conformance contract).
 
 ---
 
-## Phase 8 — Provider Type Ports ⬜
+## Phase 8 — Provider Type Ports ✅
 
 Port remaining engines from `legacy/agent/services/*` to
-`provider/<type>/`, overriding only what differs from the lib.
+`provider/<type>/`, overriding only what differs from the lib. **All
+three packages are fake-driver-tested only (no real NPU/ROCm/gufo
+hardware in this environment); real-hardware validation is deferred.**
 
-- [ ] **gufo** — `gufo serve llm` argv maps, per-request `model`
-      injection, aux spec files (mmproj/dflash/dspark/mtp) by path,
-      native responses passthrough, rate-gauge parsing.
-- [ ] **halogen** — `HALOGEN_*` env map, two ports (api/engine),
-      `kv_slots` capacity.
-- [ ] **halogen-flash** — native `/v1/responses`, ~45 `HALOGEN_*` env
-      vars, static port range for disk-cache fingerprint, NPU small-model
-      pinning, **`calculate_usage` override** (backend not spec-compliant
-      on usage — the canonical override example).
-- [ ] Each: Dockerfile in `provider/<type>/`, tests, mock-equivalent.
+- [x] **gufo** (`provider/gufo`, `matrix-provider-gufo`) — `gufo serve
+      llm` argv map (`VALUE_FLAGS`/`BOOL_FLAGS`/`cache_disk` per-instance
+      dir), per-request `model` forwarded as-is (multi-model), native
+      OpenResponses passthrough, aux spec files (mmproj/dflash/dspark/
+      mtp) resolved via `ensure_artifact`, rate-gauge parsing
+      (`llamacpp:*_tokens_seconds` gauges scraped from `/metrics` and
+      merged into terminal `usage.completion_tokens_details` before the
+      event is yielded), effective capacity = `options.sessions`.
+- [x] **halogen** (`provider/halogen`, `matrix-provider-halogen`) —
+      two ports (api = PROVIDER_PORT+1, engine = +2), env-configured:
+      12-option `HALOGEN_*` map + fixed wiring (CHECKPOINT/TOKENIZER/
+      BIND/ENGINE/ports), capacity from `kv_slots` (reported as
+      `effective_capacity` in the `backend.start` ack), `stdbuf`
+      entrypoint spawn with merged stdout, SSE proxy from the API port.
+- [x] **halogen-flash** (`provider/halogen-flash`,
+      `matrix-provider-halogen-flash`) — native `/v1/responses`
+      passthrough, 43-key `HALOGEN_*` env map, **static ports for the
+      disk-cache fingerprint** (explicit in backend_config, else
+      SHA-256(MACHINE_UID) into 8200–8289 adjacent pairs), **NPU
+      small-model pinning** (ported `npu_models` suffix/pins logic +
+      `npu_probe` device/XRT/engine checks; no NPU → env omitted
+      gracefully, never an error; probe result reported in registration
+      hardware under `npu`), and the **canonical `calculate_usage`
+      override** (`usage.py`: normalizes chat-style counts / native
+      timing chunks / partial details / missing usage into the spec
+      usage dict before the terminal event is yielded; reported zeros
+      trusted, char//4 estimate only when no count keys at all; rates
+      land in `completion_tokens_details`).
+- [x] Each: Dockerfile in `provider/<type>/` (repo-root build context,
+      `uv sync --frozen --package matrix-provider-<type>`; engine binary
+      layered by the real-engine image per deployment.md), uv workspace
+      members registered in root pyproject, commented-out compose
+      examples, log ring + `backend.logs` forwarding, version gate
+      (`VERSION = "dev"`), exact `PROVIDER_TYPE` strings.
+- [x] Tests (fake-backend subprocess pattern from llama-cpp): gufo 34,
+      halogen 38, halogen-flash 97. Existing suites unchanged:
+      admin 109, lib 48, mock 8, llama-cpp 29.
+
+### Deviations
+- The legacy `GUFO_MAX_INSTANCES` / `HALOGEN_MAX_INSTANCES` multi-
+  server-per-agent limits are **dropped**: the new model is exactly one
+  backend per provider instance (ARCHITECTURE.md invariant 1).
+- Legacy allocate-and-persist Flash ports in the admin DB are replaced
+  by deterministic `SHA-256(MACHINE_UID)` derivation into the static
+  8200–8289 range (provider has no DB); explicit `api_port`/
+  `engine_port` in `backend_config` still win, which is where the
+  Phase 9 fingerprint flow can persist an allocation.
+- `calculate_usage` is wired into `BackendOverrides.calculate_usage`
+  for visibility, but the authoritative call site is the driver's
+  stream generator (the generic `/v1` layer never recomputes usage).
+- NPU pins-file downloads (`_prepare_npu_models`) are surfaced as
+  `resolve_npu_download_set()` + suffix maps in `npu.py`; the actual
+  per-file download wiring lands with Phase 9's config/update flow
+  (the driver only gates `HALOGEN_NPU_MODELS` on the probe today).
+- `metrics.inference` (ARCHITECTURE.md §8, reserved frame kind) did
+  **not** land in Phase 8 — the gufo rate gauges feed per-request
+  `TokenUsageSample` persistence instead of the reserved always-on
+  telemetry frame. It remains reserved for a future phase.
 
 ---
 

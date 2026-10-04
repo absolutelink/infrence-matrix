@@ -36,6 +36,23 @@ class ProviderSettings(BaseSettings):
     LLAMA_SERVER_PATH: str = "llama-server"
     SERVER_START_HEALTH_TIMEOUT: int = 120
 
+    # gufo backend (provider_gufo). Binary path from env, never backend_config.
+    GUFO_SERVER_PATH: str = "gufo"
+
+    # halogen backend (provider_halogen). The engine is launched through
+    # this entrypoint script; config flows via HALOGEN_* env vars.
+    HALOGEN_SERVER_PATH: str = "halogen-server"
+
+    # halogen-flash backend (provider_halogen_flash).
+    HALOGEN_FLASH_SERVER_PATH: str = "halogen-flash-server"
+
+    # halogen-flash NPU (Ryzen AI) host paths, used by the NPU probe to
+    # decide whether small models can be pinned to the NPU.
+    NPU_DEVICE_PATH: str = "/dev/accel/accel0"
+    NPU_XRT_LIB_DIR: str = "/opt/xilinx/xrt/lib"
+    NPU_PINS_FILE: str = "/opt/halogen/npu/models.txt"
+    NPU_BINARY_PATH: str = "/usr/local/bin/halogen-npu"
+
     # Machine-level metrics emitter period (seconds), active only while
     # the admin has assigned metrics ownership to this instance.
     MACHINE_METRICS_INTERVAL: float = 10.0

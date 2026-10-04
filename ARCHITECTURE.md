@@ -113,9 +113,9 @@ provider/
     tests/
   mock/                   Mock provider: hardware-free full-path dev
   llama-cpp/              Provider type: llama.cpp backend
-  halogen/                Provider type: halogen (ROCm)        — pending (Phase 8)
-  halogen-flash/          Provider type: halogen-flash (NPU)  — pending (Phase 8)
-  gufo/                   Provider type: gufo                 — pending (Phase 8)
+  halogen/                Provider type: halogen (ROCm)
+  halogen-flash/          Provider type: halogen-flash (NPU)
+  gufo/                   Provider type: gufo
 spike/litellm-fidelity/   Phase 0 spike: litellm Responses streaming fidelity
 docs/                     ws-protocol.md (canonical RFC), integration-testing.md
 legacy/                   Pre-overhaul code (backend/, agent/, recipes/) — reference only
@@ -124,8 +124,9 @@ Dockerfile                Builds admin (frontend + FastAPI) image
 ```
 
 Provider packages are uv workspace members (`admin/backend`,
-`provider/lib`, `provider/mock`, `provider/llama-cpp`,
-`spike/litellm-fidelity`). The admin image is built with
+`provider/lib`, `provider/mock`, `provider/llama-cpp`, `provider/gufo`,
+`provider/halogen`, `provider/halogen-flash`, `spike/litellm-fidelity`).
+The admin image is built with
 `uv sync --no-install-workspace --package matrix-admin`, so it does **not**
 ship provider packages — hence `app/services/wire.py` deliberately
 duplicates the frame shape from `provider_lib.wire` (keep them in sync;
