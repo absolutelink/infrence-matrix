@@ -68,6 +68,16 @@ class Settings(BaseSettings):
     # Set false (e.g. in tests) to skip starting the presence sweep task.
     INSTANCE_SWEEP_ENABLED: bool = True
 
+    # --- Phase 9 config-update pushes ---------------------------------
+    # provider.config.update awaits the provider ack; a backend drain +
+    # artifact download + boot can take minutes, so the timeout is
+    # generous. A drain-refused (backend_in_use) NAK is retried
+    # CONFIG_UPDATE_RETRIES total attempts, CONFIG_UPDATE_RETRY_DELAY
+    # seconds apart. Any other failure is reported per-instance.
+    CONFIG_UPDATE_TIMEOUT_SECONDS: float = 300.0
+    CONFIG_UPDATE_RETRIES: int = 3
+    CONFIG_UPDATE_RETRY_DELAY_SECONDS: float = 10.0
+
     # CORS: the UI is served same-origin from this app; allow Vite dev server.
     CORS_ALLOW_ALL_ORIGINS: bool = True
 

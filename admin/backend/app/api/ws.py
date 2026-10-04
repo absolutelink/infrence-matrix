@@ -84,6 +84,20 @@ async def _assign_metrics_owner(app: Any, instance_id: str) -> None:
         await metrics_service.assign_ownership(app, instance_id)
 
 
+async def _heal_config_fingerprint(app: Any, instance_id: str) -> None:  # noqa: ARG001
+    """Background stale-fingerprint self-heal (Phase 9).
+
+    If the instance's stored ``config_fingerprint`` lags the definition's
+    current ``backend_config`` (admin PATCHed while the provider was
+    disconnected), push ``provider.config.update`` now. Never breaks the
+    WS flow; mismatches are also caught by the presence sweep.
+    """
+    with contextlib.suppress(Exception):
+        from app.services.config_update import heal_stale_fingerprint
+
+        await heal_stale_fingerprint(instance_id)
+
+
 @router.websocket("/provider/ws")
 async def provider_ws(websocket: WebSocket) -> None:
     instance_id = websocket.query_params.get("instance_id", "")
@@ -114,6 +128,9 @@ async def provider_ws(websocket: WebSocket) -> None:
     # Try to make this instance the machine-level metrics reporter. Run as
     # a background task so a slow provider ack never blocks the handshake.
     asyncio.create_task(_assign_metrics_owner(websocket.app, instance_id))
+    # Phase 9 self-heal: a reconnect with a stale config_fingerprint
+    # (admin PATCHed while disconnected) gets a fresh provider.config.update.
+    asyncio.create_task(_heal_config_fingerprint(websocket.app, instance_id))
     logger.info("provider instance %s connected (epoch %s)", instance_id, epoch)
 
     try:

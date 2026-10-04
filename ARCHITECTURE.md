@@ -95,6 +95,7 @@ admin/
         sse.py                 SSEEmitter: client-facing stream framing (§7)
         alias_registry.py      litellm model-alias registration (§7)
         metrics_service.py     Machine metrics ownership assignment (§8)
+        config_update.py       Phase 9 provider.config.update push + fingerprint self-heal
         wire.py                Admin mirror of the provider wire envelope
         redis_keys.py          Redis key layout (§9)
     alembic/              ONE squashed initial migration
@@ -143,6 +144,9 @@ duplicates the frame shape from `provider_lib.wire` (keep them in sync;
 | `/admin/*` | admin (static SPA) | none | React UI, Vite `base: "/admin"` |
 | `/admin/api/health` | admin | none | Health check (used by compose healthcheck) |
 | `/admin/api/providers/register` | admin | registration token | Provider registration (§5) |
+| `/admin/api/machines*` | admin | none (trusted LAN) | Machine CRUD (Phase 9; delete refused while instances attached) |
+| `/admin/api/definitions*` | admin | none (trusted LAN) | ProviderDefinition CRUD (Phase 9; `backend_config`/`capacity` PATCH pushes `provider.config.update` to connected instances; explicit null on required fields → 422; `provider_type` change refused 409 while instances attached) |
+| `/admin/api/instances/{id}/cache/clear` `/admin/api/instances/{id}/storage/prune` | admin | none (trusted LAN) | Instance storage actions (Phase 9) |
 | `/v1/*` | admin | none (trusted LAN) | Public OpenAI-compatible inference |
 | `/provider/ws` | admin | bearer (instance secret) | Provider instances dial in (§5) |
 
@@ -205,7 +209,7 @@ of the same definition.
 | `websocket_connected` | DB mirror; authoritative liveness is the Redis presence key. |
 | `epoch` | Connection epoch: bumped on every accepted socket; stale-epoch frames ignored (fencing). |
 | `last_seen` / `last_request_at` | Liveness + idle tracking. |
-| `config_fingerprint` | SHA-256 of the applied `backend_config`; drives auto cache-clear (Phase 9). |
+| `config_fingerprint` | SHA-256 of the applied `backend_config`; drives auto cache-clear and the Phase 9 `provider.config.update` push (admin PATCH + reconnect self-heal). |
 | `assigned_gpus` | Instance-reported GPU UUIDs this backend is bound to; VRAM accounting + metrics dedup. |
 
 ### ResponseRecord
@@ -312,8 +316,28 @@ Admin → provider: `provider.hello`, `backend.start`, `backend.stop`,
 
 `backend.start` acks only after the provider's lifecycle reaches
 `running`, so a successful return means the provider's `/v1` is live.
-`backend.stop` uses **drain semantics**: the provider refuses (nak) while
-`in_use`; the admin retries.
+`backend.stop` stops the backend plainly (→ STOPPING → STOPPED):
+in-flight streams are not force-cancelled and there is no in_use refusal
+on this command — their producer tasks release their slots as the
+upstream closes (a client may see the stream end early). Real drain
+semantics live in `provider.config.update` (below), which refuses to
+stop while slots are held.
+
+`provider.config.update` (Phase 9, live) carries the new
+`backend_config` + `config_fingerprint` + scheduling fields. The
+provider adopts a differing `capacity` in place first (no restart),
+no-ops a same-fingerprint update (always safely ackable under load),
+then drains via `stop_if_idle()` — the busy check and the STOPPING
+transition are atomic under the lifecycle lock — clears the old
+fingerprint's prompt cache, applies the config, restarts the backend,
+and acks with the applied fingerprint plus discovered `model_metadata` —
+the admin persists both. Admin retries only the drain-refused case (3
+attempts, 10s apart, 300s per-instance timeout); other failures are
+reported per-instance and are not fatal to the admin row. A stale
+fingerprint on reconnect is healed automatically to the **stale
+instance only** (connect-path background task + presence sweep, with a
+per-instance in-flight push guard). Full semantics in
+`docs/ws-protocol.md` §4 and `provider/README.md`.
 
 Unknown event/command types are logged and ignored (forward compatible).
 
@@ -566,6 +590,10 @@ operation:
    implemented (`TODO(phase6-eviction)`); requests wait instead.
 8. Admin-driven idle-timeout reaper is a stub (`TODO(phase6-idle-reaper)`).
 9. Benchmarks removed; performance testing is out-of-band.
+10. Config-update retry is bounded (3 attempts for drain-refused only);
+    a provider that stays busy past the retries surfaces the failure in
+    the PATCH response and relies on the reconnect/sweep self-heal for
+    eventual consistency. The admin does not queue config pushes.
 
 ---
 

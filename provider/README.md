@@ -29,6 +29,7 @@ driver and overrides only what its backend does differently.
 | Model downloader + progress events (`downloader.py`) | Artifact layout for your model files |
 | Metrics collectors (`metrics.py`) | Any provider-specific metric quirks |
 | Config fingerprint (`config.py`) | **Overrides** — e.g. halogen-flash `calculate_usage` |
+| Phase 9 shared command handlers (`config_update.py`) | Wiring only — `install_config_handlers(client, lifecycle, state, settings, extra_cache_dirs=...)` |
 
 The goal: a new provider type is usually just a `BackendDriver` subclass
 plus a `main.py` that wires it into `BackendLifecycle` and
@@ -70,6 +71,17 @@ class BackendDriver(ABC):
     def stream_chat_completions(self, request: dict) -> AsyncIterator[dict]:
         ...
         # Optional; default raises NotImplementedError -> HTTP 501.
+
+    def apply_config(self, backend_config: dict) -> None:
+        ...
+        # Phase 9: adopt an updated backend_config before the next start
+        # (default no-op; all five providers implement it). Must also
+        # reset `resolved_artifacts` (see storage.prune_unused).
+
+    resolved_artifacts: list[str]
+    # Phase 9: local artifact paths recorded during the last start
+    # (main/mmproj/draft/tokenizer/NPU pins). This is the reference
+    # set storage.prune_unused keeps.
 
     async def aclose(self) -> None: ...  # optional cleanup (default no-op)
 ```
@@ -628,3 +640,177 @@ See "Overriding usage normalization" above; the implementation is
 `response.incomplete`, accumulating `output_text.delta` characters and
 reasoning-delta tokens for the estimate inputs. Table-tested with every
 observed raw shape in `tests/test_calculate_usage.py`.
+
+## Phase 9: config update / cache clear / storage prune
+
+The admin owns the `backend_config`; a definition change must reach the
+running provider without operator intervention. The shared machinery
+lives in `provider_lib/config_update.py` and every provider wires it
+with one call in `install_command_handlers`:
+
+```python
+from provider_lib.config_update import ConfigState, install_config_handlers
+
+state = ConfigState()  # applied-fingerprint tracker
+install_command_handlers(client, lifecycle, emitter, state)  # per-package
+# inside that:
+install_config_handlers(
+    client,
+    lifecycle,
+    state,
+    settings,
+    extra_cache_dirs=[...],  # optional: engine cache dirs this provider owns
+)
+```
+
+`apply_registration(...)` seeds `state.applied_fingerprint` from the
+registration response's `provider_definition.config_fingerprint`, so
+the provider and the admin start with the same view.
+
+### `provider.config.update` flow
+
+Payload: `{"backend_config": {...}, "config_fingerprint": "<sha256>",
+"idle_timeout_seconds": int, "capacity": int}`.
+
+Order matters: capacity adoption and the noop check run **before** the
+drain gate, so a same-fingerprint (or capacity-only) update is always
+safely ackable regardless of load and never restarts the backend.
+
+1. **Validate** — fingerprint must be a non-empty string and
+   `backend_config` an object; otherwise NAK `{"ok": false, "step":
+   "validate"}`.
+2. **Capacity adopt** — if the pushed `capacity` differs from
+   `lifecycle.capacity`, adopt it immediately. Capacity is enforced at
+   the provider (slot admission) and never requires a restart.
+   `idle_timeout_seconds` is **not** consumed by the provider (the idle
+   reaper is admin-side, `TODO(phase6-idle-reaper)`); it rides in the
+   payload for observability only.
+3. **Fingerprint compare** — received == applied → ack
+   `{"ok": true, "detail": {"noop": true, "capacity_adopted": bool,
+   ...}}`; nothing else touched (a capacity-only change lands here with
+   `capacity_adopted: true` and the backend still running).
+4. **Drain (atomic)** — `lifecycle.stop_if_idle()` checks
+   `in_flight > 0 or status == IN_USE` and performs the STOPPING
+   transition under the **same lifecycle lock** with no intervening
+   await, so a concurrent `/v1` `acquire_slot()` can never slip in
+   between check and stop and get SIGTERMed mid-stream. Busy → NAK
+   `{"ok": false, "error": "backend_in_use", "detail": {"step":
+   "drain", "retry_after": 10, "in_flight": N}}` (no error status
+   emitted — the provider is simply refusing, not broken).
+5. **Announce** — emit `provider.status initializing` (backend already
+   stopped by step 4; skipped work when it was already stopped).
+6. **Clear the prompt cache** — delete the OLD fingerprint's
+   prompt-cache dir (see the convention below) plus any
+   `extra_cache_dirs`. Model files are **never** touched.
+7. **Apply config** — `driver.apply_config(backend_config)` (now a
+   `BackendDriver` ABC hook with a default no-op; all five providers
+   implement it).
+8. **Start** — `lifecycle.start()`; artifact resolution/downloads
+   happen inside the driver and stream `download.progress` events.
+9. **Scrape metadata** — `driver.list_models()` (best-effort: a scrape
+   failure logs and yields `[]`, never fails the update).
+10. **Ack** — `{"ok": true, "detail": {"config_fingerprint": fp,
+   "capacity": c, "model_metadata": [...],
+   "prompt_cache_deleted": [...], "prompt_cache_bytes_freed": N}}`.
+   The admin persists the echoed fingerprint onto
+   `ProviderInstance.config_fingerprint` and stores
+   `model_metadata` (as `{"models": [...]}`) on the definition.
+
+On failure at any step (after the drain refusal): emit `provider.status
+error` and NAK `{"ok": false, "error": "<message>", "detail": {"step":
+"<step>"}}` where step ∈ `validate|drain|cache_clear|apply_config|
+start`. The provider stays in whatever state the lifecycle reached
+(usually `error`); the admin records the per-instance failure — it is
+visible in the PATCH response, not fatal to the admin row.
+
+Note: the fingerprint means the config is **adopted**, not that a
+backend is *running* under it — registration seeds
+`state.applied_fingerprint` before the first start, and a later stop
+leaves it in place.
+
+**Retry policy (admin side, documented choice):** the push uses a
+generous per-instance timeout (`CONFIG_UPDATE_TIMEOUT_SECONDS`, default
+300s — drain + download + boot can take minutes) and awaits instances
+concurrently. A `backend_in_use` NAK is retried up to
+`CONFIG_UPDATE_RETRIES` total attempts (default 3) spaced
+`CONFIG_UPDATE_RETRY_DELAY_SECONDS` (default 10s); any other failure is
+reported immediately. Re-sync is idempotent: re-PATCHing, or simply a
+provider reconnect, re-triggers the same flow (see self-heal below).
+
+### Prompt-cache directory convention
+
+**`CACHE_DIR/prompt_cache/<config_fingerprint>/`** is the canonical
+per-config prompt-cache location. Providers that persist engine prompt
+caches write them under the directory keyed by the fingerprint they
+were configured with, so:
+
+- A fingerprint change naturally orphans the old dir; clearing on
+  update = deleting the old fingerprint's dir (and the shared root).
+- `cache.clear` deletes **only** the prompt-cache root
+  (`CACHE_DIR/prompt_cache`) plus the provider's `extra_cache_dirs`
+  (gufo: `CACHE_DIR/<MACHINE_UID>` per-instance `--cache-disk` dir;
+  halogen-flash: `CACHE_DIR/halogen-flash` engine disk cache).
+  `MODELS_DIR` and `CACHE_DIR/provider_config.json` are never touched.
+  The ack carries `{"deleted": [...], "bytes_freed": N}` and supports
+  `{"dry_run": true}` (plan only). **Refused while the backend is
+  `in_use`** (`{"ok": false, "error": "backend_in_use", "detail":
+  {"step": "drain", ...}}`) unless `{"force": true}` — clearing engine
+  caches under live streams can cause I/O errors. `dry_run` never
+  touches files and is always allowed.
+- llama-cpp has no on-disk prompt cache in this design (its cache is
+  process-RAM via `--cache-ram`/slot save); the convention applies to
+  disk-caching engines. The handler is still installed and clears the
+  shared root harmlessly.
+
+### `storage.prune_unused`
+
+Payload: `{"dry_run": bool = false}`. Deletes files under `MODELS_DIR`
+**not referenced by the current backend_config's resolved artifact
+set**. The reference set is `driver.resolved_artifacts` — the local
+paths each driver recorded during the last successful artifact
+resolution (main GGUF, mmproj, draft, tokenizer dir, prepared NPU
+pin files). Safety rules:
+
+- If the driver has no resolved artifact set yet (backend never
+  started under this config), the provider **refuses** (`{"ok": false,
+  "error": "no_resolved_artifacts..."}`) rather than deleting every
+  model on the box.
+- A referenced **directory** (tokenizer) protects its whole subtree.
+- Reference paths are `os.path.realpath`-normalized on both sides of the
+  comparison, so a recorded path with `..` / double slashes / symlinked
+  mounts still protects the live file.
+- `dry_run: true` returns the plan (`deleted`, `bytes_freed`, `kept`)
+  without deleting.
+- Ack: `{"ok": true, "deleted": [...], "bytes_freed": N, "kept": [...]}`.
+
+Drivers must reset `resolved_artifacts` in `apply_config` and
+repopulate it during `start()` (all five packages do).
+
+### NPU pre-download wiring (halogen-flash)
+
+Closes the Phase 8 deferral: in `HalogenFlashBackend.start()`, when
+`options.npu_models` is requested **and** the host NPU probe passes,
+the driver reads the image's pins file (`NPU_PINS_FILE`), plans the
+download set with `resolve_npu_download_set()` (shared `devices/`
+programs pulled from the owner's record), and `ensure_artifact`s each
+file into `MODELS_DIR/npu/<id>/` **before spawn** (revision pinned;
+`download.progress` events flow through the driver's progress
+callback). Prepared files join `resolved_artifacts` so prune keeps
+them. Graceful by design: a missing/unparsable pins file or any
+download failure logs a warning and **omits the pins**
+(`HALOGEN_NPU_MODELS` unset) — the start never fails on NPU prep.
+
+### Self-heal (stale fingerprints)
+
+If the admin PATCHed a definition while a provider was disconnected,
+the instance's stored fingerprint lags. On every WS accept the admin
+schedules a cheap background check (and the presence sweep repeats it):
+`instance.config_fingerprint != sha256(canonical(definition.backend_config))`
+→ push `provider.config.update` for that instance **only** (never the
+whole-definition fan-out — a current sibling must not be drained or
+churned by a heal). A per-instance in-flight guard in
+`app/services/config_update.py` ensures a slow (300s) apply is never
+re-pushed by the next 30s sweep into the same provider's command queue;
+the skipped heal simply retries on a later sweep. Matching fingerprints
+cost one DB read and no traffic.
+

@@ -21,6 +21,7 @@ from provider_lib.admin_client import AdminClient, RegistrationResult
 from provider_lib.app_factory import BackendOverrides, create_provider_app
 from provider_lib.backend import BackendLifecycle
 from provider_lib.config import ProviderSettings
+from provider_lib.config_update import ConfigState, install_config_handlers
 from provider_lib.metrics import MachineMetricsEmitter, collect_machine_snapshot
 from provider_lib.wire import Frame, InstanceStatusValue
 
@@ -99,6 +100,7 @@ def install_command_handlers(
     client: AdminClient,
     lifecycle: BackendLifecycle,
     emitter: MachineMetricsEmitter,
+    config_state: ConfigState | None = None,
 ) -> None:
     """Register admin->provider command handlers on the client."""
 
@@ -134,9 +136,16 @@ def install_command_handlers(
     client.on_command("backend.stop", on_backend_stop)
     client.on_command("metrics.assign", on_metrics_assign)
     client.on_command("metrics.unassign", on_metrics_unassign)
+    install_config_handlers(
+        client, lifecycle, config_state or ConfigState(), client.settings
+    )
 
 
-def apply_registration(lifecycle: BackendLifecycle, result: RegistrationResult) -> None:
+def apply_registration(
+    lifecycle: BackendLifecycle,
+    result: RegistrationResult,
+    config_state: ConfigState | None = None,
+) -> None:
     """Adopt capacity and the backend_config from the registration response."""
     definition = result.provider_definition
     capacity = definition.get("capacity")
@@ -146,6 +155,9 @@ def apply_registration(lifecycle: BackendLifecycle, result: RegistrationResult) 
     driver = lifecycle.driver
     if isinstance(backend_config, dict) and isinstance(driver, HalogenBackend):
         driver.apply_config(backend_config)
+    if config_state is not None:
+        fp = definition.get("config_fingerprint")
+        config_state.applied_fingerprint = fp if isinstance(fp, str) else None
 
 
 async def emit_provider_status(
@@ -181,9 +193,10 @@ async def register_provider(
     backend_config = result.provider_definition.get("backend_config") or {}
     if lifecycle is None:
         lifecycle = make_lifecycle(client, backend_config)
+    config_state = ConfigState()
     emitter = MachineMetricsEmitter(lifecycle, client, settings)
-    install_command_handlers(client, lifecycle, emitter)
-    apply_registration(lifecycle, result)
+    install_command_handlers(client, lifecycle, emitter, config_state)
+    apply_registration(lifecycle, result, config_state)
     return result, lifecycle, emitter
 
 

@@ -82,7 +82,25 @@ async def sweep_once(redis_client: aioredis.Redis) -> list[str]:
         with contextlib.suppress(Exception):
             await metrics_service.release_ownership(redis_client, instance_id)
     await _reassign_ownerless_machines(redis_client)
+    # Phase 9 self-heal: connected instances whose stored
+    # config_fingerprint lags the definition's current backend_config
+    # get a provider.config.update push (catches misses from the connect
+    # path; the heal is a no-op when fingerprints match).
+    await _heal_stale_fingerprints()
     return stale
+
+
+async def _heal_stale_fingerprints() -> None:
+    from app.services.config_update import heal_stale_fingerprint_safe
+
+    with Session(engine) as session:
+        rows = session.exec(
+            select(ProviderInstance).where(
+                col(ProviderInstance.websocket_connected) == True  # noqa: E712
+            )
+        ).all()
+        instance_ids = [str(inst.id) for inst in rows]
+    await asyncio.gather(*(heal_stale_fingerprint_safe(i) for i in instance_ids))
 
 
 async def _reassign_ownerless_machines(redis_client: aioredis.Redis) -> None:

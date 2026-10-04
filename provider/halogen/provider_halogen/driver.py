@@ -74,6 +74,9 @@ class HalogenBackend(BackendDriver):
         self._log_ring = CursorLogRing(_LOG_BUFFER_LINES)
         self._log_reader: asyncio.Task[None] | None = None
         self._client: httpx.AsyncClient | None = None
+        # Phase 9: local paths resolved during the last start, used by
+        # storage.prune_unused as the "referenced artifact set".
+        self.resolved_artifacts: list[str] = []
 
     def _resolve_ports(self) -> tuple[int, int]:
         cfg = self._config
@@ -86,6 +89,7 @@ class HalogenBackend(BackendDriver):
         """Adopt a (possibly updated) backend_config before start."""
         self._config = backend_config or {}
         self._ports = self._resolve_ports()
+        self.resolved_artifacts = []
 
     @property
     def api_port(self) -> int:
@@ -161,6 +165,7 @@ class HalogenBackend(BackendDriver):
         if not shutil.which(self._binary) and not Path(self._binary).exists():
             raise RuntimeError(f"halogen entrypoint not found: {self._binary}")
         checkpoint_path, tokenizer_path = await self._resolve_artifacts()
+        self.resolved_artifacts = [checkpoint_path, tokenizer_path]
         api_port, engine_port = self._ports
         env = build_env(
             self._config.get("options") or {},

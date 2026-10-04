@@ -178,6 +178,8 @@ async def _download_hf(
     filename: str,
     models_dir: Path,
     progress_cb: ProgressCallback | None,
+    revision: str | None = None,
+    local_subdir: Path | None = None,
 ) -> str:
     try:
         from huggingface_hub import hf_hub_download
@@ -187,15 +189,22 @@ async def _download_hf(
             f"({repo}/{filename})"
         ) from exc
 
-    local_dir = Path(models_dir) / _validate_relative(repo, "repo")
+    if local_subdir is not None:
+        local_dir = Path(models_dir) / local_subdir
+    else:
+        local_dir = Path(models_dir) / _validate_relative(repo, "repo")
     loop = asyncio.get_running_loop()
     tqdm_class = _make_tqdm_class(filename, progress_cb, loop) if progress_cb else None
+    kwargs: dict[str, Any] = {}
+    if revision:
+        kwargs["revision"] = revision
     return await asyncio.to_thread(
         lambda: hf_hub_download(
             repo_id=repo,
             filename=filename,
             local_dir=str(local_dir),
             **({"tqdm_class": tqdm_class} if tqdm_class else {}),
+            **kwargs,
         )
     )
 
@@ -205,6 +214,8 @@ async def ensure_artifact(
     *,
     models_dir: Path,
     progress_cb: ProgressCallback | None = None,
+    revision: str | None = None,
+    local_subdir: str | None = None,
 ) -> str:
     """Resolve an artifact descriptor to a local file path.
 
@@ -213,6 +224,11 @@ async def ensure_artifact(
       - `{"source": "hf"|"huggingface", "repo": ..., "file": ...}` —
         candidate resolution first (`models_dir/repo/file`, then flat
         `models_dir/file`), then a de-duplicated HuggingFace download.
+
+    Optional `revision` pins the HF revision, and `local_subdir` places
+    the file under `models_dir/<local_subdir>/<file>` instead of the
+    default repo-mirrored layout (used by the halogen-flash NPU pin
+    downloads into `MODELS_DIR/npu/<id>/`).
 
     Raises `DownloadError` on unknown shapes, traversal attempts, or a
     missing local file.
@@ -236,25 +252,46 @@ async def ensure_artifact(
         raise DownloadError("HF artifact requires both 'repo' and 'file'")
 
     models_dir = Path(models_dir)
-    # Candidate resolution: repo layout first, then FLAT under MODELS_DIR
-    # (operators store .gguf files directly in the models root while DB
-    # paths look like /models/{repo}/{file}).
-    candidates = [
-        storage_path(models_dir, repo, filename),
-        models_dir / _validate_relative(filename, "filename"),
-        models_dir / Path(filename).name,
-    ]
+    if local_subdir is not None:
+        subdir = _validate_relative(local_subdir, "local_subdir")
+        candidates = [models_dir / subdir / _validate_relative(filename, "filename")]
+    else:
+        # Candidate resolution: repo layout first, then FLAT under MODELS_DIR
+        # (operators store .gguf files directly in the models root while DB
+        # paths look like /models/{repo}/{file}).
+        candidates = [
+            storage_path(models_dir, repo, filename),
+            models_dir / _validate_relative(filename, "filename"),
+            models_dir / Path(filename).name,
+        ]
     for candidate in candidates:
         if candidate.is_file():
             return str(candidate)
 
-    key = f"{repo}/{filename}"
+    key = (
+        f"{repo}/{filename}"
+        if local_subdir is None
+        else f"{repo}/{filename}@{local_subdir}"
+    )
+    if revision:
+        key = f"{key}#{revision}"
     in_flight = _DOWNLOAD_TASKS.get(key)
     if in_flight is not None and not in_flight.done():
         return await in_flight
 
     task: asyncio.Task[str] = asyncio.create_task(
-        _download_hf(repo, filename, models_dir, progress_cb)
+        _download_hf(
+            repo,
+            filename,
+            models_dir,
+            progress_cb,
+            revision=revision,
+            local_subdir=(
+                _validate_relative(local_subdir, "local_subdir")
+                if local_subdir is not None
+                else None
+            ),
+        )
     )
     _DOWNLOAD_TASKS[key] = task
     try:

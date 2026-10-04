@@ -64,6 +64,9 @@ class LlamaCppBackend(BackendDriver):
         self._log_ring = CursorLogRing(_LOG_BUFFER_LINES)
         self._log_readers: list[asyncio.Task[None]] = []
         self._client: httpx.AsyncClient | None = None
+        # Phase 9: local paths resolved during the last start, used by
+        # storage.prune_unused as the "referenced artifact set".
+        self.resolved_artifacts: list[str] = []
 
     def apply_config(self, backend_config: dict[str, Any]) -> None:
         """Adopt a (possibly updated) backend_config before start."""
@@ -71,6 +74,7 @@ class LlamaCppBackend(BackendDriver):
         self.backend_port = int(
             self._config.get("backend_port") or (self._settings.PROVIDER_PORT + 1)
         )
+        self.resolved_artifacts = []
 
     @property
     def base_url(self) -> str:
@@ -101,6 +105,9 @@ class LlamaCppBackend(BackendDriver):
         model_path = await self._ensure(model, "model")
         mmproj_path = await self._ensure(self._config.get("mmproj"), "mmproj")
         draft_path = await self._ensure(self._config.get("draft"), "draft")
+        self.resolved_artifacts = [
+            p for p in (model_path, mmproj_path, draft_path) if p
+        ]
         return model_path, mmproj_path, draft_path
 
     # ------------------------------------------------------------------

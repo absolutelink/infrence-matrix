@@ -172,6 +172,74 @@ async def test_capacity_backend_busy() -> None:
     assert lifecycle.in_flight == 2
 
 
+async def test_stop_if_idle_refuses_while_slot_held() -> None:
+    """SF-1: stop_if_idle raises BackendBusy when a slot is held and the
+    backend is NOT stopped."""
+    driver = FakeDriver()
+    lifecycle, _ = _collect_lifecycle(driver)
+    await lifecycle.start()
+    await lifecycle.acquire_slot()  # RUNNING -> IN_USE
+    with pytest.raises(BackendBusy) as exc_info:
+        await lifecycle.stop_if_idle()
+    assert exc_info.value.in_flight == 1
+    assert lifecycle.backend_status == BackendStatusValue.IN_USE
+    assert driver.stop_calls == 0
+    await lifecycle.release_slot()
+    assert lifecycle.backend_status == BackendStatusValue.RUNNING
+    # Now idle -> stops cleanly.
+    await lifecycle.stop_if_idle()
+    assert lifecycle.backend_status == BackendStatusValue.STOPPED
+    assert driver.stop_calls == 1
+
+
+async def test_stop_if_idle_stops_when_idle() -> None:
+    driver = FakeDriver()
+    lifecycle, _ = _collect_lifecycle(driver)
+    await lifecycle.start()
+    await lifecycle.stop_if_idle()
+    assert lifecycle.backend_status == BackendStatusValue.STOPPED
+    # Already stopped -> no-op (no extra driver.stop call).
+    await lifecycle.stop_if_idle()
+    assert driver.stop_calls == 1
+
+
+async def test_stop_if_idle_atomic_against_concurrent_acquire() -> None:
+    """SF-1: with capacity 1 and a running backend, a concurrent
+    acquire_slot and stop_if_idle never both succeed-and-kill: exactly one
+    of them wins the lock first, and the loser sees the new state."""
+    driver = FakeDriver()
+    lifecycle, _ = _collect_lifecycle(driver)
+    await lifecycle.start()
+
+    acquire_failed = 0
+    stop_refused = 0
+
+    async def racer_acquire() -> None:
+        nonlocal acquire_failed
+        try:
+            await lifecycle.acquire_slot()
+        except BackendBusy, BackendNotReady:
+            acquire_failed += 1
+
+    async def racer_stop() -> None:
+        nonlocal stop_refused
+        try:
+            await lifecycle.stop_if_idle()
+        except BackendBusy:
+            stop_refused += 1
+
+    await asyncio.gather(racer_acquire(), racer_stop())
+    # If the acquire won, the stop must have been refused (busy), and the
+    # driver was never stopped under a live slot. If the stop won, the
+    # acquire must have failed (not serving).
+    assert (acquire_failed, stop_refused) in {(0, 1), (1, 0)}
+    if stop_refused:
+        assert lifecycle.in_flight == 1
+        assert driver.stop_calls == 0
+    else:
+        assert lifecycle.backend_status == BackendStatusValue.STOPPED
+
+
 async def test_release_tolerates_extra_releases() -> None:
     lifecycle, emitted = _collect_lifecycle()
     await lifecycle.start()

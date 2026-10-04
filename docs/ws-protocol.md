@@ -198,6 +198,20 @@ the dying connection) and marks the DB row
 `websocket_connected=false, instance_status="disconnected"`. The epoch
 key is **not** deleted.
 
+**Config self-heal on connect (Phase 9):** after marking the row
+connected, the admin compares `ProviderInstance.config_fingerprint`
+with `sha256(canonical(definition.backend_config))`; on mismatch it
+pushes `provider.config.update` **to that instance only** (never the
+definition-wide fan-out — current siblings are not churned) in a
+background task (same helper the presence sweep calls), so a config
+PATCHed while the provider was down is applied automatically on
+reconnect. A per-instance in-flight guard (module-level set in
+`app/services/config_update.py`; the admin is a single uvicorn worker,
+so an in-process guard is authoritative — always cleared in a `finally`)
+ensures a slow (300s) apply is never re-pushed by subsequent 30s sweeps
+into the same provider's command queue; a skipped heal retries on the
+next sweep.
+
 ### Close codes
 
 | Code | Meaning |
@@ -225,7 +239,7 @@ Events do **not** require an ack; the admin persists/acts on them.
 | `metrics.inference` | available/max slots, token speed, prompt-processing speed, in-flight | Reserved (defined in `FrameKind`, not yet emitted; the admin does not handle it yet) | Always-on per-instance telemetry; lands with Phase 7/8. |
 | `backend.boot_requested` | `{}` | Reserved | Observability only; boot is admin-driven (scheduler sends `backend.start`). |
 | `provider.logs` | provider-instance-level log lines | Reserved | Lands with the UI/logging phase. |
-| `backend.metadata` | model metadata scraped from the backend | Reserved | Persisted to `ProviderDefinition.model_metadata` on init (Phase 9). |
+| `backend.metadata` | model metadata scraped from the backend | Reserved | Not used: discovered metadata travels in the `provider.config.update` **ack detail** (`model_metadata`) and is persisted by the admin there (Phase 9). |
 
 `instance_status` ∈ `registering|initializing|running|unhealthy|error|disconnected`
 (`InstanceStatusValue`).
@@ -249,15 +263,15 @@ timeout)` sends the command and awaits the matching ack (default 30s).
 | type | payload | status | notes |
 | --- | --- | --- | --- |
 | `backend.start` | `{}` | Live | Provider awaits `BackendLifecycle.start()` (STOPPED → STARTING → RUNNING with `backend.status` per transition) and acks ok with `detail.capacity`. |
-| `backend.stop` | `{}` | Live | Provider awaits `BackendLifecycle.stop()` (→ STOPPING → STOPPED, emitted) and acks ok. **Drain semantics**: refuse (nak) while `in_use`; admin retries. |
+| `backend.stop` | `{}` | Live | Provider awaits `BackendLifecycle.stop()` (→ STOPPING → STOPPED, emitted) and acks ok. **No forced drain**: in-flight streams are not cancelled — their producer tasks release their slots as the upstream closes (the client may see the stream end early). Use `provider.config.update` when drain semantics matter (it refuses to stop while `in_use`). |
 | `backend.restart` | `{}` | Reserved | Stop + start. |
 | `provider.initialize` | `{}` | Reserved | Run the full init lifecycle (see `ARCHITECTURE.md` §8 / Phase 9). |
-| `provider.config.update` | new `backend_config` JSON | Reserved | Triggers init: drain+stop, recompute fingerprint, auto-clear cache if changed, download/update artifacts, start, scrape metadata, stop → running (Phase 9). |
+| `provider.config.update` | `{"backend_config": {...}, "config_fingerprint": "<sha256 hex>", "idle_timeout_seconds": int, "capacity": int}` | **Live (Phase 9)** | Apply a new definition config in place. Provider order matters: (1) **capacity adopt** — a differing `capacity` is applied to `lifecycle.capacity` immediately (enforced at the provider; no restart needed); (2) **noop** — received fingerprint == applied → ack `{"ok": true, "detail": {"noop": true, "capacity_adopted": bool, ...}}`, always safely ackable even under load; (3) **drain** — `lifecycle.stop_if_idle()` checks busy and transitions STOPPING under the same lifecycle lock with no intervening await (a concurrent `acquire_slot()` can never slip in and get SIGTERMed mid-stream); busy → NAK `{"ok": false, "error": "backend_in_use", "detail": {"step": "drain", "retry_after": 10, "in_flight": N}}`; (4) otherwise emits `provider.status initializing`, clears the old fingerprint's prompt cache, `driver.apply_config`, starts (artifact downloads stream `download.progress`), scrapes `list_models()`. **Ok ack detail:** `{"config_fingerprint", "capacity", "model_metadata": [...], "prompt_cache_deleted", "prompt_cache_bytes_freed"}` — the admin persists the echoed fingerprint on the instance and `model_metadata` (`{"models": [...]}`) on the definition. **Failure NAK:** `{"ok": false, "error": "<msg>", "detail": {"step": "validate|drain|cache_clear|apply_config|start"}}`. `idle_timeout_seconds` is carried in the payload for observability only — the provider does not consume it (idle reaping is admin-side, `TODO(phase6-idle-reaper)`). Admin retry policy: 300s per-instance timeout, instances pushed concurrently; only `backend_in_use` is retried (3 attempts, 10s apart); other failures reported per-instance without rolling back the admin row. A stale fingerprint on (re)connect is auto-healed by the connect path and the presence sweep (**stale instance only**, guarded against duplicate in-flight pushes). See `provider/README.md`. |
 | `metrics.assign` | resource list (GPU UUIDs / categories) | Live (Phase 5) | Grant machine-level metrics ownership; admin `assign_ownership` sends it, provider starts its emitter. Carries epoch. |
 | `metrics.unassign` | resource list | Provider handler live; admin send not yet wired (ownership currently lapses via Redis lease expiry) | Revoke machine-level metrics ownership. |
 | `metrics.category.start` | category name | Reserved | Enable a `METRICS_CATEGORIES` category. |
-| `cache.clear` | `{}` | Reserved | **Prompt-cache files only** — never model files (Phase 9). |
-| `storage.prune_unused` | `{}` | Reserved | Delete orphaned files not referenced by the active fingerprint (Phase 9). |
+| `cache.clear` | `{"dry_run": bool = false, "force": bool = false}` | **Live (Phase 9)** | **Prompt-cache files only** — never model files. Deletes `CACHE_DIR/prompt_cache` plus the provider's engine cache dirs (`extra_cache_dirs`: gufo `CACHE_DIR/<MACHINE_UID>`, halogen-flash `CACHE_DIR/halogen-flash`). **Refused while the backend is `in_use`** (NAK `{"ok": false, "error": "backend_in_use", "detail": {"step": "drain", ...}}`) unless `force: true` — clearing engine caches under live streams can cause I/O errors; `dry_run` never touches files and is always allowed. Ack detail: `{"dry_run", "deleted": [...], "bytes_freed": N}`. Admin surface: `POST /admin/api/instances/{id}/cache/clear` (body `{dry_run?, force?}`). |
+| `storage.prune_unused` | `{"dry_run": bool = false}` | **Live (Phase 9)** | Delete `MODELS_DIR` files not referenced by the driver's current `resolved_artifacts` set (main/mmproj/draft/tokenizer/NPU pins; a referenced directory protects its subtree). **Refuses** (NAK `no_resolved_artifacts`) when the driver has not resolved its set yet — never deletes blind. Ack detail: `{"dry_run", "deleted": [...], "bytes_freed": N, "kept": [...]}`. Admin surface: `POST /admin/api/instances/{id}/storage/prune`. |
 
 The provider lifecycle, `BackendDriver` interface, slot admission, and the
 release-on-upstream-close invariant are documented in `provider/README.md`.

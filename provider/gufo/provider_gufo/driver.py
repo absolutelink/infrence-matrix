@@ -80,6 +80,9 @@ class GufoBackend(BackendDriver):
         self._log_ring = CursorLogRing(_LOG_BUFFER_LINES)
         self._log_readers: list[asyncio.Task[None]] = []
         self._client: httpx.AsyncClient | None = None
+        # Phase 9: local paths resolved during the last start, used by
+        # storage.prune_unused as the "referenced artifact set".
+        self.resolved_artifacts: list[str] = []
 
     def apply_config(self, backend_config: dict[str, Any]) -> None:
         """Adopt a (possibly updated) backend_config before start."""
@@ -87,6 +90,7 @@ class GufoBackend(BackendDriver):
         self.backend_port = int(
             self._config.get("backend_port") or (self._settings.PROVIDER_PORT + 1)
         )
+        self.resolved_artifacts = []
 
     @property
     def base_url(self) -> str:
@@ -146,6 +150,11 @@ class GufoBackend(BackendDriver):
             return
         model_path = await self._resolve_main_model()
         options = await self._resolve_aux()
+        self.resolved_artifacts = [model_path] + [
+            str(options[key])
+            for key in AUX_KEYS
+            if isinstance(options.get(key), str) and options[key]
+        ]
         cmd = build_command(
             options,
             model_path=model_path,

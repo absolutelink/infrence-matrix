@@ -41,6 +41,21 @@ class MockBackend(BackendDriver):
         self.started = False
         self.stream_open_count = 0
         self.stream_close_count = 0
+        # Phase 9: artifact tracking for storage.prune_unused. The mock
+        # downloads nothing; tests can seed this list directly.
+        self.resolved_artifacts: list[str] = []
+        self.applied_configs: list[dict[str, Any]] = []
+
+    def apply_config(self, backend_config: dict[str, Any]) -> None:
+        """Adopt mock stream knobs from (updated) backend_config."""
+        cfg = backend_config or {}
+        self.applied_configs.append(dict(cfg))
+        if isinstance(cfg.get("model"), str) and cfg["model"]:
+            self.model = cfg["model"]
+        if isinstance(cfg.get("delta_count"), int):
+            self.delta_count = cfg["delta_count"]
+        if isinstance(cfg.get("delta_delay"), (int, float)):
+            self.delta_delay = float(cfg["delta_delay"])
 
     async def start(self) -> None:
         self.start_calls += 1

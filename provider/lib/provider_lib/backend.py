@@ -45,7 +45,19 @@ class BackendNotReady(RuntimeError):
 
 
 class BackendBusy(RuntimeError):
-    """All inference slots are in use (-> HTTP 429)."""
+    """All inference slots are in use (-> HTTP 429).
+
+    Also raised by :meth:`BackendLifecycle.stop_if_idle` when a stop is
+    refused because live requests hold slots (drain semantics). Carries
+    ``in_flight`` so the caller can report the count that triggered the
+    refusal without re-reading (and racing) the counter.
+    """
+
+    def __init__(
+        self, message: str = "backend busy", *, in_flight: int | None = None
+    ) -> None:
+        super().__init__(message)
+        self.in_flight = in_flight
 
 
 class _StreamFailure:
@@ -102,6 +114,16 @@ class BackendDriver(ABC):
         (raises NotImplementedError -> HTTP 501).
         """
         raise NotImplementedError("this backend has no chat/completions stream")
+
+    def apply_config(self, backend_config: dict[str, Any]) -> None:  # noqa: B027
+        """Adopt a (possibly updated) backend_config.
+
+        Called at registration and by the Phase 9 `provider.config.update`
+        flow *before* `start()`, so the next boot picks up the new model
+        artifacts / args / options. The default is a no-op for drivers
+        that are configured entirely at construction time; drivers that
+        read `backend_config` lazily in `start()` may ignore this.
+        """
 
     async def aclose(self) -> None:  # noqa: B027  - optional hook, default no-op
         """Release driver-held resources (httpx clients, subprocesses)."""
@@ -192,21 +214,48 @@ class BackendLifecycle:
         """Any non-stopped state -> STOPPING -> STOPPED; failure -> ERROR.
 
         In-flight streams are not force-cancelled here; their producer
-        tasks release their slots as the upstream closes.
+        tasks release their slots as the upstream closes. Use
+        :meth:`stop_if_idle` when the caller must *not* stop under load.
         """
         async with self._lock:
-            if self._status == BackendStatusValue.STOPPED:
-                return
-            self._status = BackendStatusValue.STOPPING
-            await self._emit(BackendStatusValue.STOPPING, "backend stopping")
-            try:
-                await self._driver.stop()
-            except Exception as exc:  # noqa: BLE001
-                self._status = BackendStatusValue.ERROR
-                await self._emit(BackendStatusValue.ERROR, f"stop failed: {exc}")
-                raise
-            self._status = BackendStatusValue.STOPPED
-            await self._emit(BackendStatusValue.STOPPED, "backend stopped")
+            await self._stop_locked()
+
+    async def stop_if_idle(self) -> None:
+        """Atomically refuse to stop while a slot is held; otherwise stop.
+
+        Raises ``BackendBusy`` if ``in_flight > 0`` or the status is
+        ``IN_USE``. The busy check and the STOPPING transition happen
+        under the same lock acquisition with **no intervening await**, so
+        a concurrent ``acquire_slot()`` can never slip in between the
+        check and the stop (which would SIGTERM the process under a live
+        stream).
+        """
+        async with self._lock:
+            if self._in_flight > 0 or self._status == BackendStatusValue.IN_USE:
+                raise BackendBusy(
+                    f"backend busy: {self._in_flight} request(s) in flight",
+                    in_flight=self._in_flight,
+                )
+            await self._stop_locked()
+
+    async def _stop_locked(self) -> None:
+        """Stop body assuming ``self._lock`` is already held.
+
+        asyncio.Lock is not reentrant — callers must hold the lock and
+        must not await anything between their busy check and here.
+        """
+        if self._status == BackendStatusValue.STOPPED:
+            return
+        self._status = BackendStatusValue.STOPPING
+        await self._emit(BackendStatusValue.STOPPING, "backend stopping")
+        try:
+            await self._driver.stop()
+        except Exception as exc:  # noqa: BLE001
+            self._status = BackendStatusValue.ERROR
+            await self._emit(BackendStatusValue.ERROR, f"stop failed: {exc}")
+            raise
+        self._status = BackendStatusValue.STOPPED
+        await self._emit(BackendStatusValue.STOPPED, "backend stopped")
 
     # ------------------------------------------------------------------
     # Slot admission

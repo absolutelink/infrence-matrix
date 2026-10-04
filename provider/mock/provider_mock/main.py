@@ -31,6 +31,7 @@ from provider_lib.admin_client import AdminClient, RegistrationResult
 from provider_lib.app_factory import BackendOverrides, create_provider_app
 from provider_lib.backend import BackendLifecycle
 from provider_lib.config import ProviderSettings
+from provider_lib.config_update import ConfigState, install_config_handlers
 from provider_lib.wire import Frame, InstanceStatusValue
 
 from provider_mock.backend import MockBackend
@@ -74,7 +75,11 @@ def make_lifecycle(client: AdminClient, **stream_kwargs: Any) -> BackendLifecycl
     return BackendLifecycle(driver, capacity=DEFAULT_CAPACITY, status_callback=emit)
 
 
-def install_command_handlers(client: AdminClient, lifecycle: BackendLifecycle) -> None:
+def install_command_handlers(
+    client: AdminClient,
+    lifecycle: BackendLifecycle,
+    config_state: ConfigState | None = None,
+) -> None:
     """Register admin->provider command handlers on the client."""
 
     async def on_backend_start(frame: Frame) -> dict[str, Any]:
@@ -92,9 +97,16 @@ def install_command_handlers(client: AdminClient, lifecycle: BackendLifecycle) -
 
     client.on_command("backend.start", on_backend_start)
     client.on_command("backend.stop", on_backend_stop)
+    install_config_handlers(
+        client, lifecycle, config_state or ConfigState(), client.settings
+    )
 
 
-def apply_registration(lifecycle: BackendLifecycle, result: RegistrationResult) -> None:
+def apply_registration(
+    lifecycle: BackendLifecycle,
+    result: RegistrationResult,
+    config_state: ConfigState | None = None,
+) -> None:
     """Adopt capacity and model alias from the registration response."""
     definition = result.provider_definition
     capacity = definition.get("capacity")
@@ -103,6 +115,12 @@ def apply_registration(lifecycle: BackendLifecycle, result: RegistrationResult) 
     alias = definition.get("alias")
     if isinstance(alias, str) and alias and isinstance(lifecycle.driver, MockBackend):
         lifecycle.driver.model = alias
+    backend_config = definition.get("backend_config")
+    if isinstance(backend_config, dict):
+        lifecycle.driver.apply_config(backend_config)
+    if config_state is not None:
+        fp = definition.get("config_fingerprint")
+        config_state.applied_fingerprint = fp if isinstance(fp, str) else None
 
 
 async def emit_provider_status(
@@ -130,14 +148,15 @@ async def register_provider(
     """
     if lifecycle is None:
         lifecycle = make_lifecycle(client)
-    install_command_handlers(client, lifecycle)
+    config_state = ConfigState()
+    install_command_handlers(client, lifecycle, config_state)
     result = await client.register(
         provider_type=PROVIDER_TYPE,
         version=VERSION,
         port=client.settings.PROVIDER_PORT,
         hardware=FAKE_HARDWARE,
     )
-    apply_registration(lifecycle, result)
+    apply_registration(lifecycle, result, config_state)
     return result, lifecycle
 
 

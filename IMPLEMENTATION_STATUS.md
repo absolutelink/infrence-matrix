@@ -1,9 +1,10 @@
 # Inference Matrix — Implementation Status
 
 **Overhaul branch:** `litellm-architecture-overhaul`
-**Last updated:** 2026-10-04 (Phase 8 complete: gufo / halogen /
-halogen-flash provider ports — fake-driver-tested; hardware validation
-deferred)
+**Last updated:** 2026-10-04 (Phase 9 complete: admin Machines/
+Definitions CRUD + `provider.config.update` / fingerprint / cache-clear
+/ prune flow — fake-tested + live local validation; Phase 8 NPU
+pre-download deviation closed)
 
 This file tracks the litellm-based architecture overhaul (see
 [ARCHITECTURE.md](ARCHITECTURE.md)). Each phase lists its features with
@@ -23,7 +24,7 @@ starting a feature, read the linked protocol/doc first.
 | 6 | Scheduler + `/v1/responses` via litellm + SSE emitter + persistence | 🟡 In progress |
 | 7 | `/v1/chat/completions` + `/v1/models` + 501 stubs | ✅ Complete |
 | 8 | gufo / halogen / halogen-flash provider ports | ✅ Complete |
-| 9 | `provider.config.update` / fingerprint / cache-clear flow | ⬜ Pending |
+| 9 | `provider.config.update` / fingerprint / cache-clear flow | ✅ Complete |
 | 10 | Admin UI rework | ⬜ Pending |
 | 11 | Docs consolidation + full E2E validation | ⬜ Pending |
 
@@ -399,8 +400,12 @@ hardware in this environment); real-hardware validation is deferred.**
   stream generator (the generic `/v1` layer never recomputes usage).
 - NPU pins-file downloads (`_prepare_npu_models`) are surfaced as
   `resolve_npu_download_set()` + suffix maps in `npu.py`; the actual
-  per-file download wiring lands with Phase 9's config/update flow
-  (the driver only gates `HALOGEN_NPU_MODELS` on the probe today).
+  per-file download wiring **landed with Phase 9** (`driver.
+  _prepare_npu_models()` is called from `start()` when the probe
+  passes, `ensure_artifact`s each pinned file into
+  `MODELS_DIR/npu/<id>/` with the record's revision before spawn, and
+  failure degrades to omitting `HALOGEN_NPU_MODELS` — never a start
+  failure). [CLOSED]
 - `metrics.inference` (ARCHITECTURE.md §8, reserved frame kind) did
   **not** land in Phase 8 — the gufo rate gauges feed per-request
   `TokenUsageSample` persistence instead of the reserved always-on
@@ -408,18 +413,141 @@ hardware in this environment); real-hardware validation is deferred.**
 
 ---
 
-## Phase 9 — Config Update / Fingerprint / Cache ⬜
+## Phase 9 — Config Update / Fingerprint / Cache ✅
 
-- [ ] `provider.config.update` command → provider enters `initializing`:
-      drain+stop backend, recompute `config_fingerprint`, **auto-clear
-      prompt cache if changed** (`cache.clear` = prompt cache only, never
-      model files), download/update model artifacts, start backend,
-      scrape metadata, stop backend → `running`.
-- [ ] `storage.prune_unused` — delete orphaned files not referenced by
-      the active fingerprint.
-- [ ] Per-step failure states + progress reporting.
-- [ ] Admin calls `ensure_registered` on definition create/update so
-      aliases are warm before first use.
+**Admin:** `app/api/admin/machines.py`, `app/api/admin/definitions.py`,
+`app/api/admin/instances.py`, `app/services/config_update.py`,
+`app/api/ws.py` (connect-path heal), `app/services/presence_sweep.py`
+(sweep heal). **Provider lib:** `provider_lib/config_update.py`
+(shared `provider.config.update` / `cache.clear` /
+`storage.prune_unused` handlers + the `CACHE_DIR/prompt_cache/<fp>/`
+convention), `BackendDriver.apply_config` ABC hook +
+`resolved_artifacts` contract, `downloader.ensure_artifact` gained
+`revision` + `local_subdir`. **Docs:** `docs/ws-protocol.md` §4,
+`provider/README.md` ("Phase 9" section).
+
+- [x] `provider.config.update` command → provider enters `initializing`:
+      capacity adopt (no restart, before the gates), fingerprint compare
+      (noop ack on match — safely ackable under load), atomic drain
+      (`stop_if_idle()` NAKs `backend_in_use` + `retry_after` while in
+      flight), stop backend, **auto-clear
+      prompt cache only** (old fp dir + engine cache dirs; never model
+      files), `driver.apply_config`, start backend (artifact
+      downloads/`download.progress` flow), scrape `list_models()`, ack
+      `{"config_fingerprint", "capacity", "model_metadata",
+      "prompt_cache_deleted", "prompt_cache_bytes_freed"}`.
+      Per-step failure → NAK `{"step": "...", "error": "..."}` +
+      `provider.status error`.
+- [x] Admin push + persistence: PATCH `backend_config` or `capacity`
+      (provider-visible fields) pushes concurrently to all connected
+      instances
+      (300s timeout), updates `ProviderInstance.config_fingerprint` on
+      ok ack, persists discovered `model_metadata`
+      (`{"models": [...]}`) onto the definition; failed provider update
+      is reported in the PATCH body (`config_update_results`), not fatal
+      to the admin row. **Retry policy:** drain-refused only, 3 attempts,
+      10s apart (settings `CONFIG_UPDATE_*`); other failures reported
+      immediately.
+- [x] Stale-fingerprint **self-heal**: WS connect background task +
+      presence sweep compare the instance fingerprint to the definition's
+      and auto-push on mismatch **to the stale instance only**, under a
+      per-instance in-flight push guard (cheap no-op on match).
+- [x] `cache.clear` — prompt-cache dirs only; ack `{deleted,
+      bytes_freed}`, `dry_run` supported. Admin endpoint
+      `POST /admin/api/instances/{id}/cache/clear`.
+- [x] `storage.prune_unused` — deletes `MODELS_DIR` files not in
+      `driver.resolved_artifacts` (recorded during start; referenced
+      dirs protect subtrees); **refuses** when the reference set is empty
+      (never deletes blind); `dry_run` supported. Admin endpoint
+      `POST /admin/api/instances/{id}/storage/prune`.
+- [x] Admin CRUD: `POST/GET/PATCH/DELETE /admin/api/machines` (uid
+      immutable; DELETE refused 409 while instances attached) and
+      `/admin/api/definitions` (light admin-side validation:
+      `provider_type` ∈ PROVIDER_TYPES, capacity ≥ 1, vram/idle ≥ 0,
+      JSON-serializable `backend_config`; deep validation stays
+      provider-side; DELETE allowed only with **no** websocket-connected
+      instance, else 409 suggesting disable; offline instance rows
+      cascade-delete with the definition).
+- [x] `ensure_registered(alias)` called on definition create **and**
+      update so litellm aliases are warm before first use.
+- [x] All five providers wire `install_config_handlers` (mock/llama-cpp/
+      gufo/halogen/halogen-flash); gufo adds its `--cache-disk` dir and
+      halogen-flash adds `HALOGEN_CACHE_DIR` as `extra_cache_dirs`.
+- [x] NPU pre-download wiring for halogen-flash (closes Phase 8
+      deviation #4): pins planning → `ensure_artifact` per file into
+      `MODELS_DIR/npu/<id>/` before spawn; graceful omission on any
+      planning/download failure.
+- [x] Tests: admin 140 (31 new: `test_admin_machines.py`,
+      `test_admin_definitions.py`, `test_config_update_flow.py` —
+      includes a real-WS PATCH→frame→ack round-trip, drain-retry,
+      reconnect self-heal, capacity-only push, heal-stale-instance-only +
+      in-flight guard, explicit-null 422, provider_type-change refusal),
+      lib 71 (+23: `test_config_update.py`, `test_cache_clear.py`,
+      `test_prune.py`, `stop_if_idle` lifecycle tests), mock 11 (+3),
+      llama-cpp 31 (+2), gufo 36 (+2), halogen 40 (+2),
+      halogen-flash 101 (+4, NPU prep). All fake/local-tested; no real
+      hardware involved.
+- [x] Live validation 2026-10-04 (local uvicorn admin :8000 + mock
+      provider :8081, dev DB): register+connect → PATCH
+      `backend_config` (`delta_count` 3→7→5) observed over the real WS
+      (provider went initializing→running, acked new fingerprint, DB
+      instance fingerprint + definition `model_metadata` updated) →
+      `POST /v1/responses` still works and reflects the new config
+      (`output_tokens` tracks `delta_count`) → `cache.clear` dry-run +
+      real via the admin endpoint deleted only the prompt-cache dir
+      (`provider_config.json` untouched) → kill provider, PATCH while
+      down (no push), force the DB row stale, presence sweep healed it
+      back to the current fingerprint.
+
+### Phase 9 review fixes (2026-10-04)
+- **SF-1 (racy drain)**: `BackendLifecycle.stop_if_idle()` performs the
+  busy check + STOPPING transition atomically under the lifecycle lock
+  (stop body extracted to `_stop_locked()`; `BackendBusy` now carries
+  `in_flight`). `config_update` uses it — a `/v1` acquire can no longer
+  slip between the check and a SIGTERM under a live stream.
+- **SF-2 (capacity-only PATCH)**: the provider adopts a differing
+  `capacity` **before** the noop/drain gates (no restart; ack
+  `capacity_adopted`); the admin PATCH triggers a push on fingerprint
+  **or** capacity change. `idle_timeout_seconds` is NOT a push trigger —
+  the provider consumes no idle setting (admin-side reaper
+  `TODO(phase6-idle-reaper)`); documented.
+- **SF-3 (heal storm / fan-out)**: provider order swapped (noop check
+  before drain refusal — same-fp is always safely ackable); admin heal
+  pushes to the **stale instance only** (not the definition fan-out;
+  the PATCH flow keeps the fan-out); per-instance in-flight guard
+  (module-level `set` in `app/services/config_update.py` — single
+  uvicorn worker makes in-process authoritative; always cleared in a
+  `finally`).
+- **SF-4 (explicit null → 409)**: PATCH with explicit `null` on any
+  non-nullable column (`alias`, `provider_type`, `registration_token`,
+  etc.) is rejected with a clear 422 "field cannot be null"; the setattr
+  loop only applies validated non-null fields.
+- **N-1**: unused `_STEP_PRE_START` / `_STEP_STOP` constants removed.
+- **N-2**: `backend.stop` docs softened — the command has **no** forced
+  drain (in-flight streams release as the upstream closes); real drain
+  semantics are `provider.config.update` only.
+- **N-3**: PATCH changing `provider_type` while instances are attached →
+  409 (old containers would keep a silently broken binding).
+- **N-4**: `cache.clear` refuses while `backend_status == IN_USE`
+  (NAK `backend_in_use` / step `drain`) unless `force: true`; `dry_run`
+  always allowed. Admin endpoint accepts `force`.
+- **N-5**: prune reference matching realpath-normalizes both the
+  referenced set and walked paths (`..`/`//`/symlinked mounts can no
+  longer cause a live file to be deleted).
+- **N-8**: prune admin timeout raised to 300s (`PRUNE_TIMEOUT_SECONDS`).
+- **N-6 / N-7**: comments/doc notes only (transient double-PATCH
+  self-heals; fingerprint means "adopted", not "running").
+
+### Deviations
+- The Phase 9 checklist's "stop backend → `running`" final transition is
+  implemented as start→`running` (the stop happens before the apply);
+  the provider ends in `running` as intended.
+- `backend.metadata` (reserved event) was **not** used: discovered
+  metadata rides in the `provider.config.update` ack detail instead,
+  which keeps the flow request/response-ordered (no cross-frame race).
+- Config-update results are surfaced synchronously in the PATCH body;
+  there is no async job table (the provider has no DB and the admin stays
+  stateless-per-request; the self-heal covers missed pushes).
 
 ---
 

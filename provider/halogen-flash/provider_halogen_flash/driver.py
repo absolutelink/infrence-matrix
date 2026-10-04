@@ -51,7 +51,11 @@ from provider_halogen_flash.env import (
     resolve_ports,
 )
 from provider_halogen_flash.log_ring import CursorLogRing
-from provider_halogen_flash.npu import probe_npu
+from provider_halogen_flash.npu import (
+    load_npu_pins,
+    probe_npu,
+    resolve_npu_download_set,
+)
 from provider_halogen_flash.usage import calculate_usage
 
 logger = logging.getLogger("provider.halogen_flash")
@@ -89,11 +93,15 @@ class HalogenFlashBackend(BackendDriver):
         self._log_ring = CursorLogRing(_LOG_BUFFER_LINES)
         self._log_reader: asyncio.Task[None] | None = None
         self._client: httpx.AsyncClient | None = None
+        # Phase 9: local paths resolved during the last start (model,
+        # tokenizer, prepared NPU pins), used by storage.prune_unused.
+        self.resolved_artifacts: list[str] = []
 
     def apply_config(self, backend_config: dict[str, Any]) -> None:
         """Adopt a (possibly updated) backend_config before start."""
         self._config = backend_config or {}
         self._ports = resolve_ports(self._config, self._settings.MACHINE_UID)
+        self.resolved_artifacts = []
 
     @property
     def api_port(self) -> int:
@@ -157,6 +165,63 @@ class HalogenFlashBackend(BackendDriver):
         return list(requested)
 
     # ------------------------------------------------------------------
+    # NPU pre-download (Phase 9; closes the Phase 8 deferral)
+    # ------------------------------------------------------------------
+    async def _prepare_npu_models(self, npu_models: list[str] | None) -> list[str]:
+        """Download the pinned NPU small-model files for the gated ids.
+
+        Reads the image's pins file (``NPU_PINS_FILE``), plans the
+        download set via ``resolve_npu_download_set`` (shared
+        ``devices/`` programs included), and ``ensure_artifact``s each
+        file into ``MODELS_DIR/npu/<id>/`` before spawn (progress
+        events flow through the driver's progress callback).
+
+        Graceful by design: a missing/unparsable pins file, or any
+        planning/download error, logs and yields an empty list — the
+        requested pins are omitted and start proceeds without NPU
+        models. Never fails the boot.
+        """
+        if not npu_models:
+            return []
+        pins_file = self._settings.NPU_PINS_FILE
+        try:
+            records = await asyncio.to_thread(load_npu_pins, pins_file)
+            plan = resolve_npu_download_set(records, list(npu_models))
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "NPU pins planning failed (%s: %s); omitting npu pins",
+                pins_file,
+                exc,
+            )
+            return []
+        prepared: list[str] = []
+        for dir_id, (repo, revision, files) in sorted(plan.items()):
+            for path, _size, _sha in files:
+                try:
+                    local = await ensure_artifact(
+                        {"source": "hf", "repo": repo, "file": path},
+                        models_dir=self._settings.MODELS_DIR,
+                        progress_cb=self._progress_cb,
+                        revision=revision,
+                        local_subdir=f"npu/{dir_id}",
+                    )
+                except Exception as exc:  # noqa: BLE001 - never fail start
+                    logger.warning(
+                        "NPU artifact download failed (%s/%s): %s; omitting pins",
+                        repo,
+                        path,
+                        exc,
+                    )
+                    return []
+                prepared.append(local)
+        logger.info(
+            "NPU artifacts prepared: %d file(s) for %s",
+            len(prepared),
+            ", ".join(sorted(plan)),
+        )
+        return prepared
+
+    # ------------------------------------------------------------------
     # Artifact resolution
     # ------------------------------------------------------------------
     async def _resolve_artifact(self, descriptor: Any, kind: str) -> str:
@@ -200,8 +265,19 @@ class HalogenFlashBackend(BackendDriver):
         tokenizer = await self._resolve_artifact(
             self._config.get("tokenizer"), "tokenizer"
         )
+        self.resolved_artifacts = [checkpoint, tokenizer]
         api_port, engine_port = self._ports
         cache_dir = Path(self._settings.CACHE_DIR) / "halogen-flash"
+        npu_models = await self._npu_models_for_env()
+        if npu_models:
+            # Phase 9: pre-download the pinned NPU small-model files so
+            # the engine finds them locally at spawn. If the pins cannot
+            # be prepared, omit the pins entirely (graceful degradation).
+            prepared = await self._prepare_npu_models(npu_models)
+            if prepared:
+                self.resolved_artifacts.extend(prepared)
+            else:
+                npu_models = None
         env = build_env(
             self._config.get("options") or {},
             api_port=api_port,
@@ -209,7 +285,7 @@ class HalogenFlashBackend(BackendDriver):
             checkpoint_path=checkpoint,
             tokenizer_path=tokenizer,
             cache_dir=cache_dir,
-            npu_models=await self._npu_models_for_env(),
+            npu_models=npu_models,
         )
         cmd = build_argv(self._binary)
         logger.info(

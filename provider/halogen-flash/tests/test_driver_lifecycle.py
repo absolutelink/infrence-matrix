@@ -32,16 +32,39 @@ def _backend(
     tmp_path: Any,
     binary: str,
     artifacts: dict[str, str],
+    settings_kw: dict[str, Any] | None = None,
     **kw: Any,
 ) -> HalogenFlashBackend:
     npu_probe = kw.pop("npu_probe", lambda: NPU_UNAVAILABLE)
-    settings = make_settings(tmp_path, binary)
+    settings = make_settings(tmp_path, binary, **(settings_kw or {}))
     cfg: dict[str, Any] = {
         "model": {"path": artifacts["checkpoint"]},
         "tokenizer": {"path": artifacts["tokenizer"]},
     }
     cfg.update(kw)
     return HalogenFlashBackend(settings, cfg, npu_probe=npu_probe)
+
+
+NPU_PINS = """
+model qwen3-embedding-0.6b repo=acme/embed revision=v1
+file qwen3-embedding-0.6b embed.bin 10 aa
+model qwen3.5-2b repo=acme/nano revision=v2
+file qwen3.5-2b nano.bin 10 bb
+"""
+
+
+def _npu_settings(tmp_path: Any) -> dict[str, Any]:
+    """A pins file plus pre-placed local NPU artifacts (no downloads)."""
+    pins = tmp_path / "npu_pins.txt"
+    pins.write_text(NPU_PINS)
+    for dir_id, name in (
+        ("qwen3-embedding-0.6b", "embed.bin"),
+        ("qwen3.5-2b", "nano.bin"),
+    ):
+        p = tmp_path / "models" / "npu" / dir_id / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+    return {"NPU_PINS_FILE": str(pins)}
 
 
 async def test_start_healthy_running_via_lifecycle(
@@ -140,6 +163,7 @@ async def test_npu_env_set_when_probe_available(
         tmp_path,
         fake_flash_binary,
         local_artifacts,
+        settings_kw=_npu_settings(tmp_path),
         npu_probe=lambda: NPU_AVAILABLE,
         options={"npu_models": ["qwen3-embedding-0.6b", "qwen3.5-2b"]},
     )
@@ -147,6 +171,9 @@ async def test_npu_env_set_when_probe_available(
         await driver.start()
         recorded = json.loads((state_dir / "env.json").read_text())
         assert recorded["HALOGEN_NPU_MODELS"] == "qwen3-embedding-0.6b,qwen3.5-2b"
+        # Phase 9: the pinned files were pre-downloaded (resolved locally)
+        # and tracked in the prune reference set.
+        assert any("npu/qwen3.5-2b/nano.bin" in p for p in driver.resolved_artifacts)
     finally:
         await driver.aclose()
 
