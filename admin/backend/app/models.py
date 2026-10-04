@@ -15,7 +15,7 @@ The provider instance itself is stateless (no DB); it derives everything from
 env + the registration response, mirrored here by the admin.
 
 Auth model: trusted LAN. The registration_token and per-instance secret gate
-only the provider WebSocket. See docs/architecture.md.
+only the provider WebSocket. See the root ARCHITECTURE.md.
 """
 
 import uuid

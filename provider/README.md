@@ -1,16 +1,54 @@
-# Provider packages — Phase 4: backend lifecycle + /v1 surface
+# Provider Authoring Guide
+
+This is the guide to the **provider** side of Inference Matrix: the
+hardware-local containers that each own one inference backend. Architecture
+context: [../ARCHITECTURE.md](../ARCHITECTURE.md); the admin ⇄ provider
+wire protocol: [../docs/ws-protocol.md](../docs/ws-protocol.md).
 
 A **provider instance** runs on a hardware machine, owns a real inference
 backend as a subprocess (or fake, for the mock), and exposes:
 
 - An **OpenAI-compatible HTTP API on `PROVIDER_PORT`** (default 8081).
-  The admin's litellm client targets `http://<machine>:<PROVIDER_PORT>/v1/...`.
+  The admin's litellm client targets
+  `http://<machine.reachable_address()>:<PROVIDER_PORT>/v1/...`.
 - A **dial-out WebSocket** to the admin (`/provider/ws`) for lifecycle
-  commands/events (see `docs/ws-protocol.md`).
+  commands/events.
 
 `provider/lib/provider_lib` holds the generic machinery; each provider
-package (`provider/mock`, later `provider/llama-cpp`) implements the
-per-type driver.
+package (`provider/mock`, `provider/llama-cpp`, `provider/halogen`,
+`provider/halogen-flash`, `provider/gufo`) implements the per-type
+driver and overrides only what its backend does differently.
+
+## What you get from the library vs. what you implement
+
+| Provided by `provider_lib` | You implement per provider type |
+| --- | --- |
+| Registration + WS client (`admin_client.py`) | `BackendDriver` (start/stop/health/list_models/stream_*) |
+| Backend state machine + slot admission (`backend.py`) | Command/env construction for the real backend |
+| Provider-port FastAPI app + `/v1` surface (`app_factory.py`) | Translation of the backend's native output → spec |
+| Model downloader + progress events (`downloader.py`) | Artifact layout for your model files |
+| Metrics collectors (`metrics.py`) | Any provider-specific metric quirks |
+| Config fingerprint (`config.py`) | **Overrides** — e.g. halogen-flash `calculate_usage` |
+
+The goal: a new provider type is usually just a `BackendDriver` subclass
+plus a `main.py` that wires it into `BackendLifecycle` and
+`create_provider_app`. If only one behavior differs (e.g. usage
+normalization), override just that.
+
+## Writing a new provider type
+
+1. Create `provider/<type>/` as a uv workspace member (`pyproject.toml`
+   depending on `provider_lib`), add it to the root
+   `[tool.uv.workspace].members`.
+2. Implement a `BackendDriver` subclass (see next section).
+3. Add `main.py` mirroring `provider/mock/provider_mock/main.py`: build
+   the driver, wrap in `BackendLifecycle`, install WS command handlers,
+   register + connect, serve `create_provider_app(...)`.
+4. Set `PROVIDER_TYPE` for the package; the admin cross-checks it against
+   the registration token's definition.
+5. Add a `Dockerfile` and tests.
+6. Do **not** re-implement lifecycle/slot/WS semantics — they come from
+   the lib.
 
 ## BackendDriver (provider_lib/backend.py)
 
@@ -122,6 +160,21 @@ Mounted when `BackendOverrides.lifecycle` is set; otherwise 503.
 Slots are acquired **before** the `StreamingResponse` starts so
 busy/not-ready are real HTTP statuses; no slot leaks on early errors.
 
+## Overrides (BackendOverrides, app_factory.py)
+
+`create_provider_app(settings, overrides)` takes a `BackendOverrides`
+object. Unset hooks fall back to library defaults; set only what your
+provider type needs to change.
+
+| Override | Purpose |
+| --- | --- |
+| `provider_type` / `version` | Identity reported to the admin. |
+| `lifecycle` | The `BackendLifecycle` to mount the `/v1` surface on. Omit → 503. |
+| `calculate_usage` | `Callable[[Any], dict[str, int]]`. Compute spec usage when the backend does not report it spec-compliantly. **Canonical example: halogen-flash overrides this** because its backend's usage shape isn't OpenResponses-clean. |
+
+Keep overrides minimal — if `calculate_usage` is the only thing that
+differs, that's the only code your package adds beyond the driver.
+
 ## Mock provider (provider/mock)
 
 `MockBackend` implements the driver: instant start, canned
@@ -132,17 +185,7 @@ the admin WS command handlers (`backend.start`/`backend.stop` drive it)
 and the FastAPI `/v1` app. Boot is admin-driven: after connect the
 backend stays STOPPED.
 
-## Phase 5 (llama-cpp) checklist
-
-Implement `BackendDriver` over a managed `llama-server` subprocess:
-`start` spawns + waits for health, `stream_responses` proxies the
-upstream SSE and normalizes to spec events (usage in
-`response.completed`), `stop` terminates the process. Pass your driver
-into `BackendLifecycle` and mount via `BackendOverrides(lifecycle=...)`.
-All slot/state-machine semantics come for free — do not re-implement
-them in the package.
-
-## llama-cpp provider (provider/llama-cpp) — Phase 5
+## Worked example: llama-cpp provider (provider/llama-cpp)
 
 `LlamaCppBackend` (provider_llama_cpp/driver.py) manages one
 `llama-server` subprocess. Entry point `provider_llama_cpp.main` follows

@@ -1,144 +1,187 @@
-# FastAPI Project - Development
+# Inference Matrix — Development
 
-## Local Development
+Local development of the overhauled stack (`admin/` + `provider/`).
+Architecture: [ARCHITECTURE.md](ARCHITECTURE.md). Agent conventions:
+[AGENTS.md](AGENTS.md).
 
-For local development, run PostgreSQL with Docker Compose, and run the FastAPI and Vite development servers locally.
+Everything you need — **PostgreSQL, Redis, the admin, and the mock
+provider — runs locally via Docker Compose with no hardware.** For the
+fastest inner loop, run the admin (and/or a provider) as a local dev
+server against the Compose postgres + redis.
 
-Start the supporting services:
+## Prerequisites
+
+- Python 3.14 + [uv](https://docs.astral.sh/uv/)
+- [Bun](https://bun.sh/)
+- Docker + Docker Compose v2
+
+## Full stack via Compose
 
 ```bash
-docker compose up -d db
+docker compose up -d --build
 ```
 
-Then, from the `backend` directory, install the dependencies and prepare the database:
+| URL | What |
+| --- | --- |
+| http://localhost:8000/ | Swagger UI |
+| http://localhost:8000/openapi.json | OpenAPI schema |
+| http://localhost:8000/admin | React admin UI |
+| http://localhost:8000/admin/api/health | Health check |
+| http://localhost:8000/v1/... | Public inference API |
+
+Services: `postgres` (5432), `redis` (6379), `admin` (8000),
+`provider-mock` (8081). `compose.override.yml` exposes postgres/redis
+ports to the host and adds hot-reload watch for the admin;
+`compose.deploy.yml` adds Traefik TLS (see deployment.md).
+
+**The stack starts empty.** The mock provider cannot register until a
+Machine + ProviderDefinition exist (see Seeding below).
+
+### Seeding (until the admin UI CRUD lands — Phase 10)
+
+Create the Machine and a mock ProviderDefinition the mock provider can
+register against:
 
 ```bash
+docker compose exec -T postgres psql -U inference -d inference_matrix <<'SQL'
+INSERT INTO machines (id, uid, name, host, total_vram_bytes, hardware, created_at)
+VALUES (gen_random_uuid(), 'mock-machine-1', 'Mock Machine', 'provider-mock', 32000000000, '{}', now());
+
+INSERT INTO provider_definitions (id, alias, provider_type, backend_config,
+    vram_required_bytes, idle_timeout_seconds, capacity, registration_token,
+    model_metadata, enabled, status, created_at)
+VALUES (gen_random_uuid(), 'mock-model', 'mock', '{}',
+    8000000000, 300, 4, 'mock-registration-token',
+    '{}', true, 'stopped', now());
+SQL
+
+docker compose restart provider-mock   # provider registers on startup only
+```
+
+The admin reaches the mock provider via `machine.host` — use the Compose
+service name `provider-mock` (as in the snippet above). If you run the
+provider outside Compose (the `uv run` loop below), set `host` to
+`host.docker.internal` instead.
+
+Then:
+
+```bash
+curl -N http://localhost:8000/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "mock-model", "input": "Hello!", "stream": true}'
+```
+
+## Admin backend dev loop
+
+With postgres + redis up (`docker compose up -d postgres redis`):
+
+```bash
+cd admin/backend
 uv sync
-uv run bash scripts/prestart.sh
+uv run bash scripts/prestart.sh   # alembic upgrade head
+uv run fastapi dev                # http://localhost:8000
 ```
 
-Start the FastAPI development server:
+`fastapi dev` hot-reloads on changes in `admin/backend/app`.
+
+### Admin checks & tests
+
+From `admin/backend`:
 
 ```bash
-uv run fastapi dev
+uv run ruff check app
+uv run ruff format --check app
+uv run pytest tests/ -q
 ```
 
-In another terminal, from the project root, install the frontend dependencies and start the Vite development server:
+Tests require:
+- PostgreSQL **UTF8** database, `TEST_DATABASE_URL` (default
+  `postgresql+psycopg://postgres@localhost:5432/inference_matrix_test_utf8`).
+  The dev cluster's default DBs are SQL_ASCII — create the test DB once:
+  `docker compose exec postgres createdb -U inference inference_matrix_test_utf8`
+  (and point `TEST_DATABASE_URL` at `postgres` user or grant rights).
+- Redis DB 15: `TEST_REDIS_URL` (default `redis://localhost:6379/15`).
+- The background presence sweep is disabled in tests
+  (`INSTANCE_SWEEP_ENABLED=false`); `sweep_once` is exercised directly.
+
+## Provider dev loop
+
+Provider packages are uv workspace members. Run the mock provider locally
+against a local admin:
+
+```bash
+cd provider/mock
+MACHINE_UID=mock-machine-1 \
+PROVIDER_REGISTRATION_TOKEN=mock-registration-token \
+ADMIN_BASE_URL=http://localhost:8000 \
+CACHE_DIR=/tmp/im-cache MODELS_DIR=/tmp/im-models \
+uv run python -m provider_mock.main
+```
+
+Provider tests (from the repo root):
+
+```bash
+uv run --project provider/lib pytest provider/lib/tests -q
+uv run --project provider/mock pytest provider/mock/tests -q
+uv run --project provider/llama-cpp pytest provider/llama-cpp/tests -q
+```
+
+Real-hardware providers (llama-cpp etc.) need `LLAMA_SERVER_PATH` and GPU
+access — use the mock provider for hardware-free development.
+
+## Frontend dev loop
+
+From the repo root:
 
 ```bash
 bun install
-bun run dev
+bun run dev        # Vite at http://localhost:5173/admin/
 ```
 
-Now you can open these URLs:
+Vite proxies `/admin/api` and `/v1` to `http://localhost:8000` (see
+`admin/frontend/vite.config.ts`; `base: "/admin/"`). Run the admin
+backend alongside (fastapi dev) while working on the UI.
 
-Frontend development server: <http://localhost:5173>
+`admin/frontend/src/routeTree.gen.ts` is auto-generated by the TanStack
+Router plugin — never edit by hand. If routes 404 unexpectedly, delete it
+and restart Vite.
 
-Backend API: <http://localhost:8000>
+## API client generation
 
-Automatic interactive API documentation with Swagger UI: <http://localhost:8000/docs>
-
-The frontend development server uses the backend at `http://localhost:8000`, as configured in `frontend/.env`.
-
-### Frontend Served by FastAPI
-
-Build the frontend from the `frontend` directory:
+After any admin route/schema change:
 
 ```bash
-bun run build
+bash scripts/generate-client.sh
 ```
 
-The build is written to `backend/app/frontend` and served by FastAPI at <http://localhost:8000>. Rebuild the frontend after making frontend changes.
+Exports `app.openapi()` from `admin/backend` → `admin/frontend/openapi.json`
+→ regenerates `admin/frontend/src/client/` → runs frontend lint. Never
+hand-edit generated client files.
 
-## Full Stack with Docker Compose
+## Environment variables
 
-> **Warning — the Compose files in this repo are inconsistent and the commands in
-> this section are known-broken as written.** `compose.yml` defines the services
-> `postgres`, `frontend`, and `agent`. `compose.override.yml` (and
-> `compose.deploy.yml`) reference `db`, `adminer`, `backend`, `proxy`, and
-> `playwright`, which are **not** defined in the base. `db`/`adminer` have no
-> `image:` or `build:`, and `backend` points at `backend/Dockerfile`, which does
-> not exist. `docker compose -f compose.yml -f compose.override.yml config`
-> therefore fails, and the ports also collide (`frontend` and `backend` both map
-> `8000`; `agent` and `adminer` both map `8080`). These instructions are inherited
-> from the upstream full-stack template and have not been reconciled with the
-> renamed services. Until the Compose files are fixed, use the local
-> development workflow at the top of this file (`uv run fastapi dev` + `bun run
-> dev`) or build/run the single root `Dockerfile` directly.
+- `.env` (root, tracked): local defaults; compose interpolates from it.
+- Admin settings: `admin/backend/app/core/config.py` (Pydantic BaseSettings;
+  `POSTGRES_*`, `REDIS_URL`, `VERSION`, `INSTANCE_SWEEP_*`, CORS).
+- Provider settings: `provider/lib/provider_lib/config.py` (`MACHINE_UID`,
+  `PROVIDER_REGISTRATION_TOKEN`, `ADMIN_BASE_URL`, `PROVIDER_PORT`,
+  `CACHE_DIR`, `MODELS_DIR`, `METRICS_CATEGORIES`, `LLAMA_SERVER_PATH`).
+- Provider containers read env **at startup only** — recreate
+  (`docker compose up -d --force-recreate provider-mock`) to apply
+  changes.
 
-To run the backend and built frontend in Docker Compose:
+## Pre-commit hooks
+
+The project uses [prek](https://prek.j178.dev/) (pre-commit compatible).
 
 ```bash
-docker compose run --rm backend bash scripts/prestart.sh
-docker compose watch
+uv run prek install -f     # install git hook
+uv run prek run --all-files  # manual full run
 ```
 
-Now you can open these URLs:
+## Testing the public API
 
-Application, with the frontend and API served by FastAPI: <http://localhost:8000>
-
-Automatic interactive API documentation with Swagger UI: <http://localhost:8000/docs>
-
-Adminer, database web administration: <http://localhost:8080>
-
-Traefik UI, to see how the routes are being handled by the proxy: <http://localhost:8090>
-
-Stop a locally running FastAPI server before starting the Compose backend because both use port `8000`.
-
-**Note**: The first time you start the stack, it might take a minute for all the services to be ready. To monitor it, use `docker compose logs`, or `docker compose logs backend` for the backend service.
-
-## Docker Compose Files and Environment Variables
-
-The main `compose.yml` file contains the configuration shared by the whole stack. Docker Compose loads it automatically.
-
-The `compose.override.yml` file adds local development settings, such as mounting the source code as a volume. Docker Compose also loads it automatically and applies it on top of `compose.yml`.
-
-The `compose.deploy.yml` file contains the deployment-specific settings, including HTTPS and automatic certificate handling. It is explicitly combined with `compose.yml` when deploying the application.
-
-The backend reads local settings from the `.env` file. Docker Compose also uses it for variable interpolation and passes the settings each container needs.
-
-After changing variables, make sure you restart the stack:
-
-```bash
-docker compose watch
-```
-
-## The `.env` File
-
-The tracked `.env` file contains local development defaults, passwords, and other configuration. Its hostnames use `localhost` for processes running on your machine. Docker Compose overrides hostnames such as the database and SMTP server with their Compose service names.
-
-Do not store deployment secrets in `.env`. Configure them as described in the [FastAPI Cloud deployment guide](./deployment.md) or the [Docker Compose deployment guide](./deployment-docker-compose.md).
-
-## Pre-commit Hooks and Code Linting
-
-The project uses [prek](https://prek.j178.dev/), a modern alternative to [pre-commit](https://pre-commit.com/), for code linting and formatting.
-
-You can find a file `.pre-commit-config.yaml` with configurations at the root of the project.
-
-### Install `prek` to Run Automatically
-
-`prek` is already part of the dependencies of the project.
-
-From the project root, install the Git hook so that `prek` runs automatically before each commit:
-
-```bash
-uv run prek install -f
-```
-
-The `-f` flag forces the installation, in case there was already a `pre-commit` hook previously installed.
-
-Now whenever you try to commit, for example with:
-
-```bash
-git commit
-```
-
-`prek` will check and format the code you are about to commit. If it modifies any files, add those files to Git again before committing.
-
-### Run `prek` Manually
-
-You can also run `prek` manually on all files from the project root:
-
-```bash
-uv run prek run --all-files
-```
+OpenResponses compliance suite: see
+[docs/integration-testing.md](docs/integration-testing.md). Run it
+against a local admin (`http://localhost:8000/v1`) with the mock
+provider for fast feedback, or against the deployment.

@@ -1,77 +1,147 @@
-# FastAPI Project - Deployment
+# Inference Matrix — Deployment
 
-Deploy the project to [FastAPI Cloud](https://fastapicloud.com) with the included GitHub Actions workflow.
+Deployment of the overhauled stack. Architecture:
+[ARCHITECTURE.md](ARCHITECTURE.md). Local dev: [development.md](development.md).
 
-## Create the FastAPI Cloud Application
+## Topology
 
-Create an application in FastAPI Cloud and set its [Application Directory](https://fastapicloud.com/docs/builds-and-deployments/application-directory/) to `backend`.
+| Host | Runs | Access |
+| --- | --- | --- |
+| Application host (`core@10.100.2.100`) | `matrix-app` container (admin: FastAPI + built SPA), postgres, redis, Traefik | `docker` |
+| Provider host(s) (`core@10.100.2.111`) | provider instance containers (one per backend), each on its own `PROVIDER_PORT` | root-scoped `podman` |
+| Public | `https://matrix.thelink.family` → `/` Swagger, `/admin` WebUI, `/v1` inference, `/provider/ws` provider dial-in | Traefik TLS |
 
-Connect a PostgreSQL database using the [Neon](https://fastapicloud.com/docs/integrations/neon-integration/) or [Supabase](https://fastapicloud.com/docs/integrations/supabase-integration/) integration. Both integrations configure a `DATABASE_URL` secret automatically. You can also configure `DATABASE_URL` manually for another PostgreSQL provider.
+## Images
 
-## Configure the Application
+- **Admin**: built from the root `Dockerfile` — multi-stage (bun builds the
+  frontend → python 3.14 + uv installs `matrix-admin` only,
+  `--no-install-workspace`). Image: `ghcr.io/<owner>/matrix-app`.
+- **Providers**: each provider type builds from `provider/<type>/Dockerfile`
+  (e.g. `provider/mock/Dockerfile`, `provider/llama-cpp/Dockerfile`).
+  Real-engine images layer the backend binary (llama-server, halogen, gufo)
+  onto the provider package.
 
-### Environment Variables
+CI (`build-and-push.yml`) builds and pushes on push to `main`/`develop` and
+version tags.
 
-Add these required [environment variables](https://fastapicloud.com/docs/builds-and-deployments/environment-variables/) to the FastAPI Cloud application:
+## Deploy order (IMPORTANT — version hard-fail)
 
-* `PROJECT_NAME`: The name of the project, used in the API documentation.
-* `FRONTEND_HOST`: The public URL of the application, such as the generated `https://your-app.fastapicloud.dev` URL or a custom domain.
+Provider registrations are **rejected with 409** unless the provider
+`version` exactly matches the admin `VERSION` (baked from the git commit id
+at build time). Therefore:
 
-To enable Sentry, configure `SENTRY_DSN`.
+1. **Deploy the admin first.**
+2. Then recreate **every** provider instance with the matching image.
 
-### Secrets
+A mismatched provider refuses to start with a clear error rather than
+running inconsistent code. This is an accepted constraint of the
+solo-operator, fresh-deploy model.
 
-Add these required values and mark them as secrets:
-
-* `DATABASE_URL`: The PostgreSQL connection URL, configured automatically when using a database integration.
-
-## Configure Continuous Deployment
-
-The included `.github/workflows/deploy.yml` workflow builds the frontend, prepares the database, and deploys the application whenever changes are pushed to `master`. You can also run it manually from the **Actions** tab.
-
-Log in to FastAPI Cloud and configure the [deploy token](https://fastapicloud.com/docs/advanced-features/deploy-tokens/) and application ID as GitHub repository secrets:
+## Application host (admin)
 
 ```bash
-uv run fastapi login
-uv run fastapi cloud setup-ci --secrets-only --app-id <your-app-id>
+ssh core@10.100.2.100
+cd <matrix-deploy-dir>
+docker compose -f compose.yml -f compose.deploy.yml pull
+DOMAIN=matrix.thelink.family \
+POSTGRES_PASSWORD=<...> \
+docker compose -f compose.yml -f compose.deploy.yml up -d
 ```
 
-If the GitHub CLI is installed and authenticated, the command configures `FASTAPI_CLOUD_TOKEN` and `FASTAPI_CLOUD_APP_ID` automatically. Otherwise, it prints the values so you can add them in your repository under **Settings** > **Secrets and variables** > **Actions**.
+- `compose.deploy.yml` adds the Traefik v3 proxy with Let's Encrypt TLS
+  and routes `Host(DOMAIN)` to the admin container.
+- Container startup runs `scripts/prestart.sh` (alembic migrations) via
+  the entrypoint before serving.
+- The admin runs a **single uvicorn worker** (the scheduler is in-process;
+  see ARCHITECTURE.md §6). Do not scale workers without the Redis-queue
+  swap.
+- Healthcheck: `GET /admin/api/health`.
 
-The workflow runs database migrations before deploying. In the repository's **Settings** > **Secrets and variables** > **Actions** page, add this repository variable:
+Verify:
+```bash
+curl -fsS https://matrix.thelink.family/admin/api/health
+curl -fsS https://matrix.thelink.family/openapi.json >/dev/null && echo "schema ok"
+docker logs matrix-app --tail 50
+```
 
-* `PROJECT_NAME`
+## Provider host(s)
 
-Add this repository secret:
+Provider instances run in **root's Podman space** on `core@10.100.2.111`
+(quadlet/systemd or `podman run`). Each instance needs:
 
-* `DATABASE_URL`
+```
+MACHINE_UID=<machine uid pre-created in the admin UI>
+PROVIDER_REGISTRATION_TOKEN=<token of the provider definition>
+ADMIN_BASE_URL=https://matrix.thelink.family
+PROVIDER_PORT=8081            # unique per machine per instance
+CACHE_DIR=/cache              # prompt cache + provider_config.json
+MODELS_DIR=/models            # model artifacts
+METRICS_CATEGORIES="gpu_usage vram os_ram cpu storage"   # no 'inference'
+LLAMA_SERVER_PATH=...         # for llama-cpp; env-only, never in backend_config
+```
 
-Use the same values configured in FastAPI Cloud. For `DATABASE_URL`, use the connection URL from your database provider. The database must be reachable from GitHub-hosted runners so the preparation step can connect to it.
+Example (podman):
+```bash
+ssh core@10.100.2.111
+sudo podman pull ghcr.io/<owner>/provider-llama-cpp:<version>
+sudo podman run -d --name provider-llama-cpp \
+  --device /dev/dri --device /dev/kfd \
+  -e MACHINE_UID=matrix-1 \
+  -e PROVIDER_REGISTRATION_TOKEN=<token> \
+  -e ADMIN_BASE_URL=https://matrix.thelink.family \
+  -e PROVIDER_PORT=8081 \
+  -e CACHE_DIR=/cache -e MODELS_DIR=/models \
+  -v provider_cache:/cache -v provider_models:/models \
+  ghcr.io/<owner>/provider-llama-cpp:<version>
+```
 
-The deployment workflow performs these steps:
+- The provider registers at startup, then **dials out** to
+  `wss://matrix.thelink.family/provider/ws` — no inbound port to the
+  provider host is required for control (only the `PROVIDER_PORT` must be
+  reachable from the admin for litellm's HTTP calls).
+- Providers read env at startup only; to change config, recreate the
+  container (`podman rm -f` + `run`, or `docker compose up -d
+  --force-recreate provider-<type>` where Compose is used).
+- The admin assigns machine-level metrics ownership and drives
+  `backend.start`/`backend.stop` over the WS as requests arrive.
 
-1. Installs and builds the frontend into `backend/app/frontend`.
-2. Runs `backend/scripts/prestart.sh` to apply database migrations.
-3. Deploys the project with `uv run fastapi deploy`.
+## Database
 
-## URLs
+- PostgreSQL 16. Schema applied by the squashed initial migration at
+  prestart. Fresh install only — the overhaul does not migrate the old
+  schema (backwards compatibility is intentionally not supported).
+- Before any upgrade that touches the schema, back up the DB (see the
+  backup-restore skill).
 
-Replace `your-app.fastapicloud.dev` with the URL of your FastAPI Cloud application.
+## Redis
 
-Application (frontend and API): `https://your-app.fastapicloud.dev`
+- Redis 7. Holds WS secrets/epochs/presence, scheduler mirrors, VRAM
+  ledger, metrics-ownership leases. All keys are TTL-bounded so a Redis
+  flush self-heals from Postgres + fresh provider registrations (config
+  itself is never lost — it's in Postgres). Redis must be reachable by the
+  admin.
 
-Interactive API docs: `https://your-app.fastapicloud.dev/docs`
+## Security model — trusted LAN
 
-## Docker Compose
+`/admin/api/*` and `/v1/*` are **unauthenticated**. Do not expose them
+beyond a trusted network / reverse proxy without adding auth first. The
+only secrets are the per-definition `registration_token` (plaintext in
+provider env) and the per-instance WS secret (Redis). Token rotation is
+manual (edit the definition, redeploy the provider). See ARCHITECTURE.md
+§12.
 
-For deployment to your own server, see the [Docker Compose deployment guide](./deployment-docker-compose.md).
+## Operational notes
 
-## GitHub Repository Automation
-
-Install the following GitHub Apps to enable the included repository automation:
-
-* [Latest Changes](https://github.com/apps/latest-changes) updates `release-notes.md` when a pull request is merged.
-* [PR Push](https://github.com/apps/pr-push) lets the pre-commit workflow push automated fixes to pull request branches.
-* [PR Submit](https://github.com/apps/pr-submit) lets the **Bump pre-commit hooks** and **Prepare Release** workflows create pull requests.
-
-To publish code coverage with [Smokeshow](https://github.com/samuelcolvin/smokeshow), add `SMOKESHOW_AUTH_KEY` as a repository secret.
+- **Version drift after a partial deploy:** every mismatched provider 409s
+  on registration until updated. Check `docker logs` / `podman logs` for
+  the version-mismatch error and pull the matching tag.
+- **Provider host reachability:** the admin must resolve `machine.host` and
+  open `PROVIDER_PORT`. Use a DNS name or IP that works from the admin
+  container's network.
+- **VRAM over-provisioning:** admission is VRAM-budgeted per machine
+  (`Machine.total_vram_bytes` vs `vram_required_bytes`). Idle-backend
+  eviction to free VRAM is not yet implemented (Phase 6 TODO) — requests
+  wait rather than evict. Size `total_vram_bytes` honestly.
+- **Cold starts:** a request for a stopped backend pays the boot time
+  inside `scheduler.acquire`; SSE keepalive during boot is a Phase 6 TODO —
+  ensure the Traefik/proxy read timeout exceeds your worst-case boot.

@@ -31,8 +31,10 @@ For this workflow, hand the scoped fix to a **`general` subagent** using the
 task tool. Give it a self-contained prompt with:
 
 1. Exact paths, call chain, observed failure, expected result, and explicit
-   scope boundaries. Include relevant `AGENTS.md` invariants (especially lease
-   ownership, upstream close, agent process identity, and generated files).
+   scope boundaries. Include relevant `AGENTS.md` invariants (especially
+   slot release on upstream connection close, admin scheduler release in a
+   cancellation-safe `finally`, provider instance process identity, the
+   admin-owned `resp_<uuid>`, and generated files).
 2. Required cancellation/error/resource-cleanup behavior and how to preserve
    existing semantics. State which behavior is *not yet proven* if diagnosis is
    uncertain.
@@ -49,28 +51,30 @@ that instruction. Do not launch parallel agents just to accelerate the cycle.
 
 - Read the *actual diff*, not only the agent summary. Trace the production
   caller as well as the helper under test; look for early break, disconnect,
-  concurrent cancellation, timeouts, resource/slot/lease release, and response
+  concurrent cancellation, timeouts, resource/slot release, and response
   framing. Check that failures keep their original type/status and that
   bounded queues retain backpressure.
 - Challenge assumptions with evidence. In the C3 cycle, local tests proved
   `wait_for(anext())` truncated an async generator, but a 48-second
   **client-visible** gap did not prove an idle upstream body read: it could
-  precede agent response headers or consist of discarded upstream comments.
+   precede provider response headers or consist of discarded upstream comments.
   Correct the diagnosis when observations disagree.
 - Strengthen missing *meaningful* tests and fix review findings, or send the
   agent a focused follow-up. Where safe, demonstrate that the regression test
   fails on the prior implementation. Confirm prompt/JSON shapes used by tests
   and probes against the real API schema.
 - Run the relevant checks once after the final changes. Examples:
-  - Backend (workdir `backend/`): `uv run ruff check app`,
+  - Admin (workdir `admin/backend/`): `uv run ruff check app`,
     `uv run ruff format --check app`, `uv run pytest tests/ -q --tb=short`.
     Check touched test files with Ruff too; `ruff ... app` does not include them.
-  - Agent (workdir `agent/`): use the environment variables documented in
-    `AGENTS.md` for tests, and run Ruff on touched agent files.
-  - Frontend: run relevant build/lint checks. Backend **route/schema** changes
+  - Provider packages (repo root): `uv run --project provider/lib pytest
+    provider/lib/tests -q` (same for `provider/mock`, `provider/llama-cpp`),
+    and Ruff on touched provider files.
+  - Frontend: run relevant build/lint checks. Admin **route/schema** changes
     require `bash scripts/generate-client.sh`; never edit generated files.
   - Database changes: apply migrations before DB-backed tests as documented in
-    `AGENTS.md`. Never run destructive `scripts/test.sh` on a shared database.
+    `AGENTS.md` (`admin/backend/scripts/prestart.sh`). Never run destructive
+    `scripts/test.sh` on a shared database.
 - Inspect `git diff --check` and `git status` at handoff. Do not commit unless
   the user explicitly asks. Provide a **concise commit message in a fenced
   code block** when the change is ready for the user to commit/deploy.

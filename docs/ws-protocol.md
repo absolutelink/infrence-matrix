@@ -1,17 +1,18 @@
-# Inference Matrix — Admin ⇄ Provider Wire Protocol (Phase 3)
+# Inference Matrix — Admin ⇄ Provider Wire Protocol
 
 This document specifies the registration handshake and the provider
 WebSocket protocol between a **provider instance** (hardware-local
-container: `provider/mock`, later `provider/llama-cpp`, etc.) and the
-**admin** (`admin/backend`, the stateless broker).
+container: `provider/mock`, `provider/llama-cpp`, `provider/halogen`,
+`provider/halogen-flash`, `provider/gufo`) and the **admin**
+(`admin/backend`, the stateless broker).
 
 Auth model: **trusted LAN**. The registration token and the per-instance
 secret gate only the provider WebSocket and the registration endpoint.
 `/admin/api` and `/v1` are unauthenticated by design.
 
-Later phases add inference-path commands (backend boot args, cache clear,
-metrics assignment payloads, etc.); the frame envelope and the
-registration/connection flow below are stable.
+The frame envelope, registration/connection flow, and the commands/events
+below are the live protocol. New command kinds are added here as they land
+(see `IMPLEMENTATION_STATUS.md` for what's implemented vs. reserved).
 
 ---
 
@@ -207,17 +208,24 @@ key is **not** deleted.
 
 ---
 
-## 4. Frame catalog (Phase 3 scope)
+## 4. Frame catalog
 
 ### Provider → Admin (events)
 
-Events do **not** require an ack in Phase 3; the admin persists them.
+Events do **not** require an ack; the admin persists/acts on them.
 
-| type | payload | handling |
-| --- | --- | --- |
-| `ping` | `{}` | Admin replies `pong` with `reply_to = ping.id` (reply direction: admin → provider). |
-| `provider.status` | `{"instance_status": "...", "backend_status": "...", "error_message": "..."}` | Updates `ProviderInstance.instance_status` / `backend_status` / `error_message`, `last_seen=now`. |
-| `backend.status` | `{"backend_status": "..." (or "status"), "error_message": "..."}` | Updates `ProviderInstance.backend_status` (+ optional error), `last_seen=now`. |
+| type | payload | status | handling |
+| --- | --- | --- | --- |
+| `ping` | `{}` | Live | Admin replies `pong` with `reply_to = ping.id` (reply direction: admin → provider). |
+| `provider.status` | `{"instance_status": "...", "backend_status": "...", "error_message": "..."}` | Live | Updates `ProviderInstance.instance_status` / `backend_status` / `error_message`, `last_seen=now`. |
+| `backend.status` | `{"backend_status": "..." (or "status"), "error_message": "..."}` | Live | Updates `ProviderInstance.backend_status` (+ optional error), `last_seen=now`. |
+| `metrics.machine` | machine-level snapshot (vram/gpu_usage/os_ram/cpu/storage) for assigned resources only | Live | Persisted to Redis `im:metrics:machine:{machine_uid}`; refreshes the ownership lease. Emitted by `MachineMetricsEmitter` while owned. |
+| `download.progress` | `{filename, progress_percent, bytes_downloaded, total_bytes, speed_mbps, phase}` | Live | Emitted by `provider_lib.downloader` (throttled). |
+| `backend.logs` | `{stream, line}` (cursor/ring in llama-cpp) | Live | Surfaced to the admin UI. |
+| `metrics.inference` | available/max slots, token speed, prompt-processing speed, in-flight | Reserved (defined in `FrameKind`, not yet emitted) | Always-on per-instance telemetry; lands with Phase 6/7. |
+| `backend.boot_requested` | `{}` | Reserved | Observability only; boot is admin-driven (scheduler sends `backend.start`). |
+| `provider.logs` | provider-instance-level log lines | Reserved | Lands with the UI/logging phase. |
+| `backend.metadata` | model metadata scraped from the backend | Reserved | Persisted to `ProviderDefinition.model_metadata` on init (Phase 9). |
 
 `instance_status` ∈ `registering|initializing|running|unhealthy|error|disconnected`
 (`InstanceStatusValue`).
@@ -236,21 +244,23 @@ Commands carry an `id`; the provider **must** reply with a frame of
 ```
 
 The admin's `ConnectionManager.send_command(instance_id, type, payload,
-timeout)` sends the command and awaits the matching ack.
+timeout)` sends the command and awaits the matching ack (default 30s).
 
-| type | payload (Phase 3) | notes |
-| --- | --- | --- |
-| `backend.start` | `{}` | Provider handler awaits `BackendLifecycle.start()` (STOPPED → STARTING → RUNNING with `backend.status` per transition) and acks ok with `detail.capacity`. |
-| `backend.stop` | `{}` | Provider handler awaits `BackendLifecycle.stop()` (→ STOPPING → STOPPED, emitted) and acks ok. |
+| type | payload | status | notes |
+| --- | --- | --- | --- |
+| `backend.start` | `{}` | Live | Provider awaits `BackendLifecycle.start()` (STOPPED → STARTING → RUNNING with `backend.status` per transition) and acks ok with `detail.capacity`. |
+| `backend.stop` | `{}` | Live | Provider awaits `BackendLifecycle.stop()` (→ STOPPING → STOPPED, emitted) and acks ok. **Drain semantics**: refuse (nak) while `in_use`; admin retries. |
+| `backend.restart` | `{}` | Reserved | Stop + start. |
+| `provider.initialize` | `{}` | Reserved | Run the full init lifecycle (see `ARCHITECTURE.md` §8 / Phase 9). |
+| `provider.config.update` | new `backend_config` JSON | Reserved | Triggers init: drain+stop, recompute fingerprint, auto-clear cache if changed, download/update artifacts, start, scrape metadata, stop → running (Phase 9). |
+| `metrics.assign` | resource list (GPU UUIDs / categories) | Live (Phase 5) | Grant machine-level metrics ownership; admin `assign_ownership` sends it, provider starts its emitter. Carries epoch. |
+| `metrics.unassign` | resource list | Provider handler live; admin send not yet wired (ownership currently lapses via Redis lease expiry) | Revoke machine-level metrics ownership. |
+| `metrics.category.start` | category name | Reserved | Enable a `METRICS_CATEGORIES` category. |
+| `cache.clear` | `{}` | Reserved | **Prompt-cache files only** — never model files (Phase 9). |
+| `storage.prune_unused` | `{}` | Reserved | Delete orphaned files not referenced by the active fingerprint (Phase 9). |
 
-Phase 4 (provider lifecycle + /v1 surface) is documented in
-`provider/README.md`: the `BackendDriver` interface, the lifecycle state
-machine, slot admission, and the release-on-upstream-close invariant.
-
-Other command kinds (`backend.restart`, `provider.initialize`,
-`provider.config.update`, `metrics.assign`, `cache.clear`,
-`storage.prune_unused`, ...) are reserved in `FrameKind` for later
-phases and are not exercised yet.
+The provider lifecycle, `BackendDriver` interface, slot admission, and the
+release-on-upstream-close invariant are documented in `provider/README.md`.
 
 ### Admin → Provider (informational)
 

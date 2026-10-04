@@ -1,390 +1,114 @@
 # Inference Matrix
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Docker Compose](https://github.com/your-org/inference-matrix/actions/workflows/docker-compose.yml/badge.svg)](https://github.com/your-org/inference-matrix/actions)
+**OpenAI-compatible inference broker for local GGUF models, with a
+hardware-local provider architecture and a full admin WebUI.**
 
-**OpenAI API-compatible inference server for local GGUF models with full WebUI management**
-
-Inference Matrix provides a complete OpenAI API-compatible interface that routes inference requests to llama.cpp servers. Manage local models, download from HuggingFace/ModelScope, monitor GPU usage, and maintain conversation history - all through a modern WebUI.
+Inference Matrix routes OpenAI-compatible requests to inference backends
+(llama.cpp, halogen, halogen-flash, gufo) running on one or more
+machines, scheduling boot/shutdown around VRAM capacity and tracking
+conversations server-side. The admin is a single container; each provider
+instance is a hardware-local container that owns exactly one backend.
 
 ![Dashboard](img/dashboard.png)
 
-## Key Features
+## How it works
 
-### 🚀 OpenAI API Compatible
+```
+Client ──/v1──▶ Admin (FastAPI + litellm + Redis + Postgres)
+                  │  scheduler: FIFO + VRAM admission
+                  │  WS commands ↓ / events ↑
+                  ▼
+              Provider instance (owns 1 backend, serves spec-clean /v1 on :8081)
+                  ▼
+              llama-server / halogen / halogen-flash / gufo
+```
 
-Drop-in replacement for OpenAI API with full compatibility:
-- `/v1/models` - List available models
-- `/v1/chat/completions` - Chat completions with SSE streaming
-- `/v1/completions` - Legacy completions
-- `/v1/embeddings` - Text embeddings
-- `/v1/responses` - Advanced Responses API with tree conversations
-- `/v1/files` - File management
-- `/v1/batches` - Batch processing
-- `/v1/audio/*` - Transcription, translation, and speech
+- **Admin** — client-facing API, conversation store, scheduler, provider
+  registry, and the admin UI. Drives inference with the
+  [litellm](https://litellm.ai) SDK and knows nothing provider-specific.
+- **Provider instance** — hardware-local. Boots/monitors/stops its
+  backend, normalizes the backend's API to the OpenAI/OpenResponses spec
+  on its own port, and streams metrics/logs/events to the admin over a
+  WebSocket it dials itself (works behind NAT).
+- **Machine** — a host pre-registered in the admin with a UID and VRAM
+  capacity; the scheduler uses it to avoid over-provisioning.
 
-### 🤖 Local Model Management
+See **[ARCHITECTURE.md](ARCHITECTURE.md)** for the full design and
+**[docs/ws-protocol.md](docs/ws-protocol.md)** for the admin ⇄ provider
+protocol.
 
-- **Download models** from HuggingFace and ModelScope
-- **GGUF format support** (optimized for llama.cpp)
-- **Progress tracking** with pause/resume
-- **Auto-validation** after download
-- **Full metadata** extraction (architecture, capabilities, benchmarks)
+## Public API
 
-### ⚡ High-Performance Inference
+| Endpoint | Status |
+| --- | --- |
+| `POST /v1/responses` | Supported — streaming + non-streaming, `previous_response_id` chaining, tools |
+| `POST /v1/chat/completions` | Planned (Phase 7) |
+| `GET /v1/models` | Planned (Phase 7) — from provider definitions |
+| `GET /` | Swagger UI |
+| `GET /openapi.json` | OpenAPI schema |
 
-- **llama.cpp backend** with llama-server subprocess management
-- **GPU acceleration** (CUDA, Metal, Vulkan) with auto-detection
-- **Auto start/stop** servers based on demand
-- **Prompt caching** with hybrid tracking
-- **Multiple models** running simultaneously
+Other OpenAI endpoints (embeddings, legacy completions, files, batches,
+audio, rerank, moderations, decisions) currently return `501 Not
+Implemented` — see Accepted Regressions in
+[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
 
-### 🎯 WebUI Dashboard
+## Quick start (local, no hardware)
 
-- **Model management** - Download, load, unload, delete
-- **Real-time monitoring** - VRAM usage, tokens/sec, queue depth
-- **GPU configuration** - Per-model GPU layer settings
-- **Conversation history** - Tree-structured for /v1/responses
-
-### 💾 Data Persistence
-
-- **PostgreSQL** for metadata storage
-- **Tree-structured conversations** for Responses API
-- **OpenAI `prompt_cache_key` pass-through** to engines (per-process caching)
-
-> **Backup is `pg_dump` only.** There is no `app.services.backup` module and no
-> in-app backup/restore feature; see the corrected procedure in
-> `docs/user-guide.md` → Backup & Restore.
->
-> **Prompt cache is metadata-only and currently dormant.** The `prompt_cache`
-> table exists but no live route writes to it — the backend `cache.py` and
-> `llama_server.py` modules that would are dead code (see AGENTS.md). Actual
-> prompt caching is handled inside each engine process, not by the broker.
-
-### 🔒 Security
-
-There is **no authentication anywhere** in the broker or the agent. Any network
-client that can reach the ports can register agents, start/stop servers, forward
-arbitrary commands, and read/write files. Both are trusted purely by network
-position — firewall them and never expose the agent directly. See
-`docs/architecture.md` → Security Considerations for the full list of exposed
-surfaces.
-
-## Quick Start
-
-### 1. Clone and Configure
+Requires [Docker Compose](https://docs.docker.com/compose/) and
+[Bun](https://bun.sh/).
 
 ```bash
-git clone https://github.com/your-org/inference-matrix.git
-cd inference-matrix
-cp .env.example .env
+# Bring up postgres + redis + admin + mock provider
+docker compose up -d --build
+
+# Admin UI        -> http://localhost:8000/admin
+# Swagger UI      -> http://localhost:8000/
+# OpenAPI schema  -> http://localhost:8000/openapi.json
 ```
 
-Edit `.env` with your settings:
-```bash
-POSTGRES_PASSWORD=your_secure_password
-DEFAULT_GPU_LAYERS=35
-```
-
-> The broker builds its database URL from `POSTGRES_USER` / `POSTGRES_PASSWORD` /
-> `POSTGRES_DB` / `POSTGRES_HOST` / `POSTGRES_PORT` (`backend/app/core/config.py`).
-> A single `DATABASE_URL` is **ignored** (`extra="ignore"`), and `MODELS_PATH` /
-> `FILES_PATH` / `CACHE_PATH` default to absolute in-container paths
-> (`/models`, `/files`, `/cache`) that must be volume-mounted, not set to host
-> paths. See the Compose caveat below.
-
-### 2. Start services
-
-> **Caveat: the Compose stack in this repo does not currently come up as written.**
-> `compose.yml` names its services `postgres`/`frontend`/`agent`, while
-> `compose.override.yml` and `compose.deploy.yml` reference `db`/`backend`/
-> `adminer`/`proxy` (with a non-existent `backend/Dockerfile`) and collide on
-> ports 8000/8080. `docker compose up -d` will fail until these are reconciled.
-> For now, run the backend and frontend locally (see `development.md`) or build
-> and run the single root `Dockerfile`.
-
-### 3. Access the application
-
-- **WebUI**: http://localhost:5173 (frontend dev server)
-- **API**: http://localhost:8000
-- **API Docs**: http://localhost:8000/docs
-
-> **Note**: During local development, the frontend runs on port 5173 with hot reload enabled. In production deployments, the frontend is served by the backend on port 8000.
-
-### 4. Download your first model
-
-1. Open WebUI at http://localhost:5173
-2. Navigate to **Models**
-3. Click **Download Model**
-4. Enter HuggingFace repo: `TheBloke/Llama-2-7B-Chat-GGUF`
-5. Select file: `llama-2-7b-chat.Q4_K_M.gguf`
-6. Click **Download**
-
-### 5. Make your first API call
+The stack starts empty: the mock provider cannot register until a Machine
+(uid `mock-machine-1`) and a `mock` ProviderDefinition (registration token
+`mock-registration-token`) exist. Create them via the admin UI once
+Machine/Definition CRUD lands (Phase 10); until then, seed with a `psql`
+insert (see development.md § Seeding for a ready-made snippet), then
+restart the mock provider container:
 
 ```bash
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "llama-2-7b-chat.Q4_K_M.gguf",
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'
+docker compose restart provider-mock
 ```
-
-Or use with OpenAI SDK:
-```python
-from openai import OpenAI
-
-client = OpenAI(
-    base_url="http://localhost:8000/v1",
-    api_key="not-needed"
-)
-
-response = client.chat.completions.create(
-    model="llama-2-7b-chat.Q4_K_M.gguf",
-    messages=[{"role": "user", "content": "Hello!"}]
-)
-print(response.choices[0].message.content)
-```
-
-## Documentation
-
-- **[Architecture](docs/architecture.md)** - System design and components
-- **[API Reference](docs/api-endpoints.md)** - Complete API specification
-- **[Deployment Guide](docs/deployment.md)** - Production deployment with Docker
-- **[User Guide](docs/user-guide.md)** - WebUI usage and examples
-- **[Models Reference](docs/models.md)** - Database schema and models
-
-## Technology Stack
-
-### Backend
-- **FastAPI** - Modern Python web framework
-- **SQLModel** - SQLAlchemy + Pydantic ORM
-- **PostgreSQL** - Relational database
-- **llama.cpp** - Efficient LLM inference
-
-### Frontend
-- **React** - UI framework
-- **TypeScript** - Type safety
-- **shadcn/ui** - Component library
-- **Tailwind CSS** - Styling
-
-### Infrastructure
-- **Docker Compose** - Container orchestration
-- **Traefik** - Reverse proxy (optional)
-- **Mailpit** - Email testing (development)
-
-## Model Support
-
-### Supported Formats
-- **GGUF only** (llama.cpp native format)
-
-### Supported Quantizations
-- Q2_K through Q8_0
-- Q4_K_S, Q4_K_M (recommended)
-- Q5_K_S, Q5_K_M
-- Q6_K, Q8_0
-- F16, F32, BF16
-
-### Download Sources
-- **HuggingFace Hub** (primary)
-- **ModelScope** (secondary)
-- Extensible architecture for more sources
-
-### Recommended Models
-- **Llama 3.x** - `bartowski/Llama-3-8B-Instruct-GGUF`
-- **Mistral** - `TheBloke/Mistral-7B-Instruct-v0.2-GGUF`
-- **Qwen** - `Qwen/Qwen-7B-Chat-GGUF`
-- **Phi-3** - `TheBloke/Phi-3-mini-4k-instruct-GGUF`
-
-## GPU Support
-
-### NVIDIA (CUDA)
-- Requires CUDA drivers and toolkit
-- Auto-detected and configured
-- Recommended: 35-50 GPU layers
-
-### Apple Silicon (Metal)
-- Built-in support on M1/M2/M3
-- No additional configuration needed
-- Recommended: 25-50 GPU layers
-
-### AMD/Intel (Vulkan)
-- Requires Vulkan drivers
-- Cross-platform support
-- Performance varies by GPU
-
-## Performance Tips
-
-1. **Maximize GPU layers** - Increase until VRAM is 80-90% full
-2. **Use Q4_K_M quantization** - Best speed/quality balance
-3. **Enable prompt caching** - Reduces latency for repeated patterns
-4. **Right-size models** - Use smaller models for simple tasks
-5. **Monitor VRAM** - Avoid swapping which kills performance
-
-**Expected Performance** (tokens/second):
-- RTX 4090 + Q4_K_M 7B: ~80 tok/s
-- M2 Max + Q4_K_M 7B: ~50 tok/s
-- CPU only + Q4_K_M 7B: ~5 tok/s
-
-## Configuration
-
-### Environment Variables
-
-Key variables in `.env`:
-```bash
-# GPU configuration
-DEFAULT_GPU_LAYERS=35
-DEFAULT_CONTEXT_SIZE=4096
-SERVER_INACTIVITY_TIMEOUT=300
-
-# Storage
-MODELS_PATH=/models
-FILES_PATH=/files
-CACHE_PATH=/cache
-```
-
-### llama.cpp Server
-
-Auto-configured with sensible defaults:
-- **GPU layers**: 35 (adjust based on VRAM)
-- **Context size**: 4096 tokens
-- **Batch size**: 512
-- **Auto-shutdown**: 5 minutes inactivity
-
-## Backup & Restore
-
-There is no `app.services.backup` module and no in-app backup feature. Back up the
-PostgreSQL database with `pg_dump` and the model/file directories separately:
 
 ```bash
-# Dump the database (compose service: postgres)
-docker compose exec -T postgres \
-  pg_dump -U inference -d inference_matrix | gzip > matrix-$(date +%Y%m%d).sql.gz
-
-# Restore into an empty database
-gunzip -c matrix-20261001.sql.gz | \
-  docker compose exec -T postgres psql -U inference -d inference_matrix
-
-# Back up model + uploaded-file volumes separately (GGUFs are not in the DB)
+curl -N http://localhost:8000/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "<your-mock-alias>", "input": "Hello!", "stream": true}'
 ```
 
-See `docs/user-guide.md` → Backup & Restore for details.
+The mock provider exercises the entire real path — registration, WebSocket,
+scheduler, VRAM admission, boot handshake, litellm, SSE, persistence —
+with zero GPU.
 
-## Troubleshooting
+## Repository layout
 
-### Model won't load
-- Verify GGUF file exists and is valid
-- Check available VRAM: `nvidia-smi` or system monitor
-- Review logs: `docker compose logs backend`
-
-### Slow generation
-- Increase GPU layers in settings
-- Reduce context size
-- Use smaller quantization (Q4_K_M)
-
-### Out of memory
-- Reduce GPU layers
-- Lower context size
-- Close other GPU applications
-
-See [docs/deployment.md](docs/deployment.md) for detailed troubleshooting.
+```
+admin/
+  backend/    FastAPI admin + public inference API (uv package: matrix-admin)
+  frontend/   React + Bun + TanStack Router UI (served under /admin)
+provider/
+  lib/        Shared provider library (registration, WS, lifecycle, metrics)
+  mock/       Mock provider (hardware-free development + tests)
+  llama-cpp/  llama.cpp provider
+  halogen/ halogen-flash/ gufo/   (pending, Phase 8)
+docs/         ws-protocol.md, integration-testing.md
+legacy/       Pre-overhaul code (reference only)
+```
 
 ## Development
 
-### Backend development
-```bash
-cd backend
-uv sync
-uv run python -m app.main
-```
-
-### Frontend development
-```bash
-cd frontend
-bun install
-bun run dev
-```
-
-### Run tests
-```bash
-cd backend
-uv run pytest
-```
-
-## Contributing
-
-Contributions welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) first.
+See **[development.md](development.md)** for local setup (backend,
+frontend, tests, client generation) and **[deployment.md](deployment.md)**
+for production. Agent-facing commands and conventions live in
+**[AGENTS.md](AGENTS.md)**.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) - Efficient LLM inference
-- [FastAPI](https://fastapi.tiangolo.com) - Modern web framework
-- [HuggingFace](https://huggingface.co) - Model hosting
-- This project started from the [Full Stack FastAPI Template](https://github.com/tiangolo/full-stack-fastapi-template)
-
----
-
-**Built with ❤️ for local AI inference**
-
-## Monitoring & Observability
-
-### Prometheus Metrics
-
-Access metrics at: `http://localhost:8000/api/v1/metrics`
-
-**Available metrics:**
-- Agent count and status
-- Server count by agent
-- Inference request latency (histogram)
-- Tokens generated
-- VRAM usage per GPU
-- Prompt cache size (`inference_matrix_cache_size_bytes` — defined but never
-  populated, so it always reports 0; see the dormant prompt-cache note above)
-
-**Prometheus configuration:**
-```yaml
-scrape_configs:
-  - job_name: 'inference-matrix'
-    static_configs:
-      - targets: ['frontend:8000']
-    metrics_path: '/api/v1/metrics'
-```
-
-### Real-Time Monitoring
-
-- **WebUI Dashboard** - Live agent status, GPU usage, server health
-- **WebSocket Events** - Real-time updates for server lifecycle, downloads, GPU metrics
-- **Health Checks** - `GET /api/v1/utils/health-check/` on the broker and `GET /health` on the agent
-
-### Logging
-
-```bash
-# View logs
-docker compose logs -f frontend
-docker compose logs -f agent
-
-# Filter by level
-docker compose logs frontend | grep ERROR
-```
-
-See `docs/monitoring-guide.md` for complete monitoring documentation.
-
----
-
-## Documentation
-
-- **[Architecture](docs/architecture.md)** - System design and components
-- **[API Reference](docs/api-endpoints.md)** - Complete API specification
-- **[Deployment](docs/deployment.md)** - Production deployment guide
-- **[User Guide](docs/user-guide.md)** - WebUI usage
-- **[Troubleshooting](docs/troubleshooting.md)** - Common issues and solutions
-- **[Monitoring](docs/monitoring-guide.md)** - Observability setup
-
----
-
-**Built with ❤️ for distributed AI inference**
+MIT — see [LICENSE](LICENSE).

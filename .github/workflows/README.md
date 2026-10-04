@@ -1,17 +1,45 @@
 # GitHub Workflows
 
-This directory contains GitHub Actions workflows for building and deploying Inference Matrix components.
+GitHub Actions for the Inference Matrix monorepo (litellm-based
+architecture).
 
-## Workflows
+## Active
 
-- `build-and-push.yml` - Builds and pushes the main application and agent images, and recipes
+- **`build-and-push.yml`** — the main pipeline:
+  1. `test-admin` — starts **postgres 16 + redis 7** service containers,
+     `uv sync`s `admin/backend`, runs Ruff (`ruff check` +
+     `format --check`), applies migrations (`scripts/prestart.sh`), then
+     `pytest`.
+  2. `test-provider` — `uv sync`s the provider packages and runs Ruff +
+     tests for `provider/lib` and `provider/mock`.
+  3. `build-matrix-app` — needs both test jobs; builds and pushes the
+     admin image (`ghcr.io/<owner>/matrix-app`) from the root `Dockerfile`
+     (multi-stage: bun builds the frontend → python 3.14 + uv installs
+     `matrix-admin` only).
 
-## Building Recipes
+  Runs on push to `main`/`develop` and `v*` tags, and on pull requests to
+  `main`.
 
-The Vulkan llama.cpp recipe is built as a separate Docker image to provide optimized GPU acceleration for AMD and Intel GPUs.
+## Per-provider images
 
-The workflow is structured to:
-1. First build and push the base agent image
-2. Then build the Vulkan recipe using the built agent image as a base
+Provider-type images (`llama-cpp`, `gufo`, `halogen`, `halogen-flash`)
+build from `provider/<type>/Dockerfile`. The mock provider builds from
+`provider/mock/Dockerfile` for local/compose use. Wiring per-type image
+builds into this workflow is a **Phase 8** task (see the NOTE in
+`build-and-push.yml` and `IMPLEMENTATION_STATUS.md`).
 
-This ensures that the recipe uses the latest agent image and incorporates all the latest changes.
+> The old "base agent image + recipes" build model (Vulkan/ROCm recipes
+> layering the agent) is **gone** — replaced by one Dockerfile per provider
+> type under `provider/`.
+
+## Disabled workflows
+
+The `*.disabled` files (release notes, issue manager, pre-commit, zizmor,
+etc.) are inherited template automation, currently switched off. Re-enable
+individually if needed.
+
+## Deploy note
+
+Because provider registration **hard-fails on version mismatch** (409),
+the admin image must be deployed before provider images — see
+`deployment.md`.

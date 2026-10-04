@@ -1,536 +1,550 @@
 # Inference Matrix — Architecture
 
-Inference Matrix is an OpenAI-compatible inference broker that schedules GGUF model
-inference across one or more hardware-local agents. The system is a monorepo with
-four major boundaries: `backend/`, `frontend/`, `agent/`, and `recipes/`.
+Inference Matrix is an OpenAI-compatible inference broker that schedules GGUF
+model inference across one or more hardware machines. The admin container is
+the brain (database, scheduler, client API); provider instances are
+hardware-local containers that each own exactly one inference backend
+process.
 
-The high-level data path is:
+**Status: this document describes the litellm-based architecture on the
+`litellm-architecture-overhaul` branch.** It supersedes the legacy
+broker/agent design (parked under `legacy/` for reference only).
+
+---
+
+## 1. System Overview
 
 ```
-Client (OpenAI SDK / WebUI)
-        │  HTTPS /v1/*                 (OpenAI-compatible API)
-        ▼
-┌─────────────────────────────┐   WebSocket /api/ws/*    ┌──────────────────────────┐
-│  Backend (FastAPI broker)   │ ◄──────────────────────► │  Agent (FastAPI, per host)│
-│  - stateless request layer  │   POST /api/v1/agents/   │  - owns llama-server procs │
-│  - scheduler + leases (PG)  │       register           │  - proxies llama.cpp HTTP  │
-│  - metadata (PostgreSQL)    │                          │  - GPU / model file mgmt   │
-└─────────────┬───────────────┘                          └────────────┬───────────────┘
-              │                                                       │ subprocess spawn
-              ▼                                                       ▼
-        PostgreSQL 16                                   llama.cpp / Halogen engines + GPU
+                     ┌───────────────────────────────────────────────┐
+                     │               ADMIN CONTAINER                 │
+                     │  FastAPI (1 uvicorn worker) + Redis + Postgres│
+                     │                                             │
+  Client             │  /                 Swagger UI               │
+  (OpenAI SDK /      │  /openapi.json     OpenAPI schema           │
+   WebUI)            │  /admin/*          React admin UI           │
+    │  HTTPS /v1/*   │  /admin/api/*      Admin management API     │
+    └───────────────▶│  /v1/*             Public inference API     │
+                     │      │  (driven by litellm SDK)             │
+                     │      ▼                                      │
+                     │  InferenceScheduler  ── FIFO + VRAM admit   │
+                     │      │                                      │
+                     │      │  WS: commands ↓ / events ↑           │
+                     └──────┼──────────────────────────────────────┘
+                            │  /provider/ws  (provider dials in)
+        ┌───────────────────┼───────────────────────┐
+        ▼                   ▼                       ▼
+  ┌───────────┐       ┌───────────┐          ┌───────────┐
+  │ MACHINE A │       │ MACHINE B │   ...    │ MACHINE N │
+  │ provider  │       │ provider  │          │ provider  │
+  │ instance  │       │ instance  │          │ instance  │
+  │  ┌─────┐  │       │  ┌─────┐  │          │  ┌─────┐  │
+  │  │backend│ │       │  │backend│ │          │  │backend│ │
+  │  └─────┘  │       │  └─────┘  │          │  └─────┘  │
+  │  :8081 ▲──┼───────┼──▲ :8081 │          │           │
+  └────────┼──┘       └──┼───────┘          └───────────┘
+           │  litellm targets http://<machine>:<port>/v1 │
+           └─────────────────────────────────────────────┘
 ```
 
-The backend never talks to llama.cpp directly. It never holds model files. It is a
-**stateless broker**: all durable state lives in PostgreSQL; all hardware state
-lives in the agent's process table.
+### Components
 
----
-
-## 1. Repository Layout
-
-| Path | Role |
+| Component | Role |
 | --- | --- |
-| `backend/` | FastAPI broker: OpenAI-compatible API, scheduler, agent manager, migrations |
-| `frontend/` | React + TypeScript + TanStack Router WebUI (served by the backend image) |
-| `agent/` | Hardware-local agent: llama-server / Halogen lifecycle + inference proxy |
-| `recipes/` | Docker recipes layering the agent onto different GPU backends (Vulkan, ROCm, Halogen) |
-| `docker/` | Container entrypoint + `entrypoint.d` migration/config scripts |
-| `scripts/` | Client generation (`generate-client.sh`), test, release helpers |
-| `docs/` | Supporting docs (architecture prose, deployment guides) |
+| **Admin** (`admin/backend`) | Owns Postgres + Redis, the scheduler, conversation state, the client-facing `/v1` API, the admin UI/API, and the provider WebSocket registry. Runs **litellm** to drive inference. Knows **nothing** provider-specific. |
+| **Provider instance** (`provider/<type>`) | Hardware-local container. Owns exactly **one** backend subprocess, its lifecycle, metrics, logs, and downloads. Serves a fully OpenAI/OpenResponses-spec-compliant HTTP API on `PROVIDER_PORT` and dials the admin over a WebSocket. |
+| **Backend** | The provider's inference software (llama-server, halogen, halogen-flash, gufo). A private detail of the provider instance; never seen by the admin. |
+| **Machine** | A physical/virtual host with a unique `uid`, pre-registered in the admin UI, with VRAM capacity tracked for scheduler admission. |
+| **Redis** | Scheduler queues/mirrors, VRAM ledger, WS presence/secrets/epochs, metrics-ownership leases. |
+| **Postgres** | Source of truth for configuration (machines, provider definitions, instances) and stored responses. |
 
-Tooling: Python 3.14 + `uv` for backend/agent; Bun + Vite for the frontend.
-Backend and agent are separate `uv` projects with their own `pyproject.toml` and
-`uv.lock`.
+### Key invariants
+
+1. A provider instance has **exactly one** backend.
+2. The provider instance is in full control of the backend lifecycle and
+   inference-slot admission. Slot capacity is enforced **at the provider**,
+   tied to the inbound connection lifecycle — a dead admin/litellm
+   connection cannot leak a slot.
+3. The admin never proxies raw provider-quirk traffic. Everything between
+   admin and provider is either (a) the WS control protocol or (b)
+   standard OpenAI-compatible HTTP driven by litellm against the
+   provider's spec-compliant port.
+4. The client-facing `/v1/responses` SSE stream must pass the
+   openresponses.org conformance suite. That client boundary is the
+   fidelity contract; internal layers are free as long as it holds.
+5. The admin owns the client-facing `resp_<uuid>` id and the conversation
+   chain. litellm-side session state is never relied upon.
 
 ---
 
-## 2. Backend (the broker)
+## 2. Repository Layout
 
-Python 3.14, FastAPI, SQLModel, PostgreSQL (async via `psycopg` + async engine).
-Entry: `backend/app/main.py`.
+```
+admin/
+  backend/                FastAPI admin + public inference API (package: matrix-admin)
+    app/
+      main.py             App factory: docs at "/", /openapi.json, routers, lifespan
+      models.py           SQLModel tables (squashed schema, see §4)
+      api/
+        admin/            /admin/api/*  (health, provider registration)
+        v1/               /v1/*         (public inference)
+        ws.py             /provider/ws  (provider WebSocket)
+      services/
+        scheduler.py      InferenceScheduler: in-process FIFO + Redis mirror (§6)
+        connection_manager.py  WS registry, auth, epochs, command/ack (§5)
+        presence_sweep.py      Background stale-connection sweeper
+        sse.py                 SSEEmitter: client-facing stream framing (§7)
+        alias_registry.py      litellm model-alias registration (§7)
+        metrics_service.py     Machine metrics ownership assignment (§8)
+        wire.py                Admin mirror of the provider wire envelope
+        redis_keys.py          Redis key layout (§9)
+    alembic/              ONE squashed initial migration
+    docs/redis-keys.md    Redis key reference
+  frontend/               React + Bun + TanStack Router UI (Vite base: "/admin")
+provider/
+  lib/                    Shared provider library (package: provider_lib)
+    provider_lib/
+      admin_client.py     Registration, WS dial, bearer auth, reconnect/backoff
+      wire.py             Canonical wire envelope (Frame, FrameKind, Ack)
+      backend.py          BackendDriver ABC + BackendLifecycle (slot mgmt)
+      app_factory.py      FastAPI app serving the provider port + /v1 surface
+      config.py           ProviderSettings (env-derived)
+      downloader.py       Model downloads with progress events
+      metrics.py          GPU / RAM / CPU / storage collectors
+    tests/
+  mock/                   Mock provider: hardware-free full-path dev
+  llama-cpp/              Provider type: llama.cpp backend
+  halogen/                Provider type: halogen (ROCm)        — pending (Phase 8)
+  halogen-flash/          Provider type: halogen-flash (NPU)  — pending (Phase 8)
+  gufo/                   Provider type: gufo                 — pending (Phase 8)
+spike/litellm-fidelity/   Phase 0 spike: litellm Responses streaming fidelity
+docs/                     ws-protocol.md (canonical RFC), integration-testing.md
+legacy/                   Pre-overhaul code (backend/, agent/, recipes/) — reference only
+compose.yml               postgres + redis + admin + provider-mock
+Dockerfile                Builds admin (frontend + FastAPI) image
+```
 
-### 2.1 Application assembly (`app/main.py`)
+Provider packages are uv workspace members (`admin/backend`,
+`provider/lib`, `provider/mock`, `provider/llama-cpp`,
+`spike/litellm-fidelity`). The admin image is built with
+`uv sync --no-install-workspace --package matrix-admin`, so it does **not**
+ship provider packages — hence `app/services/wire.py` deliberately
+duplicates the frame shape from `provider_lib.wire` (keep them in sync;
+`docs/ws-protocol.md` is canonical).
 
-The app mounts three groups of routers:
+---
 
-1. **Management API** under `settings.API_V1_STR` (`/api/v1`) — `api_router` from
-   `app/api/main.py`: agents, server instances, models, benchmarks, queue
-   (`POST /queue/clear`, `GET /queue/{request_id}`), metrics, stats, huggingface
-   search, utils. The queue lookup exposes status and terminal reason, not prompts.
-2. **Agent/UI WebSocket** under `/api` (not `/api/v1`):
-   - `/api/ws/agents/{agent_id}` — inbound **command** channel: the agent dials
-     this socket and receives commands (`start_server`, `stop_server`,
-     `update_model`) from the backend. (Events flow the other way — see §3.2;
-     the buffer replayed here at connect is the backend's own per-agent buffer,
-     not agent event replay.)
-   - `/api/ws/events/{agent_id}` — UI subscription to a single agent's event stream
-   - `/api/ws/queue-status` — aggregate queue/slot snapshot pushed every 2s
-3. **OpenAI-compatible API** under `/v1` (kept off `/api/v1` so SDK base URLs work):
-   `models`, `chat/completions`, `completions`, `embeddings`, `responses`
-   (+ `responses` WebSocket), `files`, `batches`, `audio/*`.
+## 3. URL Layout
 
-Lifespan hooks (`lifespan` in `main.py`) start background loops:
+| Path | Served by | Auth | Notes |
+| --- | --- | --- | --- |
+| `/` | admin | none | Built-in Swagger UI (`docs_url="/"`) |
+| `/openapi.json` | admin | none | Full OpenAPI schema of the admin app |
+| `/admin/*` | admin (static SPA) | none | React UI, Vite `base: "/admin"` |
+| `/admin/api/health` | admin | none | Health check (used by compose healthcheck) |
+| `/admin/api/providers/register` | admin | registration token | Provider registration (§5) |
+| `/v1/*` | admin | none (trusted LAN) | Public OpenAI-compatible inference |
+| `/provider/ws` | admin | bearer (instance secret) | Provider instances dial in (§5) |
 
-- `agent_manager.start_cleanup_loop()` — prune offline agents.
-- `inference_scheduler.reconcile_persisted_leases()` — invalidate leases left over
-  from a previous process, then `start_reconciliation()`.
-- `start_queue_worker()` — benchmark queue worker.
-- `token_stats_prune_loop()` — prune token usage samples.
-- `metrics_snapshot_loop()` — maintain Prometheus-style metrics.
+The provider instance serves its own OpenAI-compatible HTTP API on
+`PROVIDER_PORT` (default **8081**), reachable from the admin at
+`http://{machine.reachable_address()}:{port}/v1/...`. `Machine` exposes
+`dns`/`host`/`ip`; `reachable_address()` prefers `dns or host or ip`.
 
-An HTTP middleware (`track_inference_activity`) counts `/v1/*` requests until the
-SSE body is fully drained, not merely until the handler returns. This activity
-counter is separate from inference lease ownership: a streaming lease is released
-at upstream completion, even if the downstream client drains more slowly (§4.4).
+---
 
-The frontend is served from `app.frontend("/", directory=FRONTEND_DIR)`
-(`backend/app/frontend`, populated at image build time).
+## 4. Data Model
 
-### 2.2 Configuration (`app/core/config.py`)
+All tables are created by **one squashed Alembic initial migration**
+(`admin/backend/alembic/versions/0140d6ad9f48_initial_squashed_schema.py`),
+applied by `scripts/prestart.sh` and by CI. The provider instance itself
+has **no database** — it derives everything from env + the registration
+response, mirrored here by the admin.
 
-`Settings` (pydantic-settings) reads `../.env`. Key groups:
+### Machine
+A host that provider instances run on. **Created in the admin UI before
+any provider registers against its `uid`.**
 
-- Database: `POSTGRES_*`, `DATABASE_URL` (async `postgresql+psycopg`),
-  `SYNC_DATABASE_URL` (`psycopg2`), pool sizing, and a **15s idle-transaction
-  timeout** to stop abandoned row locks from convoying inference admission.
-- Storage paths: `MODELS_PATH`, `FILES_PATH`, `CACHE_PATH` (forced absolute).
-- CORS / frontend hosts, Sentry DSN (prod only).
-
-### 2.3 Data model (`app/models.py`, Alembic in `backend/alembic/versions/`)
-
-Core tables (all UUID PKs unless noted):
-
-- **Agent** — registered inference host. `name` (unique), `platform`
-  (`llamacpp`/`halogen`/`halogen-flash`/`gufo`), `type`, `host`,
-  `port`, `status`, `gpu_info` (JSON), `last_seen`,
-  `websocket_connected`.
-- **Model** — GGUF registry. `name` (unique), `path`, `size_bytes` (BigInteger),
-  `architecture`, `model_type` ∈ `llm|mtp|mmproj|dflash`, `quantization`,
-  capability flags (`supports_embeddings`, `supports_vision`), source provenance.
-- **ServerInstance** — a llama-server/Halogen process mirrored from the agent.
-  Links `model_id` (+ optional `mmproj_model_id`, `dflash_model_id`), a unique
-  public **`alias`** used as the OpenAI `model` id, `engine` + `engine_options`,
-  typed settings (`gpu_layers`, `context_size`, `flash_attn`, `mtp_draft_max`,
-  `server_options` JSON), `slot_generation`, `effective_capacity`,
-  `vram_required_bytes`, inactivity timeout, usage counters, `agent_id`,
-  `proxy_url`.
-- **InferenceLease** — the scheduling primitive (§4). `request_id` (unique),
-  `model_id`, `server_instance_id`, `preferred_server_id`, `required_agent_id`,
-  `status` (`queued|reserving|active|released|cancelled|expired|failed`),
-  `terminal_reason`, `lease_expires_at`, `slot_generation`, `reservation_id`
-  (per-attempt fencing token), `reservation_expires_at`, and partial indexes for
-  FIFO queue order and reservation recovery.
-- **ResponseRecord** — OpenResponses API turns with `previous_response_id` chaining
-  (tree conversations), full input/output item JSON, token counts, store/background
-  flags.
-- **PromptCache** — cache metadata only; the cache *file* lives on the agent
-  (`cache_path`, `llama_cache_id`, TTL, hits).
-- **DownloadJob** — model download progress (HF/ModelScope), retries, pause token.
-- **TokenUsageSample** — per-request token + llama.cpp stage durations/rates for
-  live stats (prompt/predicted tokens/sec surfaced directly from the engine).
-- **BenchmarkDefinition** / **BenchmarkRun** — persisted `llama-bench` configs and
-  queued/completed runs.
-- **File** / **AudioJob** / **BatchJob** — uploaded files (sha256, purpose) and the
-  audio/batch jobs that consume them.
-
-> Note: users and API keys were removed (`b7f2d3e9c1a4`); the broker is single-user
-> / trusted-network. Conversations were replaced by `ResponseRecord`
-> (`b1f8c2a47d90`).
-
-### 2.4 Services (`app/services/`)
-
-| Service | Responsibility |
+| Field | Notes |
 | --- | --- |
-| `agent_manager.py` | Agent registration, persistent WS connection supervisor, event fan-out, offline cleanup, command dispatch, lease invalidation on server death |
-| `inference_scheduler.py` | FIFO queueing, `InferenceLease` admission/renewal/release/reconciliation, VRAM room-making, target preparation |
-| `inference_stream.py` | SSE keepalives while opening the agent stream and waiting for the first LLM frame; shared dispatch deadline |
-| `inference_target.py` | Resolve an OpenAI `model` string (alias / name / UUID) → `InferenceTarget` with optional server/agent pinning |
-| `server_startup.py` | Build start payloads, `dispatch_start`/`initialize_server`, `ensure_server_ready`, readiness waits |
-| `server_lifecycle.py` | Start/stop/status mirroring of server instances |
-| `server_options.py` | Typed llama-server option validation/serialization |
-| `cache.py` | Prompt cache metadata operations |
-| `models.py` | Model registry operations |
-| `benchmark.py` | Benchmark queue worker + run orchestration |
-| `token_stats.py` | Aggregate token usage samples, prune loop |
-| `gpu.py` | GPU info aggregation from agents |
-| `reasoning_metadata.py` | Reasoning-effort → upstream payload mapping |
-| `request_activity.py` | Active-stream counter used by the HTTP middleware |
-| `scheduler_locks.py` | PostgreSQL advisory locks (per-agent + benchmark) for serialized admission |
-| `llama_server.py` | Legacy/local server helper (kept for compatibility) |
+| `uid` | Stable identifier supplied by the operator, referenced by the provider's `MACHINE_UID` env. Unique. |
+| `name` | Display name. Unique. |
+| `host` / `dns` / `ip` | How the admin reaches instances on this machine. |
+| `total_vram_bytes` | Admission budget; merged/refreshed from provider-reported hardware. |
+| `hardware` | JSON inventory: `{"gpus": [{"uuid","vendor","name","total_vram_bytes"}, ...], "cpu": {...}, "ram": {...}}`. Union of reports from all instances on the machine. |
 
-`agent_manager` is the single place agent lifecycle events are handled:
-`server.started` / `server.stopped` / `server.error` update mirrored
-`ServerInstance` rows and **invalidate active `InferenceLease`s** when the server
-can no longer serve them, so the scheduler stops handing out dead slots.
+A provider registering with an unknown `MACHINE_UID` is **rejected (404)**.
+UIDs must not be reused across physical hosts (see Known Limitations).
 
----
+### ProviderDefinition
+A client-facing model: how to boot a backend and how to schedule it.
 
-## 3. Agent (hardware-local)
-
-Python 3.14, FastAPI. Entry: `agent/app/main.py` (`create_app`). Routers:
-`servers`, `benchmarks`, `models`, `gpu`, `websocket`, `proxy`.
-
-### 3.1 Lifecycle
-
-On startup (`@app.on_event("startup")`):
-1. `frontend_client.start_background_tasks()` — register with the backend and run
-   the WS connection loop.
-2. `start_gpu_monitoring()` — periodic `gpu.usage` events.
-3. `server_manager.start_log_forwarding()` — tail llama-server logs to the backend.
-4. `server_manager.start_health_monitoring()` — subprocess health loop.
-
-Required env at import: `AGENT_ID`, `FRONTEND_URL`, `MODELS_PATH` (see AGENTS.md).
-`AGENT_PLATFORM`/`AGENT_TYPE` default to `llamacpp`/`generic`.
-
-### 3.2 Registration & connection (`services/frontend_client.py`)
-
-- `POST {FRONTEND_URL}/api/v1/agents/register` with `agent_id`, `name`,
-  `platform`, `type`, `host`, `port`, `gpu_info`, and a report of the
-  **running server set**
-  (`running_server_ids` / `healthy_server_ids` / `server_statuses` with
-  `slot_generation` + `effective_capacity`). There is no
-  `inference_slot_protocol` field: the version negotiation was removed and all
-  agents use the single reserved-slot admission path.
-- The backend dedupes by **name** (the agent-declared `agent_id` is not persisted;
-  backend UUIDs are authoritative) and reconciles the reported running set against
-  its `ServerInstance` rows — anything not reported as running is marked stopped
-  and its leases invalidated (agent re-registration is the reconciliation point).
-- After registration, the **backend dials the agent** at
-  `ws://{agent.host}:{agent.port}/ws/status` with `X-Agent-ID`
-  (`agent_manager._run_agent_websocket`). The agent's `websocket.py` `/ws/status`
-  endpoint subscribes to the local `event_bus` and forwards lifecycle events out
-  to the backend, alongside periodic `heartbeat` frames
-  (`WS_HEARTBEAT_INTERVAL`). Buffered events are **not** replayed on (re)connect —
-  fresh state arrives via the next registration's `running_server_ids` instead, to
-  avoid stale `server.started`/`server.stopped` flapping.
-- **Two distinct sockets per agent**, dialed in opposite directions:
-  - **Events: backend → agent** (`agent_manager` opens `ws://agent:8080/ws/status`;
-    the agent's `event_bus` publishes `server.*`, `gpu.usage`, `download.progress`
-    onto it).
-  - **Commands: agent → backend** (`frontend_client.connect_websocket` opens
-    `ws://backend/api/ws/agents/{id}` and handles inbound
-    `start_server`/`stop_server`/`update_model`).
-  In addition, the backend can issue synchronous HTTP commands to the agent via
-  `agent_manager.send_to_agent` (used for reconciliation, `/servers/stop`
-  fencing, and `/gpu` telemetry). A `_connection_supervisor` keeps the event
-  connection alive and fences unreachable agents.
-
-### 3.3 Server process management
-
-`server_manager` is the in-memory source of truth for live llama-server processes
-(backend rows are only a mirror). Engines:
-
-- **`llama_server.py`** — `llama-server` subprocess: build argv from
-  `ServerConfig` (gpu_layers, context, batch, flash-attn, mmproj, draft models),
-  spawn with `LD_LIBRARY_PATH` set to the binary dir, wait for `/health`, monitor
-  exit codes, expose `get_effective_capacity` and the `slot_generations` dict
-  (per-server generation counters).
-- **`halogen_server.py`** / **`halogen_flash_server.py`** — Halogen engines: one
-  isolated process per server instance, separate API + engine ports, ring-buffer
-  logs, capacity reporting.
-
-`servers.py` `/start`:
-- Validates engine vs platform; rejects stale `slot_generation` (409).
-- **Idempotent**: a start for an already-running id with equal generation is a
-  no-op success (registration re-dispatches starts every ~60s; a second spawn
-  would be wrong). A higher generation stops the old process first.
-- Auto-downloads models before spawn (Halogen repo, main GGUF, mmproj projector —
-  with explicit `mmproj_source` required to avoid mis-resolving the main GGUF as a
-  projector — and draft models).
-- The **agent owns port allocation** (`_allocate_port`) unless a port is pinned.
-
-`/prepare` reserves/validates without spawning; `/stop`, `/list`,
-`/status/{id}`, `/metadata/{id}`, `/logs/{id}`, `/delete` round out lifecycle.
-
-### 3.4 Inference proxy (`services/proxy.py` + `routes/proxy.py`)
-
-`ServerProxy` forwards OpenAI-shaped requests to the correct local llama-server
-port and streams SSE back. Notable behaviors:
-
-- **Slot generation fencing** (`_check_generation`) — requests carrying an
-  `X-Inference-Slot-Generation` are rejected if the process generation changed,
-  preventing a stale lease from touching a recycled process.
-- **Capacity enforcement** — coordinates with `inference_operations.py` for
-  agent-owned admission. The reserved-slot path
-  `POST /proxy/{server_id}/reservations/{request_id}` accepts an available slot
-  immediately or reports busy; it **does not queue at the agent**. Its in-memory
-  operation registry tracks the `request_id`, server generation, one-use
-  `X-Inference-Reservation-ID`, and a 15s expiry (`RESERVATION_TTL_SECONDS`) for
-  unconsumed reservations. Dispatch and cancel carry the attempt ID, so a late
-  request cannot consume or cancel a newer attempt.
-  `/proxy/{server_id}/operations/...` supports status, cancellation, and backend
-  reconciliation. The agent still contains a non-reserved wait path (emitting
-  `: inference slot queued` SSE comments) for requests that arrive without a
-  reservation; the current backend scheduler always reserves first.
-- **Connect retries** with backoff (`CONNECT_RETRY_DELAYS`) before connecting to
-  the engine; reserved inference is not replayed after dispatch when a read
-  times out, because no response bytes does not prove the engine did no work.
-- An upstream HTTP error in a stream becomes an SSE `data:` error frame instead
-  of a raw JSON body masquerading as a successful empty completion.
-- **`proxy_stream_background`** — drains the upstream LLM independently of
-  downstream SSE backpressure: the producer owns the slot and closes it at
-  upstream **EOF**, even if the downstream client stops reading. This is the fix
-  for "a completed llama request holding a slot because a client connection
-  remains open" (see AGENTS.md high-risk note).
-- Routes expose `/proxy/{server_id}/...`, reservation admission, and operation
-  endpoints for tracking/cancelling individual inferences.
-
-### 3.5 Model & GPU services
-
-- `model_manager.py` — list/download/validate GGUF files (HF + ModelScope);
-  emits `download.progress` events.
-- `gpu_monitor.py` — sample VRAM/utilization; emits `gpu.usage`.
-- `log_buffers.py` — `CursorLogRing` for bounded, cursor-addressable server logs.
-
----
-
-## 4. Scheduling & Inference Leases
-
-`InferenceScheduler` (`inference_scheduler.py`) is the core of multi-request
-correctness. It is PostgreSQL-backed so multiple backend workers (the image runs
-`uvicorn --workers 4`) share one FIFO.
-
-### 4.1 Constants
-
-- `LEASE_TIMEOUT_SECONDS = 30*60` — max queue wait.
-- `ACTIVE_LEASE_TTL_SECONDS = 90`, `LEASE_RENEWAL_INTERVAL_SECONDS = 30` —
-  active leases must be renewed or they expire (crash safety).
-- `SCHEDULER_POLL_SECONDS = 1.0` — queue poll cadence.
-- `RESERVATION_RECOVERY_SECONDS = 12` — DB reservation attempt deadline, shorter
-  than the agent's 15s unconsumed-slot expiry. The waiting request or the
-  reconciler requeues an abandoned attempt.
-- `FIRST_FRAME_TIMEOUT_SECONDS = 150`, `KEEPALIVE_SECONDS = 10`
-  (`inference_stream.py`) — one dispatch deadline across agent headers and
-  first LLM data, with downstream SSE comment heartbeats during both waits.
-- `UPSTREAM_COMPLETION_COOLDOWN_SECONDS = 0.5`,
-  `SERVER_READY_COOLDOWN_SECONDS = 3.0` — settling gaps between slot reuse.
-
-### 4.2 `acquire()` flow
-
-`acquire(model_id, request_id, preferred_server_id?, required_agent_id?, timeout,
-is_cancelled?)` returns an `InferenceLeaseHandle`:
-
-1. `_queue(...)` inserts a `queued` lease (FIFO by `queued_at`, `id`).
-2. Loop until deadline:
-   - If client disconnected → cancel lease, raise `InferenceRequestCancelled`.
-   - `_admission_open()` — advisory-lock-gated admission check.
-   - `_candidates(...)` → running, healthy servers first. `_claim()` briefly locks
-     the server and compatible FIFO head to check capacity and mark the request
-     `reserving` with a fresh attempt ID. It then contacts the agent **outside any
-     DB row-lock transaction**. On acceptance, a second short, fenced transaction
-     checks request/attempt/server generation and transitions to `active`.
-     Busy/error returns to `queued`; disconnected or stale attempts are cancelled
-     or recovered. `reserving` requests retain their place at the compatible FIFO
-     head and count toward pending capacity.
-   - If only `starting`/`stopped` candidates: take the per-agent advisory lock and
-     `_prepare_target()` (dispatch start / wait ready), then claim.
-   - Otherwise sleep `SCHEDULER_POLL_SECONDS`.
-3. On claim, `monitor_disconnect(is_cancelled)` is attached so a dropped client
-   mid-stream cancels its operation promptly. A disconnect while `reserving`
-   terminalizes that lease; agent cancellation and expiry free any unconsumed slot.
-4. Terminal mapping:
-   - disconnected queued request → `cancelled`
-   - scheduler timeout → `expired`
-   - active lease on a stopped/failed/unreachable/expired server → `failed`
-   - upstream error/EOF without successful completion → `failed`
-   - successful upstream completion → `released` (`terminal_reason=completed`)
-   Terminal leases are excluded from queued/active admission queries.
-
-### 4.3 `InferenceLeaseHandle`
-
-Holds `server`, `lease_id`, `slot_generation`, the `reservation_id` attempt UUID, a
-`lost` event, and background renewal + disconnect-monitor tasks. Key methods:
-
-- `guard(awaitable, cancelled?)` — runs one upstream operation, cancelling it if
-  the lease is lost or the client disconnects; raises `InferenceLeaseLost` or
-  `InferenceRequestCancelled`.
-- `mark_upstream_started()` — lets the renewal loop renew a stream owned outside
-  `guard` (used by SSE streaming).
-- `dispatch_headers()` — carries request ID, generation, and the reservation
-  attempt ID through the agent proxy.
-- `release(outcome)` / `cancel()` — outcome-aware terminal transitions; cancellation
-  is fenced by the reservation token.
-
-### 4.4 Streaming lease lifecycle
-
-In `v1_chat_completions.py` and `v1_completions.py`, the route acquires a lease,
-then opens the agent stream while sending SSE `: keep-alive` comments to the
-client. The same 150s deadline bounds header acquisition and the first `data:`
-frame; later idle reads retain transport timeouts. The backend requires an
-upstream completion marker rather than treating premature EOF as success. It
-records an error event and failed lease for upstream failures; normal completion
-releases the lease before downstream usage/`[DONE]` frames finish draining.
-The agent's `proxy_stream_background` drains the LLM independently of client
-backpressure and releases its slot at upstream EOF. Neither layer holds a slot
-solely because an idle downstream client has not finished consuming SSE.
-
-### 4.5 Reconciliation
-
-`reconcile_stale_leases()` (every 30s) and `reconcile_persisted_leases()`
-(at startup) recover expired `reserving` attempts, expire queued requests, and
-query agent operations before terminalizing stale active work on healthy
-servers. A stopped/unhealthy server or changed `slot_generation` fences active
-leases. `_make_room()` evicts/stops idle servers (VRAM-aware via
-`vram_required_bytes` vs live VRAM) to admit a higher-priority target.
-
----
-
-## 5. OpenAI-Compatible API Surface
-
-Mounted at `/v1` (`backend/app/api/routes/v1/`):
-
-| Endpoint | Notes |
+| Field | Notes |
 | --- | --- |
-| `GET /v1/models` | Lists server aliases + models |
-| `POST /v1/chat/completions` | SSE streaming via agent proxy, lease-guarded, reasoning-effort aware |
-| `POST /v1/completions` | Legacy completions |
-| `POST /v1/embeddings` | Embeddings (capability-checked) |
-| `POST /v1/responses` (+ WS, `/responses/compact`) | OpenResponses API: tree conversations via `previous_response_id`, event-streamed, persisted as `ResponseRecord` |
-| `POST /v1/files` | Upload; sha256 + purpose |
-| `POST /v1/batches` | Batch jobs over JSONL files |
-| `POST /v1/audio/*` | Transcription / translation / speech (system Whisper) |
+| `alias` | Public model name clients use in `/v1/models` and the `model` field. Unique. |
+| `provider_type` | One of `llama-cpp`, `halogen`, `halogen-flash`, `gufo`, `mock`. |
+| `backend_config` | JSON handed to the provider to start its backend: model artifacts (main GGUF + mmproj + draft, each with source), engine args, engine options. Schema documented in `provider/README.md`. |
+| `vram_required_bytes` | Scheduler admission hint. |
+| `idle_timeout_seconds` | Admin-driven idle stop (reaper — Phase 6 TODO). |
+| `capacity` | Concurrent backend slots (≥1). |
+| `registration_token` | Secret presented at registration; binds instance→definition and cross-checked against the container's provider type. Unique. |
+| `model_metadata` | OpenAI model metadata discovered at init. |
+| `enabled` | Disabled definitions are excluded from scheduling. |
 
-The WebUI may send `X-Inference-Request-ID: chatcmpl-{uuid}` on chat requests
-and poll `GET /api/v1/queue/{request_id}` for `queued`, `reserving`, `active`,
-and terminal status. Other OpenAI clients need not set this header. The WebUI
-also surfaces streamed errors rather than silently treating them as empty output.
+### ProviderInstance
+One backend on one Machine for one ProviderDefinition. Unique on
+`(machine_id, provider_definition_id)` — a machine cannot run two backends
+of the same definition.
 
-`resolve_inference_target()` maps the `model` field: a **ServerInstance alias**
-pins `preferred_server_id`; a model name/UUID allows any compatible replica; an
-optional `agent_id` pins `required_agent_id`. The Responses router additionally
-maps chain history into the llama payload (`_build_chain_history`,
-`_llama_payload`).
+| Field | Notes |
+| --- | --- |
+| `port` | The provider's own port (default 8081). |
+| `version` | Provider instance version (commit id until first release). |
+| `instance_status` | `registering` `initializing` `running` `unhealthy` `error` `disconnected` |
+| `backend_status` | `stopped` `initializing` `starting` `running` `in_use` `stopping` `error` |
+| `websocket_connected` | DB mirror; authoritative liveness is the Redis presence key. |
+| `epoch` | Connection epoch: bumped on every accepted socket; stale-epoch frames ignored (fencing). |
+| `last_seen` / `last_request_at` | Liveness + idle tracking. |
+| `config_fingerprint` | SHA-256 of the applied `backend_config`; drives auto cache-clear (Phase 9). |
+| `assigned_gpus` | Instance-reported GPU UUIDs this backend is bound to; VRAM accounting + metrics dedup. |
 
----
+### ResponseRecord
+Stored OpenResponses turn (spec `ResponseResource`), chained by
+`previous_response_id`. The admin owns `response_id` (`resp_<uuid>`);
+litellm's affinity-wrapped upstream id is stored in `parameters` for turn
+affinity while the DB chain stays ours. `input_items`/`output_items` hold
+spec-shaped payloads; token counts and `store`/`status`/error fields
+mirror the spec.
 
-## 6. Frontend
+### TokenUsageSample
+Per-request prompt/cached/completion token + rate telemetry, FK to
+provider instance + definition.
 
-React + TypeScript + TanStack Router + shadcn/ui, built with Bun/Vite, served by
-the backend image (`app.frontend`).
-
-- `src/client/` — **generated** OpenAPI SDK (`sdk.gen.ts`, `types.gen.ts`) from
-  `openapi.json` via `openapi-ts`. Regenerated by
-  `bash scripts/generate-client.sh`; never hand-edited.
-- `src/routes/_layout/*` — pages: dashboard (`index`), `agents`, `models`,
-  `server-instances`, `chat`, `completions`, `embeddings`, `responses`,
-  `benchmarks`, `audio`.
-- `src/components/` — feature components (Agents, Models, ServerInstances,
-  Benchmarks, Queue, Stats, Common, Sidebar, ui).
-- `src/routeTree.gen.ts` — generated by TanStack Router; delete + restart Vite on
-  unexpected 404s.
-- Live UI uses the backend WebSockets: `/api/ws/events/{agent_id}` (per-agent
-  event stream) and `/api/ws/queue-status` (aggregate queue/slot snapshot).
-  Chat additionally polls its own `/api/v1/queue/{request_id}` while waiting;
-  OpenAI SSE keepalive comments do not change the client-visible chunk schema.
-
----
-
-## 7. Deployment & Build
-
-### 7.1 Images
-
-- **Matrix app** (root `Dockerfile`): multi-stage — Bun builds the frontend →
-  copied into `backend/app/frontend`; `python:3.14` + `uv sync --package app`;
-  entrypoint `docker/entrypoint.sh` + `docker/entrypoint.d/` (010 generate-config,
-  020 run-migrations). Runs `uvicorn app.main:app --host 0.0.0.0 --port 8000
-  --workers 4 --ws-ping-interval 30 --ws-ping-timeout 60`. Serves WebUI + API +
-  broker on 8000.
-- **Agent** (`agent/Dockerfile`): `python:3.14-slim` base, no llama.cpp bundled;
-  `AGENT_PLATFORM`/`AGENT_TYPE` env; uvicorn on `AGENT_PORT` (8080).
-- **Recipes** (`recipes/`): layer the agent onto GPU backends —
-  `llama-cpp-vulkan` (ghcr llama.cpp full-vulkan), `llama-cpp-q38rocm`
-  (ROCmFP4 / Strix Halo), `halogen-rocm`, `halogen-flash`. Built images run in
-  root's Podman space on the agent host.
-
-### 7.2 Topology (production, per AGENTS.md)
-
-- Matrix app container `matrix-app` on `core@10.100.2.100`, served at
-  `https://matrix.thelink.family` via Traefik + Let's Encrypt.
-- Inference agent types on `core@10.100.2.111` (Podman, root space).
-- PostgreSQL 16 for metadata.
-- There is no `inference_slot_protocol` to check. `GET /api/v1/agents` and
-  `GET /api/v1/agents/{id}` report `platform`, `type`, `status`, and
-  `websocket_connected`; all agents use the single reserved-slot admission path,
-  so live queue behavior is attributed to the backend scheduler, not a
-  negotiated protocol generation.
-
-### 7.3 Compose caveat
-
-Compose files are inconsistent (see AGENTS.md): `compose.yml` defines `postgres` +
-`frontend` (+ `agent`), while `compose.override.yml`/helper scripts refer to `db`
-and `backend`. Inspect the selected files before any service-specific command.
-
-### 7.4 CI (`.github/workflows/build-and-push.yml`)
-
-Backend job: install uv → ruff → `scripts/prestart.sh` (migrations) → `pytest`.
-Agent job: ruff → pytest. Image jobs: build & push matrix-app, agent, and recipe
-images; they trigger on pushes to `main`/`develop`/version tags and on PRs to
-`main` (pushes are gated so PR runs build-only). Most other workflow files are
-`.disabled`.
+### Dropped by the overhaul
+`agents`, `server_instances`, `models` (folded into `backend_config`),
+`inference_leases` (replaced by the scheduler + provider admission),
+`prompt_cache` (provider-local via fingerprint), `download_jobs`
+(replaced by `download.progress` events), `benchmark_*`, `files`,
+`batch_jobs`, `audio_jobs`, `users`/`api_keys`.
 
 ---
 
-## 8. Cross-Cutting Concerns
+## 5. Registration & Connection Protocol
 
-### 8.1 Security
+Full wire-level detail lives in **`docs/ws-protocol.md`** (canonical RFC).
+Summary:
 
-No auth between backend and agent — trusted internal network only. Users/API keys
-removed. The agent must never be exposed externally; all external traffic goes
-through the backend (TLS via Traefik). Secrets kept out of logs.
+### Provider environment (all env-derived, no DB)
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `MACHINE_UID` | yes | UID of the Machine this container runs on |
+| `PROVIDER_REGISTRATION_TOKEN` | yes | Token of the ProviderDefinition it serves |
+| `ADMIN_BASE_URL` | yes | e.g. `http://admin:8000` |
+| `PROVIDER_PORT` | no (8081) | Port the spec-compliant API listens on |
+| `CACHE_DIR` | yes (`/cache`) | Prompt caches, persisted `provider_config.json` |
+| `MODELS_DIR` | yes (`/models`) | Model artifact storage |
+| `METRICS_CATEGORIES` | no | Space-delimited: `gpu_usage vram os_ram cpu storage`. Inference metrics are **always** enabled and must not appear here. |
 
-### 8.2 Failure handling
+`LLAMA_SERVER_PATH` and other backend-binary paths come from the
+environment, never from `backend_config`.
 
-- **Agent unreachable**: backend WS supervisor fences the agent, marks its
-  `ServerInstance`s unavailable, invalidates active leases; queued requests fail
-  or wait; on reconnect, re-registration reconciles the running set.
-- **llama-server crash**: agent health monitor detects exit, emits
-  `server.stopped`/`server.error`; backend mirrors + invalidates leases.
-- **Backend restart**: startup and periodic reconciliation recover pending
-  reservations and check stale active leases against agent operations; agents
-  keep running processes and re-register to re-sync.
-- **Client disconnect mid-stream**: the `is_cancelled` monitor fences the lease
-  and cancels the agent operation; the HTTP middleware separately tracks request
-  activity until its stream closes. Unconsumed reservations also expire
-  independently on the agent.
+### Sequence
+```
+Provider                          Admin
+   │ POST /admin/api/providers/register
+   │  {machine_uid, registration_token, provider_type,
+   │   version, port, hardware, metrics_categories}
+   │ ──────────────────────────────▶
+   │  validations (403/404/409):
+   │    registration_token → ProviderDefinition exists
+   │    definition.provider_type == container's provider_type
+   │    version == admin settings.VERSION   (HARD FAIL)
+   │    machine_uid exists
+   │  effects:
+   │    merge hardware into Machine, upsert ProviderInstance
+   │    issue per-instance secret → Redis im:ws:secret:{id}
+   │ ◀──────────────────────────────
+   │  {instance_id, instance_secret, provider config, fingerprint}
+   │ write provider_config.json to CACHE_DIR
+   │ dial ws(s)://{admin}/provider/ws
+   │   Authorization: Bearer {instance_secret}
+   │ ──────────────────────────────▶  auth vs Redis (constant-time)
+   │                                  accept → bump im:ws:epoch:{id}
+   │   ◀── provider.hello {epoch}    claim im:ws:owner:{id}
+   │                                  instance_status → running
+```
 
-### 8.3 Observability
+- **Version hard fail:** provider versions must match the admin exactly
+  (409). Admin and provider images are deployed together (§10).
+- **Socket lifecycle:** if the WS dies, the admin marks the instance
+  `disconnected` immediately (live path) and via the presence sweep
+  (safety net for missed disconnects / admin restarts). The provider
+  reconnects with exponential backoff (1s → 30s max). Each accepted
+  reconnect gets a strictly greater **epoch**; the old socket is closed
+  with code `4409`.
 
-- `/api/v1/metrics` (Prometheus-style) + snapshot loop.
-- `/api/v1/stats` + `TokenUsageSample`-backed live token rates.
-- WS event streams (per-agent + queue-status) feed the WebUI; the agent
-  `/ws/status` endpoint emits periodic `heartbeat` frames
-  (`WS_HEARTBEAT_INTERVAL`) for liveness.
-- Per-request `/api/v1/queue/{request_id}` statuses and correlated reservation,
-  stream-open, first-frame, and stream-close logs identify where admission or
-  dispatch stalled without exposing prompts in the queue-status response.
-- Structured JSON logs; llama-server/Halogen logs forwarded via ring buffers.
+### Frame envelope (both directions)
+```json
+{ "v": 1, "type": "...", "id": "...", "reply_to": null,
+  "epoch": 12, "ts": "ISO-8601 UTC", "payload": {} }
+```
+Commands carry an `id` and require an `ack` frame (`reply_to=<id>`,
+payload `{ok, error, detail}`). The admin's
+`ConnectionManager.send_command(instance_id, type, payload, timeout)`
+awaits the matching ack (default 30s). Every frame carries the epoch;
+stale-epoch frames are discarded by both sides.
 
-### 8.4 Extensibility
+### Event / command catalog
+Provider → admin: `provider.status`, `backend.status`,
+`backend.boot_requested`, `metrics.machine`, `metrics.inference`,
+`backend.logs`, `provider.logs`, `download.progress`,
+`backend.metadata`, `ping`.
 
-- New inference engines: add a manager in `agent/app/services/` mirroring
-  `llama_server.py`'s interface (start/stop/health/capacity/slot_generation) and
-  register its platform/engine in `servers.py` validation.
-- New OpenAI endpoints: add a `v1_*` router; reuse `resolve_inference_target` +
-  `inference_scheduler.acquire` + `lease.guard` for correct slot semantics.
-- Multi-agent load balancing / failover: already supported by candidate selection
-  and `required_agent_id` pinning; VRAM-aware room-making generalizes to pools.
+Admin → provider: `provider.hello`, `backend.start`, `backend.stop`,
+`backend.restart`, `provider.initialize`, `provider.config.update`,
+`metrics.assign`, `metrics.unassign`, `metrics.category.start`,
+`cache.clear`, `storage.prune_unused`, `pong`.
+
+`backend.start` acks only after the provider's lifecycle reaches
+`running`, so a successful return means the provider's `/v1` is live.
+`backend.stop` uses **drain semantics**: the provider refuses (nak) while
+`in_use`; the admin retries.
+
+Unknown event/command types are logged and ignored (forward compatible).
 
 ---
 
-## 9. Key Invariants (do not break)
+## 6. Scheduler
 
-1. The agent owns live llama-server processes in memory; backend `ServerInstance`
-   rows are a mirror, reconciled at agent (re-)registration.
-2. Backend-generated UUIDs are authoritative server/agent identity; agent-declared
-   `agent_id` is not persisted.
-3. Inference admission is FIFO and lease-backed in PostgreSQL; `reserving`
-   claims must be fenced by both reservation ID and server generation. Terminal
-   leases (`released`/`cancelled`/`expired`/`failed`) must never appear in
-   queued/active admission queries.
-4. A slot is held from agent reservation through upstream completion/cancellation,
-   never solely by an idle downstream SSE connection. The agent may not put
-   an already-admitted request into a second capacity queue.
-5. `slot_generation` fences recycled processes from stale leases.
-6. Backend route/schema changes require `bash scripts/generate-client.sh`; never
-   hand-edit `frontend/src/client/*` or `routeTree.gen.ts`.
+`admin/backend/app/services/scheduler.py` — **in-process FIFO with a
+Redis mirror**. The admin runs a single uvicorn worker, so the
+authoritative queue is a per-alias waiter `deque` guarded by an
+`asyncio.Lock` (serializes admission) and an `asyncio.Condition`
+(wait/wake). The Redis keys (§9) are a best-effort observable mirror,
+and the `im:sched:lock` contract is honored around boot/admission
+mutations so a future cross-worker Redis-queue implementation can swap in
+behind the same `acquire`/`release` interface.
+
+`acquire(alias, request_id)` semantics:
+1. Zero connected+enabled candidates → `NoProviderAvailable` (503)
+   immediately — never queue what can never run.
+2. FIFO fairness: the request is appended to the alias waiter deque and
+   only admitted at the head when a slot is available.
+3. A slot = `active_on_instance < definition.capacity` **and** the
+   instance's machine has enough free VRAM for `vram_required_bytes`.
+   Free VRAM = `Machine.total_vram_bytes` minus VRAM held by *other*
+   instances on the machine (merging `im:vram:used` with this process's
+   active slots). The target's own hold is excluded.
+4. A `stopped` candidate is booted with `backend.start` under the
+   admission lock; boot failure/timeout falls through to the next
+   candidate. A successful boot is remembered in-process (`_booted`) so a
+   lagging DB mirror never causes a redundant boot.
+5. Waiting is bounded by `queue_timeout` (default 300s) → `QueueTimeout`
+   (504).
+6. Admission records `im:sched:active` + `im:vram:used` and returns an
+   `Admission{instance_id, base_url, machine_uid}`.
+7. **Eviction of idle different-alias instances to free VRAM is not yet
+   implemented** — `TODO(phase6-eviction)`; the request waits instead.
+
+`release(alias, request_id)` is idempotent and cancellation-safe
+(`asyncio.shield` around cleanup so a client-disconnect-mid-stream still
+releases and wakes the next waiter).
+
+---
+
+## 7. Inference Flow (request path)
+
+Example: streamed Responses API against `https://matrix.thelink.family`.
+
+```
+1. Client POST /v1/responses {model: alias, input: [...],
+     previous_response_id: "resp_abc", stream: true}
+2. Admin resolves the enabled ProviderDefinition by alias (else 404),
+   mints client_response_id = "resp_" + uuid4().hex.
+3. Admin builds the litellm input: on previous_response_id, load the
+   prior ResponseRecord and prepend its input_items + output_items to the
+   new input. The admin owns the chain; previous_response_id is NOT
+   passed to litellm.
+4. ensure_registered(alias): register the alias with litellm
+   (supports_native_streaming=True, mode="responses",
+   litellm_provider="openai"). REQUIRED — without it litellm "fake
+   streams" and fails with a confusing APIError (see FINDINGS).
+5. scheduler.acquire(alias, request_id) → Admission with base_url.
+   (503 NoProviderAvailable / 504 QueueTimeout before the stream starts.)
+6. litellm.aresponses(model="openai/<alias>",
+     api_base=f"{admission.base_url}/v1", custom_llm_provider="openai",
+     stream=True, tools=[client tools + platform local tools], input=...)
+7. Provider translation layer normalizes the backend's output to spec on
+   the instance port; the slot is held for the inbound connection
+   lifetime; backend.status → in_use.
+8. Admin's SSEEmitter re-frames litellm events for the client:
+   - replaces response.id with the admin-owned resp_<uuid> on every
+     lifecycle frame (created/in_progress/completed/failed/incomplete),
+   - reassigns sequence_number monotonically (0,1,2,...),
+   - passes everything else (usage, output[], non-canonical events like
+     response.reasoning_text.delta) through untouched.
+9. litellm exceptions (MidStreamFallbackError etc.) → SSEEmitter.failed()
+   synthesizes the spec response.failed + error frames.
+10. finally (cancellation-safe): close upstream stream, scheduler.release,
+    persist ResponseRecord + TokenUsageSample once.
+```
+
+Cancellation: client disconnect → FastAPI cancels the emitter task →
+litellm stream closed → provider sees TCP close → slot freed. No separate
+lease-renewal machinery.
+
+### Public endpoint scope (this overhaul)
+| Endpoint | Status |
+| --- | --- |
+| `/v1/responses` | **Full** (stream + non-stream) — Phase 6 |
+| `/v1/chat/completions` | Pending (Phase 7) via `litellm.acompletion` |
+| `/v1/models` | Pending (Phase 7) — derived from ProviderDefinitions |
+| `/v1/embeddings`, `/v1/completions` (legacy), `/v1/rerank`, `/v1/moderations`, `/v1/decisions`, `/v1/audio/*`, `/v1/files`, `/v1/batches` | **501 stubs** — accepted regressions (§12) |
+| Responses-over-WebSocket transport | **Dropped** (not part of the OpenResponses spec) |
+| Benchmarks | **Dropped entirely** |
+
+---
+
+## 8. Metrics
+
+### Machine-level metrics (deduped)
+Multiple provider instances share one machine; each hardware resource is
+emitted by **exactly one** connected instance. `metrics_service.py`
+manages ownership via Redis `im:metrics:owner:{machine_uid}` (SET NX,
+TTL 30s, refreshed on each `metrics.machine` receipt). On connect the
+admin assigns unowned resources (subject to the instance's declared
+`im:metrics:cats:{instance_id}`); on expiry/disconnect another instance
+on the same machine can take over. Epoch fencing makes failover safe
+against half-open sockets.
+
+### Inference metrics (never deduped)
+Each instance always emits `metrics.inference`: available slots, max
+slots, token speed, prompt-processing speed, in-flight counts.
+
+### Categories
+`gpu_usage`, `vram`, `os_ram` (OS usage only — APUs share RAM with VRAM),
+`cpu`, `storage` (cache + model dirs). Collectors in
+`provider_lib/metrics.py` (NVML / rocm-sysfs / psutil).
+
+---
+
+## 9. Redis Key Layout
+
+Postgres is the source of truth for configuration and stored responses.
+Redis holds fast-changing runtime state that can be rebuilt from Postgres +
+a fresh provider registration. All keys namespaced `im:`. Full table in
+`admin/backend/docs/redis-keys.md`.
+
+| Key | Type | TTL | Purpose |
+| --- | --- | --- | --- |
+| `im:ws:secret:{instance_id}` | String | 30d | Per-instance WS secret (trusted LAN, plaintext; not in Postgres) |
+| `im:ws:epoch:{instance_id}` | Counter | none | Monotonic connection epoch (INCR per accepted socket) |
+| `im:ws:owner:{instance_id}` | String | none | Connection token of the currently accepted socket |
+| `im:ws:presence:{instance_id}` | String | 60s | Liveness marker; absence ⇒ sweep marks disconnected |
+| `im:metrics:owner:{machine_uid}` | String | 30s | Which instance emits machine-level metrics for the machine |
+| `im:metrics:machine:{machine_uid}` | String | 30s | Latest machine-level snapshot JSON |
+| `im:metrics:cats:{instance_id}` | String | — | Instance's declared metrics categories (JSON list) |
+| `im:sched:queue:{alias}` | List | — | Queued request ids (mirror of in-process deque) |
+| `im:sched:wait:{req_id}` | Hash | 1h | position / enqueued_at / status |
+| `im:sched:active:{alias}` | Set | — | Admitted request ids (cardinality ≤ capacity) |
+| `im:sched:lock:{alias}` | String | 5s (SET NX PX) | Admission lock contract |
+| `im:vram:used:{machine_uid}` | Hash | 60s | `{instance_id}` → bytes held; TTL-bounded so a crashed admin self-heals |
+
+---
+
+## 10. Deployment
+
+| Container | Contents | Notes |
+| --- | --- | --- |
+| `admin` | built SPA + FastAPI, port 8000 behind Traefik at `matrix.thelink.family` | **single uvicorn worker** (in-process scheduler authority) |
+| `postgres` 16 | schema via squashed migration at prestart | |
+| `redis` 7 | scheduler/WS/metrics runtime state | |
+| provider images | one per provider type from `provider/<type>/Dockerfile` | run on hardware hosts; mock for local dev |
+
+**Deploy order (mandatory, due to version hard-fail):** admin first, then
+all provider instances. A version-mismatched provider refuses to start
+with a clear 409. Accepted constraint of the solo-operator model.
+
+---
+
+## 11. Mock Provider
+
+`provider/mock` implements the full provider contract with no hardware:
+- Registers with a fake GPU inventory.
+- `backend.start` transitions `initializing → starting → running` almost
+  instantly.
+- Serves fake but spec-compliant `/v1/responses` + `/v1/chat/completions`
+  with streaming deltas, tool-call events, and usage.
+- Emits all metric categories with synthetic values.
+
+Purpose: the entire real path (registration → WS → scheduler → VRAM
+admission → boot handshake → litellm → SSE → persistence) runs locally
+with `docker compose up` and no GPU. This is the base for integration
+tests and UI development.
+
+---
+
+## 12. Security Model — Trusted LAN (Known Limitation)
+
+**The system assumes a trusted network.** Consciously chosen for solo
+operation:
+
+- `/admin/api/*` and `/v1/*` are **unauthenticated**. Do not expose them
+  beyond the LAN / a trusted reverse proxy without adding auth first.
+- The **only** secrets are the per-definition `registration_token`
+  (plaintext in provider env — possession proves entitlement) and the
+  per-instance WS `instance_secret` issued at registration (Redis).
+- Token rotation is manual: edit the definition, redeploy the provider.
+  No revocation short of deleting the definition/instance.
+- Threat accepted: anyone on the network can call inference and the admin
+  API; anyone with `registration_token` + a valid `MACHINE_UID` can
+  register a rogue instance.
+
+---
+
+## 13. Known Limitations & Accepted Regressions
+
+1. Trusted-LAN only (§12).
+2. Version hard-fail requires coordinated admin+provider deploys (§10).
+3. Embeddings, legacy completions, rerank, moderations, decisions, audio,
+   files, batches: 501 stubs (§7). **Do not "restore" old
+   implementations from git history** — re-implement against the new
+   provider/scheduler model when needed.
+4. No prompt-cache tracking table; cache is provider-local via
+   fingerprint.
+5. Multi-file model artifacts are JSON (`backend_config`), not relational
+   — no cross-definition artifact dedup.
+6. `MACHINE_UID` misuse (same UID on two physical hosts) poisons VRAM
+   admission; there is no host-fingerprint check.
+7. Scheduler VRAM eviction of idle co-located backends is not yet
+   implemented (`TODO(phase6-eviction)`); requests wait instead.
+8. Admin-driven idle-timeout reaper is a stub (`TODO(phase6-idle-reaper)`).
+9. Benchmarks removed; performance testing is out-of-band.
+
+---
+
+## 14. Testing & Conformance
+
+- **Exit criterion for every inference-path phase:** the openresponses.org
+  conformance (Zod) suite passes against `/v1/responses` (see
+  `docs/integration-testing.md`).
+- Phase 0 fidelity spike results in `spike/litellm-fidelity/FINDINGS.md`
+  are the design basis for the §7 emitter: native streaming preserves the
+  full event set (dual-name reasoning, `sequence_number`, populated
+  `output[]`, usage); the admin owns the emitter and the `resp_` id;
+  litellm exceptions must be mapped to spec terminal frames.
+- Admin services have unit tests (`admin/backend/tests/`: scheduler, SSE
+  emitter, v1 responses, connection manager, presence sweep, metrics).
+- Provider lib + each provider package have their own tests.
+- Mock provider integration tests cover registration, boot, streaming,
+  failover (kill socket → instant `disconnected` → metrics reassignment).
+
+---
+
+## 15. References
+
+- `docs/ws-protocol.md` — canonical Admin ⇄ Provider wire protocol RFC
+- `admin/backend/docs/redis-keys.md` — Redis key reference
+- `provider/README.md` — provider authoring guide
+- `spike/litellm-fidelity/FINDINGS.md` — litellm streaming fidelity decision
+- `IMPLEMENTATION_STATUS.md` — per-phase feature status
+- `AGENTS.md` — commands, workflow, high-risk gotchas

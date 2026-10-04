@@ -1,6 +1,6 @@
 """Admin settings.
 
-URL layout (see docs/architecture.md):
+URL layout (see the root ARCHITECTURE.md):
   /                 Swagger UI (built-in)
   /openapi.json     OpenAPI schema
   /admin            React UI (served from app/frontend build)

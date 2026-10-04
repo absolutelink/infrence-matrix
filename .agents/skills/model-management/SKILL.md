@@ -1,280 +1,145 @@
 ---
 name: model-management
-description: Download, manage, and organize GGUF models from HuggingFace and ModelScope
+description: Manage GGUF model artifacts in Inference Matrix (backend_config descriptors, HuggingFace downloads, storage layout)
 ---
 
-# Model Management Skill
+# Model Management — Inference Matrix
 
-Use this skill when managing GGUF models - downloading from sources, organizing files, and maintaining model metadata.
+Use this skill when managing model files (GGUF artifacts) that provider
+instances download and load.
 
-## Commands
+**There is no `app.services.models` CLI and no `/etc/inference-matrix/models.yaml`.**
+In the overhauled architecture the admin has **no `Model` table**. Models
+are described inside `ProviderDefinition.backend_config` as JSON artifact
+descriptors, and the **provider instance** downloads them at init/boot via
+`provider_lib.downloader`.
 
-### Download a Model
+## Where model info lives
 
-```bash
-# From HuggingFace
-uv run python -m app.services.models download \
-  --source huggingface \
-  --repo TheBloke/Llama-2-7B-Chat-GGUF \
-  --file llama-2-7b-chat.Q4_K_M.gguf
+- **`ProviderDefinition.backend_config`** (Postgres) — declares the
+  artifacts the backend needs: main model, optional mmproj (vision),
+  optional draft (speculative). Schema in `provider/README.md`.
+- **Provider `MODELS_DIR`** (env) — the actual GGUF files on disk.
+- **`ProviderDefinition.model_metadata`** — OpenAI-style metadata scraped
+  from the running backend during initialization.
 
-# From ModelScope
-uv run python -m app.services.models download \
-  --source modelscope \
-  --repo modelscope/Llama-3-8B \
-  --file llama-3-8b.Q4_K_M.gguf
-
-# With custom destination
-uv run python -m app.services.models download \
-  --source huggingface \
-  --repo TheBloke/Mistral-7B-v0.1-GGUF \
-  --file mistral-7b.Q5_K_M.gguf \
-  --destination /custom/path/models
+```json
+{
+  "model":  {"source": "hf", "repo": "TheBloke/Llama-2-7B-Chat-GGUF", "file": "llama-2-7b-chat.Q4_K_M.gguf"},
+  "mmproj": {"source": "hf", "repo": "ggml-org/models", "file": "gemma/mmproj-model-f16.gguf"},
+  "draft":  {"source": "hf", "repo": "...", "file": "draft.gguf"},
+  "args":   {"ctx": 8192, "gpu_layers": 35, "flash_attn": "on", "parallel": 1}
+}
 ```
 
-**Parameters:**
-- `--source`: `huggingface` or `modelscope`
-- `--repo`: Repository ID (owner/name)
-- `--file`: Specific GGUF file to download
-- `--destination`: Custom destination path (optional)
-- `--resume`: Resume interrupted download (boolean flag)
+Artifacts also accept a plain local path (no download):
+`{"path": "/models/foo.gguf"}` — the file must already exist.
 
-### Pause/Resume Download
+## Supported source
 
-```bash
-# Pause active download
-uv run python -m app.services.models pause --job-id <job-uuid>
+**HuggingFace only** (`source: "hf"` / `"huggingface"`). The downloader
+uses `huggingface_hub.hf_hub_download` (imported lazily). `modelscope` is
+**not** supported in the new downloader — if you need it, that's a new
+feature to add to `provider_lib/downloader.py`, not a config toggle.
 
-# Resume paused download
-uv run python -m app.services.models resume --job-id <job-uuid>
+Private HF repos: supply the token via the provider container's
+`HF_TOKEN` / `HUGGINGFACE_TOKEN` env (read by `huggingface_hub`), not in
+`backend_config`.
+
+## Storage layout + resolution
+
+`MODELS_DIR` mirrors the repo:
+
+```
+MODELS_DIR/
+  TheBloke/Llama-2-7B-Chat-GGUF/llama-2-7b-chat.Q4_K_M.gguf
+  ggml-org/models/gemma/ggml-model.gguf
+  mistral-7b.Q5_K_M.gguf          # FLAT: operator-dropped files
 ```
 
-### List Downloads
+Resolution order in `ensure_artifact()`:
+1. `MODELS_DIR/<repo>/<file>` (repo-mirrored)
+2. `MODELS_DIR/<file>` (FLAT — operators drop GGUFs directly here)
+3. HuggingFace download into `MODELS_DIR/<repo>`
 
-```bash
-# All downloads
-uv run python -m app.services.models downloads list
+**The FLAT hit short-circuits the download** — if a file with that name
+already exists at the top of `MODELS_DIR`, it's used as-is.
 
-# Active downloads only
-uv run python -m app.services.models downloads list --status active
+## Downloads + progress events
 
-# Failed downloads
-uv run python -m app.services.models downloads list --status failed
-```
+`ensure_artifact(descriptor, models_dir, progress_cb)` (async):
+- Returns the resolved local path.
+- Publishes throttled `download.progress` events (default min interval
+  1s, `DOWNLOAD_PROGRESS_INTERVAL`) through the provider's event bus →
+  admin WS. Payload: `{filename, progress_percent, bytes_downloaded,
+  total_bytes, speed_mbps, phase}` (phase: downloading/completed/failed).
+- **In-flight dedup** by `repo/file` (module-level registry) — concurrent
+  requests for the same artifact share one download.
+- **Path-traversal guards** on repo/filename.
+- `huggingface_hub` is imported lazily so packages that never download stay
+  importable without it.
 
-### Delete a Model
+There is **no pause/resume token** and **no `DownloadJob` table** anymore —
+progress is event-only, streamed live to the admin UI. Resume across
+process restarts is handled by `hf_hub_download`'s own cache semantics.
 
-```bash
-# Delete model file and metadata
-uv run python -m app.services.models delete --model-id <model-uuid>
+## When downloads happen
 
-# Delete file only (keep metadata)
-uv run python -m app.services.models delete --model-id <model-uuid> --keep-metadata
+- On **provider initialization** (Phase 9 `provider.config.update` /
+  first boot): the provider downloads/updates the artifacts named in
+  `backend_config` before starting the backend.
+- On `backend.start`, if an artifact is missing locally, the driver calls
+  `ensure_artifact` to fetch it before spawning the process.
+- The admin observes progress via `download.progress` WS events (persisted
+  to the instance's `download_progress`-style UI state in the admin, not a
+  dedicated table).
 
-# Force delete (even if loaded)
-uv run python -m app.services.models delete --model-id <model-uuid> --force
-```
+## Quantization formats (reference)
 
-### Validate Model
+GGUF quants supported by the backends (this is about the file, not the
+platform):
+- `Q2_K` … `Q8_0`, `F16`/`BF16`/`F32`.
+- **Recommended:** `Q4_K_M` for speed/quality balance.
+- Pick the quant that fits your VRAM budget (see `gpu-config` skill);
+  the file must match what `Machine.total_vram_bytes` /
+  `vram_required_bytes` accounting allows.
 
-```bash
-# Check file integrity
-uv run python -m app.services.models validate --model-id <model-uuid>
+## Managing models via the admin
 
-# Full validation with metadata extraction
-uv run python -m app.services.models validate --model-id <model-uuid> --extract-metadata
-```
+1. Create/edit a **ProviderDefinition** and set `backend_config` with the
+   artifact descriptors (validated against the documented JSON schema —
+   don't invent ad-hoc keys).
+2. The definition's `registration_token` binds it to a provider instance
+   of the matching `provider_type`.
+3. Trigger init (Phase 9) or a boot; the provider downloads artifacts and
+   the admin shows `download.progress`.
+4. Removing a model = disabling/deleting the ProviderDefinition. Orphaned
+   files are reclaimed by `storage.prune_unused` (Phase 9) — deletes files
+   in MODELS_DIR/CACHE_DIR not referenced by any active config fingerprint.
 
-### Get Model Info
+## Validation
 
-```bash
-# Basic info
-uv run python -m app.services.models info --model-id <model-uuid>
+- The admin validates `backend_config` shape with Pydantic on write.
+- GGUF integrity is the backend's problem at load time; a corrupt file
+  surfaces as a boot failure + `backend.logs`. Re-download by removing the
+  local file and re-triggering init.
 
-# Full metadata
-uv run python -m app.services.models info --model-id <model-uuid> --full
+## Troubleshooting
 
-# List all models
-uv run python -m app.services.models list
-```
+| Symptom | Cause / fix |
+| --- | --- |
+| "unsupported artifact source" | Only `hf`/`huggingface`/`path` are valid. Fix `backend_config`. |
+| Download 401/403 | Private repo — set `HF_TOKEN` in the provider container env. |
+| Wrong file used | FLAT `MODELS_DIR/<file>` shadow — remove the stray top-level file. |
+| Disk full | Free space or use a smaller quant; downloads go under `MODELS_DIR`. |
+| Stale model after config change | Fingerprint should have changed → auto cache-clear + re-download (Phase 9). |
 
-### Refresh Model Metadata
+## Anti-patterns
 
-```bash
-# Re-extract metadata from file
-uv run python -m app.services.models refresh-metadata --model-id <model-uuid>
-
-# Refresh all models
-uv run python -m app.services.models refresh-metadata --all
-```
-
-## Python API
-
-Use the `ModelManager` class in Python code:
-
-```python
-from app.services.models import ModelManager
-
-manager = ModelManager()
-
-# Download with progress callback
-async def on_progress(bytes_downloaded, total_bytes, speed):
-    print(f"Progress: {bytes_downloaded/total_bytes*100:.1f}% at {speed/1e6:.1f} MB/s")
-
-job = await manager.download_model(
-    source="huggingface",
-    repo_id="TheBloke/Llama-2-7B-Chat-GGUF",
-    filename="llama-2-7b-chat.Q4_K_M.gguf",
-    on_progress=on_progress
-)
-
-# Pause/Resume
-await manager.pause_download(job.id)
-await manager.resume_download(job.id)
-
-# Get model info
-model = await manager.get_model(model_id)
-models = await manager.list_models()
-
-# Delete model
-await manager.delete_model(model_id)
-
-# Validate
-is_valid = await manager.validate_model(model_id)
-metadata = await manager.extract_metadata(model_id)
-```
-
-## Supported Sources
-
-### HuggingFace Hub
-
-**Format:** `owner/repo`
-
-**Examples:**
-- `TheBloke/Llama-2-7B-Chat-GGUF`
-- `TheBloke/Mistral-7B-Instruct-v0.2-GGUF`
-- `bartowski/Llama-3-8B-Instruct-GGUF`
-
-**Features:**
-- Public and private repos (with token)
-- Progress tracking
-- Resume support
-- File validation
-
-### ModelScope
-
-**Format:** `owner/repo`
-
-**Examples:**
-- `modelscope/Llama-3-8B`
-- `qwen/Qwen-7B-Chat-GGUF`
-
-**Features:**
-- China-friendly mirror
-- Progress tracking
-- Resume support
-
-## Model Organization
-
-Models are stored in:
-```
-/models/
-├── llama-2-7b-chat.Q4_K_M.gguf
-├── mistral-7b-instruct.Q5_K_M.gguf
-└── qwen-7b-chat.Q4_K_M.gguf
-```
-
-Metadata stored in PostgreSQL `models` table.
-
-## Quantization Formats
-
-Supported GGUF quantizations:
-- `Q2_K` - Smallest, lowest quality
-- `Q3_K_S`, `Q3_K_M`, `Q3_K_L` - Small, decent quality
-- `Q4_0`, `Q4_1` - Original quants
-- `Q4_K_S`, `Q4_K_M` - Recommended balance
-- `Q5_0`, `Q5_1`, `Q5_K_S`, `Q5_K_M` - Better quality
-- `Q6_K`, `Q8_0` - Near lossless
-- `BF16`, `F16`, `F32` - Unquantized
-
-**Recommended:** `Q4_K_M` for best speed/quality balance
-
-## Download Features
-
-### Progress Tracking
-- Real-time progress percentage
-- Download speed (MB/s)
-- ETA calculation
-- Bytes downloaded/total
-
-### Pause/Resume
-- HTTP range requests for resuming
-- Pause token storage
-- Automatic retry on network failures
-
-### Error Recovery
-- Auto-retry (max 3 attempts)
-- Exponential backoff
-- Checksum validation after download
-- Quarantine failed downloads
-
-### Validation
-- GGUF magic number check
-- Header parsing
-- Metadata extraction
-- Optional SHA256 verification
-
-## Metadata Extraction
-
-Automatically extracts:
-- Architecture (llama, mistral, qwen, etc.)
-- Parameter count
-- Context length
-- Quantization type
-- File size
-- Tensor dimensions
-
-## Best Practices
-
-1. **Always validate** after download completes
-2. **Use resume** for large models (>5GB)
-3. **Check disk space** before downloading
-4. **Verify quantization** matches use case
-5. **Keep metadata updated** after file operations
-6. **Clean up failed downloads** periodically
-
-## Error Handling
-
-Common errors:
-
-**"File not found"**: Check repo ID and filename
-**"Out of disk space"**: Free up space or use smaller quantization
-**"Invalid GGUF file"**: Redownload, file may be corrupted
-**"Repo not found"**: Verify repo is public or provide auth token
-**"Download failed"**: Check network, retry with resume
-
-## Configuration
-
-Download config in `/etc/inference-matrix/models.yaml`:
-
-```yaml
-downloads:
-  max_concurrent: 3
-  chunk_size_mb: 64
-  max_retries: 3
-  timeout_seconds: 3600
-  resume_on_failure: true
-
-storage:
-  base_path: /models
-  organize_by_source: false
-  auto_validate: true
-
-sources:
-  huggingface:
-    use_token: false
-    token_env: HUGGINGFACE_TOKEN
-  
-  modelscope:
-    use_mirror: true
-```
+- ❌ Referencing the old `Model`/`DownloadJob` tables — they don't exist.
+- ❌ Putting model paths in provider env instead of `backend_config`
+  (env is for `MODELS_DIR` root + binary paths, not per-model files).
+- ❌ Assuming ModelScope works — it's HuggingFace-only right now.
+- ❌ Hand-placing files in `MODELS_DIR` without a matching descriptor and
+  expecting the platform to know about them (except the FLAT resolution
+  convenience for declared filenames).

@@ -1,417 +1,177 @@
 ---
 name: gpu-config
-description: Configure and monitor GPU acceleration for llama.cpp inference
+description: Configure and monitor GPU acceleration for Inference Matrix providers (VRAM admission, gpu_layers, backend metrics)
 ---
 
-# GPU Configuration Skill
+# GPU Configuration — Inference Matrix
 
-Use this skill when configuring, monitoring, or troubleshooting GPU acceleration for inference.
+Use this skill when configuring GPU acceleration, VRAM budgeting, or
+monitoring GPU usage in Inference Matrix.
 
-## Commands
+**There is no `app.services.gpu` CLI and no `/etc/inference-matrix/gpu.yaml`.**
+GPU configuration is split across three real places:
 
-### Check GPU Availability
+1. **`ProviderDefinition.backend_config.args`** — per-model llama.cpp GPU
+   flags (`gpu_layers`, `flash_attn`, `parallel`, etc.). Set via the admin.
+2. **`Machine.total_vram_bytes` + `ProviderDefinition.vram_required_bytes`**
+   — the scheduler's VRAM admission budget.
+3. **`provider_lib/metrics.py`** — the GPU sampler (nvidia-smi / AMD sysfs)
+   that emits `metrics.machine` events.
+
+The backend binary path (`LLAMA_SERVER_PATH`) is a provider-container env
+var, **never** in `backend_config`.
+
+## GPU layers (llama-cpp)
+
+Set in `backend_config.args` on the ProviderDefinition. The llama-cpp
+driver maps them to CLI flags (see `provider/README.md` command mapping):
+
+```json
+{
+  "args": {
+    "gpu_layers": 35,
+    "ctx": 8192,
+    "flash_attn": "on",
+    "parallel": 1,
+    "tensor_split": null,
+    "main_gpu": 0,
+    "split_mode": "layer"
+  }
+}
+```
+
+| Field | CLI | Notes |
+| --- | --- | --- |
+| `gpu_layers` | `--n-gpu-layers` | Default 35. Higher = more offload, more VRAM. |
+| `ctx` / `context_size` | `--ctx-size` | VRAM grows with context. |
+| `flash_attn` | `--flash-attn on\|off` | bool or string. |
+| `parallel` | `--parallel` | Concurrency slots. `strict_mtp_qwen:true` forces 1. |
+| `tensor_split` | `--tensor-split` | e.g. `[0.5,0.5]` for 2 GPUs. |
+| `main_gpu` | `--main-gpu` | Primary GPU index. |
+| `split_mode` | `--split-mode` | `layer` / `row` / `none`. |
+
+**Rule of thumb for `gpu_layers`:** 4GB GPU → 20–30; 8GB → 35–45;
+12GB+ → 50+ or full offload. Increase gradually and watch VRAM.
+
+> ⚠️ `--prompt-cache` is OBSOLETE — never emit it. `--cache-prompt` is the
+> valid modern flag; the driver already handles this distinction.
+
+## VRAM admission (the scheduler)
+
+The scheduler decides whether a backend can boot on a machine based on
+VRAM, not layers. See `ARCHITECTURE.md` §6.
+
+- **`Machine.total_vram_bytes`** — the machine's VRAM budget. Set when you
+  create the Machine in the admin; refined from provider-reported
+  hardware at registration. Size it honestly (leave headroom for OS/display).
+- **`ProviderDefinition.vram_required_bytes`** — what this model needs to
+  load. Estimate from the GGUF size + context + KV cache.
+- On `acquire`, free VRAM = `total_vram_bytes` − VRAM held by other
+  instances on the machine. If `vram_required_bytes` > free, the request
+  does **not** boot and instead waits (or 504s on timeout).
+
+**Estimating `vram_required_bytes`:**
+- Q4_K_M ≈ 0.7 GB per billion params (full offload) + ~1 GB per 4K ctx.
+- Add a margin; over-reporting is safer than OOM.
+
+> Idle-backend **eviction** to free VRAM is not yet implemented
+> (`TODO(phase6-eviction)`) — requests wait rather than evicting a
+> co-located idle backend. Don't pack models to 100% of a GPU.
+
+## Monitoring GPU / VRAM
+
+Machine-level metrics are collected by the provider and emitted over the WS
+only when the admin assigns ownership (`im:metrics:owner:{machine_uid}`,
+TTL 30s). Categories: `gpu_usage`, `vram`, `os_ram`, `cpu`, `storage`.
+Inference metrics (`metrics.inference`) are always emitted per-instance.
+
+**Sampler** (`provider_lib/metrics.py`):
+- NVIDIA: `nvidia-smi --query-gpu=...` (CSV).
+- AMD: sysfs (`/sys/class/drm/card*/device/mem_info_vram_used`, `busy_percent`).
+- Failed collectors omit their key (never raise).
+
+**Ad-hoc host checks:**
+```bash
+nvidia-smi                          # NVIDIA
+watch -n1 nvidia-smi
+cat /sys/class/drm/card0/device/mem_info_vram_used   # AMD (bytes)
+vulkaninfo | grep GPU               # Vulkan enumeration
+```
+
+**Via the platform:** the admin WebUI (Phase 10) shows per-machine VRAM
+used/free and per-instance `metrics.inference` (token speed, slots). Until
+then, inspect Redis:
+```bash
+docker compose exec redis redis-cli GET im:metrics:machine:<machine_uid>
+docker compose exec redis redis-cli HGETALL im:vram:used:<machine_uid>
+```
+
+## Container GPU access
+
+Provider containers need the device nodes exposed:
 
 ```bash
-# Detect available GPUs
-uv run python -m app.services.gpu detect
+# NVIDIA
+docker run --gpus all ...        # or --device /dev/nvidia*
 
-# Show GPU info
-uv run python -m app.services.gpu info
+# AMD (ROCm / halogen)
+podman run --device /dev/kfd --device /dev/dri ...
 
-# Test GPU backend
-uv run python -m app.services.gpu test-backend --backend cuda
-uv run python -m app.services.gpu test-backend --backend metal
-uv run python -m app.services.gpu test-backend --backend vulkan
+# Vulkan
+podman run --device /dev/dri ...
 ```
 
-### Configure GPU Layers
+`LD_LIBRARY_PATH` is defaulted to the `llama-server` binary's directory by
+the driver (`env.setdefault`) — Vulkan/ROCm containers may need it set
+explicitly for driver libs.
 
-```bash
-# Set global default
-uv run python -m app.services.gpu config --gpu-layers 35
+## Multi-GPU
 
-# Set per-model override
-uv run python -m app.services.gpu config \
-  --model-id <model-uuid> \
-  --gpu-layers 50
-
-# Reset to default
-uv run python -m app.services.gpu config --model-id <model-uuid> --reset
-```
-
-### Monitor GPU Usage
-
-```bash
-# Real-time VRAM usage
-uv run python -m app.services.gpu monitor --interval 2
-
-# VRAM by model
-uv run python -m app.services.gpu usage --by-model
-
-# Historical usage
-uv run python -m app.services.gpu history --timeframe 1h
-```
-
-### Optimize GPU Settings
-
-```bash
-# Auto-optimize for current GPU
-uv run python -m app.services.gpu optimize --model-id <model-uuid>
-
-# Test different layer counts
-uv run python -m app.services.gpu benchmark \
-  --model-id <model-uuid> \
-  --layers 20,30,40,50
-```
-
-## Python API
-
-```python
-from app.services.gpu import GPUManager
-
-gpu_manager = GPUManager()
-
-# Detect GPUs
-gpus = await gpu_manager.detect_gpus()
-# Returns: [{id, name, vram_total, vram_free, backend}, ...]
-
-# Get GPU info
-info = await gpu_manager.get_gpu_info(gpu_id=0)
-# Returns: {name, vram, backend, compute_capability, ...}
-
-# Configure layers
-await gpu_manager.set_gpu_layers(
-    model_id=model_id,
-    layers=35
-)
-
-# Get recommended layers
-recommended = await gpu_manager.recommend_layers(
-    model_id=model_id,
-    target_vram_usage_percent=80
-)
-
-# Monitor VRAM
-usage = await gpu_manager.get_vram_usage()
-# Returns: {total, used, free, percent}
-```
-
-## GPU Backends
-
-### CUDA (NVIDIA)
-
-**Requirements:**
-- NVIDIA GPU
-- CUDA drivers installed
-- CUDA toolkit 11.0+
-
-**Detection:**
-```bash
-nvidia-smi
-```
-
-**Configuration:**
-```yaml
-gpu:
-  backend: cuda
-  main_gpu: 0
-  tensor_split: null  # For multi-GPU
-```
-
-**Optimal Settings:**
-- Small GPU (4GB): 20-30 layers
-- Medium GPU (8GB): 35-45 layers
-- Large GPU (12GB+): 50+ layers
-
-### Metal (Apple Silicon)
-
-**Requirements:**
-- Apple Silicon (M1/M2/M3)
-- macOS 12.0+
-
-**Detection:**
-```bash
-system_profiler SPDisplaysDataType
-```
-
-**Configuration:**
-```yaml
-gpu:
-  backend: metal
-  main_gpu: 0
-```
-
-**Optimal Settings:**
-- M1/M2 (8GB): 25-35 layers
-- M1/M2 (16GB+): 40-50 layers
-- M2/M3 Max: 50+ layers
-
-### Vulkan (AMD/Intel)
-
-**Requirements:**
-- AMD or Intel GPU
-- Vulkan drivers installed
-
-**Detection:**
-```bash
-vulkaninfo
-```
-
-**Configuration:**
-```yaml
-gpu:
-  backend: vulkan
-  main_gpu: 0
-```
-
-**Optimal Settings:**
-- Varies by GPU, test with benchmark command
-
-### CPU-Only
-
-**When to Use:**
-- No GPU available
-- GPU debugging
-- Testing
-
-**Configuration:**
-```yaml
-gpu:
-  backend: cpu
-  n_threads: 8  # Number of CPU threads
-```
-
-## Multi-GPU Configuration
-
-### Tensor Parallelism
-
-Split model across multiple GPUs:
-
-```yaml
-gpu:
-  backend: cuda
-  main_gpu: 0
-  tensor_split: [0.5, 0.5]  # Split evenly across 2 GPUs
-```
-
-**Example for 3 GPUs:**
-```yaml
-tensor_split: [0.33, 0.33, 0.34]
-```
-
-### Layer Splitting
-
-Different GPUs handle different layers:
-
-```python
-# Manual layer assignment
-await gpu_manager.set_tensor_split(
-    model_id=model_id,
-    split=[0.6, 0.4]  # 60% on GPU 0, 40% on GPU 1
-)
-```
-
-## VRAM Management
-
-### Calculate VRAM Usage
-
-```python
-from app.services.gpu import calculate_vram_usage
-
-vram_needed = calculate_vram_usage(
-    model_params=7_000_000_000,  # 7B model
-    quantization="Q4_K_M",
-    gpu_layers=35,
-    context_size=4096,
-    batch_size=512
-)
-# Returns: vram_bytes (e.g., 6_442_450_944 for ~6GB)
-```
-
-**Rule of Thumb:**
-- Q4_K_M: ~0.7 GB per billion params (full GPU offload)
-- Each GPU layer: ~0.1-0.2 GB
-- Context: ~1GB per 4K tokens
-
-### VRAM Monitoring
-
-```python
-# Real-time monitoring
-async for usage in gpu_manager.monitor_vram(interval_seconds=1):
-    print(f"VRAM: {usage.percent}% used")
-    if usage.percent > 90:
-        print("Warning: Low VRAM!")
-```
-
-### Auto-Adjust Layers
-
-```python
-# Automatically set layers based on available VRAM
-layers = await gpu_manager.auto_configure_layers(
-    model_id=model_id,
-    max_vram_percent=85,
-    min_layers=10
-)
-```
-
-## Benchmarking
-
-### Test Performance
-
-```python
-from app.services.gpu import benchmark_model
-
-results = await benchmark_model(
-    model_id=model_id,
-    gpu_layers_list=[20, 30, 40, 50],
-    context_size=4096,
-    prompt="Hello, how are you?",
-    max_tokens=100
-)
-
-# Results include:
-# - tokens/second for each layer count
-# - VRAM usage for each
-# - Optimal recommendation
-```
-
-### Compare Backends
-
-```python
-# Compare CUDA vs CPU
-cuda_result = await benchmark_model(model_id, gpu_layers=35, backend="cuda")
-cpu_result = await benchmark_model(model_id, gpu_layers=0, backend="cpu")
-
-speedup = cuda_result.tokens_per_second / cpu_result.tokens_per_second
-print(f"CUDA is {speedup:.1f}x faster")
-```
+- **Layer/tensor split within one backend:** use `tensor_split` +
+  `split_mode` in `backend_config.args`.
+- **One backend per GPU:** create separate ProviderDefinitions/instances,
+  each with `assigned_gpus` bound to a single GPU UUID; the scheduler treats
+  each instance's VRAM need against the machine budget.
+- A provider instance owns exactly **one** backend, so multi-GPU =
+  multiple instances on the same Machine.
 
 ## Troubleshooting
 
-### GPU Not Detected
-
-**CUDA:**
+### GPU not detected
 ```bash
-# Check drivers
-nvidia-smi
-
-# Check CUDA version
-nvcc --version
-
-# Restart Docker with GPU
-docker compose restart backend
+nvidia-smi                 # driver present?
+ls /dev/kfd /dev/dri       # AMD nodes present + passed to container?
 ```
+Recreate the provider container with the right `--device`/`--gpus` flags.
 
-**Metal:**
-```bash
-# Check Metal support
-system_profiler SPDisplaysDataType | grep Metal
-```
+### Out of memory / boot fails
+1. Lower `gpu_layers` in `backend_config.args`.
+2. Lower `ctx`.
+3. Use a smaller quantization (larger Q# = smaller).
+4. Reduce `parallel` (each slot uses KV cache).
+5. Increase `Machine.total_vram_bytes` headroom or reduce
+   `vram_required_bytes` over-packing.
+Check the failed boot's `backend.logs` in the admin / provider container
+logs.
 
-**Vulkan:**
-```bash
-# Check Vulkan support
-vulkaninfo | grep GPU
-```
+### Slow performance
+- Confirm `gpu_layers` is high enough that the model actually fits on GPU.
+- Ensure `flash_attn: "on"`.
+- Check VRAM isn't thrashing (monitor `im:vram:used`).
+- Thermal throttling: check temps with `nvidia-smi` / `radeontop`.
 
-### Out of Memory
+### Two backends over-provisioned the same GPU
+- Verify `Machine.total_vram_bytes` reflects the real GPU, and each
+  `ProviderDefinition.vram_required_bytes` sums correctly.
+- Metrics dedup: only one instance per machine emits `metrics.machine` at
+  a time (ownership lease); inference metrics are per-instance and never
+  deduped.
 
-**Solutions:**
-1. Reduce GPU layers
-2. Reduce context size
-3. Use smaller quantization
-4. Close other GPU applications
-5. Use tensor splitting across multiple GPUs
+## Best practices
 
-```bash
-# Reduce layers
-uv run python -m app.services.gpu config --gpu-layers 25
-
-# Reduce context
-uv run python -m app.services.gpu config --context-size 2048
-```
-
-### Slow Performance
-
-**Check:**
-1. GPU utilization (should be >80%)
-2. VRAM usage (shouldn't be swapping)
-3. GPU temperature (thermal throttling?)
-4. PCIe bandwidth (for discrete GPUs)
-
-```bash
-# Monitor in real-time
-watch -n 1 nvidia-smi  # NVIDIA
-watch -n 1 powermetrics --samplers gpu  # Apple
-```
-
-### CUDA Out of Memory
-
-**Error:** `CUDA out of memory. Tried to allocate...`
-
-**Solutions:**
-```bash
-# Immediate: Reduce batch size
-uv run python -m app.services.gpu config --batch-size 256
-
-# Reduce context
-uv run python -m app.services.gpu config --context-size 2048
-
-# Reduce GPU layers
-uv run python -m app.services.gpu config --gpu-layers 20
-```
-
-## Configuration
-
-GPU config in `/etc/inference-matrix/gpu.yaml`:
-
-```yaml
-gpu:
-  # Backend selection: auto, cuda, metal, vulkan, cpu
-  backend: auto
-  
-  # Primary GPU (for multi-GPU)
-  main_gpu: 0
-  
-  # Multi-GPU splitting
-  tensor_split: null  # [0.5, 0.5] for 2 GPUs
-  
-  # Defaults
-  default_gpu_layers: 35
-  max_gpu_layers: 100
-  
-  # VRAM limits
-  max_vram_usage_percent: 90
-  reserve_vram_gb: 1
-  
-  # Monitoring
-  monitor_interval_seconds: 5
-  log_vram_usage: true
-  
-  # Auto-optimization
-  auto_optimize: true
-  benchmark_on_start: false
-```
-
-## Best Practices
-
-1. **Start conservative**: Begin with 35 layers, increase gradually
-2. **Monitor VRAM**: Keep usage under 90% to avoid OOM
-3. **Benchmark**: Test different layer counts for your use case
-4. **Use appropriate quantization**: Q4_K_M for balance, Q5+ for quality
-5. **Reserve VRAM**: Leave 1GB for display/system (if using same GPU)
-6. **Multi-GPU**: Use tensor splitting for large models
-
-## Performance Tips
-
-**Maximize tokens/second:**
-- Maximize GPU layers (until VRAM limit)
-- Use larger batch sizes (if VRAM allows)
-- Keep context size reasonable
-- Use Q4_K_M or Q5_K_M quantization
-
-**Minimize latency:**
-- Pre-load models (don't wait for first request)
-- Use prompt caching
-- Keep context warm (don't let server shutdown)
-- Use smaller models for simple tasks
+1. Start `gpu_layers` at 35 and raise until VRAM ~85–90%.
+2. Report `vram_required_bytes` honestly; leave the machine under-committed.
+3. Don't rely on eviction — it isn't implemented; over-provisioning just
+   makes requests wait.
+4. Reserve ~1 GB on a GPU shared with display/OS.
+5. Use `metrics.machine` VRAM readings to validate your budget assumptions.

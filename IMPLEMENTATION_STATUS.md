@@ -1,549 +1,308 @@
-# Inference Matrix - Implementation Status
+# Inference Matrix — Implementation Status
 
-Last Updated: September 27, 2026
+**Overhaul branch:** `litellm-architecture-overhaul`
+**Last updated:** 2026-10-04 (Phase 6 in progress)
 
-## ✅ Completed Features
+This file tracks the litellm-based architecture overhaul (see
+[ARCHITECTURE.md](ARCHITECTURE.md)). Each phase lists its features with
+enough detail that a fresh session can pick up any single feature. When
+starting a feature, read the linked protocol/doc first.
 
-### 🏗️ Infrastructure & DevOps
+## Phase Overview
 
-- [x] **Multi-stage Docker build**
-  - Frontend build with Bun/Vite
-  - Backend with Python/uv
-  - Single image serving both on port 8000
-  - Image name: `ghcr.io/absolutelink/matrix-app:main`
+| Phase | Scope | Status |
+| --- | --- | --- |
+| 0 | litellm Responses streaming fidelity spike | ✅ Complete |
+| 1 | Repo restructure: `admin/` + `provider/` workspaces, Redis in compose, CI/Dockerfiles | ✅ Complete |
+| 2 | Squashed schema (5 tables) + Redis key layout | ✅ Complete |
+| 3 | Provider registration + WS auth + epoch fencing + connection manager | ✅ Complete |
+| 4 | Provider lib: backend lifecycle, `/v1` translation surface, slot admission | ✅ Complete |
+| 5 | llama-cpp provider + model downloader + machine metrics + ownership | ✅ Complete |
+| 6 | Scheduler + `/v1/responses` via litellm + SSE emitter + persistence | 🟡 In progress |
+| 7 | `/v1/chat/completions` + `/v1/models` + 501 stubs | ⬜ Pending |
+| 8 | gufo / halogen / halogen-flash provider ports | ⬜ Pending |
+| 9 | `provider.config.update` / fingerprint / cache-clear flow | ⬜ Pending |
+| 10 | Admin UI rework | ⬜ Pending |
+| 11 | Docs consolidation + full E2E validation | ⬜ Pending |
 
-- [x] **Modular Entrypoint System**
-  - `/etc/entrypoint.d/` with numbered scripts (010, 020...)
-  - 010-generate-config.sh: Runtime API URL configuration
-  - 020-run-migrations.sh: Database migrations
-  - Support for `/opt/rootfs` overlay for custom files
-  - CMD override via `/tmp/docker_cmd_override`
-
-- [x] **Database Migrations**
-  - Alembic configured with environment variable support
-  - BigInteger columns for `size_bytes` and `parameter_count`
-  - Automatic migration on container startup
-
-- [x] **Production Deployment**
-  - Systemd service on 10.100.2.100
-  - Traefik reverse proxy with Let's Encrypt
-  - Domain: `matrix.thelink.family`
-  - PostgreSQL database connection
-
-### 📊 Models Management
-
-- [x] **Models CRUD**
-  - List all models with DataTable
-  - Add model manually
-  - Edit model details
-  - Delete model with confirmation
-  - Model actions menu (⋮)
-
-- [x] **HuggingFace Integration**
-  - Search HuggingFace for GGUF models
-  - Auto-detect split model files (e.g., `model-00001-of-00003.gguf`)
-  - Group split files as single download option
-  - Fetch actual parameter count from `config.json`
-  - Display file sizes and counts
-
-- [x] **Model Information Display**
-  - Name, architecture, quantization
-  - Size (formatted: GB, MB)
-  - Parameter count (formatted: B, M)
-  - Context length
-  - Source information
-  - Tags
-
-### 🎨 Frontend UI Components
-
-- [x] Dashboard layout with sidebar navigation
-- [x] DataTable component with sorting, pagination
-- [x] Dialog components (Add, Edit, Delete, Search)
-- [x] Form components with validation
-- [x] Toast notifications (success, error)
-- [x] Loading states and skeletons
-- [x] Dark/Light theme support
-- [x] Responsive design
-
-### 🔌 API Endpoints (Backend)
-
-- [x] `/api/v1/models/` - CRUD operations
-- [x] `/api/v1/huggingface/search` - Search HF models
-- [x] `/api/v1/huggingface/models/files` - List GGUF files
-- [x] `/api/v1/huggingface/models/params` - Get parameter count
-- [x] `/api/health` - Health check
-
-### 🌐 Frontend Configuration
-
-- [x] Runtime API URL configuration via `window.APP_CONFIG`
-- [x] Fallback chain: runtime → build env → window.location.origin
-- [x] Vite dev server proxy for local development
-- [x] No hardcoded localhost URLs
+Legend: ✅ complete · 🟡 in progress · ⬜ pending
 
 ---
 
-## 🚧 In Progress
+## Phase 0 — litellm Fidelity Spike ✅
 
-- [~] **Audio transcription** - UI wired, backend is a stub
+**Decision doc:** `spike/litellm-fidelity/FINDINGS.md`
 
----
+Verified `litellm.aresponses(stream=True)` against a toy upstream emitting
+the full 26-event OpenResponses set. **litellm is suitable.** Constraints
+carried into Phase 6:
 
-## 📋 Planned Features
+1. Admin owns the client-facing `resp_<uuid>` and the emitter; litellm's
+   affinity-wrapped id is stored for continuation but never surfaced.
+2. Every alias must be registered with litellm
+   (`supports_native_streaming: True`, `mode: "responses"`,
+   `litellm_provider: "openai"`) or native streaming isn't selected.
+3. `response.failed` arrives as `MidStreamFallbackError`; admin must map
+   exceptions to spec terminal frames.
+4. Admin owns the chain: reconstruct full `input` from DB; never pass
+   `previous_response_id` to litellm.
+5. Provider-side translation layer is still required — litellm faithfully
+   transports whatever the provider emits; it does not fix non-compliance.
 
-### 🎯 High Priority (MVP)
-
-#### Agents Management
-- [x] Agents list page
-- [x] Add agent dialog
-- [x] Edit agent configuration
-- [x] Delete agent
-- [x] Agent status monitoring
-- [x] Agent logs viewer (llama-server stdout/stderr, 5s auto-refresh)
-- [x] Agent metrics viewer (GPU, VRAM, running servers)
-- [x] Agent auto-registration from agent service (retry until success)
-- [x] Periodic re-registration (heals backend->agent event WS after backend restarts)
-- [x] Configurable advertised address (AGENT_HOST / AGENT_PORT)
-
-#### Recipes (Agent Backend Images)
-- [x] Vulkan recipe: agent app layered on `ghcr.io/ggml-org/llama.cpp:full-vulkan`
-- [x] CI `build-recipes` job chained after `build-agent` (AGENT_IMAGE build-arg)
-- [x] Quadlet `.container` deployment file for systemd/podman
-
-#### Server Instances
-- [x] Server instances list (live, 5s auto-refresh)
-- [x] Start server dialog (model + agent picker)
-- [x] Start/stop existing instances from row menu
-- [x] Automatic model download on server start (agent fetches from HuggingFace if missing)
-- [x] Server lifecycle events (server.started/stopped/error) with DB state fallback (dispatch ack)
-- [x] Live llama-server log streaming (log.lines events) with 100-line history seeding + polling fallback
-- [x] Per-server llama.cpp logs sheet in UI (live tail, auto-scroll, stderr highlight)
-- [x] Stale instance cleanup: agents report running_server_ids on registration; backend marks unreported instances stopped
-- [x] Server health monitoring (periodic health checks, transition events, crash detection)
-- [x] Server configuration editing (in-place, `PUT /api/v1/server-instances/{id}` with restart flag, active-lease and benchmark guards)
-- [x] Scrollable settings side sheets (Start + Edit are right-side `Sheet`s with sticky header/footer)
-- [ ] Engine switching on an existing instance (deliberately rejected)
-- [ ] Connection testing
-
-#### Real-time Event Streaming
-- [x] Agent event bus with buffered pub/sub (`server.*`, `download.*`, `gpu.usage`, `log.lines`)
-- [x] Agent `/ws/status` streams real events (was heartbeat-only)
-- [x] Backend fans agent events out to UI clients via `/api/ws/events/{agent_id}`
-- [x] Backend `server.error` handling, `started_at` on `server.started`
-- [x] UI live event feed sheet per agent
-- [x] Download progress events with speed_mbps (tqdm shim for hf_hub)
-- [x] Real GPU metrics via nvidia-smi sampling + periodic gpu.usage emission
-
-#### Inference Scheduling & Queueing (`backend/app/services/inference_scheduler.py`)
-- [x] Postgres-backed `InferenceLease` rows (queued/active/terminal + `terminal_reason`, `slot_generation`)
-- [x] VRAM-aware FIFO admission (`FOR UPDATE SKIP LOCKED`, oldest-first, configured `vram_required_bytes` else model + mmproj + dflash size vs agent `vram_total`)
-- [x] Capacity from agent-reported effective slots (llama.cpp `parallel`, Halogen `kv_slots`) — not llama `/slots` telemetry polling
-- [x] Lease TTL (90s) + renewal loop gated on healthy server and matching slot generation
-- [x] Guard cancels upstream work when the lease is lost; `release()` shielded from ASGI cancellation
-- [x] Stale-lease reconciliation loop (30s) + startup reconciliation of persisted leases
-- [x] Queued-past-deadline → `expired`; active lease on stopped/unhealthy/missing server → `failed` + fenced forced stop
-- [x] Idle-server eviction to make room (LRU by `last_request_at`, skips active leases), matched across co-located agents by host + GPU id
-- [x] Cold-start serialization via per-resource advisory lock (`host:gpu_id`)
-- [x] Disconnected-request cancellation wired into every `/v1` entrypoint (ASGI `CancelledError` treated as authoritative)
-- [x] Queue clearing: `POST /api/v1/queue/clear` (queued only) + "Clear queue" UI
-- [x] Live queue status: `/api/ws/queue-status` pushed every 2s → `QueueStatusBar` (running/queued/GPU/VRAM, per-server booting/ready)
-- [x] `server_stream_closed` releases the lease even when the client keeps its SSE connection open
-
-#### Halogen / halogen-flash Engine Support
-- [x] Platform registry: `AGENT_PLATFORM` ∈ `llamacpp | halogen | halogen-flash`, validated on agent registration
-- [x] Halogen ROCm engine driver (env-var driven startup, fixed entrypoint, no CLI flags)
-- [x] halogen-flash driver: ~30 mapped env options incl. KV pool, sampling, reasoning effort, composable context
-- [x] Two private ports per server (api + engine); only the agent port is published
-- [x] Health probes on the API port with 900s startup grace and transient-failure tolerance
-- [x] Merged stdout/stderr log forwarding (blocking readline in a thread) into `log.lines`
-- [x] Configurable disk prompt caching (`HALOGEN_CACHE_DIR`, `cache_disk_gib`, `cache_prune_old`)
-- [x] Vision tower toggle (halogen-flash) + typed `HalogenServerOptions` / `HalogenFlashServerOptions` (`extra="forbid"`)
-- [x] Process-group cleanup (`start_new_session` + `killpg` SIGTERM→SIGKILL)
-- [x] Proxy path allowlist + slot-generation fencing for halogen-flash
-- [x] Payload compat: null-optional omission, cached-token usage mapping, streaming token delivery
-- [x] Engine picker + per-engine settings fields in Start/Edit dialogs
-- [x] Recipes: `halogen-rocm`, `halogen-flash`, `llama-cpp-q38rocm`, `llama-cpp-vulkan`
-- [ ] Engine migration/upgrade path for existing instances
-
-#### Inference Features
-- [x] Chat completion UI (OpenAI-compatible `/v1/chat/completions` via agent proxy)
-- [x] Text completion UI (`/v1/completions`, streaming + non-streaming)
-- [x] Embeddings generator (`/v1/embeddings`, `supports_embeddings` gating)
-- [~] File upload for processing — backend OpenAI file API complete (upload/list/get/content/delete + checksum); no standalone Files UI page
-- [~] Batch job management — API shell only (`validating` status, no executor, no output files, no UI)
-- [ ] Audio transcription UI — page exists but backend is a stub (`v1_audio.py` returns placeholder text; no whisper.cpp wiring)
-
-#### OpenResponses API (`/v1/responses`) — ✅ implemented (core scope + conformance)
-Target: [Open Responses spec v2026-04-24](https://www.openresponses.org/specification) (full core scope incl. WebSocket transport + `/responses/compact`; `service_tier` accepted, maps to default).
-
-- [x] **Schemas module** (`backend/app/api/routes/v1/responses/schemas.py`): content parts (input_text/image/file/video, output_text, refusal, reasoning_text, summary_text), item params (user/system/developer/assistant messages, function_call, function_call_output, reasoning, item_reference, compaction), FunctionToolParam, tool_choice union incl. `allowed_tools`, text.format (text/json_object/json_schema), ReasoningParam, TextParam, StreamOptionsParam, Usage (+details), CreateResponseBody, ResponseResource, CompactRequestBody/CompactResource
-- [x] **Spec serialization** (`serialize()` helper): `exclude_none=True, by_alias=True` at every emission point — conformance harness's Zod schemas mark temperature/top_p/penalties/top_logprobs/parallel_tool_calls strictly non-nullable and use optional() (key-absent, not null) for phase/logprobs/encrypted_content; text.format echo matches the TextFormat union (`type:"text"` → `{type}` only, `json_schema` → real `schema` key via alias + `strict` defaulting `true`, `verbosity` omitted when unset); tools echo carries `strict:true` default
-- [x] **Streaming events** (`events.py`): all ~24 spec events (response.created/queued/in_progress/completed/failed/incomplete, output_item.added/done, content_part.added/done, output_text.delta/done, refusal.*, reasoning.* + reasoning_text.* (dual-name: spec conformance schemas + OpenWebUI), reasoning_summary_*, function_call_arguments.delta/done, error) with monotonic `sequence_number`, `event:`/`data:` SSE framing, terminal `[DONE]`
-- [x] **Persistence**: new `responses` table mirroring ResponseResource 1:1 (replaces `conversations` table, migration `b1f8c2a47d90`); `previous_response_id` chaining = previous.input + previous.output + new input; `store=false` → no persistence, `previous_response_not_found` error on missing chain
-- [x] **Translator** (`translator.py`, Responses items ↔ llama.cpp chat messages/chunks): input items → messages (instructions → system, function_call/output replay as text, reasoning skipped); llama.cpp tool_calls + reasoning_content → function_call/reasoning items; `allowed_tools` → backend enforcement (violating calls suppressed into a note message)
-- [x] **POST /v1/responses**: alias resolution (incl. stopped/errored auto-start) + name/id fallback, non-streaming + SSE, spec error envelopes (previous_response_not_found, model_not_found); `background=true` → 400; no GET retrieval endpoint (spec doesn't document one)
-- [x] **Agent `--jinja` always-on**: llama.cpp tool calling requires `--jinja`; agent starts every llama-server with it (behavior change: templates drive formatting/parsing for chat/completions too)
-- [x] **Reasoning**: map llama.cpp `reasoning_content` deltas → reasoning items + dual-name events (`response.reasoning.delta/done` for spec conformance + `response.reasoning_text.delta/done` for OpenWebUI, identical payloads); reasoning item closed (`output_item.done`, completed) as soon as content/tool-call deltas start — llama.cpp sends no explicit end-of-reasoning marker mid-stream, and OpenWebUI only closes the thinking block on `output_item.done`
-- [x] **Assistant phase passthrough** (spec 2026-04-24): `commentary`/`final_answer` accepted on assistant input items (replayed as bracketed cue), last assistant phase echoed on output message items
-- [x] **Multimodal (real)**: `input_image` parts → llama.cpp multimodal `image_url` message parts (base64 data URLs/remote URLs); mmproj plumbing end-to-end — projector is selected per server instance (start/edit dialogs; default None = no `--mmproj` flag), agent downloads the projector on demand and spawns llama-server with `--mmproj` (servers without a projector get llama.cpp's clean error, surfaced as model_error)
-- [x] **POST /v1/responses/compact** (spec 2026-04-24): real compaction — model-summarization sampling pass through the same llama.cpp proxy, returns `response.compaction` (compaction item `encrypted_content` = summary, `created_at`, `usage`), stateless (no DB write); spec error envelopes for missing model / not-found chain
-- [x] **WebSocket transport** (`ws.py`, spec 2026-04-24): `POST /v1/responses` also served over WS — `{"type":"response.create"}` turns, same streaming events as SSE, spec error envelope, sequential processing (one in-flight response), transport-specific fields (`stream`/`stream_options`/`background`) rejected, 60-min connection limit (`websocket_connection_limit_reached`); connection-local cache enables `store=false` chaining via `previous_response_id` with `previous_response_not_found` on miss and cache eviction on failed turns; mounted directly in main.py (FastAPI 1.3 `_IncludedRouter` breaks WS handshakes through the v1 include)
-- [x] **Tests**: `tests/api/routes/test_responses_unit.py` (schemas/translator/StreamState/SSE framing + `TestConformanceSchemaRules`/`TestConformanceStreamingEvents` mirroring the harness's Zod rules), `tests/api/routes/test_v1_responses.py` (routes), regenerated frontend client
-- [x] **UI test page** (`/responses`): dedicated playground — server selector, spec SSE parsing (`event:`+`data:` frames), rendered items (text, Thinking, tool-call chips), **raw streaming-event inspector** (sequence_number + collapsible JSON payloads), `store` toggle with `previous_response_id` chaining ("New conversation" resets), temperature/max_tokens sliders, non-streaming mode rendering the full ResponseResource; added Switch component (`radix-ui`); sidebar entry "Responses API" after Chat
-- [ ] Deferred: WebSocket compaction tests (CLI-only), service_tier behavior (accepted, maps to default)
-
-Key llama.cpp facts (researched):
-- Tool calling on `/v1/chat/completions` only works with `--jinja` (template autoparser builds PEG grammar; parses model output into structured tool_calls; grammar-constrains arguments from tool JSON schemas)
-- Wire shapes: request `tools:[{type:"function",function:{name,description,parameters}}]`, `tool_choice:"auto"|"none"|"required"|{type:"function",function:{name}}`; non-streaming result `message.tool_calls[]` + `finish_reason:"tool_calls"`; streaming via `delta.tool_calls[]` fragments
-- We translate flat Responses `FunctionToolParam` ↔ llama's nested `function:{...}` shape; `allowed_tools` is ours to enforce (llama.cpp unaware)
-- Images: llama.cpp accepts `{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}` content parts; without an mmproj projector the server 500s ("image input is not supported") — we surface it as a model_error
-- Conformance harness quirks (openresponses repo, `src/lib/sse-parser.ts`): its generated schemas validate reasoning deltas as `response.reasoning.delta/done` while its own reference/spec text and OpenWebUI use `reasoning_text.*` — hence dual-name emission
-
-#### Dashboard Improvements
-- [x] System metrics dashboard cards (models, agents, servers, requests, GPU, VRAM)
-- [x] Live queue metrics + bottom status bar (GPU utilization/VRAM, deduplicated across agents sharing a GPU)
-- [ ] Model usage statistics — ✅ implemented (`total_requests`/`total_tokens_generated`/`average_response_time_ms` incremented per successful request via SQL-side running average)
-- [~] Recent activity feed (renders server instances with static counters, not a timestamped event feed)
-- [ ] Quick actions panel (only "Clear queue" exists in the status bar)
-- [ ] Resource usage charts (numeric cards only; no charting library installed)
-
-### 🔧 Medium Priority
-
-#### Benchmarking — ✅ implemented (`0737fa1`, `74df892`)
-- [x] **Benchmark definitions**
-  - Persisted `BenchmarkDefinition` + `BenchmarkRun` with CRUD (`backend/app/api/routes/benchmarks.py`)
-  - Copy-from-server-instance dialog retains a config snapshot + source reference
-  - Core `llama-bench` options: prompt/generation sizes, repetitions, batch/ubatch, GPU layers, flash attention
-  - dflash draft model support (`--spec-type draft-dflash -md`)
-- [x] **Benchmark execution**
-  - Runs `llama-bench` directly on the agent (`agent/app/services/llama_bench.py`), `LLAMA_BENCH_PATH` per recipe
-  - Queues until the agent/model is available; downloads missing models first
-  - All prompt/context combinations in one run; Markdown/CSV/bare-table parsing + aggregate summary
-  - Run history, raw output, errors, timestamps, status transitions persisted until deleted
-- [x] **Benchmark server isolation**
-  - One active benchmark globally via Postgres advisory lock; FIFO queue
-  - Waits for idle (persisted active leases) then force-stops all starting/running servers
-  - Idle timeout with abort/force-stop resolution in the UI
-  - Starts/restarts/edits blocked while a benchmark runs; scheduler admission denied
-  - Automatically stopped servers stay stopped after the run
-- [x] **Benchmark UI and history** — `/benchmarks` page (definitions + queue/history tabs, 5s refresh, results viewer); log tab auto-opens and is labeled by run
-  - [ ] Benchmark actions and latest-result summaries on server definition rows (not implemented)
-- [x] **Benchmark tests** — backend CRUD/snapshot, scheduler isolation, agent parse/command construction
-  - [ ] Frontend benchmark tests (none in repo)
-
-#### Server and Log Panel Improvements
-- [x] **Reliable log streaming** — ✅ implemented
-  - [x] Explicit connected/disconnected/**reconnecting** state per stream (`StreamStatus` in `agentEventStream.ts`, yellow pulse indicator while reconnecting)
-  - [x] Auto-reconnect with exponential backoff (1s→15s) without losing the visible tail
-  - [x] One shared, refcounted WebSocket per agent across all consumers (tab indicators, sheets)
-  - [x] Cursor-based merging: agent log rings assign monotonic per-feed sequence numbers; live events carry `seq_start`/`seq_end`; history endpoints accept `?after=<cursor>` and report `gap` on eviction — no content-suffix matching, no duplicate lines
-  - [x] Poll history while disconnected; immediate cursor catch-up on reconnect; bootstrap union handles live events arriving mid-fetch
-  - [x] Green/red connected indicator in every log tab title, including inactive tabs
-  - [x] Benchmark log tabs have history + polling (`/benchmarks/logs/{run_id}` cursor ring)
-- [~] **Log panel layout** — partially done
-  - [x] Reserve main-content space for the open bottom panel instead of overlaying inputs (`_layout.tsx` padding)
-  - [x] Reserved space updates while resized or collapsed
-  - [x] Responses, Completions, Embeddings, and Audio reflow to the reserved height via `--log-panel-h` (published on `SidebarInset`); footer padding accounts for the panel
-
-#### Prompts Library
-- [ ] Saved prompts
-- [ ] Prompt templates
-- [ ] Prompt categories
-- [ ] Share prompts
-
-#### Model Enhancements
-- [x] Model download progress (download.progress events with speed_mbps)
-- [x] Repository-structure-preserving model storage (flat vs `/models/{repo}/{file}` resolution)
-- [ ] Model validation checker
-- [ ] Model compatibility test
-- [ ] Model benchmarking (see the Benchmarking implementation plan above)
-- [ ] ModelScope source (backend `download_from_modelscope` exists but is not exposed by any route; agent-side downloads are HuggingFace only)
-
-### 🌟 Low Priority (Nice to Have)
-
-#### Advanced Features
-- [ ] Conversation history
-- [ ] Chat export/import
-- [ ] Custom themes
-- [ ] Keyboard shortcuts
-- [ ] Mobile responsive improvements
-- [ ] PWA support
-
-#### Monitoring & Analytics
-- [ ] Request logging (per-request `logger` calls only; no request-log table)
-- [x] Performance metrics — ✅ implemented: Prometheus `/api/v1/metrics` fed from `record_request_telemetry` (request counter/latency histogram/tokens per model+agent), `gpu.usage` events → VRAM gauge, 15s DB snapshot loop for agent/server gauges (stale labels cleared)
-- [~] Error tracking — Sentry init only (DSN-gated); per-entity `error_message` fields surfaced in tables, no aggregation
-- [x] Usage analytics — all inference paths (chat/completions/embeddings/responses HTTP+WS) persist `TokenUsageSample` rows via `record_request_telemetry`; aggregation at `/api/v1/stats/tokens`
-- [ ] Cost tracking
-
-#### Integrations
-- [ ] Webhook configurations
-- [ ] API webhooks
-- [ ] Third-party integrations
+Reproduce: `cd spike/litellm-fidelity && uv run python spike2.py`.
 
 ---
 
-## 📁 File Structure
+## Phase 1 — Restructure ✅
 
-```
-frontend/src/
-├── components/
-│   ├── Common/
-│   │   ├── DataTable.tsx ✅
-│   │   └── Pending*.tsx ✅
-│   ├── Models/
-│   │   ├── AddModel.tsx ✅
-│   │   ├── AddModelFromHF.tsx ✅
-│   │   ├── columns.tsx ✅
-│   │   ├── DeleteModel.tsx ✅
-│   │   ├── EditModel.tsx ✅
-│   │   ├── ModelActionsMenu.tsx ✅
-│   │   └── SearchHuggingFace.tsx ✅
-│   └── ui/ (Shadcn components) ✅
-├── routes/
-│   ├── _layout/
-│   │   ├── index.tsx ✅ (Dashboard)
-│   │   ├── models.tsx ✅
-│   │   ├── agents.tsx ✅
-│   │   ├── server-instances.tsx ✅
-│   │   └── chat/ ✅
-│   └── client/ (Auto-generated API client) ✅
-
-backend/app/
-├── api/
-│   ├── routes/
-│   │   ├── models.py ✅
-│   │   ├── huggingface.py ✅
-│   │   ├── server_instances.py ✅
-│   │   ├── agents.py ✅
-│   │   └── v1/ (OpenAI-compatible endpoints) ✅
-│   └── deps.py ✅ (get_db/SessionDep)
-├── models.py ✅
-└── core/ (Config, DB) ✅
-```
+- uv workspace members: `admin/backend`, `provider/lib`, `provider/mock`,
+  `provider/llama-cpp`, `spike/litellm-fidelity` (see root
+  `pyproject.toml`).
+- `compose.yml` runs **postgres + redis + admin + provider-mock** with
+  healthchecks and `REDIS_URL`/`POSTGRES_*` wiring. **Full local stack
+  works with no hardware.**
+- Root `Dockerfile` builds frontend (bun) → admin image (python 3.14, uv,
+  `--no-install-workspace --package matrix-admin`).
+- CI `build-and-push.yml` starts postgres 16 + redis 7 services and tests
+  the admin.
+- Old code parked in `legacy/` (reference only; never import).
 
 ---
 
-## 🛠️ Development Setup
+## Phase 2 — Schema + Redis Keys ✅
 
-### Local Development
-```bash
-# Backend
-cd backend
-uv sync
-uv run python -m app.main
+**Models:** `admin/backend/app/models.py`
+**Redis doc:** `admin/backend/docs/redis-keys.md`
+**Migration:** `admin/backend/alembic/versions/0140d6ad9f48_initial_squashed_schema.py`
 
-# Frontend
-cd frontend
-bun install
-bun run dev
-# Access at http://localhost:5173
-# API proxied to http://localhost:8000
-```
+Five tables: `Machine`, `ProviderDefinition`, `ProviderInstance`,
+`ResponseRecord`, `TokenUsageSample` (fields in ARCHITECTURE.md §4).
+`Machine.reachable_address()` = `dns or host or ip`. Uniqueness:
+`ProviderInstance` unique on `(machine_id, provider_definition_id)`.
 
-### Docker Build
-```bash
-docker build -t ghcr.io/absolutelink/matrix-app:main .
-```
-
-### Environment Variables
-```bash
-# Database
-POSTGRES_USER=inference-matrix
-POSTGRES_PASSWORD=<secret>
-POSTGRES_DB=inference-matrix
-POSTGRES_HOST=postgres
-POSTGRES_PORT=5432
-
-# Application
-AGENT_DISCOVERY_ENABLED=true
-FRONTEND_HOST=https://matrix.thelink.family
-
-# Runtime (optional - uses current origin if not set)
-API_URL=https://matrix.thelink.family
-```
+Redis namespaces: `im:ws:*` (secret/epoch/owner/presence),
+`im:metrics:*` (owner/machine/cats), `im:sched:*` (queue/wait/active/
+lock), `im:vram:used:{machine_uid}`. All TTL-bounded so a crashed admin
+self-heals.
 
 ---
 
-## 🗄️ Change Archive
+## Phase 3 — Registration + WS + Auth ✅
 
-### September 22, 2026 (afternoon - server lifecycle & streaming)
-- ✅ Real agent event bus: `/ws/status` now streams server.started/stopped/error, download.progress, gpu.usage, log.lines (was heartbeat-only)
-- ✅ Implemented `/server-instances/start` (port allocation 8090-8190, DB row up front, background dispatch) and `/{id}/stop` (agent command proxy)
-- ✅ Added `/server-instances/{id}/start` to restart stopped/errored instances reusing stored port/config
-- ✅ Automatic model download on server start: agent fetches missing GGUF from source_repo_id before launching llama-server
-- ✅ Live log streaming: per-server ring buffer in agent, log.lines events every 1s, UI live tail with history seeding (last 100 lines) and polling fallback
-- ✅ UI events WS: new `/api/ws/events/{agent_id}` forwarding agent events to UI clients
-- ✅ Agents report running_server_ids on registration; backend only resets instances not actually running (fixes stopped/error loop from periodic re-register)
-- ✅ Periodic agent re-registration every 60s (heals event channel after backend restarts)
-- ✅ Start Server dialog in UI (model + agent picker), Start/Stop actions per instance row
-- ✅ Fixed llama-server flags for new llama.cpp: `--flash-attn on|off` (removed `--prompt-cache`)
-- ✅ Set LD_LIBRARY_PATH when spawning llama-server (vulkan image env not guaranteed)
-- ✅ Fixed 'str' object has no attribute 'get': backend now parses agent WS messages before handling; consolidated duplicate connection loop
-- ✅ Fixed log drain KeyError (silent buffer discard); download.progress via tqdm shim (added refresh/set_postfix_str for xet)
-- ✅ Removed tracked __pycache__ files; repo-wide gitignore rules
-- ✅ Server Instances page wired to real API (was stub)
+**Admin:** `app/api/admin/providers.py`, `app/api/ws.py`,
+`app/services/connection_manager.py`, `app/services/presence_sweep.py`,
+`app/services/wire.py`.
+**Provider:** `provider_lib/admin_client.py`, `provider_lib/wire.py`.
+**Protocol:** `docs/ws-protocol.md`.
 
-### September 22, 2026 (earlier)
-- ✅ Vulkan recipe rebuilt: layers agent app on official `ghcr.io/ggml-org/llama.cpp:full-vulkan` (no llama.cpp compilation), CI chained after agent build
-- ✅ Fixed agent registration 500 (UUID PK upsert on name), wired registration loop on agent startup
-- ✅ Fixed WebSocket URLs: agent→frontend scheme mapping (https→wss), backend→agent `/ws/status` (no /api prefix)
-- ✅ Mounted agent WS endpoint at `/api/ws/agents/{agent_id}` on backend
-- ✅ Implemented `send_command` HTTP proxy to agent (was TODO stub); agent routes at root (no `/api` prefix)
-- ✅ Agent list/get now read from database (survives backend restarts)
-- ✅ Added View Logs (llama-server stdout/stderr) and View Metrics (GPU/servers) sheets in UI
-- ✅ Added `AGENT_HOST`/`AGENT_PORT` settings for advertised agent address
-- ✅ Fixed agent startup import errors (model_manager singleton, server_manager alias, response_model)
-- ✅ Added missing backend settings (WS_RECONNECT_INTERVAL, AGENT_MAX_RECONNECT_ATTEMPTS)
+- `POST /admin/api/providers/register`: validates token→definition→
+  provider_type match, exact version match (409), machine pre-exists
+  (404). Merges hardware, upserts instance, issues per-instance secret to
+  Redis, returns config + fingerprint.
+- Provider dials `/provider/ws` with `Bearer <secret>`; auth is
+  constant-time vs Redis. On accept: bump `im:ws:epoch`, send
+  `provider.hello`, claim `im:ws:owner`.
+- `ConnectionManager.send_command(instance_id, type, payload, timeout=30)`
+  awaits a matching `ack`. Frame envelope `{v,type,id,reply_to,epoch,ts,
+  payload}`.
+- Dead socket → instance `disconnected` (instant live path + presence
+  sweep safety net). Reconnect backoff 1s→30s; old socket closed 4409.
+- `ping`/`pong` keep presence alive.
 
-### September 21, 2026
-- ✅ Removed users, authentication, and API keys (not needed for this project)
-- ✅ Dropped `user`, `item`, and `api_keys` database tables via migration
-- ✅ Regenerated API client without auth endpoints
-- ✅ Simplified vite proxy to `/api/v1` and `/v1` (fixed 404s on `/api-keys` page path)
-- ✅ Forced `client_encoding=utf8` for SQL_ASCII postgres compatibility
-
-### September 19, 2026
-- ✅ Fixed frontend API calls to use runtime config instead of localhost
-- ✅ Implemented auto-grouping of split GGUF files from HuggingFace
-- ✅ Added endpoint to fetch actual parameter count from HF config.json
-- ✅ Fixed BigInteger migration for large model sizes (>2GB)
-- ✅ Implemented modular entrypoint system with numbered scripts
-- ✅ Fixed database migrations running on container startup
-- ✅ Added Vite proxy for local development
-- ✅ Updated GitHub Actions to build from root Dockerfile
-- ✅ Changed image name to `matrix-app` (was `frontend`)
+Tests: `test_registration.py`, `test_ws_connection.py`.
 
 ---
 
-## 🎯 Next Steps
+## Phase 4 — Provider Lib Lifecycle + `/v1` Surface ✅
 
-1. ~~OpenResponses API~~ ✅ implemented + conformance pass (see Inference Features section)
-2. ~~Benchmarking~~ ✅ implemented (definitions, queue, isolation, results, history)
-3. ~~Reliable log streaming~~ ✅ implemented (cursor log rings, shared per-agent WS, reconnecting state, benchmark history)
-4. ~~Log panel layout~~ ✅ reflowed via `--log-panel-h` CSS variable
-5. ~~Observability producers~~ ✅ implemented (Prometheus metrics fed, server usage counters incremented, all inference paths persist token usage samples)
-6. **Audio transcription** - replace the `/v1/audio/*` stubs with real whisper.cpp plumbing on the agent
-7. **Batch executor** - JSONL parsing, request fan-out, output files, plus a UI
-8. **Server management polish** - connection testing, benchmark result summaries on definition rows
-9. **ModelScope source** - expose the existing `download_from_modelscope` service via a route
+**Docs:** `provider/README.md`.
+**Core:** `provider_lib/backend.py` (`BackendDriver` ABC +
+`BackendLifecycle`), `provider_lib/app_factory.py`
+(`create_provider_app`, `BackendOverrides`).
 
----
+- `BackendDriver`: `start/stop/health/list_models/stream_responses`
+  (+ optional `stream_chat_completions`, `aclose`).
+- `BackendLifecycle`: state machine (STOPPED→STARTING→RUNNING→STOPPING),
+  `acquire_slot`/`release_slot` tied to inbound connection lifecycle,
+  emits `backend.status` per transition, `_owned_stream` releases slot on
+  stream close/cancel/error.
+- Provider app serves `/health`, `/v1/models`, `/v1/responses`,
+  `/v1/chat/completions` on `PROVIDER_PORT`; translation layer normalizes
+  the backend output to spec.
+- Mock provider (`provider/mock`) implements the full contract with fake
+  streaming.
 
-## 📝 Recent Changes
-
-### September 27, 2026 (observability producers)
-- ✅ New `record_request_telemetry()` in `token_stats.py`: single choke point called by every inference path — persists the `TokenUsageSample`, records Prometheus request/latency/token metrics, and increments the serving `ServerInstance`'s `total_requests`/`total_tokens_generated`/`average_response_time_ms` with a SQL-side running average (no read-modify-write races)
-- ✅ Wired into all 8 inference paths: chat completions (stream + non-stream), completions (stream + non-stream), embeddings, responses HTTP (`_complete` + `_stream_events`), responses WS — with `success`/`error`/`cancelled` status from `time.monotonic()` request timers; success is recorded before `lease.release()` and the close-out yields so a late cancel can't downgrade a completed inference; `telemetry_recorded` guards prevent double-counting
-- ✅ Prometheus gauges now snapshot correctly: `update_agent_metrics`/`update_server_metrics` clear stale label sets before repopulating (previously deleted servers froze their series); server counts aggregate per (agent, status) instead of `set(1)` per row
-- ✅ `metrics_snapshot_loop()` (15s, started in the FastAPI lifespan) refreshes agent/server gauges from the DB; `agent_manager._handle_gpu_usage` now feeds `inference_matrix_vram_usage_bytes` per device from `gpu.usage` events (falls back to the aggregate on gpu_id 0)
-- ✅ Telemetry is best-effort everywhere: attribute/metric failures are swallowed and logged, never breaking inference (verified against SimpleNamespace-based transport tests)
-- ✅ Tests: `tests/api/test_metrics.py` (stale-label clearing, per-agent/status counts, VRAM gauge, DB snapshot), 5 new `record_request_telemetry` cases in `test_token_stats.py` (counters, running average, error non-increment, Prometheus deltas, detached-server safety), 2 gpu.usage gauge tests in `test_agent_manager.py` — 212 backend tests green
-
-### September 27, 2026 (reliable log streaming)
-- ✅ Cursor-addressable log rings in the agent (`log_buffers.py`): every llama-server, halogen, and llama-bench line gets a monotonic per-feed sequence number; `log.lines` and `benchmark.log` events carry `seq_start`/`seq_end`; `GET /servers/logs/{id}?after=<cursor>` and `GET /benchmarks/logs/{run_id}?after=<cursor>` return incremental lines plus `gap` on eviction
-- ✅ Shared, refcounted WebSocket per agent in the frontend (`agentEventStream.ts`): one socket no matter how many components subscribe; exponential-backoff reconnect (1s→15s); sequence numbers stay continuous across reconnects
-- ✅ Tri-state stream status (`connecting` / `connected` / `reconnecting`) surfaced in every log tab indicator and events sheet badge
-- ✅ `useLogFeed` merges live events and polled history purely by cursor — no content-suffix matching, so repeated log lines can never duplicate; the visible tail survives disconnects, catch-up runs immediately on reconnect, and the bootstrap unions live events that arrive mid-fetch
-- ✅ Benchmark log tabs now seed history and poll while disconnected (were live-only)
-- ✅ Halogen merged diagnostics standardized to `stdout` (live and history no longer disagree on stream color)
-- ✅ Tests: agent ring/cursor/eviction tests, benchmark cursor log test, frontend `bun test` for the pure merge helpers
-
-### September 26-27, 2026 (scheduling hardening + streaming fixes)
-- ✅ Hardened inference scheduling and server lifecycle: immutable terminal leases, fenced forced stops, `server_stream_closed` releases the lease even when the client keeps its SSE connection open
-- ✅ Native tool-call history preserved for `/v1/chat/completions`
-- ✅ Responses streaming: restored lease renewal across long streams, handled missing async event iterators, forwarded reasoning controls, reliably drained upstream streams
-- ✅ Halogen streaming token delivery preserved
-- ✅ Agent WebSocket keepalive timeouts prevented (heartbeat/pump decoupled)
-- ✅ Switched capacity accounting from llama `/slots` telemetry polling to active-lease counts
-
-### September 25-26, 2026 (VRAM-aware FIFO scheduling)
-- ✅ `InferenceLease` model + `inference_scheduler.py`: FIFO admission with `FOR UPDATE SKIP LOCKED`, VRAM admission from configured requirements, TTL renewal, reconciliation loops
-- ✅ Idle-server eviction (LRU) including across co-located agents matched by host + GPU id; per-resource advisory lock serializes cold starts
-- ✅ Disconnected requests are cancelled; `POST /api/v1/queue/clear` + UI button
-- ✅ Queue status UI: `/api/ws/queue-status` push + `QueueStatusBar`
-- ✅ Flash slot capacity read from engine options (`kv_slots`), not parallelism defaults
-
-### September 25, 2026 (Halogen + halogen-flash platforms)
-- ✅ Halogen ROCm engine support: env-var driven startup, dual api/engine ports, health probes with startup grace, merged log forwarding, process-group cleanup
-- ✅ halogen-flash platform: `hf_xet` downloads, ~30 mapped engine env options, disk prompt caching, vision tower toggle, proxy allowlist + slot-generation fencing
-- ✅ Recipes: `halogen-rocm`, `halogen-flash`, `llama-cpp-q38rocm` (in addition to `llama-cpp-vulkan`)
-- ✅ Engine picker + typed per-engine options in Start/Edit dialogs; engine mismatch rejected at the agent
-- ✅ Payload compatibility: null-optional omission, cached-token usage mapping, startup/exit fail-fast with captured logs
-
-### September 24-25, 2026 (benchmarking)
-- ✅ `llama-bench` benchmarking: definitions CRUD with config snapshots, copy-from-server-instance, agent execution, result parsing/aggregation, run history
-- ✅ Isolation: one global run via Postgres advisory lock, idle wait, force stop of all servers, blocked starts/edits during runs
-- ✅ `/benchmarks` page with definitions + queue/history tabs and auto-opened run log tabs
-- ✅ dflash draft model support for servers and benchmarks
-
-### September 25, 2026 (server health monitoring)
-- ✅ Agent-side health monitor checks active llama-server processes every 10s with failure/recovery thresholds
-- ✅ Unexpected llama-server exits emit `server.error` and are removed from the agent's active registry
-- ✅ `server.health` transition events persist health state and last-check timestamps in the backend
-- ✅ Unhealthy inference instances get a short recovery window instead of the full cold-start timeout
-- ✅ Server instance UI shows the last health-check time and agent event feed includes health transitions
-- ✅ Added agent and backend regression tests for health thresholds, recovery, crashes, and persistence
-- ✅ Failed server stderr remains available in the logs panel after the process exits
-- ✅ Startup failures fail fast on process exit and display the persisted error message in the server row
-- ✅ DFlash startup no longer forwards the incompatible `strict_mtp_qwen` flag
-- ✅ Queue capacity defaults to 4 slots, or uses the configured `parallel` setting; `/slots` is active-count telemetry only
-- ✅ Logs opened before startup now merge history discovered during later polling with live output
-- ✅ Dashboard cards now use live server and GPU data; bottom status bar summarizes GPU utilization and VRAM
-- ✅ Dashboard GPU/VRAM summaries deduplicate multiple agents reporting the same physical GPU
-
-### September 23, 2026 (Open Responses conformance pass)
-- ✅ Ran the openresponses.org conformance suite (cloned spec repo, validated against its generated Zod schemas); fixed all reported schema failures
-- ✅ Spec serialization: `serialize()` helper (`exclude_none`, `by_alias`) — unset temperature/top_p/penalties/top_logprobs/parallel_tool_calls omitted (were `null`, which fails the harness's non-nullable fields); optional() keys (phase/logprobs/encrypted_content) absent, not null; text.format echo matches the TextFormat union (`schema` alias + `strict:true` default); tools echo `strict:true`
-- ✅ Reasoning dual-name emission: `response.reasoning.delta/done` (spec conformance schemas) + `response.reasoning_text.delta/done` (OpenWebUI) with identical payloads
-- ✅ Assistant phase (`commentary`/`final_answer`) full passthrough; output message echo
-- ✅ Real multimodal: `input_image` → llama.cpp `image_url` parts; mmproj end-to-end (projector selected per server instance, agent downloads + `--mmproj` flag; None = flag omitted)
-- ✅ `POST /v1/responses/compact`: real model-summarization pass, spec `response.compaction` shape, stateless
-- ✅ WebSocket transport at `/v1/responses`: `response.create` turns, sequential, spec error envelope, 60-min limit, connection-local `store:false` cache with eviction-on-failure (spec reconnect-recovery semantics); mounted directly — FastAPI 1.3 `_IncludedRouter` breaks WS handshakes
-- ✅ Conformance tests added mirroring harness Zod rules (65 backend tests green); client regenerated, frontend build green
-
-### September 23, 2026 (reasoning passthrough fixes)
-- ✅ `/v1/chat/completions` dropped llama.cpp's `delta.reasoning_content` before re-emitting chunks — thinking tokens never reached clients (Matrix Chat page or OpenWebUI); now forwarded in stream deltas and non-streaming `message.reasoning_content`
-- ✅ Responses API emitted reasoning as custom `response.reasoning.*` events — OpenWebUI ignores those (expects spec `response.reasoning_text.delta/done`); renamed, UI listener + generated client updated
-- ✅ Translator never closed the reasoning item mid-stream (llama.cpp has no end-of-reasoning marker; the `finish_reason == "reasoning_content"` legacy signal never fires) → OpenWebUI kept thinking blocks open until `response.completed`; now closed on first content/tool-call delta
-
-### September 23, 2026 (Responses API test page)
-- ✅ New UI page `/responses` ("Responses API" in sidebar after Chat): playground for the OpenResponses endpoint
-- ✅ Spec-framed SSE parsing (`event:` + `data:` blocks, `[DONE]` terminator — richer than the chat page's data-line-only parser)
-- ✅ Rendered output items: text bubbles, Thinking disclosures (response.reasoning_text.delta), tool-call chips (function_call items)
-- ✅ Raw streaming-event inspector panel: every event with sequence_number, type color coding, collapsible JSON payload
-- ✅ Test affordances: `store` toggle with `previous_response_id` chaining (New-conversation button resets), temperature / max_output_tokens sliders, non-streaming mode via generated client
-- ✅ Added missing `switch.tsx` Shadcn component (unified `radix-ui` package); empty `Sparkles` cleanup
-- ✅ tsc clean, biome clean, production build green, routeTree regenerated
-
-### September 23, 2026 (invisible cold starts)
-- ✅ New shared service `backend/app/services/server_startup.py`: `ensure_server_ready` / `ensure_server_ready_by_id` / `find_alias_instance` — running servers pass through, `starting` instances are waited on (dedup: parallel requests share one startup), `stopped`/`error` instances are auto-started via agent dispatch and the request waits for health
-- ✅ Client connection is held during the entire cold start (including model download, 900s budget) so the first token arrives as soon as the server is healthy — start is invisible to users
-- ✅ `/v1/chat/completions`: alias resolution now includes stopped/errored instances (auto-restarts them); `_get_or_create_server` dedups in-flight startups and passes `jinja` + 900s timeout; streaming generator awaits readiness itself
-- ✅ `/v1/responses`: same alias auto-start + ensure-ready for both SSE and JSON paths
-- ✅ Chat + completions UI selectors now list **all** server instances (running first), stopped ones annotated "(will start on first message)" — no more dead selections
-- ✅ Tests: `tests/services/test_server_startup.py` (7 cases: running/starting/error/stopped/missing paths)
-
-### September 23, 2026 (OpenResponses API)
-- ✅ Planned + implemented OpenResponses (`/v1/responses`) targeting spec v2026-04-24 — schemas, streaming events, `responses` table (drops `conversations`), translator, agent `--jinja` always-on, unit + route tests, regenerated client (see Inference Features section for the full checklist)
+Tests: `provider/lib/tests`, `provider/mock/tests` (lifecycle, admission,
+stream release).
 
 ---
 
-## 📊 Statistics
+## Phase 5 — llama-cpp + Downloader + Machine Metrics ✅
 
-- **Frontend Routes**: 12 (dashboard, models, agents, server-instances, chat, responses, completions, embeddings, audio, benchmarks)
-- **API Endpoints**: 45+ implemented (incl. server-instances start/stop/restart/edit, `/v1/responses` + `/responses/compact` + WS transport, benchmarks CRUD/run/stop/timeout, queue clear, models status)
-- **UI Components**: 55+ Shadcn components (incl. new Switch)
-- **Database Models**: 12 SQLModel classes (adds `InferenceLease`, `BenchmarkDefinition`, `BenchmarkRun`; ResponseRecord replaced Conversation)
-- **Docker Layers**: 2-stage build
-- **Entrypoint Scripts**: 3 modular scripts
-- **Event Types**: 15 agent events (server.*, download.*, gpu.usage, log.lines, model.*, benchmark.*) + 26 OpenResponses streaming events (incl. dual-name reasoning)
-- **Agent Recipes**: 4 (llama-cpp-vulkan, llama-cpp-q38rocm, halogen-rocm, halogen-flash)
+**Provider:** `provider/llama-cpp/` (`LlamaCppBackend` driver,
+`build_llama_command`, `CursorLogRing`, `main.py`).
+**Lib:** `provider_lib/downloader.py`, `provider_lib/metrics.py`.
+**Admin:** `app/services/metrics_service.py`.
+
+- llama.cpp driver: subprocess management, log ring with cursor, health
+  wait, artifact resolution (main/mmproj/draft), `--flash-attn on|off`.
+- Model downloader emits `download.progress` (percent/bytes/speed).
+- Machine metrics collectors: GPU (NVML/rocm-sysfs), os_ram/cpu (psutil),
+  storage. Emitted only when the admin assigns ownership.
+- Metrics ownership: `im:metrics:owner:{machine_uid}` lease (TTL 30s),
+  assignment on connect, failover on expiry. `im:metrics:cats:{id}` holds
+  declared categories.
+
+Tests: `provider/llama-cpp/tests`, `test_metrics_ownership.py`.
 
 ---
 
-## 🔗 Links
+## Phase 6 — Scheduler + `/v1/responses` 🟡 IN PROGRESS
 
-- **Production**: https://matrix.thelink.family
-- **GitHub**: https://github.com/absolutelink/infrence-matrix
-- **Container Registry**: ghcr.io/absolutelink/matrix-app
-- **Documentation**: See `/docs` folder
+**Admin:** `app/services/scheduler.py`, `app/services/sse.py`,
+`app/services/alias_registry.py`, `app/api/v1/responses.py`.
+**Design:** ARCHITECTURE.md §6, §7; FINDINGS.md.
+
+### Done (uncommitted, tests green)
+- `InferenceScheduler` — in-process per-alias FIFO + Redis mirror.
+  `acquire`/`release`; `NoProviderAvailable`→503, `QueueTimeout`→504.
+  Slot = capacity + machine free VRAM. Prefers already-running instances.
+  Boots via `backend.start` under `im:sched:lock`. Remembers `_booted` to
+  avoid redundant boots. `release` cancellation-safe (shielded).
+- `SSEEmitter` — re-frames litellm events: replaces `response.id` with
+  admin `resp_<uuid>` on lifecycle frames, reassigns `sequence_number`
+  monotonically, passes usage/output[]/non-canonical events through,
+  synthesizes `response.failed`+`error` on exception.
+- `alias_registry.ensure_registered(alias)` — registers litellm native
+  streaming alias (idempotent, process-cached).
+- `POST /v1/responses` route — parse body, resolve definition, mint id,
+  build litellm input from DB chain (prepend prior input+output items),
+  ensure_registered, acquire, stream through emitter, persist
+  ResponseRecord + TokenUsageSample, release in finally.
+- Error taxonomy: `map_exception_to_error` → NotFound=invalid_request/
+  model_not_found, else server_error/upstream_failed.
+- Lifespan wires scheduler + presence sweep.
+- Tests: `test_scheduler.py`, `test_sse_emitter.py`, `test_v1_responses.py`
+  (72 admin tests pass).
+
+### Remaining for Phase 6
+- [ ] **VRAM eviction** — `TODO(phase6-eviction)`: stop idle
+      different-alias instances on a machine to free VRAM instead of
+      waiting. Priority: LRU-idle first.
+- [ ] **Idle-timeout reaper** — `TODO(phase6-idle-reaper)`: stop
+      instances past `idle_timeout_seconds` with no active requests
+      (background task stub exists; `start_background`/`stop` wired).
+- [ ] **Tool / agent loop** — forward client `tools` to litellm; execute
+      platform local tools; feed results back (multi-turn within one
+      request). Decide explicit-loop vs litellm agentic hooks.
+- [ ] **Keepalive during cold boot** — emit SSE `: keep-alive` comments
+      while `scheduler.acquire` blocks on a boot, so Traefik doesn't kill
+      long cold starts.
+- [ ] **Conformance gate** — run openresponses.org compliance suite
+      against `/v1/responses`; must pass before Phase 6 is ✅.
+- [ ] **Non-stream path** — verify JSON (non-`stream`) response shape +
+      persistence parity.
+
+Feature spec for each remaining item: see ARCHITECTURE.md §6–§7 and
+`docs/ws-protocol.md`; ask which to take next.
+
+---
+
+## Phase 7 — Chat Completions + Models + Stubs ⬜
+
+- [ ] `POST /v1/chat/completions` via `litellm.acompletion` against the
+      same scheduler admission + provider port. Persist usage.
+- [ ] `GET /v1/models` — derive from enabled `ProviderDefinition`s
+      (alias + `model_metadata`).
+- [ ] 501 stubs with OpenAI error envelope for: `/v1/embeddings`,
+      `/v1/completions` (legacy), `/v1/rerank`, `/v1/moderations`,
+      `/v1/decisions`, `/v1/audio/*`, `/v1/files`, `/v1/batches`.
+- [ ] `generate-client.sh` after routes land.
+- [ ] Conformance/integration suite green.
+
+---
+
+## Phase 8 — Provider Type Ports ⬜
+
+Port remaining engines from `legacy/agent/services/*` to
+`provider/<type>/`, overriding only what differs from the lib.
+
+- [ ] **gufo** — `gufo serve llm` argv maps, per-request `model`
+      injection, aux spec files (mmproj/dflash/dspark/mtp) by path,
+      native responses passthrough, rate-gauge parsing.
+- [ ] **halogen** — `HALOGEN_*` env map, two ports (api/engine),
+      `kv_slots` capacity.
+- [ ] **halogen-flash** — native `/v1/responses`, ~45 `HALOGEN_*` env
+      vars, static port range for disk-cache fingerprint, NPU small-model
+      pinning, **`calculate_usage` override** (backend not spec-compliant
+      on usage — the canonical override example).
+- [ ] Each: Dockerfile in `provider/<type>/`, tests, mock-equivalent.
+
+---
+
+## Phase 9 — Config Update / Fingerprint / Cache ⬜
+
+- [ ] `provider.config.update` command → provider enters `initializing`:
+      drain+stop backend, recompute `config_fingerprint`, **auto-clear
+      prompt cache if changed** (`cache.clear` = prompt cache only, never
+      model files), download/update model artifacts, start backend,
+      scrape metadata, stop backend → `running`.
+- [ ] `storage.prune_unused` — delete orphaned files not referenced by
+      the active fingerprint.
+- [ ] Per-step failure states + progress reporting.
+- [ ] Admin calls `ensure_registered` on definition create/update so
+      aliases are warm before first use.
+
+---
+
+## Phase 10 — Admin UI Rework ⬜
+
+- [ ] **Machines** page: create (uid, name, host/dns/ip, total_vram),
+    view merged hardware.
+- [ ] **Provider Definitions** page: alias, provider_type, `backend_config`
+    editor (JSON schema-validated), vram/idle/capacity, **copyable
+    registration token**, discovered metadata.
+- [ ] **Provider Instances** page: dual status (instance + backend),
+    version, port, epoch, last_seen, assigned metrics, live logs.
+- [ ] Wire to regenerated client; TanStack routes under `/admin` base.
+- [ ] Remove old Agents / Server Instances / Benchmarks pages.
+
+---
+
+## Phase 11 — Docs Consolidation + E2E ⬜
+
+- [ ] Final pass over all docs; fix drift from Phases 6–10.
+- [ ] Full local run with mock provider end-to-end.
+- [ ] Integration + conformance suite green against a deployed admin.
+- [ ] Provider authoring guide complete (`provider/README.md`).
+
+---
+
+## Accepted Regressions (do NOT restore from `legacy/`)
+
+These existed in the pre-overhaul system and are intentionally removed or
+stubbed. Re-implement against the new model only when a feature needs it.
+
+| Feature | Status | Why |
+| --- | --- | --- |
+| `/v1/embeddings` | 501 stub | Out of scope for the litellm Responses/Chat core |
+| `/v1/completions` (legacy) | 501 stub | Legacy text completions |
+| `/v1/rerank`, `/v1/moderations`, `/v1/decisions` | 501 stub | Not in core path |
+| `/v1/audio/*`, `/v1/files`, `/v1/batches` | 501 stub | File/audio/batch subsystem dropped with old `files`/`batch_jobs`/`audio_jobs` tables |
+| Responses-over-WebSocket transport | Removed | Not part of the OpenResponses spec |
+| Benchmarks (`llama-bench`) | Removed | All tables/services/UI/events dropped |
+| `PromptCache` table / hybrid cache tracking | Removed | Cache is provider-local via fingerprint (Phase 9) |
+| `Model` registry table | Removed | Artifacts folded into `backend_config` JSON |
+| `InferenceLease` / reservation / slot_generation | Removed | Replaced by scheduler + provider connection-lifecycle admission |
+| Users / API keys | Removed | Trusted-LAN model |
+| Prometheus `/metrics` | Never existed in new code | Old `monitoring-guide.md` deleted |
+
+## Known Limitations
+
+1. Trusted-LAN only — `/admin/api` and `/v1` unauthenticated.
+2. Version hard-fail requires coordinated admin+provider deploys.
+3. `MACHINE_UID` must not be reused across physical hosts (no host
+   fingerprint).
+4. Phase 6 eviction + idle reaper are TODO (see Phase 6 remaining).
+5. Single uvicorn worker (in-process scheduler authority); multi-worker
+   needs the Redis-queue swap behind the `acquire`/`release` interface.

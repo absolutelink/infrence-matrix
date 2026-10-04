@@ -1,145 +1,83 @@
-# FastAPI Project - Backend
+# Inference Matrix — Admin Backend
 
-## Requirements
+FastAPI application: the broker, scheduler, provider registry, public
+`/v1` inference API, admin API, and the served React SPA. Python 3.14 +
+uv; package name `matrix-admin`.
 
-* [Docker](https://www.docker.com/).
-* [uv](https://docs.astral.sh/uv/) for Python package and environment management.
+Full design: [../../ARCHITECTURE.md](../../ARCHITECTURE.md). Agent
+conventions: [../../AGENTS.md](../../AGENTS.md). Wire protocol:
+[../../docs/ws-protocol.md](../../docs/ws-protocol.md). Redis keys:
+[docs/redis-keys.md](docs/redis-keys.md).
 
-## Local Development
+## URL layout
 
-Run the backend locally and connect it to PostgreSQL in Docker Compose.
+| Path | Purpose |
+| --- | --- |
+| `/` | Swagger UI |
+| `/openapi.json` | OpenAPI schema |
+| `/admin/*` | React SPA (built into `app/frontend`) |
+| `/admin/api/*` | Admin management API (health, provider registration) |
+| `/v1/*` | Public OpenAI-compatible inference |
+| `/provider/ws` | Provider instance WebSocket dial-in |
 
-From the project root, start PostgreSQL and Mailpit:
+## Local development
 
-```console
-$ docker compose up -d db mailpit
-```
-
-Then, from `./backend/`, install the dependencies, prepare the database, and start the development server:
-
-```console
-$ uv sync
-$ uv run bash scripts/prestart.sh
-$ uv run fastapi dev
-```
-
-The API is available at `http://localhost:8000`, with automatic interactive docs at `http://localhost:8000/docs`.
-
-## General Workflow
-
-Run backend commands from `./backend/` with `uv run`. Make sure your editor uses the Python interpreter at `.venv/bin/python` in the project root.
-
-Modify or add SQLModel models for data and SQL tables in `./backend/app/models.py`, API endpoints in `./backend/app/api/`, CRUD (Create, Read, Update, Delete) utils in `./backend/app/crud.py`.
-
-## VS Code
-
-There are already configurations in place to run the backend through the VS Code debugger, so that you can use breakpoints, pause and explore variables, etc.
-
-The setup is also already configured so you can run the tests through the VS Code Python tests tab.
-
-## Full Stack with Docker Compose
-
-To run the backend and built frontend in Docker Compose:
-
-```console
-$ docker compose run --rm backend bash scripts/prestart.sh
-$ docker compose watch
-```
-
-The application is available at `http://localhost:8000`.
-
-### Docker Compose Override
-
-The `compose.override.yml` file contains local settings for published ports, source synchronization, automatic image rebuilds, and backend reloads. Docker Compose applies it automatically when you run `docker compose` without an explicit file list.
-
-To open a shell in the backend container:
-
-```console
-$ docker compose exec backend bash
-```
-
-## Backend Tests
-
-To test the backend from the `backend` directory, run:
-
-```console
-$ uv run bash scripts/test.sh
-```
-
-The tests run with Pytest. Modify existing tests or add new ones in `./backend/tests/`.
-
-If you use GitHub Actions, the tests will run automatically.
-
-### Test a Running Stack
-
-If your stack is already up and you just want to run the tests, you can use:
+Postgres + Redis must be running (`docker compose up -d postgres redis`
+from the repo root). Then:
 
 ```bash
-docker compose exec backend bash scripts/tests-start.sh
+uv sync
+uv run bash scripts/prestart.sh   # alembic upgrade head
+uv run fastapi dev                # http://localhost:8000
 ```
 
-The `/app/backend/scripts/tests-start.sh` script calls `pytest`. If you need to pass extra arguments to `pytest`, you can pass them to that command and they will be forwarded.
-
-For example, to stop on first error:
+## Lint & tests
 
 ```bash
-docker compose exec backend bash scripts/tests-start.sh -x
+uv run ruff check app
+uv run ruff format --check app
+uv run pytest tests/ -q
 ```
 
-### Test Coverage
+Tests need a **UTF8** PostgreSQL database (`TEST_DATABASE_URL`, default
+`postgresql+psycopg://postgres@localhost:5432/inference_matrix_test_utf8`)
+and Redis DB 15 (`TEST_REDIS_URL`). The background presence sweep is
+disabled in tests (`INSTANCE_SWEEP_ENABLED=false`).
 
-When the tests run, they generate `htmlcov/index.html`. Open it in your browser to inspect the test coverage.
+## Layout
 
-## Migrations
-
-Make sure you create a revision of your models and upgrade the database with that revision every time you change them. From the `backend` directory, use `uv` to run Alembic against the PostgreSQL container:
-
-* Alembic is already configured to import your SQLModel models from `./backend/app/models.py`.
-
-* After changing a model (for example, adding a column), create a revision:
-
-```console
-$ uv run alembic revision --autogenerate -m "Add column last_name to User model"
+```
+app/
+  main.py                 App factory + lifespan (scheduler, sweep)
+  models.py               SQLModel tables (Machine, ProviderDefinition,
+                          ProviderInstance, ResponseRecord, TokenUsageSample)
+  core/                   config.py, db.py, redis.py
+  api/
+    admin/                /admin/api/* (health, providers register)
+    v1/                   /v1/* (public inference)
+    ws.py                 /provider/ws
+    main.py               Router assembly
+  services/
+    scheduler.py          InferenceScheduler (FIFO + VRAM admission)
+    connection_manager.py WS registry, auth, epoch, command/ack
+    presence_sweep.py     Stale-connection sweeper
+    sse.py                SSEEmitter (client-facing stream framing)
+    alias_registry.py     litellm alias registration
+    metrics_service.py    Machine metrics ownership
+    wire.py               Admin mirror of the provider wire envelope
+    redis_keys.py         Redis key helpers
+alembic/                  ONE squashed initial migration
+scripts/prestart.sh       Applies migrations
+tests/                    pytest suite
 ```
 
-* Commit to the git repository the files generated in the alembic directory.
+## Client generation
 
-* After creating the revision, run the migration in the database (this is what will actually change the database):
+After route/schema changes, run `bash ../../scripts/generate-client.sh`
+from the repo root to regenerate the frontend API client.
 
-```console
-$ uv run alembic upgrade head
-```
+## Note on provider packages
 
-If you don't want to use migrations at all, uncomment the lines in the file at `./backend/app/core/db.py` that end in:
-
-```python
-SQLModel.metadata.create_all(engine)
-```
-
-and comment the line in the file `scripts/prestart.sh` that contains:
-
-```console
-$ alembic upgrade head
-```
-
-If you don't want to start with the default models and want to remove them / modify them, from the beginning, without having any previous revision, you can remove the revision files (`.py` Python files) under `./backend/app/alembic/versions/`. And then create a first migration as described above.
-
-## Email Templates
-
-The email templates are written with [React Email](https://react.email) in `./packages/react-email/`. The `emails` directory holds one component per email and the `ui` directory holds the shared components (layout, heading, button, link, callout).
-
-The rendered HTML in `./backend/app/email-templates/` is generated from those components. It is what the application sends and should not be edited by hand.
-
-To preview the emails while editing them, start the dev server from the root of the project:
-
-```console
-$ bun run email:dev
-```
-
-Values coming from the backend are declared as Jinja placeholders in the component props, for example `username = "{{ username }}"`. The context for each email is built in `generate_*_email()` in `./backend/app/utils.py`, so a new placeholder needs to be added there too.
-
-Once you are done, regenerate the templates used by the application:
-
-```console
-$ bun run email:export
-```
+This app must **not** import from `provider/*`. It builds with
+`uv sync --no-install-workspace --package matrix-admin`. The `wire.py`
+duplication with `provider_lib.wire` is deliberate — keep both in sync.

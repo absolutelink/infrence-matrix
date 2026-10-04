@@ -1,364 +1,248 @@
 ---
 name: api-helpers
-description: OpenAI API compatibility helpers and utilities for endpoint implementation
+description: OpenAI-compatible endpoint implementation patterns for the Inference Matrix admin (litellm-driven /v1 API, SSE streaming, error mapping)
 ---
 
-# API Helpers Skill
+# API Helpers — Admin `/v1` Patterns
 
-Use this skill when implementing or debugging OpenAI-compatible API endpoints.
+Use this skill when implementing or debugging the public OpenAI-compatible
+API in `admin/backend/app/api/v1/`. The admin drives **litellm** against a
+scheduler-admitted provider instance and owns the client-facing contract.
+Architecture: `ARCHITECTURE.md` §7. Fidelity basis:
+`spike/litellm-fidelity/FINDINGS.md`.
 
-## OpenAI API Compatibility
+## Core principles
 
-### Request Validation
+1. **litellm does the provider talking; the admin owns the contract.**
+   Never hand-roll upstream HTTP to a backend. Call
+   `litellm.aresponses` / `litellm.acompletion` with
+   `custom_llm_provider="openai"` and `api_base` pointed at the provider
+   instance port.
+2. **The admin owns the `resp_<uuid>`.** Mint it yourself; overwrite
+   `response.id` on every lifecycle frame via `SSEEmitter`. Store litellm's
+   wrapped id in `ResponseRecord.parameters` for affinity — never surface it
+   to the client.
+3. **The admin owns the conversation chain.** Reconstruct full `input`
+   from Postgres. Do **not** pass `previous_response_id` to litellm.
+4. **Register the alias before calling litellm**, or native streaming isn't
+   selected and you get a confusing `APIError`.
+5. **Admission is the scheduler's job**, not the route's. Acquire before
+   streaming; release in a cancellation-safe `finally`.
 
-```python
-from app.utils.api_helpers import validate_chat_request, ValidationError
-
-try:
-    validated = validate_chat_request(request_body)
-    # validated.model, validated.messages, validated.temperature, etc.
-except ValidationError as e:
-    return JSONResponse(status_code=400, content=e.to_openai_error())
-```
-
-**Validates:**
-- Required fields (model, messages)
-- Field types and ranges
-- Message structure
-- Tool definitions
-- Streaming parameters
-
-### Response Formatting
-
-```python
-from app.utils.api_helpers import format_chat_response, format_error_response
-
-# Success response
-response = format_chat_response(
-    model="llama-2-7b-chat.Q4_K_M.gguf",
-    choices=[...],
-    usage={"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
-)
-
-# Error response
-error = format_error_response(
-    message="Model not found",
-    error_type="not_found_error",
-    code="model_not_found",
-    param="model"
-)
-```
-
-### SSE Streaming
+## Endpoint skeleton (`POST /v1/responses`)
 
 ```python
-from app.utils.api_helpers import sse_stream
+@router.post("/v1/responses")
+async def create_response(request: Request) -> Any:
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "request body must be a JSON object")
 
-async def stream_response():
-    async with sse_stream() as stream:
-        # Send chunks
-        await stream.send({
-            "id": "chatcmpl-123",
-            "choices": [{"delta": {"content": "Hello"}, "index": 0}]
-        })
-        
-        # Send usage at end
-        await stream.send({
-            "choices": [],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 20}
-        })
-        
-        # Send DONE
-        await stream.close()
-```
+    alias = body.get("model")
+    input_value = body.get("input")
+    if not alias or input_value is None:
+        raise HTTPException(400, "'model' and 'input' are required")
 
-## API Key Authentication
+    # 1. Resolve the enabled ProviderDefinition by alias (404 if missing/disabled).
+    # 2. Load prior ResponseRecord for previous_response_id (404 if not found).
+    # 3. Mint the admin-owned client id.
+    client_response_id = f"resp_{uuid.uuid4().hex}"
 
-### Validate API Key
+    # 4. Register litellm native streaming for this alias (idempotent).
+    ensure_registered(alias)
 
-```python
-from app.utils.api_helpers import validate_api_key
+    # 5. Reconstruct litellm input from the DB chain.
+    litellm_input = build_litellm_input(body, previous)
 
-async def get_current_user(authorization: str):
-    api_key = extract_api_key(authorization)
-    is_valid, key_info = await validate_api_key(api_key)
-    
-    if not is_valid:
-        raise HTTPException(401, "Invalid API key")
-    
-    return key_info
-```
+    # 6. Admit via the scheduler.
+    scheduler = get_scheduler(request)
+    try:
+        admission = await scheduler.acquire(alias, client_response_id)
+    except NoProviderAvailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except QueueTimeout as exc:
+        raise HTTPException(504, str(exc)) from exc
 
-### Extract API Key
-
-```python
-from app.utils.api_helpers import extract_api_key
-
-# From Authorization header
-api_key = extract_api_key("Bearer sk-abc123...")
-
-# From X-API-Key header
-api_key = extract_api_key(headers.get("X-API-Key"))
-```
-
-### Check Permissions
-
-```python
-from app.utils.api_helpers import check_permissions
-
-await check_permissions(
-    api_key_info=key_info,
-    required_permissions=["chat", "embeddings"]
-)
-```
-
-## Rate Limiting
-
-### Apply Rate Limits
-
-```python
-from app.utils.api_helpers import rate_limit, RateLimitExceeded
-
-@rate_limit(requests_per_minute=60, tokens_per_minute=10000)
-async def create_chat_completion(request):
+    # 7. Forward only whitelisted passthrough fields.
+    passthrough = {k: body[k] for k in PASSTHROUGH_FIELDS if k in body}
     ...
 ```
 
-### Get Rate Limit Headers
+## Passthrough fields
+
+Forward only a known whitelist to litellm; never forward arbitrary client
+JSON. Current set (`app/api/v1/responses.py`):
+
+`instructions, tools, tool_choice, temperature, top_p, max_output_tokens,
+reasoning, text, truncation, parallel_tool_calls, metadata, user, store,
+background, include`
+
+## Calling litellm
 
 ```python
-from app.utils.api_helpers import get_rate_limit_headers
-
-headers = get_rate_limit_headers(
-    limit_requests=60,
-    remaining_requests=45,
-    reset_requests=30,
-    limit_tokens=10000,
-    remaining_tokens=8000,
-    reset_tokens=45
+stream = await litellm.aresponses(
+    model=alias,                         # bare alias; provider is "openai"
+    custom_llm_provider="openai",
+    api_base=f"{admission.base_url}/v1", # base_url has NO /v1; append here
+    stream=True,
+    input=litellm_input,
+    **passthrough,
 )
 ```
 
-## Token Counting
+- `admission.base_url` is `http://{machine.reachable_address()}:{port}`
+  (no `/v1`). The caller appends `/v1`.
+- Chat completions use `litellm.acompletion` the same way (`mode` differs
+  in the alias registration).
 
-### Count Tokens
-
-```python
-from app.utils.api_helpers import count_tokens
-
-# Count message tokens
-num_tokens = count_tokens(
-    messages=[
-        {"role": "system", "content": "You are helpful"},
-        {"role": "user", "content": "Hello"}
-    ],
-    model="llama-2-7b-chat"
-)
-
-# Count single text
-num_tokens = count_tokens(text="Hello world")
-```
-
-### Estimate Context Usage
+## Alias registration (REQUIRED)
 
 ```python
-from app.utils.api_helpers import estimate_context_usage
+from app.services.alias_registry import ensure_registered
 
-usage = estimate_context_usage(
-    messages=messages,
-    max_tokens=512,
-    context_length=4096
-)
-# usage.total_tokens, usage.available, usage.will_fit
+ensure_registered(alias)   # idempotent, process-cached
 ```
 
-## Tool/Function Calling
-
-### Parse Tool Calls
+Registers with litellm as:
 
 ```python
-from app.utils.api_helpers import parse_tool_calls
-
-tool_calls = parse_tool_calls(
-    response_text=llm_output,
-    available_tools=[tool1, tool2]
-)
+litellm.register_model({alias: {
+    "supports_native_streaming": True,
+    "litellm_provider": "openai",
+    "mode": "responses",          # "chat" for completions
+    "input_cost_per_token": 0,
+    "output_cost_per_token": 0,
+}})
 ```
 
-### Format Tool Response
+Provider-definition create/update flows should also call this so aliases are
+warm before first use.
+
+## SSE emitter
 
 ```python
-from app.utils.api_helpers import format_tool_response
+from app.services.sse import SSEEmitter, to_dict
 
-response = format_tool_response(
-    tool_call_id="call_123",
-    output={"result": "success"}
-)
+emitter = SSEEmitter(client_response_id)
+async for event in stream:
+    yield emitter.frame(event)      # replaces id on lifecycle frames,
+                                   # reassigns sequence_number, passes the rest
+yield emitter.done()                # "data: [DONE]\n\n"
 ```
 
-## Error Handling
+- Lifecycle frames whose `response.id` is rewritten: `response.created`,
+  `response.in_progress`, `response.completed`, `response.failed`,
+  `response.incomplete`.
+- `sequence_number` is reassigned monotonically (0,1,2,...) on every frame.
+- Non-canonical events (e.g. `response.reasoning_text.delta`) pass through
+  untouched — native streaming preserves them.
+- `event_type_of()` unwraps litellm's `ResponsesAPIStreamEvents` enum
+  members to their dotted string so the `event:` line is spec-clean.
+- `to_dict()` tolerantly converts litellm pydantic-object or dict events.
 
-### OpenAI Error Format
+## Error mapping
+
+litellm does not yield a `response.failed` event — it raises
+`MidStreamFallbackError`. Map exceptions to the spec terminal frames:
 
 ```python
-from app.utils.api_helpers import OpenAIError
-
-# Create error
-error = OpenAIError(
-    message="Invalid model specified",
-    error_type="invalid_request_error",
-    code="model_not_found",
-    param="model"
-)
-
-# Convert to response
-response = error.to_response(status_code=400)
-
-# Raise as exception
-raise error.to_http_exception()
+try:
+    async for event in stream:
+        ...
+except Exception as exc:   # MidStreamFallbackError and friends
+    error = map_exception_to_error(exc)
+    for frame in emitter.failed(error):
+        yield frame
+    yield emitter.done()
 ```
 
-### Common Errors
+`map_exception_to_error`:
+- `litellm.exceptions.NotFoundError` →
+  `{"type": "invalid_request_error", "code": "model_not_found"}`
+- everything else (MidStreamFallbackError, APIError, connection errors) →
+  `{"type": "server_error", "code": "upstream_failed"}`
+
+`SSEEmitter.failed(error)` returns `[response.failed frame, error frame]` —
+`yield from` it.
+
+## Cancellation-safe cleanup (CRITICAL)
+
+The scheduler slot must be released even if the client disconnects
+mid-stream. Wrap teardown in `asyncio.shield` and use `finally`:
 
 ```python
-# Model not found
-raise model_not_found_error(model_id)
-
-# Invalid request
-raise invalid_request_error("messages is required", param="messages")
-
-# Authentication error
-raise authentication_error("Invalid API key")
-
-# Rate limit
-raise rate_limit_error(retry_after=60)
-
-# Server error
-raise server_error("Model loading failed")
+try:
+    async for event in stream:
+        yield emitter.frame(event)
+    yield emitter.done()
+finally:
+    await asyncio.shield(_teardown())   # close upstream, release slot, persist once
 ```
 
-## Request ID Tracking
+`InferenceScheduler.release()` is idempotent and shielded internally. The
+provider frees its own slot on TCP close, so a dead admin never wedges a
+backend.
 
-### Generate Request ID
+## Persistence
+
+On completion (stream or non-stream), persist exactly once:
+
+- `ResponseRecord`: `response_id`=client id, `previous_response_id`,
+  `input_items` (the FULL reconstructed input for this turn),
+  `output_items`, token counts, `store`, `status`, and litellm's wrapped
+  id in `parameters`.
+- `TokenUsageSample`: prompt/cached/completion tokens + rates.
+
+Because each record stores the full conversation up to that turn, a
+continuation reconstructs in O(1) from its immediate predecessor — no
+chain walk.
+
+## Request ID
+
+The client response id doubles as the scheduler `request_id`
+(`request_id = client_response_id`). Keep them equal so acquire/release and
+the DB row line up.
+
+## 501 stubs (unimplemented endpoints)
+
+For endpoints not yet in the core path, return the OpenAI error envelope:
 
 ```python
-from app.utils.api_helpers import generate_request_id
-
-request_id = generate_request_id()  # req_abc123xyz
+@router.post("/v1/embeddings")
+async def embeddings() -> JSONResponse:
+    return JSONResponse(
+        status_code=501,
+        content={"error": {
+            "message": "embeddings are not implemented in this deployment",
+            "type": "not_supported_error",
+            "code": "endpoint_not_implemented",
+            "param": None,
+        }},
+    )
 ```
 
-### Add to Response
+Do **not** restore old implementations from `legacy/` — see Accepted
+Regressions in `IMPLEMENTATION_STATUS.md`.
 
-```python
-from app.utils.api_helpers import add_request_id
+## Adding a new `/v1` endpoint checklist
 
-response = add_request_id(
-    response_object,
-    request_id="req_abc123"
-)
-```
+1. Resolve the enabled `ProviderDefinition` by alias (404 otherwise).
+2. `ensure_registered(alias)` with the right litellm `mode`.
+3. `scheduler.acquire(...)` → 503/504 before the stream starts.
+4. Call litellm with `api_base = admission.base_url + "/v1"`.
+5. Frame the response with the admin-owned id + sequence numbers.
+6. Map litellm exceptions to spec terminal frames.
+7. Release + persist in a cancellation-safe `finally`.
+8. `bash scripts/generate-client.sh` if the schema changed.
+9. Run the OpenResponses conformance suite (see integration-testing skill).
 
-### Log Request ID
+## Anti-patterns
 
-```python
-from app.utils.api_helpers import log_request
-
-log_request(
-    request_id="req_abc123",
-    endpoint="/v1/chat/completions",
-    model="llama-2-7b",
-    user_id="user_123"
-)
-```
-
-## Streaming Utilities
-
-### Chunk Formatter
-
-```python
-from app.utils.api_helpers import ChatCompletionChunk
-
-chunk = ChatCompletionChunk(
-    id="chatcmpl-123",
-    model="llama-2-7b",
-    choices=[{
-        "index": 0,
-        "delta": {"content": "Hello"},
-        "finish_reason": None
-    }]
-)
-
-json_str = chunk.to_json()
-```
-
-### Usage Aggregator
-
-```python
-from app.utils.api_helpers import UsageAggregator
-
-aggregator = UsageAggregator()
-aggregator.add_prompt_tokens(10)
-aggregator.add_completion_tokens(20)
-
-usage = aggregator.get_usage()
-# {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
-```
-
-## Model Resolution
-
-### Resolve Model ID
-
-```python
-from app.utils.api_helpers import resolve_model
-
-model_info = await resolve_model("llama-2-7b-chat.Q4_K_M.gguf")
-# Returns: model_id, path, config, is_loaded
-
-# Check if loaded
-if not model_info.is_loaded:
-    await load_model(model_info.id)
-```
-
-### List Available Models
-
-```python
-from app.utils.api_helpers import list_models
-
-models = await list_models()
-# Returns OpenAI-compatible model list format
-```
-
-## Best Practices
-
-1. **Always validate requests** before processing
-2. **Use OpenAI error format** for all errors
-3. **Include request IDs** in all responses
-4. **Log all API calls** with timing
-5. **Rate limit by IP and API key**
-6. **Stream large responses** to reduce memory
-7. **Count tokens accurately** for usage tracking
-
-## Configuration
-
-API config in `/etc/inference-matrix/api.yaml`:
-
-```yaml
-api:
-  base_url: /v1
-  max_request_size_mb: 10
-  timeout_seconds: 300
-  
-authentication:
-  enabled: false
-  header: Authorization
-  key_prefix: sk-
-  
-rate_limits:
-  default_requests_per_minute: 60
-  default_tokens_per_minute: 10000
-  
-logging:
-  include_request_body: false
-  include_response_body: false
-  log_request_ids: true
-```
+- ❌ Passing `previous_response_id` to litellm (admin owns the chain).
+- ❌ Surfacing litellm's wrapped response id to the client.
+- ❌ Calling a provider backend directly instead of through litellm.
+- ❌ Forwarding un-whitelisted client fields to litellm.
+- ❌ Releasing the scheduler slot only on normal completion (must be
+  `finally` + shield).
+- ❌ Reimplementing provider-specific translation in the admin — that lives
+  in `provider/<type>` (see `provider/README.md`).
