@@ -1,26 +1,21 @@
-"""Wire envelope for admin <-> provider WebSocket messages.
+"""Admin-side mirror of the provider wire envelope.
 
-Every frame is a single JSON object with this shape:
-
-    {
-      "v": 1,
-      "type": "<event_or_command_name>",
-      "id": "<message id, unique per sender connection>",
-      "reply_to": "<id of the message this is an ack/response for, or null>",
-      "epoch": <provider connection epoch, int>,
-      "ts": "<ISO-8601 UTC>",
-      "payload": { ... }
-    }
-
-Direction and semantics are defined by `type`. See docs/ws-protocol.md.
+This intentionally duplicates ``provider_lib.wire`` (provider/lib) rather
+than importing it: the admin image is built with
+``uv sync --no-install-workspace --package matrix-admin`` and does not ship
+provider packages. The two definitions MUST stay in sync — the frame shape
+is canonical in ``provider/lib/provider_lib/wire.py`` and documented in
+``docs/ws-protocol.md``.
 """
 
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field
 
 PROTOCOL_VERSION = 1
+
+WS_CLOSE_AUTH_FAILED = 4401
 
 
 def now_iso() -> str:
@@ -98,6 +93,3 @@ class InstanceStatusValue:
     UNHEALTHY = "unhealthy"
     ERROR = "error"
     DISCONNECTED = "disconnected"
-
-
-Direction = Literal["inbound", "outbound"]

@@ -41,14 +41,19 @@ class RegistrationResult:
     @property
     def ws_url(self) -> str:
         base = self.provider_definition.get("admin_ws_url")
-        if base:
-            return base
-        # Derive from ADMIN_BASE_URL by swapping scheme and path.
-        url = ProviderSettings().ADMIN_BASE_URL
-        return (
-            url.replace("https://", "wss://").replace("http://", "ws://").rstrip("/")
-            + "/provider/ws"
-        )
+        if not base:
+            # Derive from ADMIN_BASE_URL by swapping scheme and path.
+            base = (
+                ProviderSettings()
+                .ADMIN_BASE_URL.replace("https://", "wss://")
+                .replace("http://", "ws://")
+                .rstrip("/")
+                + "/provider/ws"
+            )
+        # The admin identifies the connection by instance_id (query param)
+        # and authenticates the Bearer secret against it.
+        sep = "&" if "?" in base else "?"
+        return f"{base}{sep}instance_id={self.instance_id}"
 
 
 class AdminClient:

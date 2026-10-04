@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     INSTANCE_SWEEP_INTERVAL_SECONDS: float = 30.0
     INSTANCE_STALE_AFTER_SECONDS: float = 120.0
 
+    # Set false (e.g. in tests) to skip starting the presence sweep task.
+    INSTANCE_SWEEP_ENABLED: bool = True
+
     # CORS: the UI is served same-origin from this app; allow Vite dev server.
     CORS_ALLOW_ALL_ORIGINS: bool = True
 

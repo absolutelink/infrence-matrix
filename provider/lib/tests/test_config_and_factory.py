@@ -30,7 +30,9 @@ def test_app_factory_health() -> None:
 
     from provider_lib.app_factory import BackendOverrides, create_provider_app
 
-    app = create_provider_app(_settings(), BackendOverrides(provider_type="mock", version="v1"))
+    app = create_provider_app(
+        _settings(), BackendOverrides(provider_type="mock", version="v1")
+    )
     client = TestClient(app)
     resp = client.get("/health")
     assert resp.status_code == 200

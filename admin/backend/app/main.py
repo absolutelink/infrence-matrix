@@ -9,6 +9,7 @@ URL layout:
   /provider/ws      Provider instance WebSocket dial-in
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from fastapi.routing import APIRoute
 from starlette.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
+from app.core.redis import create_redis_client
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
 
@@ -28,7 +30,27 @@ def custom_generate_unique_id(route: APIRoute) -> str:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    yield
+    redis_client = create_redis_client()
+    _app.state.redis = redis_client
+
+    sweep_task: asyncio.Task | None = None  # type: ignore[type-arg]
+    sweep_stop = asyncio.Event()
+    if settings.INSTANCE_SWEEP_ENABLED:
+        from app.services.presence_sweep import presence_sweep_loop
+
+        sweep_task = asyncio.create_task(presence_sweep_loop(redis_client, sweep_stop))
+
+    try:
+        yield
+    finally:
+        if sweep_task is not None:
+            sweep_stop.set()
+            sweep_task.cancel()
+            try:
+                await sweep_task
+            except asyncio.CancelledError:
+                pass
+        await redis_client.aclose()
 
 
 app = FastAPI(

@@ -110,15 +110,25 @@ jobs:
           uv run ruff check provider/lib provider/mock
           uv run ruff format --check provider/lib provider/mock
 
-      - name: Run tests
+      - name: Run provider-lib tests
         env:
           MACHINE_UID: test-machine
           PROVIDER_REGISTRATION_TOKEN: test-token
           ADMIN_BASE_URL: http://localhost:8000
           CACHE_DIR: /tmp/cache
           MODELS_DIR: /tmp/models
-        run: |
-          uv run pytest provider/lib/tests provider/mock/tests -v --tb=short || true
+        working-directory: ./provider/lib
+        run: uv run pytest -v --tb=short
+
+      - name: Run mock provider tests
+        env:
+          MACHINE_UID: test-machine
+          PROVIDER_REGISTRATION_TOKEN: test-token
+          ADMIN_BASE_URL: http://localhost:8000
+          CACHE_DIR: /tmp/cache
+          MODELS_DIR: /tmp/models
+        working-directory: ./provider/mock
+        run: uv run pytest -v --tb=short
 
   build-matrix-app:
     needs: [test-admin, test-provider]
