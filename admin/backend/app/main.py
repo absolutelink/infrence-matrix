@@ -33,6 +33,15 @@ async def lifespan(_app: FastAPI):
     redis_client = create_redis_client()
     _app.state.redis = redis_client
 
+    # Phase 6: in-process FIFO scheduler with Redis mirror. Single uvicorn
+    # worker makes this the authoritative admission path (see
+    # app/services/scheduler.py).
+    from app.services.scheduler import InferenceScheduler
+
+    scheduler = InferenceScheduler(redis_client)
+    _app.state.scheduler = scheduler
+    await scheduler.start_background()
+
     sweep_task: asyncio.Task | None = None  # type: ignore[type-arg]
     sweep_stop = asyncio.Event()
     if settings.INSTANCE_SWEEP_ENABLED:
@@ -50,6 +59,7 @@ async def lifespan(_app: FastAPI):
                 await sweep_task
             except asyncio.CancelledError:
                 pass
+        await scheduler.stop()
         await redis_client.aclose()
 
 

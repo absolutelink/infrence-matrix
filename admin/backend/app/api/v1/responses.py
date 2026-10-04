@@ -1,0 +1,503 @@
+"""Public OpenResponses endpoint: ``POST /v1/responses`` (Phase 6).
+
+Drives litellm against a scheduler-admitted provider instance, re-frames
+the SSE stream as the OpenResponses spec with the admin-owned
+``resp_<uuid>`` id (see ``spike/litellm-fidelity/FINDINGS.md``), and
+persists the turn as a ``ResponseRecord`` + ``TokenUsageSample``.
+
+Flow:
+
+1. Parse the body: ``model`` (alias) and ``input`` required; optional
+   ``previous_response_id``, ``stream`` (default true), ``store``
+   (default true), and passthrough params (instructions, tools, ...).
+2. Resolve the enabled ``ProviderDefinition`` by alias -> else 404.
+3. Mint ``client_response_id = "resp_" + uuid4().hex`` (the admin owns
+   the client-facing id; litellm's wrapped id is stored in parameters).
+4. Build the litellm ``input``: on ``previous_response_id``, load our
+   prior ``ResponseRecord`` and prepend its ``input_items`` +
+   ``output_items`` to the new input. We own the chain; litellm-side
+   session state is never relied on and ``previous_response_id`` is NOT
+   passed to litellm.
+5. ``ensure_registered(alias)`` so litellm selects native streaming.
+6. ``scheduler.acquire(alias, request_id)`` -> ``Admission`` with the
+   instance base URL. ``NoProviderAvailable`` -> 503, ``QueueTimeout``
+   -> 504 (JSON, since the stream has not started).
+7. Streaming (default): iterate litellm events through the
+   ``SSEEmitter``; on litellm exceptions (``MidStreamFallbackError`` and
+   friends) synthesize the spec ``response.failed`` frame; in a
+   cancellation-safe ``finally`` close the upstream stream, release the
+   scheduler slot, and persist once.
+8. Non-stream: accumulate the terminal response, replace its id, persist,
+   release, return JSON.
+
+Auth model: trusted LAN — this public route is unauthenticated (see
+``app/core/config.py``).
+"""
+
+import asyncio
+import contextlib
+import logging
+import uuid
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from typing import Any
+
+import litellm
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from sqlmodel import Session, select
+
+from app.core.db import engine
+from app.models import ProviderDefinition, ResponseRecord, TokenUsageSample
+from app.services.alias_registry import ensure_registered
+from app.services.scheduler import (
+    Admission,
+    InferenceScheduler,
+    NoProviderAvailable,
+    QueueTimeout,
+)
+from app.services.sse import SSEEmitter, to_dict
+
+logger = logging.getLogger("admin.v1.responses")
+
+router = APIRouter(tags=["responses"])
+
+# Request fields forwarded straight to litellm.aresponses when present.
+PASSTHROUGH_FIELDS = (
+    "instructions",
+    "tools",
+    "tool_choice",
+    "temperature",
+    "top_p",
+    "max_output_tokens",
+    "reasoning",
+    "text",
+    "truncation",
+    "parallel_tool_calls",
+    "metadata",
+    "user",
+    "store",
+    "background",
+    "include",
+)
+
+
+def get_scheduler(request: Request) -> InferenceScheduler:
+    scheduler = getattr(request.app.state, "scheduler", None)
+    if scheduler is None:
+        raise HTTPException(status_code=503, detail="scheduler not initialized")
+    return scheduler  # type: ignore[no-any-return]
+
+
+def map_exception_to_error(exc: Exception) -> dict[str, Any]:
+    """Map a litellm/provider exception to the spec error object."""
+    if isinstance(exc, litellm.exceptions.NotFoundError):
+        return {
+            "type": "invalid_request_error",
+            "code": "model_not_found",
+            "message": str(exc),
+        }
+    # MidStreamFallbackError wraps an InternalServerError produced by a
+    # provider-side response.failed; both are upstream failures, as are
+    # APIError/connection errors.
+    return {
+        "type": "server_error",
+        "code": "upstream_failed",
+        "message": str(exc),
+    }
+
+
+def _as_item_list(value: Any) -> list[dict[str, Any]]:
+    """Normalize spec input/output payloads into a list of dicts."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [v if isinstance(v, dict) else to_dict(v) for v in value]
+    return [{"content": value}]
+
+
+def _usage_tokens(usage: dict[str, Any]) -> tuple[int, int, int, int]:
+    """(input, output, total, cached) from a spec usage dict, tolerating
+    legacy prompt_tokens/completion_tokens aliases."""
+    input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+    output_tokens = int(
+        usage.get("output_tokens") or usage.get("completion_tokens") or 0
+    )
+    total_tokens = int(usage.get("total_tokens") or (input_tokens + output_tokens))
+    details = usage.get("input_tokens_details") or {}
+    cached = int(details.get("cached_tokens") or 0)
+    return input_tokens, output_tokens, total_tokens, cached
+
+
+def build_litellm_input(body: dict[str, Any], previous: ResponseRecord | None) -> Any:
+    """Reconstruct the litellm input for a (possibly continued) turn.
+
+    Always returns a list of input items: a bare string input is wrapped
+    as a user message so the stored ``input_items`` and the litellm
+    payload share one shape. On continuation, the prior record's
+    ``input_items`` (the full conversation up to that turn) plus its
+    ``output_items`` are prepended to this turn's new input.
+    """
+    new_input = body.get("input")
+    if isinstance(new_input, str):
+        new_input = [{"role": "user", "content": new_input}]
+    if previous is None:
+        return new_input
+    combined: list[dict[str, Any]] = list(previous.input_items)
+    combined.extend(previous.output_items)
+    if isinstance(new_input, list):
+        combined.extend(new_input)
+    return combined
+
+
+def persist_turn(
+    *,
+    client_response_id: str,
+    previous_response_id: str | None,
+    input_items: list[dict[str, Any]],
+    output_items: list[dict[str, Any]],
+    definition_id: uuid.UUID,
+    instance_id: uuid.UUID | None,
+    parameters: dict[str, Any],
+    status: str,
+    usage: dict[str, Any] | None,
+    error: dict[str, Any] | None,
+    store: bool,
+) -> None:
+    """Insert the ResponseRecord (+ TokenUsageSample) once, at terminal."""
+    input_tokens = output_tokens = total_tokens = cached = 0
+    prompt_ms = predicted_ms = 0.0
+    prompt_tps = predicted_tps = 0.0
+    if usage:
+        input_tokens, output_tokens, total_tokens, cached = _usage_tokens(usage)
+        timing = usage.get("completion_tokens_details") or {}
+        prompt_ms = float(timing.get("prompt_time") or 0.0) * 1000.0
+        predicted_ms = float(timing.get("prediction_time") or 0.0) * 1000.0
+        prompt_tps = float(timing.get("prompt_per_second") or 0.0)
+        predicted_tps = float(timing.get("predicted_per_second") or 0.0)
+
+    record = ResponseRecord(
+        response_id=client_response_id,
+        previous_response_id=previous_response_id,
+        input_items=input_items,
+        output_items=output_items,
+        provider_definition_id=definition_id,
+        provider_instance_id=instance_id,
+        parameters=parameters,
+        status=status,
+        store=store,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        completed_at=datetime.now(UTC),
+    )
+    if error:
+        record.error_code = str(error.get("code"))
+        record.error_message = error.get("message")
+
+    sample = TokenUsageSample(
+        provider_instance_id=instance_id,
+        provider_definition_id=definition_id,
+        prompt_tokens=input_tokens,
+        cached_tokens=cached,
+        completion_tokens=output_tokens,
+        prompt_ms=prompt_ms,
+        predicted_ms=predicted_ms,
+        prompt_per_second=prompt_tps,
+        predicted_per_second=predicted_tps,
+    )
+    with Session(engine) as session:
+        session.add(record)
+        session.add(sample)
+        session.commit()
+
+
+@router.post("/v1/responses")
+async def create_response(request: Request) -> Any:
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=400, detail="request body must be a JSON object"
+        )
+
+    alias = body.get("model")
+    input_value = body.get("input")
+    if not alias or input_value is None:
+        raise HTTPException(status_code=400, detail="'model' and 'input' are required")
+
+    previous_response_id = body.get("previous_response_id")
+    with Session(engine) as session:
+        definition = session.exec(
+            select(ProviderDefinition).where(ProviderDefinition.alias == alias)
+        ).first()
+        if definition is None:
+            raise HTTPException(
+                status_code=404, detail=f"unknown model alias '{alias}'"
+            )
+        if not definition.enabled:
+            raise HTTPException(
+                status_code=404, detail=f"model alias '{alias}' is disabled"
+            )
+        definition_id = definition.id
+        base_params: dict[str, Any] = {
+            "model": alias,
+            "provider_type": definition.provider_type,
+        }
+
+        previous: ResponseRecord | None = None
+        if previous_response_id:
+            previous = session.exec(
+                select(ResponseRecord).where(
+                    ResponseRecord.response_id == previous_response_id
+                )
+            ).first()
+            if previous is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"previous_response_id '{previous_response_id}' not found",
+                )
+
+    stream = bool(body.get("stream", True))
+    store = bool(body.get("store", True))
+    client_response_id = f"resp_{uuid.uuid4().hex}"
+    request_id = client_response_id
+
+    ensure_registered(alias)
+    litellm_input = build_litellm_input(body, previous)
+
+    scheduler = get_scheduler(request)
+    try:
+        admission = await scheduler.acquire(alias, request_id)
+    except NoProviderAvailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except QueueTimeout as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+
+    passthrough = {k: body[k] for k in PASSTHROUGH_FIELDS if k in body}
+    # Record the accumulated input we hand to litellm as this turn's
+    # input_items. Because build_litellm_input prepends the prior record's
+    # input_items + output_items, each record stores the FULL conversation
+    # up to that turn, so a continuation reconstructs in O(1) from just
+    # its immediate predecessor (no need to walk the whole chain).
+    input_items_for_record = _as_item_list(litellm_input)
+
+    if stream:
+        return StreamingResponse(
+            _stream_response(
+                scheduler=scheduler,
+                alias=alias,
+                request_id=request_id,
+                client_response_id=client_response_id,
+                previous_response_id=previous_response_id,
+                input_items_for_record=input_items_for_record,
+                definition_id=definition_id,
+                admission=admission,
+                litellm_input=litellm_input,
+                passthrough=passthrough,
+                base_params=base_params,
+                store=store,
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    return await _non_stream_response(
+        scheduler=scheduler,
+        alias=alias,
+        request_id=request_id,
+        client_response_id=client_response_id,
+        previous_response_id=previous_response_id,
+        input_items_for_record=input_items_for_record,
+        definition_id=definition_id,
+        admission=admission,
+        litellm_input=litellm_input,
+        passthrough=passthrough,
+        base_params=base_params,
+        store=store,
+    )
+
+
+async def _stream_response(
+    *,
+    scheduler: InferenceScheduler,
+    alias: str,
+    request_id: str,
+    client_response_id: str,
+    previous_response_id: str | None,
+    input_items_for_record: list[dict[str, Any]],
+    definition_id: uuid.UUID,
+    admission: Admission,
+    litellm_input: Any,
+    passthrough: dict[str, Any],
+    base_params: dict[str, Any],
+    store: bool,
+) -> AsyncIterator[str]:
+    emitter = SSEEmitter(client_response_id)
+    terminal_output: list[dict[str, Any]] = []
+    terminal_usage: dict[str, Any] | None = None
+    litellm_wrapped_id: str | None = None
+    failed_error: dict[str, Any] | None = None
+    completed = False
+
+    stream = None
+    try:
+        stream = await litellm.aresponses(
+            model=alias,
+            custom_llm_provider="openai",
+            api_base=f"{admission.base_url}/v1",
+            stream=True,
+            input=litellm_input,
+            **passthrough,
+        )
+        try:
+            async for event in stream:
+                data = to_dict(event)
+                response = data.get("response")
+                if isinstance(response, dict):
+                    # Capture litellm's affinity-wrapped id before the
+                    # emitter replaces it with ours.
+                    if litellm_wrapped_id is None:
+                        litellm_wrapped_id = response.get("id")
+                    if data.get("type") in (
+                        "response.completed",
+                        "response.incomplete",
+                    ):
+                        terminal_output = _as_item_list(response.get("output"))
+                        terminal_usage = (
+                            to_dict(response["usage"])
+                            if response.get("usage")
+                            else None
+                        )
+                        completed = data["type"] == "response.completed"
+                yield emitter.frame(data)
+            yield emitter.done()
+        except Exception as exc:  # noqa: BLE001 - MidStreamFallbackError et al.
+            failed_error = map_exception_to_error(exc)
+            logger.warning("litellm stream failed for %s: %s", client_response_id, exc)
+            for frame in emitter.failed(failed_error):
+                yield frame
+            yield emitter.done()
+    finally:
+        # Single shielded cleanup so a cancelled aclose can never skip the
+        # slot release or persistence on the client-disconnect path.
+        async def _cleanup() -> None:
+            # Close the upstream stream on every exit path (normal end,
+            # error, or client disconnect) so the provider releases its
+            # own slot.
+            if stream is not None:
+                with contextlib.suppress(Exception):
+                    await stream.aclose()
+            with contextlib.suppress(Exception):
+                await scheduler.release(alias, request_id)
+
+        with contextlib.suppress(Exception):
+            await asyncio.shield(_cleanup())
+        # Persist once at terminal. Synchronous DB work: runs to completion
+        # without needing to be awaited, so cancellation cannot interrupt it.
+        with contextlib.suppress(Exception):
+            persist_turn(
+                client_response_id=client_response_id,
+                previous_response_id=previous_response_id,
+                input_items=input_items_for_record,
+                output_items=terminal_output,
+                definition_id=definition_id,
+                instance_id=uuid.UUID(admission.instance_id),
+                parameters={
+                    **base_params,
+                    "litellm_response_id": litellm_wrapped_id,
+                    "api_base": admission.base_url,
+                    "stream": True,
+                },
+                status="completed" if completed else "failed",
+                usage=terminal_usage if completed else None,
+                error=failed_error if not completed else None,
+                store=store,
+            )
+
+
+async def _non_stream_response(
+    *,
+    scheduler: InferenceScheduler,
+    alias: str,
+    request_id: str,
+    client_response_id: str,
+    previous_response_id: str | None,
+    input_items_for_record: list[dict[str, Any]],
+    definition_id: uuid.UUID,
+    admission: Admission,
+    litellm_input: Any,
+    passthrough: dict[str, Any],
+    base_params: dict[str, Any],
+    store: bool,
+) -> JSONResponse:
+    try:
+        result = await litellm.aresponses(
+            model=alias,
+            custom_llm_provider="openai",
+            api_base=f"{admission.base_url}/v1",
+            stream=False,
+            input=litellm_input,
+            **passthrough,
+        )
+    except Exception as exc:  # noqa: BLE001
+        error = map_exception_to_error(exc)
+        with contextlib.suppress(Exception):
+            await asyncio.shield(scheduler.release(alias, request_id))
+        with contextlib.suppress(Exception):
+            persist_turn(
+                client_response_id=client_response_id,
+                previous_response_id=previous_response_id,
+                input_items=input_items_for_record,
+                output_items=[],
+                definition_id=definition_id,
+                instance_id=uuid.UUID(admission.instance_id),
+                parameters={
+                    **base_params,
+                    "api_base": admission.base_url,
+                    "stream": False,
+                },
+                status="failed",
+                usage=None,
+                error=error,
+                store=store,
+            )
+        return JSONResponse(
+            status_code=502,
+            content={
+                "error": {
+                    "type": error["type"],
+                    "code": error["code"],
+                    "message": error["message"],
+                }
+            },
+        )
+
+    data = to_dict(result)
+    litellm_wrapped_id = data.get("id")
+    # The admin owns the client-facing id.
+    data["id"] = client_response_id
+    usage = data.get("usage")
+    output_items = _as_item_list(data.get("output"))
+
+    with contextlib.suppress(Exception):
+        await asyncio.shield(scheduler.release(alias, request_id))
+    with contextlib.suppress(Exception):
+        persist_turn(
+            client_response_id=client_response_id,
+            previous_response_id=previous_response_id,
+            input_items=input_items_for_record,
+            output_items=output_items,
+            definition_id=definition_id,
+            instance_id=uuid.UUID(admission.instance_id),
+            parameters={
+                **base_params,
+                "litellm_response_id": litellm_wrapped_id,
+                "api_base": admission.base_url,
+                "stream": False,
+            },
+            status=data.get("status", "completed"),
+            usage=to_dict(usage) if usage else None,
+            error=None,
+            store=store,
+        )
+    return JSONResponse(content=data)
