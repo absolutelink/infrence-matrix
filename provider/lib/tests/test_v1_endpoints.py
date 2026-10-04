@@ -6,7 +6,11 @@ from typing import Any
 
 import httpx
 
-from provider_lib.app_factory import BackendOverrides, create_provider_app
+from provider_lib.app_factory import (
+    BackendOverrides,
+    _aggregate_chat_chunk,
+    create_provider_app,
+)
 from provider_lib.backend import BackendDriver, BackendLifecycle
 from provider_lib.config import ProviderSettings
 
@@ -173,7 +177,10 @@ async def test_chat_completions_streams() -> None:
     async with client:
         resp = await client.post(
             "/v1/chat/completions",
-            json={"messages": [{"role": "user", "content": "hi"}]},
+            json={
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            },
         )
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("text/event-stream")
@@ -184,6 +191,102 @@ async def test_chat_completions_streams() -> None:
         assert chunks
         assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
         assert lifecycle.in_flight == 0
+
+
+async def test_chat_completions_non_stream_aggregates() -> None:
+    """Spec default (stream absent/false): the chunk stream is folded into
+    a single chat.completion JSON object (admin's litellm non-stream path
+    requires this)."""
+    lifecycle, client = await _make(EndpointDriver())
+    async with client:
+        resp = await client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": False,
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("application/json")
+        body = resp.json()
+        assert body["object"] == "chat.completion"
+        assert body["choices"][0]["message"]["content"] == "hi"
+        assert body["choices"][0]["finish_reason"] == "stop"
+        assert lifecycle.in_flight == 0
+
+
+def test_aggregate_chat_chunk_merges_deltas_and_tools() -> None:
+    acc: dict[str, Any] | None = None
+    acc = _aggregate_chat_chunk(
+        acc,
+        {
+            "id": "c1",
+            "created": 5,
+            "model": "m",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_1",
+                                "function": {"name": "f", "arguments": ""},
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+    )
+    acc = _aggregate_chat_chunk(
+        acc,
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "content": "hello ",
+                        "tool_calls": [
+                            {"index": 0, "function": {"arguments": '{"a":'}}
+                        ],
+                    },
+                }
+            ]
+        },
+    )
+    acc = _aggregate_chat_chunk(
+        acc,
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "content": "world",
+                        "tool_calls": [{"index": 0, "function": {"arguments": "1}"}}],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+        },
+    )
+    assert acc["id"] == "c1"
+    assert acc["created"] == 5
+    assert acc["model"] == "m"
+    msg = acc["choices"][0]["message"]
+    assert msg["role"] == "assistant"
+    assert msg["content"] == "hello world"
+    assert msg["tool_calls"] == [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "f", "arguments": '{"a":1}'},
+        }
+    ]
+    assert acc["choices"][0]["finish_reason"] == "tool_calls"
+    assert acc["usage"]["total_tokens"] == 5
 
 
 async def test_chat_completions_501_when_unsupported() -> None:

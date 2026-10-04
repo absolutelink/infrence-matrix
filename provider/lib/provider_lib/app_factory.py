@@ -4,7 +4,8 @@ Every provider type gets a base app that serves:
   - GET  /health         liveness + provider type + version + backend/slot state
   - GET  /v1/models      model list from the backend driver
   - POST /v1/responses   OpenResponses SSE stream (slot-admitted)
-  - POST /v1/chat/completions  OpenAI chat.completions SSE (slot-admitted)
+  - POST /v1/chat/completions  OpenAI chat.completions (SSE or JSON,
+    slot-admitted; non-stream aggregates the driver's chunk stream)
 
 Admin's litellm client targets ``http://<machine>:<PROVIDER_PORT>/v1``;
 the provider normalizes its backend into a clean OpenAI-compatible
@@ -187,10 +188,12 @@ def create_provider_app(
         return JSONResponse(content=terminal)
 
     @app.post("/v1/chat/completions")
-    async def chat_completions(request: Request) -> StreamingResponse:
+    async def chat_completions(request: Request) -> Response:
         lifecycle = _require_lifecycle()
         body = await request.json()
         try:
+            # Eager acquire inside: BackendBusy/BackendNotReady surface
+            # here, before any bytes are committed to the client.
             stream = await lifecycle.stream_chat_completions(body)
         except BackendBusy as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
@@ -198,10 +201,98 @@ def create_provider_app(
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except NotImplementedError as exc:
             raise HTTPException(status_code=501, detail=str(exc)) from exc
-        return StreamingResponse(
-            _stream_or_error(stream, terminator=True),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
+        if body.get("stream"):
+            return StreamingResponse(
+                _stream_or_error(stream, terminator=True),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        # Non-streaming (spec default): drain the chunk stream and return
+        # the aggregated chat.completion object as JSON. The slot is still
+        # owned by the pump task and released when the upstream closes.
+        completion: dict[str, Any] | None = None
+        try:
+            async for chunk in stream:
+                completion = _aggregate_chat_chunk(completion, chunk)
+        finally:
+            with contextlib.suppress(Exception):
+                await stream.aclose()
+        if completion is None:
+            raise HTTPException(
+                status_code=502, detail="backend stream ended without a chunk"
+            )
+        return JSONResponse(content=completion)
 
     return app
+
+
+def _aggregate_chat_chunk(
+    acc: dict[str, Any] | None, chunk: dict[str, Any]
+) -> dict[str, Any]:
+    """Fold one chat.completion.chunk into a chat.completion object.
+
+    Merges per-choice ``delta`` content and tool-call fragments (keyed by
+    the chunk's tool-call ``index``) into ``choices[].message``; carries
+    the last-seen ``finish_reason`` and any ``usage`` object. Mirrors the
+    OpenAI chat non-stream shape so admin's litellm client parses it.
+    """
+    if acc is None:
+        acc = {
+            "id": chunk.get("id"),
+            "object": "chat.completion",
+            "created": chunk.get("created"),
+            "model": chunk.get("model"),
+            "choices": [],
+        }
+    for key in ("id", "created", "model"):
+        if acc.get(key) is None and chunk.get(key) is not None:
+            acc[key] = chunk[key]
+    choices: list[dict[str, Any]] = acc["choices"]
+    for choice in chunk.get("choices") or []:
+        index = int(choice.get("index", len(choices)))
+        while len(choices) <= index:
+            choices.append(
+                {
+                    "index": len(choices),
+                    "message": {"role": "assistant"},
+                    "finish_reason": None,
+                }
+            )
+        slot = choices[index]
+        message: dict[str, Any] = slot["message"]
+        delta = choice.get("delta") or {}
+        if delta.get("role"):
+            message["role"] = delta["role"]
+        if delta.get("content") is not None:
+            message["content"] = (message.get("content") or "") + str(delta["content"])
+        if delta.get("tool_calls") is not None:
+            calls: list[dict[str, Any]] = message.setdefault("tool_calls", [])
+            for tool_delta in delta["tool_calls"]:
+                t_index = int(tool_delta.get("index", len(calls)))
+                while len(calls) <= t_index:
+                    calls.append(
+                        {
+                            "id": None,
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        }
+                    )
+                call = calls[t_index]
+                if tool_delta.get("id"):
+                    call["id"] = tool_delta["id"]
+                if tool_delta.get("type"):
+                    call["type"] = tool_delta["type"]
+                fn = tool_delta.get("function") or {}
+                if fn.get("name"):
+                    call["function"]["name"] = (
+                        call["function"].get("name") or ""
+                    ) + str(fn["name"])
+                if fn.get("arguments"):
+                    call["function"]["arguments"] = (
+                        call["function"].get("arguments") or ""
+                    ) + str(fn["arguments"])
+        if choice.get("finish_reason") is not None:
+            slot["finish_reason"] = choice["finish_reason"]
+    if chunk.get("usage") is not None:
+        acc["usage"] = chunk["usage"]
+    return acc

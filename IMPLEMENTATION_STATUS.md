@@ -1,7 +1,7 @@
 # Inference Matrix — Implementation Status
 
 **Overhaul branch:** `litellm-architecture-overhaul`
-**Last updated:** 2026-10-04 (docs reconciliation + Phase 6 conformance run)
+**Last updated:** 2026-10-04 (Phase 7 complete: chat completions + models + stubs)
 
 This file tracks the litellm-based architecture overhaul (see
 [ARCHITECTURE.md](ARCHITECTURE.md)). Each phase lists its features with
@@ -19,7 +19,7 @@ starting a feature, read the linked protocol/doc first.
 | 4 | Provider lib: backend lifecycle, `/v1` translation surface, slot admission | ✅ Complete |
 | 5 | llama-cpp provider + model downloader + machine metrics + ownership | ✅ Complete |
 | 6 | Scheduler + `/v1/responses` via litellm + SSE emitter + persistence | 🟡 In progress |
-| 7 | `/v1/chat/completions` + `/v1/models` + 501 stubs | ⬜ Pending |
+| 7 | `/v1/chat/completions` + `/v1/models` + 501 stubs | ✅ Complete |
 | 8 | gufo / halogen / halogen-flash provider ports | ⬜ Pending |
 | 9 | `provider.config.update` / fingerprint / cache-clear flow | ⬜ Pending |
 | 10 | Admin UI rework | ⬜ Pending |
@@ -240,17 +240,101 @@ conformance contract).
 
 ---
 
-## Phase 7 — Chat Completions + Models + Stubs ⬜
+## Phase 7 — Chat Completions + Models + Stubs ✅
 
-- [ ] `POST /v1/chat/completions` via `litellm.acompletion` against the
-      same scheduler admission + provider port. Persist usage.
-- [ ] `GET /v1/models` — derive from enabled `ProviderDefinition`s
-      (alias + `model_metadata`).
-- [ ] 501 stubs with OpenAI error envelope for: `/v1/embeddings`,
-      `/v1/completions` (legacy), `/v1/rerank`, `/v1/moderations`,
-      `/v1/decisions`, `/v1/audio/*`, `/v1/files`, `/v1/batches`.
-- [ ] `generate-client.sh` after routes land.
-- [ ] Conformance/integration suite green.
+**Admin:** `app/api/v1/chat_completions.py`, `app/api/v1/models.py`,
+`app/api/v1/stubs.py`, `app/services/alias_registry.py` (mode change).
+**Provider:** `provider_lib/app_factory.py` (chat non-stream aggregation),
+`provider/mock` (final usage chunk on chat stream).
+**Design:** ARCHITECTURE.md §7 (+ "Chat completions specifics").
+
+### Done
+- [x] `POST /v1/chat/completions` via `litellm.acompletion` against the
+      same scheduler admission + provider port. OpenAI chat body:
+      `model`/`messages` required, `stream` default false; passthrough:
+      temperature, top_p, max_tokens, tools, tool_choice, stop,
+      presence_penalty, frequency_penalty, seed, n, user,
+      response_format, logprobs, top_logprobs.
+- [x] **Native chat streaming registration (the key litellm finding).**
+      `ensure_registered` now registers the union entry
+      `mode: "chat"` + `supports_native_streaming: True` (was
+      `mode: "responses"`). Source evidence (litellm 1.103.x):
+      `aresponses` decides fake-vs-native streaming *only* via
+      `supports_native_streaming` (`OpenAIResponsesAPIConfig.should_fake_stream`
+      → `litellm.utils.supports_native_streaming`); `mode` is never read
+      on the responses dispatch path. But `acompletion` **bridges to the
+      Responses API whenever `model_cost[alias]["mode"] == "responses"`**
+      (`main.py` `responses_api_bridge_check` + bridge dispatch) — the
+      Phase 6 registration would have sent chat traffic to
+      `/v1/responses`. Probed empirically against a toy dual-endpoint
+      server: with `mode: "chat"`, aresponses stream+non-stream still hit
+      the provider's `/v1/responses` natively (no Phase 6 regression)
+      and acompletion hits `/v1/chat/completions` with real chunks +
+      usage. Chat route additionally passes `_skip_responses_api_bridge=True`
+      so litellm's gpt-5 conditional bridge (reasoning+tools on
+      OpenAI-looking endpoints) can never reroute our calls.
+- [x] **Chat id ownership**: admin mints `chatcmpl-<uuid>` and replaces
+      `id` on every streamed chunk and the non-stream response.
+      litellm passes the raw upstream chat id through un-wrapped (unlike
+      the base64 responses id); captured as `parameters.litellm_id`.
+- [x] **SSE pass-through**: data-only frames (no `event:` lines per chat
+      spec), `data: [DONE]` terminator. Admin forces
+      `stream_options.include_usage` so the stream carries a final usage
+      chunk for token persistence.
+- [x] **Persistence**: `ResponseRecord` with
+      `parameters={"api_format": "chat_completions", "litellm_id": ...,
+      "request_parameters": {echo}}`; request `messages` → `input_items`;
+      aggregated assistant message(s) (content + tool-call deltas merged
+      by index) → `output_items`; `previous_response_id` always NULL
+      (chat is stateless). `TokenUsageSample` from usage
+      (`prompt_tokens_details.cached_tokens` mapped onto the
+      responses-shaped `input_tokens_details` that `persist_turn` reads).
+      Cancellation-safe finally mirrors Phase 6 exactly: client
+      disconnect before the terminal chunk → slot released +
+      `status="failed"`, `error.code="client_disconnected"`.
+- [x] **Error mapping**: pre-stream → HTTP (400 bad body/messages,
+      404 unknown/disabled alias, 503/504 scheduler); non-stream upstream
+      failure → 502 JSON; mid-stream → chat-style
+      `data: {"error": {...}}` + `[DONE]` (not `response.failed`).
+- [x] `GET /v1/models` — enabled `ProviderDefinition`s, alias asc;
+      `id`=alias, `owned_by`=provider_type, `created`=int epoch from
+      `created_at`, `model_metadata` merged over the rest (core fields
+      authoritative). No scheduler involvement.
+- [x] 501 stubs (`app/api/v1/stubs.py`) with the OpenAI error envelope
+      (`type: not_supported_error`, `code: endpoint_not_supported`,
+      `param`: path) for POST `/v1/embeddings`, `/v1/completions`,
+      `/v1/rerank`, `/v1/moderations`, `/v1/decisions`,
+      `/v1/audio/{speech,transcriptions,translations}`, and
+      GET/POST/DELETE(+content/cancel) item routes for `/v1/files` and
+      `/v1/batches`. Hidden from the OpenAPI schema.
+- [x] Routers wired in `app/api/main.py` (public /v1).
+- [x] Provider-port chat non-stream: `app_factory.py` now drains the
+      driver chunk stream and returns an aggregated `chat.completion`
+      JSON when `stream` is falsy (same fix class as Phase 6's responses
+      non-stream; litellm's non-stream parse otherwise fails against an
+      always-SSE upstream). Mock emits a final `usage` chunk on its chat
+      stream (honors `include_usage`).
+- [x] Tests: `test_v1_chat_completions.py` (stream happy path + tool
+      delta merge, non-stream + default, mid-stream error framing,
+      generator-aclose disconnect, 404/400/503, acquire/release-once
+      spy, native-streaming registration probe), `test_v1_models.py`,
+      `test_v1_stubs.py`. Admin suite **108 passed** (72 baseline + 36
+      new, no Phase 6 regression). lib 48 (+2 chat non-stream/aggregate),
+      mock 8, llama-cpp 29.
+- [x] Conformance re-run 2026-10-04 (local admin + mock provider):
+      `basic-response`, `streaming-response`, `system-prompt`,
+      `multi-turn` — **4/4 pass**; Phase 6 not regressed by the
+      `mode: "responses"` → `mode: "chat"` registration change.
+
+### Deviations
+- Chat turns share the `responses` table (`ResponseRecord`) rather than a
+  new table — the column set (input/output items, usage, status,
+  parameters) fits; `api_format` distinguishes rows.
+- The Phase 7 checklist item "generate-client.sh after routes land" is
+  **deferred to Phase 10** (hook disabled per plan); no frontend touched.
+- `ensure_registered` keeps a single process-wide cache; switching an
+  already-registered alias's mode only happens on process restart — fine
+  because ALL aliases use the same union entry.
 
 ---
 

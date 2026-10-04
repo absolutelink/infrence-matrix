@@ -305,11 +305,21 @@ class MockBackend(BackendDriver):
                         }
                     ],
                 }
+            completion_tokens = max(1, self.delta_count)
+            prompt_tokens = 1
             yield {
                 "id": completion_id,
                 "object": "chat.completion.chunk",
                 "model": model,
                 "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                # Honors stream_options.include_usage: final usage chunk
+                # with empty delta so admin can persist token counts.
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                    "prompt_tokens_details": {"cached_tokens": 0},
+                },
             }
         finally:
             self.stream_close_count += 1

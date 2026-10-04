@@ -213,7 +213,12 @@ Stored OpenResponses turn (spec `ResponseResource`), chained by
 litellm's affinity-wrapped upstream id is stored in `parameters` for turn
 affinity while the DB chain stays ours. `input_items`/`output_items` hold
 spec-shaped payloads; token counts and `store`/`status`/error fields
-mirror the spec.
+mirror the spec. Since Phase 7 this table also stores chat-completions
+turns: `response_id` is the minted `chatcmpl-<uuid>`,
+`parameters.api_format="chat_completions"` marks the format, and
+`previous_response_id` is always `NULL` (chat is stateless client-side —
+the caller resends the full `messages`, which are stored as
+`input_items`).
 
 ### TokenUsageSample
 Per-request prompt/cached/completion token + rate telemetry, FK to
@@ -365,9 +370,14 @@ Example: streamed Responses API against `https://matrix.thelink.family`.
    new input. The admin owns the chain; previous_response_id is NOT
    passed to litellm.
 4. ensure_registered(alias): register the alias with litellm
-   (supports_native_streaming=True, mode="responses",
+   (supports_native_streaming=True, mode="chat",
    litellm_provider="openai"). REQUIRED — without it litellm "fake
    streams" and fails with a confusing APIError (see FINDINGS).
+   mode="chat" (not "responses") is deliberate: acompletion bridges to
+   /v1/responses when mode=="responses" (responses_api_bridge_check),
+   while aresponses keys native streaming only on
+   supports_native_streaming and ignores mode — so one registration
+   serves both public APIs (see §7 chat specifics).
 5. scheduler.acquire(alias, request_id) → Admission with base_url.
    (503 NoProviderAvailable / 504 QueueTimeout before the stream starts.)
  6. litellm.aresponses(model=alias,
@@ -396,11 +406,44 @@ lease-renewal machinery.
 | Endpoint | Status |
 | --- | --- |
 | `/v1/responses` | **Full** (stream + non-stream) — Phase 6 |
-| `/v1/chat/completions` | Pending (Phase 7) via `litellm.acompletion` |
-| `/v1/models` | Pending (Phase 7) — derived from ProviderDefinitions |
+| `/v1/chat/completions` | **Full** (stream + non-stream) — Phase 7, via `litellm.acompletion`; admin-owned `chatcmpl-<uuid>` id on every chunk, data-only SSE, persisted as `ResponseRecord` with `parameters.api_format="chat_completions"` |
+| `/v1/models` | **Implemented** — Phase 7; derived from enabled `ProviderDefinition`s (alias asc, `owned_by`=provider_type, `model_metadata` merged) |
 | `/v1/embeddings`, `/v1/completions` (legacy), `/v1/rerank`, `/v1/moderations`, `/v1/decisions`, `/v1/audio/*`, `/v1/files`, `/v1/batches` | **501 stubs** — accepted regressions (§12) |
 | Responses-over-WebSocket transport | **Dropped** (not part of the OpenResponses spec) |
 | Benchmarks | **Dropped entirely** |
+
+### Chat completions specifics (Phase 7)
+
+Same flow as §7 steps 5–10 with `aresponses` → `acompletion`, plus:
+
+- **Alias registration is shared** (`ensure_registered`): the litellm
+  model entry is `mode: "chat"` + `supports_native_streaming: True`.
+  `aresponses` keys native streaming off `supports_native_streaming`
+  only (never `mode`), while `acompletion` **bridges to `/v1/responses`
+  whenever `mode == "responses"`** — so the Phase 6 `mode: "responses"`
+  registration would hijack chat calls. One `mode: "chat"` registration
+  serves both APIs natively; the chat route also passes
+  `_skip_responses_api_bridge=True` as a guard against litellm's gpt-5
+  conditional bridge.
+- **Id ownership**: admin mints `chatcmpl-<uuid>` and replaces `id` on
+  every streamed chunk / the non-stream response (litellm passes the raw
+  upstream chat id through un-wrapped; it is captured in
+  `parameters.litellm_id`, never surfaced).
+- **Usage**: the admin forces `stream_options.include_usage` on the
+  streaming path so token counts persist.
+- **Persistence**: reuses the Phase 6 `persist_turn` — request
+  `messages` → `input_items`; aggregated assistant message(s) (content
+  + merged tool-call deltas) → `output_items`; client disconnect before
+  the terminal chunk persists `status="failed"` with
+  `error.code="client_disconnected"`.
+- **Error framing**: pre-stream errors → HTTP (400/404/503/504, or 502
+  JSON for upstream failures on the non-stream path); mid-stream errors →
+  chat-style `data: {"error": {...}}` + `data: [DONE]` (no
+  `response.failed` — that's the responses spec).
+- **Provider side**: the provider-port `/v1/chat/completions` now
+  honors `stream=false` by aggregating the driver's chunk stream into a
+  `chat.completion` JSON (same fix class as Phase 6's responses
+  non-stream path).
 
 ---
 
@@ -420,7 +463,7 @@ against half-open sockets.
 The `metrics.inference` frame kind is **defined and reserved** (available
 slots, max slots, token speed, prompt-processing speed, in-flight counts)
 but **not yet emitted** by any provider and not yet handled by the admin —
-it lands with Phase 7/8 (see the Reserved row in `docs/ws-protocol.md` §4).
+it lands with Phase 8 (see the Reserved row in `docs/ws-protocol.md` §4).
 When it lands it is always-on per instance and never deduped.
 
 ### Categories

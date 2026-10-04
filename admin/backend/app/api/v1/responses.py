@@ -465,74 +465,77 @@ async def _non_stream_response(
     store: bool,
 ) -> JSONResponse:
     try:
-        result = await litellm.aresponses(
-            model=alias,
-            custom_llm_provider="openai",
-            api_base=f"{admission.base_url}/v1",
-            stream=False,
-            input=litellm_input,
-            **passthrough,
-        )
-    except Exception as exc:  # noqa: BLE001
-        error = map_exception_to_error(exc)
-        with contextlib.suppress(Exception):
-            await asyncio.shield(scheduler.release(alias, request_id))
+        try:
+            result = await litellm.aresponses(
+                model=alias,
+                custom_llm_provider="openai",
+                api_base=f"{admission.base_url}/v1",
+                stream=False,
+                input=litellm_input,
+                **passthrough,
+            )
+        except Exception as exc:  # noqa: BLE001
+            error = map_exception_to_error(exc)
+            with contextlib.suppress(Exception):
+                persist_turn(
+                    client_response_id=client_response_id,
+                    previous_response_id=previous_response_id,
+                    input_items=input_items_for_record,
+                    output_items=[],
+                    definition_id=definition_id,
+                    instance_id=uuid.UUID(admission.instance_id),
+                    parameters={
+                        **base_params,
+                        "api_base": admission.base_url,
+                        "stream": False,
+                    },
+                    status="failed",
+                    usage=None,
+                    error=error,
+                    store=store,
+                )
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": {
+                        "type": error["type"],
+                        "code": error["code"],
+                        "message": error["message"],
+                    }
+                },
+            )
+
+        data = to_dict(result)
+        litellm_wrapped_id = data.get("id")
+        # The admin owns the client-facing id.
+        data["id"] = client_response_id
+        usage = data.get("usage")
+        output_items = _clean_output_items(_as_item_list(data.get("output")))
+        data["output"] = output_items
+
         with contextlib.suppress(Exception):
             persist_turn(
                 client_response_id=client_response_id,
                 previous_response_id=previous_response_id,
                 input_items=input_items_for_record,
-                output_items=[],
+                output_items=output_items,
                 definition_id=definition_id,
                 instance_id=uuid.UUID(admission.instance_id),
                 parameters={
                     **base_params,
+                    "litellm_response_id": litellm_wrapped_id,
                     "api_base": admission.base_url,
                     "stream": False,
                 },
-                status="failed",
-                usage=None,
-                error=error,
+                status=data.get("status", "completed"),
+                usage=to_dict(usage) if usage else None,
+                error=None,
                 store=store,
             )
-        return JSONResponse(
-            status_code=502,
-            content={
-                "error": {
-                    "type": error["type"],
-                    "code": error["code"],
-                    "message": error["message"],
-                }
-            },
-        )
-
-    data = to_dict(result)
-    litellm_wrapped_id = data.get("id")
-    # The admin owns the client-facing id.
-    data["id"] = client_response_id
-    usage = data.get("usage")
-    output_items = _clean_output_items(_as_item_list(data.get("output")))
-    data["output"] = output_items
-
-    with contextlib.suppress(Exception):
-        await asyncio.shield(scheduler.release(alias, request_id))
-    with contextlib.suppress(Exception):
-        persist_turn(
-            client_response_id=client_response_id,
-            previous_response_id=previous_response_id,
-            input_items=input_items_for_record,
-            output_items=output_items,
-            definition_id=definition_id,
-            instance_id=uuid.UUID(admission.instance_id),
-            parameters={
-                **base_params,
-                "litellm_response_id": litellm_wrapped_id,
-                "api_base": admission.base_url,
-                "stream": False,
-            },
-            status=data.get("status", "completed"),
-            usage=to_dict(usage) if usage else None,
-            error=None,
-            store=store,
-        )
-    return JSONResponse(content=data)
+        return JSONResponse(content=data)
+    finally:
+        # Guaranteed slot release on EVERY exit path — including
+        # asyncio.CancelledError (client disconnect during the await), which
+        # `except Exception` does not catch. Release is idempotent.
+        with contextlib.suppress(Exception):
+            await asyncio.shield(scheduler.release(alias, request_id))
