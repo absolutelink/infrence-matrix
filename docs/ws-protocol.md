@@ -240,8 +240,12 @@ timeout)` sends the command and awaits the matching ack.
 
 | type | payload (Phase 3) | notes |
 | --- | --- | --- |
-| `backend.start` | `{}` | Mock handler emits `backend.status running` and acks ok. Real handlers arrive with Phase 4. |
-| `backend.stop` | `{}` | Mock handler emits `backend.status stopped` and acks ok. |
+| `backend.start` | `{}` | Provider handler awaits `BackendLifecycle.start()` (STOPPED → STARTING → RUNNING with `backend.status` per transition) and acks ok with `detail.capacity`. |
+| `backend.stop` | `{}` | Provider handler awaits `BackendLifecycle.stop()` (→ STOPPING → STOPPED, emitted) and acks ok. |
+
+Phase 4 (provider lifecycle + /v1 surface) is documented in
+`provider/README.md`: the `BackendDriver` interface, the lifecycle state
+machine, slot admission, and the release-on-upstream-close invariant.
 
 Other command kinds (`backend.restart`, `provider.initialize`,
 `provider.config.update`, `metrics.assign`, `cache.clear`,
