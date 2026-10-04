@@ -1,0 +1,344 @@
+"""LlamaCppBackend: BackendDriver over a managed llama-server subprocess.
+
+Ported from the legacy agent's llama_server manager, re-shaped to the
+Phase 4 `BackendDriver` contract: the lifecycle/state machine/slots
+live in provider_lib; this class only owns the subprocess, its log ring,
+and the SSE proxying to the upstream OpenAI-compatible endpoints.
+
+Critical stream-close semantics: the driver's stream generators close
+the upstream httpx response in their `finally`, so when the lifecycle's
+pump closes the generator (client disconnect or exhaustion) the
+llama-server request is cancelled and the slot is released.
+"""
+
+import asyncio
+import contextlib
+import json
+import logging
+import os
+import signal
+import subprocess
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
+from pathlib import Path
+from typing import Any
+
+import httpx
+from provider_lib.backend import BackendDriver
+from provider_lib.config import ProviderSettings
+from provider_lib.downloader import ensure_artifact
+
+from provider_llama_cpp.command import build_llama_command
+from provider_llama_cpp.log_ring import CursorLogRing
+
+logger = logging.getLogger("provider.llama_cpp")
+
+ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
+LogCallback = Callable[[str, str], Awaitable[None]]
+
+_LOG_BUFFER_LINES = 2000
+_HEALTH_POLL_INTERVAL = 0.25
+_STDERR_TAIL_LINES = 5
+
+
+class LlamaCppBackend(BackendDriver):
+    """Owns one llama-server subprocess for this provider instance."""
+
+    def __init__(
+        self,
+        settings: ProviderSettings,
+        backend_config: dict[str, Any],
+        *,
+        progress_cb: ProgressCallback | None = None,
+        log_cb: LogCallback | None = None,
+    ) -> None:
+        self._settings = settings
+        self._config = backend_config or {}
+        self._progress_cb = progress_cb
+        self._log_cb = log_cb
+        self._binary = settings.LLAMA_SERVER_PATH
+        self.backend_port = int(
+            self._config.get("backend_port") or (settings.PROVIDER_PORT + 1)
+        )
+        self._proc: subprocess.Popen[str] | None = None
+        self._log_ring = CursorLogRing(_LOG_BUFFER_LINES)
+        self._log_readers: list[asyncio.Task[None]] = []
+        self._client: httpx.AsyncClient | None = None
+
+    def apply_config(self, backend_config: dict[str, Any]) -> None:
+        """Adopt a (possibly updated) backend_config before start."""
+        self._config = backend_config or {}
+        self.backend_port = int(
+            self._config.get("backend_port") or (self._settings.PROVIDER_PORT + 1)
+        )
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.backend_port}"
+
+    @property
+    def process(self) -> subprocess.Popen[str] | None:
+        return self._proc
+
+    # ------------------------------------------------------------------
+    # Artifact resolution
+    # ------------------------------------------------------------------
+    async def _ensure(self, descriptor: Any, kind: str) -> str | None:
+        if descriptor is None:
+            return None
+        if not isinstance(descriptor, dict):
+            raise RuntimeError(f"{kind} artifact descriptor must be an object")
+        return await ensure_artifact(
+            descriptor,
+            models_dir=self._settings.MODELS_DIR,
+            progress_cb=self._progress_cb,
+        )
+
+    async def _resolve_artifacts(self) -> tuple[str, str | None, str | None]:
+        model = self._config.get("model")
+        if not model:
+            raise RuntimeError("backend_config missing 'model' artifact")
+        model_path = await self._ensure(model, "model")
+        mmproj_path = await self._ensure(self._config.get("mmproj"), "mmproj")
+        draft_path = await self._ensure(self._config.get("draft"), "draft")
+        return model_path, mmproj_path, draft_path
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+    async def start(self) -> None:
+        """Resolve model files, spawn llama-server, wait for /health."""
+        if self._proc is not None and self._proc.poll() is None:
+            return
+        model_path, mmproj_path, draft_path = await self._resolve_artifacts()
+        cmd = build_llama_command(
+            self._config,
+            model_path=model_path,
+            port=self.backend_port,
+            binary=self._binary,
+            mmproj_path=mmproj_path,
+            draft_path=draft_path,
+        )
+        logger.info("starting llama-server: %s", " ".join(cmd))
+        try:
+            env = dict(os.environ)
+            # Vulkan/containers may not provide LD_LIBRARY_PATH; default it
+            # to the binary's directory (legacy behavior).
+            env.setdefault("LD_LIBRARY_PATH", str(Path(self._binary).parent))
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+        except OSError as exc:
+            raise RuntimeError(
+                f"failed to spawn llama-server ({self._binary}): {exc}"
+            ) from exc
+
+        self._proc = proc
+        self._start_log_readers()
+        try:
+            await self._wait_for_health()
+        except BaseException:
+            await self.stop()
+            raise
+
+    async def _wait_for_health(self) -> None:
+        timeout = float(self._settings.SERVER_START_HEALTH_TIMEOUT)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            proc = self._proc
+            if proc is None:
+                raise RuntimeError("llama-server process disappeared")
+            exit_code = proc.poll()
+            if exit_code is not None:
+                await self._drain_final_output()
+                raise RuntimeError(self._early_exit_message(exit_code))
+            try:
+                async with httpx.AsyncClient(timeout=2.0) as client:
+                    resp = await client.get(f"{self.base_url}/health")
+                if resp.status_code == 200:
+                    logger.info("llama-server healthy on port %s", self.backend_port)
+                    return
+            except Exception:  # noqa: BLE001 - not up yet
+                pass
+            await asyncio.sleep(_HEALTH_POLL_INTERVAL)
+        raise TimeoutError(
+            f"llama-server failed to become healthy within {timeout:.0f}s"
+        )
+
+    def _early_exit_message(self, exit_code: int | None) -> str:
+        stderr_lines = [
+            e.line for e in self._log_ring.tail(100) if e.stream == "stderr"
+        ]
+        detail = "\n".join(stderr_lines[-_STDERR_TAIL_LINES:])
+        message = f"llama-server exited with code {exit_code}"
+        if detail:
+            message = f"{message}: {detail}"
+        return message
+
+    # ------------------------------------------------------------------
+    # Log capture
+    # ------------------------------------------------------------------
+    def _start_log_readers(self) -> None:
+        proc = self._proc
+        if proc is None:
+            return
+        for stream, name in ((proc.stdout, "stdout"), (proc.stderr, "stderr")):
+            if stream is None:
+                continue
+            self._log_readers.append(
+                asyncio.create_task(self._read_log_lines(stream, name))
+            )
+
+    async def _read_log_lines(self, stream: Any, name: str) -> None:
+        proc = self._proc
+        try:
+            while proc is not None and proc.poll() is None:
+                line = await asyncio.to_thread(stream.readline)
+                if not line:
+                    break
+                self._append_log(name, line.rstrip())
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("log reader (%s) failed", name)
+
+    async def _drain_final_output(self) -> None:
+        """Read whatever the process left in its pipes after exiting."""
+        proc = self._proc
+        if proc is None:
+            return
+        for stream, name in ((proc.stdout, "stdout"), (proc.stderr, "stderr")):
+            if stream is None:
+                continue
+            try:
+                text = await asyncio.to_thread(stream.read)
+            except Exception:  # noqa: BLE001
+                continue
+            if text:
+                for line in text.splitlines():
+                    if line:
+                        self._append_log(name, line)
+
+    def _append_log(self, stream_name: str, line: str) -> None:
+        self._log_ring.append(stream_name, line)
+        if self._log_cb is not None:
+            with contextlib.suppress(RuntimeError):
+                asyncio.get_running_loop().create_task(self._log_cb(stream_name, line))
+
+    def get_logs(self, tail: int = 100) -> list[dict[str, str]]:
+        """Recent stdout/stderr lines as {stream, line} dicts."""
+        return [{"stream": e.stream, "line": e.line} for e in self._log_ring.tail(tail)]
+
+    # ------------------------------------------------------------------
+    # Health / models
+    # ------------------------------------------------------------------
+    async def health(self) -> bool:
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return False
+        try:
+            client = self._http_client()
+            resp = await client.get(f"{self.base_url}/health", timeout=5.0)
+            return resp.status_code == 200
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def list_models(self) -> list[dict[str, Any]]:
+        client = self._http_client()
+        resp = await client.get(f"{self.base_url}/v1/models", timeout=10.0)
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"llama-server /v1/models returned HTTP {resp.status_code}"
+            )
+        data = resp.json().get("data", [])
+        return list(data)
+
+    def _http_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=None)
+        return self._client
+
+    # ------------------------------------------------------------------
+    # Streaming (SSE proxy)
+    # ------------------------------------------------------------------
+    async def _stream_sse(
+        self, path: str, request: dict[str, Any]
+    ) -> AsyncIterator[dict[str, Any]]:
+        body = dict(request)
+        body["stream"] = True
+        client = self._http_client()
+        async with client.stream("POST", f"{self.base_url}{path}", json=body) as resp:
+            if resp.status_code != 200:
+                detail = await resp.aread()
+                raise RuntimeError(
+                    f"upstream {path} returned HTTP {resp.status_code}: "
+                    f"{detail.decode(errors='replace')[:500]}"
+                )
+            async for raw in resp.aiter_lines():
+                line = raw.strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[len("data:") :].strip()
+                if not data or data == "[DONE]":
+                    continue
+                try:
+                    yield json.loads(data)
+                except ValueError:
+                    logger.debug("skipping unparseable SSE data: %r", data[:120])
+        # Exiting the `async with` (normal end OR GeneratorExit from an
+        # early aclose) closes the upstream response, which cancels the
+        # llama-server request. This is what makes the lifecycle's
+        # release-on-upstream-close safe end to end.
+
+    def stream_responses(
+        self, request: dict[str, Any]
+    ) -> AsyncIterator[dict[str, Any]]:
+        return self._stream_sse("/v1/responses", request)
+
+    def stream_chat_completions(
+        self, request: dict[str, Any]
+    ) -> AsyncIterator[dict[str, Any]]:
+        return self._stream_sse("/v1/chat/completions", request)
+
+    # ------------------------------------------------------------------
+    # Teardown
+    # ------------------------------------------------------------------
+    async def stop(self) -> None:
+        proc = self._proc
+        self._proc = None
+        if proc is not None and proc.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.send_signal(signal.SIGTERM)
+            try:
+                await asyncio.to_thread(proc.wait, 30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                await asyncio.to_thread(proc.wait)
+        # Terminate FIRST: once the process is gone the pipes hit EOF and the
+        # blocked readline calls return. Cancelling readers before killing
+        # the process would deadlock on the blocking read.
+        for task in self._log_readers:
+            task.cancel()
+        if self._log_readers:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(
+                    asyncio.gather(*self._log_readers, return_exceptions=True),
+                    timeout=10,
+                )
+        self._log_readers = []
+        self._log_final_drain()
+
+    def _log_final_drain(self) -> None:
+        # After the process is gone, readers may have exited before the
+        # final lines were flushed; the ring already holds what we saw.
+        logger.debug("llama-server stopped; ring holds %d lines", len(self._log_ring))
+
+    async def aclose(self) -> None:
+        await self.stop()
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+        self._client = None

@@ -175,6 +175,13 @@ async def register_provider(
         redis_keys.secret_key(str(instance.id)), instance_secret, ex=SECRET_TTL_SECONDS
     )
 
+    # 9. Persist the declared machine-metrics categories so the metrics
+    #    ownership service can read them back at WS-connect time.
+    await redis_client.set(
+        redis_keys.metrics_cats_key(str(instance.id)),
+        json.dumps(sorted(set(body.metrics_categories))),
+    )
+
     logger.info(
         "registered instance %s for definition %s on machine %s (port %s)",
         instance.id,

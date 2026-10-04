@@ -141,3 +141,72 @@ upstream SSE and normalizes to spec events (usage in
 into `BackendLifecycle` and mount via `BackendOverrides(lifecycle=...)`.
 All slot/state-machine semantics come for free — do not re-implement
 them in the package.
+
+## llama-cpp provider (provider/llama-cpp) — Phase 5
+
+`LlamaCppBackend` (provider_llama_cpp/driver.py) manages one
+`llama-server` subprocess. Entry point `provider_llama_cpp.main` follows
+the mock's admin-driven boot pattern.
+
+### backend_config schema
+
+```json
+{
+  "model":  {"source": "hf", "repo": "ggml-org/models", "file": "gemma/ggml-model.gguf"},
+  "mmproj": {"source": "hf", "repo": "...", "file": "..."},
+  "draft":  {"source": "hf", "repo": "...", "file": "..."},
+  "args":   {"ctx": 8192, "gpu_layers": 35, "flash_attn": "on", "parallel": 1,
+             "threads": 8, "batch_size": 512, "ubatch_size": 128,
+             "reasoning": true, "jinja": true, "mtp_draft_max": 4},
+  "backend_port": 9999
+}
+```
+
+- Artifacts also accept `{"path": "/local/file.gguf"}` (no download; the
+  file must exist).
+- `model`/`mmproj`/`draft` are separate `ensure_artifact` calls
+  (provider_lib.downloader). Candidate resolution: `MODELS_DIR/<repo>/<file>`,
+  then FLAT `MODELS_DIR/<file>`, then HF download into
+  `MODELS_DIR/<repo>`.
+- The `llama-server` binary path comes from env `LLAMA_SERVER_PATH`
+  (default `llama-server`), never from backend_config.
+- `backend_port` optional; default `PROVIDER_PORT + 1`.
+- Health wait: env `SERVER_START_HEALTH_TIMEOUT` (default 120s).
+
+### Command mapping (command.py)
+
+| Config (args.*) | CLI |
+| --- | --- |
+| `model` (resolved) | `--model <path>` |
+| (backend_port) | `--port <p>` |
+| `gpu_layers` (default 35) | `--n-gpu-layers` |
+| `ctx` / `context_size` (default 4096) | `--ctx-size` |
+| `batch_size` (default 512) | `--batch-size` |
+| (always) | `--metrics` |
+| `threads`, `threads_batch`, `ubatch_size`, `keep`, `predict`, `cache_type_k/v`, `cache_reuse`, `ctx_checkpoints`, `checkpoint_every`→`--checkpoint-min-step`, `cache_ram`, `slot_save_path`, `device`, `split_mode`, `tensor_split`, `main_gpu`, `fit`, `fit_target`, `fit_ctx`, `temperature`, `top_k`, `top_p`, `min_p`, `repeat_penalty`, `presence_penalty`, `frequency_penalty`, `seed`, `parallel`, `reasoning`, `reasoning_budget`, `spec_draft_p_min` | `--<flag> <value>` when present and not None |
+| `swa_full`/`kv_unified`/`strict_mtp_qwen`→`--spec-mtp-strict-qwen` | emitted when truthy |
+| `kv_offload`, `cache_prompt`, `cont_batching`, `warmup`, `context_shift`, `no_mmap`, `no_cache_idle_slots` | `--x` / `--no-x` by boolean. NOTE: `--cache-prompt` is a valid modern flag; the OBSOLETE `--prompt-cache` is NEVER emitted. |
+| `flash_attn` (bool or "on"/"off") | `--flash-attn on|off`; skipped when None |
+| `draft` artifact present | `--spec-type draft-dflash` + `-md <path>` |
+| else `mtp_draft_max > 0` | `--spec-type draft-mtp --spec-draft-n-max N` |
+| `jinja` (default true) | `--jinja` |
+| `mmproj` artifact | `--mmproj <path>` |
+| `strict_mtp_qwen: true` | forces `--parallel 1` |
+
+Spawn env: `LD_LIBRARY_PATH` defaults to the binary's directory
+(`env.setdefault`) — Vulkan/containers may not provide it.
+
+### Downloads + machine metrics
+
+- `provider_lib.downloader.ensure_artifact()` — HF downloads with a
+  throttled tqdm→`download.progress` publisher, in-flight dedup by
+  `repo/file`, path-traversal guards.
+- `provider_lib.metrics.collect_machine_snapshot(categories, ...)` —
+  `vram`/`gpu_usage` (shared nvidia-smi/AMD-sysfs sampler), `os_ram`
+  (/proc/meminfo), `cpu` (loadavg), `storage` (disk_usage). Never
+  raises; failed collectors omit their key.
+- `provider_lib.metrics.MachineMetricsEmitter` — sends
+  `metrics.machine` every `MACHINE_METRICS_INTERVAL` (default 10s)
+  **only while the admin has assigned ownership** via the
+  `metrics.assign` WS command (revoked by `metrics.unassign`).
+  Admin-side ownership lease: see `admin/backend/docs/redis-keys.md`.

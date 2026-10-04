@@ -46,6 +46,23 @@ providers over the WS. Machine-level metrics ownership is assigned via the
 `metrics.assign` WS command (Phase 5) so exactly one instance reports each
 machine's hardware.
 
+### Machine Metrics Ownership (Phase 5)
+
+| Key | Type | TTL | Purpose |
+|-----|------|-----|---------|
+| `im:metrics:owner:{machine_uid}` | String (instance_id) | 30s | Which instance is the metrics reporter for the machine. SET NX at WS connect (or sweep reassignment); refreshed when the owner's `metrics.machine` events arrive; deleted on disconnect/stale sweep. |
+| `im:metrics:machine:{machine_uid}` | String (JSON snapshot) | 30s | Latest machine-level snapshot stored from the owner's `metrics.machine` event. Non-owner events are dropped. |
+| `im:metrics:cats:{instance_id}` | String (JSON list) | none | Instance-declared metrics categories, written at registration, read at ownership assignment (`metrics.assign` payload). |
+
+Flow: instance connects → admin reads `im:metrics:cats:{id}` → if
+non-empty, `SET im:metrics:owner:{machine_uid} <id> NX EX 30` → sends
+`metrics.assign {machine_uid, categories}` over the WS (rollback: lease
+released if the command fails). Owner emits `metrics.machine` every
+`MACHINE_METRICS_INTERVAL` (default 10s), refreshing the lease. On
+disconnect (`ws.py` finally) or stale sweep (`presence_sweep.py`) the
+lease is released; the sweep also reassigns ownerless machines that
+still have connected instances.
+
 ## WebSocket / Connection Bookkeeping
 
 | Key | Type | TTL | Purpose |

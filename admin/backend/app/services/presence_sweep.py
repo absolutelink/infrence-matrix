@@ -13,6 +13,7 @@ sweep is the safety net for missed disconnects and admin restarts.
 """
 
 import asyncio
+import contextlib
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -71,7 +72,48 @@ async def sweep_once(redis_client: aioredis.Redis) -> list[str]:
             len(stale),
             ", ".join(stale),
         )
+
+    # Metrics-ownership maintenance: release leases held by now-stale
+    # instances, then try to reassign machines that still have a
+    # connected instance but no owner.
+    from app.services import metrics_service
+
+    for instance_id in stale:
+        with contextlib.suppress(Exception):
+            await metrics_service.release_ownership(redis_client, instance_id)
+    await _reassign_ownerless_machines(redis_client)
     return stale
+
+
+async def _reassign_ownerless_machines(redis_client: aioredis.Redis) -> None:
+    """Assign metrics ownership for machines with connected instances
+    but no current owner (e.g. the previous owner's lease expired)."""
+    from app.services import metrics_service
+
+    with Session(engine) as session:
+        rows = session.exec(
+            select(ProviderInstance).where(
+                col(ProviderInstance.websocket_connected) == True  # noqa: E712
+            )
+        ).all()
+        by_machine: dict[str, list[str]] = {}
+        for inst in rows:
+            by_machine.setdefault(inst.machine.uid, []).append(str(inst.id))
+
+    for machine_uid, instance_ids in by_machine.items():
+        owner = await redis_client.get(redis_keys.metrics_owner_key(machine_uid))
+        if owner is not None and owner in instance_ids:
+            continue
+        for instance_id in instance_ids:
+            try:
+                if await metrics_service.assign_ownership(redis_client, instance_id):
+                    break
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "metrics reassignment failed for machine %s",
+                    machine_uid,
+                    exc_info=True,
+                )
 
 
 async def presence_sweep_loop(

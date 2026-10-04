@@ -17,9 +17,12 @@ Handshake (see docs/ws-protocol.md):
      disconnected. Epoch is kept (monotonic).
 """
 
+import asyncio
+import contextlib
 import logging
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import anyio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -28,6 +31,7 @@ from sqlmodel import Session
 from app.core.db import engine
 from app.core.redis import RedisNotInitialized
 from app.models import ProviderInstance
+from app.services import metrics_service
 from app.services.connection_manager import manager
 from app.services.wire import (
     WS_CLOSE_AUTH_FAILED,
@@ -74,6 +78,12 @@ def _mark_disconnected(instance_id: str) -> None:
         session.commit()
 
 
+async def _assign_metrics_owner(app: Any, instance_id: str) -> None:
+    """Background metrics-ownership assignment (never breaks the WS flow)."""
+    with contextlib.suppress(Exception):
+        await metrics_service.assign_ownership(app, instance_id)
+
+
 @router.websocket("/provider/ws")
 async def provider_ws(websocket: WebSocket) -> None:
     instance_id = websocket.query_params.get("instance_id", "")
@@ -101,6 +111,9 @@ async def provider_ws(websocket: WebSocket) -> None:
     await manager.send_frame(state, hello)
     await manager.claim_ownership(websocket.app, state)
     _mark_connected(instance_id, epoch)
+    # Try to make this instance the machine-level metrics reporter. Run as
+    # a background task so a slow provider ack never blocks the handshake.
+    asyncio.create_task(_assign_metrics_owner(websocket.app, instance_id))
     logger.info("provider instance %s connected (epoch %s)", instance_id, epoch)
 
     try:
@@ -121,3 +134,5 @@ async def provider_ws(websocket: WebSocket) -> None:
             was_current = await manager.disconnect(state)
             if was_current:
                 _mark_disconnected(instance_id)
+                with contextlib.suppress(Exception):
+                    await metrics_service.release_ownership(websocket.app, instance_id)

@@ -217,6 +217,15 @@ class ConnectionManager:
             )
             return
 
+        if frame.type == FrameKind.METRICS_MACHINE:
+            # Lazy import: metrics_service depends on this module's manager.
+            from app.services import metrics_service
+
+            await metrics_service.handle_machine_metrics(
+                app, state.instance_id, frame.payload
+            )
+            return
+
         if frame.type == FrameKind.BACKEND_STATUS:
             self._persist_status(
                 state.instance_id,

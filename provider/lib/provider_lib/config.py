@@ -31,6 +31,18 @@ class ProviderSettings(BaseSettings):
     # Known categories: gpu_usage, vram, os_ram, cpu, storage
     METRICS_CATEGORIES: str = "gpu_usage vram os_ram cpu storage"
 
+    # llama.cpp backend (provider_llama_cpp). The binary path comes from
+    # the environment, never from backend_config.
+    LLAMA_SERVER_PATH: str = "llama-server"
+    SERVER_START_HEALTH_TIMEOUT: int = 120
+
+    # Machine-level metrics emitter period (seconds), active only while
+    # the admin has assigned metrics ownership to this instance.
+    MACHINE_METRICS_INTERVAL: float = 10.0
+
+    # Minimum seconds between download.progress events.
+    DOWNLOAD_PROGRESS_INTERVAL: float = 1.0
+
     @property
     def metrics_categories(self) -> set[str]:
         return {c for c in self.METRICS_CATEGORIES.split() if c}

@@ -1,0 +1,278 @@
+"""Flag-mapping unit tests for build_llama_command."""
+
+from provider_llama_cpp.command import build_llama_command
+
+
+def _flags(cmd: list[str]) -> set[str]:
+    return {a for a in cmd if a.startswith("--")}
+
+
+def test_base_flags() -> None:
+    cmd = build_llama_command(
+        {}, model_path="/m/x.gguf", port=9999, binary="llama-server"
+    )
+    assert cmd[:3] == ["llama-server", "--model", "/m/x.gguf"]
+    assert cmd[3:5] == ["--port", "9999"]
+    assert "--n-gpu-layers" in cmd
+    assert "--ctx-size" in cmd
+    assert "--batch-size" in cmd
+    assert "--metrics" in cmd
+    # Defaults from legacy.
+    assert cmd[cmd.index("--n-gpu-layers") + 1] == "35"
+    assert cmd[cmd.index("--ctx-size") + 1] == "4096"
+    assert cmd[cmd.index("--batch-size") + 1] == "512"
+
+
+def test_ctx_key_maps_to_ctx_size_and_context_size_synonym() -> None:
+    for key in ("ctx", "context_size"):
+        cmd = build_llama_command({"args": {key: 8192}}, model_path="/m/x.gguf", port=1)
+        assert cmd[cmd.index("--ctx-size") + 1] == "8192", key
+        assert "--ctx" not in _flags(cmd)
+
+
+def test_ctx_precedence_over_context_size() -> None:
+    cmd = build_llama_command(
+        {"args": {"ctx": 2048, "context_size": 4096}},
+        model_path="/m/x.gguf",
+        port=1,
+    )
+    assert cmd[cmd.index("--ctx-size") + 1] == "2048"
+
+
+def test_value_flags() -> None:
+    cfg = {
+        "args": {
+            "threads": 8,
+            "threads_batch": 4,
+            "ubatch_size": 128,
+            "keep": 512,
+            "predict": 256,
+            "cache_type_k": "q8_0",
+            "cache_type_v": "q8_0",
+            "cache_reuse": 0.8,
+            "ctx_checkpoints": 64,
+            "checkpoint_every": 16,
+            "cache_ram": 2048,
+            "slot_save_path": "/tmp/slots",
+            "device": "cuda0",
+            "split_mode": "layer",
+            "tensor_split": "1,2",
+            "main_gpu": 0,
+            "fit": "on",
+            "fit_target": 0.9,
+            "fit_ctx": 4096,
+            "temperature": 0.7,
+            "top_k": 40,
+            "top_p": 0.95,
+            "min_p": 0.05,
+            "repeat_penalty": 1.1,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0,
+            "seed": 42,
+            "parallel": 2,
+            "reasoning": "true",
+            "reasoning_budget": 1024,
+            "spec_draft_p_min": 0.1,
+        }
+    }
+    cmd = build_llama_command(cfg, model_path="/m/x.gguf", port=1)
+    for key, flag in {
+        "threads": "--threads",
+        "threads_batch": "--threads-batch",
+        "ubatch_size": "--ubatch-size",
+        "keep": "--keep",
+        "predict": "--predict",
+        "cache_type_k": "--cache-type-k",
+        "cache_type_v": "--cache-type-v",
+        "cache_reuse": "--cache-reuse",
+        "ctx_checkpoints": "--ctx-checkpoints",
+        "checkpoint_every": "--checkpoint-min-step",
+        "cache_ram": "--cache-ram",
+        "slot_save_path": "--slot-save-path",
+        "device": "--device",
+        "split_mode": "--split-mode",
+        "tensor_split": "--tensor-split",
+        "main_gpu": "--main-gpu",
+        "fit": "--fit",
+        "fit_target": "--fit-target",
+        "fit_ctx": "--fit-ctx",
+        "temperature": "--temperature",
+        "top_k": "--top-k",
+        "top_p": "--top-p",
+        "min_p": "--min-p",
+        "repeat_penalty": "--repeat-penalty",
+        "presence_penalty": "--presence-penalty",
+        "frequency_penalty": "--frequency-penalty",
+        "seed": "--seed",
+        "parallel": "--parallel",
+        "reasoning": "--reasoning",
+        "reasoning_budget": "--reasoning-budget",
+        "spec_draft_p_min": "--spec-draft-p-min",
+    }.items():
+        assert flag in cmd, key
+        assert cmd[cmd.index(flag) + 1] == str(cfg["args"][key]), key
+
+
+def test_none_value_flags_skipped() -> None:
+    cmd = build_llama_command(
+        {"args": {"threads": None, "seed": None}},
+        model_path="/m/x.gguf",
+        port=1,
+    )
+    assert "--threads" not in cmd
+    assert "--seed" not in cmd
+
+
+def test_boolean_flag_tuples() -> None:
+    on = build_llama_command(
+        {
+            "args": {
+                "kv_offload": True,
+                "cache_prompt": True,
+                "cont_batching": True,
+                "warmup": True,
+                "context_shift": True,
+                "no_mmap": True,
+                "no_cache_idle_slots": True,
+            }
+        },
+        model_path="/m/x.gguf",
+        port=1,
+    )
+    off = build_llama_command(
+        {
+            "args": {
+                "kv_offload": False,
+                "cache_prompt": False,
+                "cont_batching": False,
+                "warmup": False,
+                "context_shift": False,
+                "no_mmap": False,
+                "no_cache_idle_slots": False,
+            }
+        },
+        model_path="/m/x.gguf",
+        port=1,
+    )
+    assert "--kv-offload" in on and "--no-kv-offload" not in on
+    assert "--no-kv-offload" in off and "--kv-offload" not in off
+    assert "--cache-prompt" in on and "--no-cache-prompt" not in on
+    assert "--no-cache-prompt" in off and "--cache-prompt" not in off
+    assert "--cont-batching" in on and "--no-cont-batching" in off
+    assert "--warmup" in on and "--no-warmup" in off
+    assert "--context-shift" in on and "--no-context-shift" in off
+    assert "--no-mmap" in on and "--mmap" in off
+    assert "--no-cache-idle-slots" in on and "--cache-idle-slots" in off
+
+
+def test_bool_only_flags_emitted_only_when_true() -> None:
+    on = build_llama_command(
+        {"args": {"swa_full": True, "kv_unified": True}},
+        model_path="/m/x.gguf",
+        port=1,
+    )
+    off = build_llama_command(
+        {"args": {"swa_full": False, "kv_unified": False}},
+        model_path="/m/x.gguf",
+        port=1,
+    )
+    assert "--swa-full" in on
+    assert "--kv-unified" in on
+    assert "--swa-full" not in off
+    assert "--kv-unified" not in off
+
+
+def test_flash_attn_value_flag_bool_and_string() -> None:
+    for value, expected in (
+        (True, "on"),
+        (False, "off"),
+        ("on", "on"),
+        ("off", "off"),
+        ("ON", "on"),
+        ("false", "off"),
+    ):
+        cmd = build_llama_command(
+            {"args": {"flash_attn": value}}, model_path="/m/x.gguf", port=1
+        )
+        assert "--flash-attn" in cmd, value
+        assert cmd[cmd.index("--flash-attn") + 1] == expected, value
+
+
+def test_flash_attn_none_skipped() -> None:
+    cmd = build_llama_command(
+        {"args": {"flash_attn": None}}, model_path="/m/x.gguf", port=1
+    )
+    assert "--flash-attn" not in cmd
+    cmd = build_llama_command({}, model_path="/m/x.gguf", port=1)
+    assert "--flash-attn" not in cmd
+
+
+def test_prompt_cache_never_emitted() -> None:
+    # The obsolete llama.cpp flag must NEVER appear, whatever the config says.
+    for args in (
+        {},
+        {"cache_prompt": True},
+        {"cache_prompt": False},
+        {"prompt_cache": True},
+        {"prompt_cache": False},
+        {"flash_attn": "on"},
+    ):
+        cmd = build_llama_command({"args": args}, model_path="/m/x.gguf", port=1)
+        assert "--prompt-cache" not in cmd
+        assert "--prompt-cache" not in " ".join(cmd)
+
+
+def test_draft_model_selects_dflash_spec() -> None:
+    cmd = build_llama_command(
+        {"args": {"mtp_draft_max": 4}},
+        model_path="/m/x.gguf",
+        port=1,
+        draft_path="/m/draft.gguf",
+    )
+    assert cmd[cmd.index("--spec-type") + 1] == "draft-dflash"
+    assert "-md" in cmd
+    assert cmd[cmd.index("-md") + 1] == "/m/draft.gguf"
+    # dflash path does not add the MTP n-max flag.
+    assert "--spec-draft-n-max" not in cmd
+
+
+def test_mtp_draft_max_selects_mtp_spec() -> None:
+    cmd = build_llama_command(
+        {"args": {"mtp_draft_max": 4}}, model_path="/m/x.gguf", port=1
+    )
+    assert cmd[cmd.index("--spec-type") + 1] == "draft-mtp"
+    assert cmd[cmd.index("--spec-draft-n-max") + 1] == "4"
+    assert "-md" not in cmd
+
+
+def test_mtp_zero_or_none_no_spec_flags() -> None:
+    for value in (0, None):
+        cmd = build_llama_command(
+            {"args": {"mtp_draft_max": value}}, model_path="/m/x.gguf", port=1
+        )
+        assert "--spec-type" not in cmd
+        assert "--spec-draft-n-max" not in cmd
+
+
+def test_strict_mtp_qwen_forces_parallel_one() -> None:
+    cmd = build_llama_command(
+        {"args": {"strict_mtp_qwen": True, "parallel": 4}},
+        model_path="/m/x.gguf",
+        port=1,
+    )
+    assert "--spec-mtp-strict-qwen" in cmd
+    assert cmd[cmd.index("--parallel") + 1] == "1"
+
+
+def test_jinja_default_true() -> None:
+    assert "--jinja" in build_llama_command({}, model_path="/m/x.gguf", port=1)
+    assert "--jinja" not in build_llama_command(
+        {"args": {"jinja": False}}, model_path="/m/x.gguf", port=1
+    )
+
+
+def test_mmproj_flag() -> None:
+    cmd = build_llama_command(
+        {}, model_path="/m/x.gguf", port=1, mmproj_path="/m/mm.gguf"
+    )
+    assert cmd[cmd.index("--mmproj") + 1] == "/m/mm.gguf"
