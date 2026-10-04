@@ -222,7 +222,7 @@ Events do **not** require an ack; the admin persists/acts on them.
 | `metrics.machine` | machine-level snapshot (vram/gpu_usage/os_ram/cpu/storage) for assigned resources only | Live | Persisted to Redis `im:metrics:machine:{machine_uid}`; refreshes the ownership lease. Emitted by `MachineMetricsEmitter` while owned. |
 | `download.progress` | `{filename, progress_percent, bytes_downloaded, total_bytes, speed_mbps, phase}` | Live | Emitted by `provider_lib.downloader` (throttled). |
 | `backend.logs` | `{stream, line}` (cursor/ring in llama-cpp) | Live | Surfaced to the admin UI. |
-| `metrics.inference` | available/max slots, token speed, prompt-processing speed, in-flight | Reserved (defined in `FrameKind`, not yet emitted) | Always-on per-instance telemetry; lands with Phase 6/7. |
+| `metrics.inference` | available/max slots, token speed, prompt-processing speed, in-flight | Reserved (defined in `FrameKind`, not yet emitted; the admin does not handle it yet) | Always-on per-instance telemetry; lands with Phase 7/8. |
 | `backend.boot_requested` | `{}` | Reserved | Observability only; boot is admin-driven (scheduler sends `backend.start`). |
 | `provider.logs` | provider-instance-level log lines | Reserved | Lands with the UI/logging phase. |
 | `backend.metadata` | model metadata scraped from the backend | Reserved | Persisted to `ProviderDefinition.model_metadata` on init (Phase 9). |

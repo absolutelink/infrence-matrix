@@ -11,6 +11,7 @@ release-on-upstream-close invariant end to end.
 """
 
 import asyncio
+import time
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -61,6 +62,48 @@ class MockBackend(BackendDriver):
             }
         ]
 
+    def _base_response(self, response_id: str, model: str) -> dict[str, Any]:
+        """A spec-complete ResponseResource skeleton.
+
+        The openresponses.org schema marks most fields required (nullable
+        or defaulted); emitting them here keeps the pass-through admin
+        emitter compliant without inventing transformations.
+        """
+        now = int(time.time())
+        return {
+            "id": response_id,
+            "object": "response",
+            "created_at": now,
+            "completed_at": None,
+            "status": "in_progress",
+            "incomplete_details": None,
+            "model": model,
+            "previous_response_id": None,
+            "instructions": None,
+            "output": [],
+            "error": None,
+            "tools": [],
+            "tool_choice": "auto",
+            "truncation": "disabled",
+            "parallel_tool_calls": True,
+            "text": {"format": {"type": "text"}},
+            "top_p": 1,
+            "presence_penalty": 0,
+            "frequency_penalty": 0,
+            "top_logprobs": 0,
+            "temperature": 1,
+            "reasoning": {"effort": None, "summary": None},
+            "usage": None,
+            "max_output_tokens": None,
+            "max_tool_calls": None,
+            "store": True,
+            "background": False,
+            "service_tier": "default",
+            "metadata": {},
+            "safety_identifier": None,
+            "prompt_cache_key": None,
+        }
+
     def stream_responses(
         self, request: dict[str, Any]
     ) -> AsyncIterator[dict[str, Any]]:
@@ -70,17 +113,16 @@ class MockBackend(BackendDriver):
         self, request: dict[str, Any]
     ) -> AsyncIterator[dict[str, Any]]:
         self.stream_open_count += 1
+        tools = request.get("tools")
+        if isinstance(tools, list) and tools:
+            async for event in self._stream_tool_call(request, tools):
+                yield event
+            return
         response_id = f"resp_{uuid.uuid4().hex[:12]}"
         item_id = f"msg_{uuid.uuid4().hex[:12]}"
         model = request.get("model") or self.model
         try:
-            base_response: dict[str, Any] = {
-                "id": response_id,
-                "object": "response",
-                "model": model,
-                "status": "in_progress",
-                "output": [],
-            }
+            base_response = self._base_response(response_id, model)
             yield {"type": "response.created", "response": dict(base_response)}
             yield {"type": "response.in_progress", "response": dict(base_response)}
             yield {
@@ -89,6 +131,7 @@ class MockBackend(BackendDriver):
                 "item": {
                     "id": item_id,
                     "type": "message",
+                    "status": "in_progress",
                     "role": "assistant",
                     "content": [],
                 },
@@ -98,7 +141,7 @@ class MockBackend(BackendDriver):
                 "item_id": item_id,
                 "output_index": 0,
                 "content_index": 0,
-                "part": {"type": "output_text", "text": ""},
+                "part": {"type": "output_text", "text": "", "annotations": []},
             }
             text = ""
             for i in range(self.delta_count):
@@ -127,13 +170,14 @@ class MockBackend(BackendDriver):
                 "item_id": item_id,
                 "output_index": 0,
                 "content_index": 0,
-                "part": {"type": "output_text", "text": text},
+                "part": {"type": "output_text", "text": text, "annotations": []},
             }
             message_item = {
                 "id": item_id,
                 "type": "message",
+                "status": "completed",
                 "role": "assistant",
-                "content": [{"type": "output_text", "text": text}],
+                "content": [{"type": "output_text", "text": text, "annotations": []}],
             }
             completion_tokens = max(1, self.delta_count)
             prompt_tokens = 1
@@ -142,12 +186,15 @@ class MockBackend(BackendDriver):
                 "response": {
                     **base_response,
                     "status": "completed",
+                    "completed_at": int(time.time()),
                     "output": [message_item],
                     # Spec names plus legacy aliases so either consumer works.
                     "usage": {
                         "input_tokens": prompt_tokens,
                         "output_tokens": completion_tokens,
                         "total_tokens": prompt_tokens + completion_tokens,
+                        "input_tokens_details": {"cached_tokens": 0},
+                        "output_tokens_details": {"reasoning_tokens": 0},
                         "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens,
                     },
@@ -155,6 +202,78 @@ class MockBackend(BackendDriver):
             }
         finally:
             self.stream_close_count += 1
+
+    async def _stream_tool_call(
+        self, request: dict[str, Any], tools: list[Any]
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Canned function_call turn: calls the first tool with fixed args.
+
+        Lets the full tool-forwarding path (client -> litellm -> provider)
+        be exercised without a real model.
+        """
+        response_id = f"resp_{uuid.uuid4().hex[:12]}"
+        item_id = f"fc_{uuid.uuid4().hex[:12]}"
+        model = request.get("model") or self.model
+        first = tools[0] if isinstance(tools[0], dict) else {}
+        name = first.get("name") or "mock_tool"
+        arguments = '{"location": "San Francisco, CA"}'
+        base_response = self._base_response(response_id, model)
+        yield {"type": "response.created", "response": dict(base_response)}
+        yield {"type": "response.in_progress", "response": dict(base_response)}
+        yield {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "id": item_id,
+                "type": "function_call",
+                "status": "in_progress",
+                "call_id": f"call_{uuid.uuid4().hex[:12]}",
+                "name": name,
+                "arguments": "",
+            },
+        }
+        yield {
+            "type": "response.function_call_arguments.delta",
+            "item_id": item_id,
+            "output_index": 0,
+            "delta": arguments,
+        }
+        yield {
+            "type": "response.function_call_arguments.done",
+            "item_id": item_id,
+            "output_index": 0,
+            "arguments": arguments,
+        }
+        call_item = {
+            "id": item_id,
+            "type": "function_call",
+            "status": "completed",
+            "call_id": f"call_{uuid.uuid4().hex[:12]}",
+            "name": name,
+            "arguments": arguments,
+        }
+        yield {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": call_item,
+        }
+        completion_tokens = max(1, self.delta_count)
+        yield {
+            "type": "response.completed",
+            "response": {
+                **base_response,
+                "status": "completed",
+                "completed_at": int(time.time()),
+                "output": [call_item],
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": completion_tokens,
+                    "total_tokens": 1 + completion_tokens,
+                    "input_tokens_details": {"cached_tokens": 0},
+                    "output_tokens_details": {"reasoning_tokens": 0},
+                },
+            },
+        }
 
     def stream_chat_completions(
         self, request: dict[str, Any]

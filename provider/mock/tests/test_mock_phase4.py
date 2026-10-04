@@ -184,7 +184,7 @@ async def test_admin_driven_boot_and_v1_streaming(fake_admin) -> None:
             assert models.status_code == 200
             assert models.json()["data"][0]["id"] == "mock-alias-model"
 
-            resp = await v1.post("/v1/responses", json={"input": "go"})
+            resp = await v1.post("/v1/responses", json={"input": "go", "stream": True})
             assert resp.status_code == 200
             assert resp.headers["content-type"].startswith("text/event-stream")
             types = [
@@ -270,7 +270,7 @@ async def test_v1_real_socket_streaming_and_disconnect(fake_admin) -> None:
                 assert health.json()["backend_status"] == "running"
                 got = 0
                 async with http.stream(
-                    "POST", "/v1/responses", json={"input": "go"}
+                    "POST", "/v1/responses", json={"input": "go", "stream": True}
                 ) as resp:
                     assert resp.status_code == 200
                     assert resp.headers["content-type"].startswith("text/event-stream")

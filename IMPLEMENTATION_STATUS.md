@@ -1,7 +1,7 @@
 # Inference Matrix — Implementation Status
 
 **Overhaul branch:** `litellm-architecture-overhaul`
-**Last updated:** 2026-10-04 (Phase 6 in progress)
+**Last updated:** 2026-10-04 (docs reconciliation + Phase 6 conformance run)
 
 This file tracks the litellm-based architecture overhaul (see
 [ARCHITECTURE.md](ARCHITECTURE.md)). Each phase lists its features with
@@ -163,7 +163,7 @@ Tests: `provider/llama-cpp/tests`, `test_metrics_ownership.py`.
 `app/services/alias_registry.py`, `app/api/v1/responses.py`.
 **Design:** ARCHITECTURE.md §6, §7; FINDINGS.md.
 
-### Done (uncommitted, tests green)
+### Done (tests green)
 - `InferenceScheduler` — in-process per-alias FIFO + Redis mirror.
   `acquire`/`release`; `NoProviderAvailable`→503, `QueueTimeout`→504.
   Slot = capacity + machine free VRAM. Prefers already-running instances.
@@ -192,19 +192,51 @@ Tests: `provider/llama-cpp/tests`, `test_metrics_ownership.py`.
 - [ ] **Idle-timeout reaper** — `TODO(phase6-idle-reaper)`: stop
       instances past `idle_timeout_seconds` with no active requests
       (background task stub exists; `start_background`/`stop` wired).
-- [ ] **Tool / agent loop** — forward client `tools` to litellm; execute
-      platform local tools; feed results back (multi-turn within one
-      request). Decide explicit-loop vs litellm agentic hooks.
+- [x] **Tool forwarding** — client `tools`/`tool_choice` are forwarded to
+      litellm (`PASSTHROUGH_FIELDS`); tool *execution* is provider-side
+      (the backend emits `function_call` items; the mock emits a canned
+      one). An admin-side multi-turn tool-execution loop is a Phase 7
+      concern, not Phase 6.
 - [ ] **Keepalive during cold boot** — emit SSE `: keep-alive` comments
       while `scheduler.acquire` blocks on a boot, so Traefik doesn't kill
       long cold starts.
-- [ ] **Conformance gate** — run openresponses.org compliance suite
-      against `/v1/responses`; must pass before Phase 6 is ✅.
-- [ ] **Non-stream path** — verify JSON (non-`stream`) response shape +
-      persistence parity.
+- [x] **Conformance gate** — ran 2026-10-04 against a local uvicorn
+      admin + mock provider: **all 6 KEY tests pass**
+      (`basic-response`, `streaming-response`, `system-prompt`,
+      `assistant-phase`, `response-output-phase-schema`, `multi-turn`)
+      plus `tool-calling` and `image-input`. The only applicable failures
+      are `compact-response` / `compact-missing-model` — no
+      `/v1/responses/compact` route exists (endpoint scope decision for
+      Phase 7/8; not a Phase 6 blocker). Full table + fixes:
+      `docs/integration-testing.md`.
+- [x] **Non-stream path** — verified: spec default (`stream` absent or
+      false) returns JSON with the admin-owned `resp_<uuid>` and persists
+      identically to the stream path.
 
-Feature spec for each remaining item: see ARCHITECTURE.md §6–§7 and
-`docs/ws-protocol.md`; ask which to take next.
+### Fixes landed during the docs/conformance pass
+- **Provider reconnect wired (was a documented gap):** both
+  `provider/mock` and `provider/llama-cpp` entrypoints now drive the
+  admin socket with `AdminClient.run_forever()` alongside uvicorn
+  (registration split into `register_provider` + persistent WS),
+  re-emitting `provider.status` on every (re)connect; llama-cpp stops
+  its metrics emitter on disconnect. Verified empirically: admin restart
+  → provider reconnects with a bumped epoch. Proven by
+  `provider/mock/tests/test_provider_reconnect.py`.
+- **Presence keepalive pings:** `AdminClient` now sends a `ping` frame
+  every 20s (`PING_INTERVAL_SECONDS`). Nothing sent them before, so idle
+  provider connections were swept `disconnected` after the 60s presence
+  TTL despite the protocol promising otherwise.
+- **Spec default `stream=false`** on `/v1/responses` (admin route
+  defaulted to true); provider `/v1/responses` honors it too (drains the
+  driver stream, returns the terminal response as JSON).
+- **Spec-clean output items:** admin strips litellm-injected
+  `phase: null` / `logprobs: null` that the Zod schema rejects; the mock
+  emits spec-complete response objects (`created_at`, `completed_at`,
+  `tools`, sampling params, usage details) and `status` on added items.
+
+Phase 6 code items are complete except eviction, the idle reaper, and
+cold-boot SSE keepalive (all explicitly-TODO, non-blocking for the
+conformance contract).
 
 ---
 

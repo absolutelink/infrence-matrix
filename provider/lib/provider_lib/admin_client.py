@@ -59,6 +59,11 @@ class RegistrationResult:
 class AdminClient:
     """Owns registration and the persistent WebSocket to the admin."""
 
+    # Seconds between keepalive `ping` frames. Must stay below the admin's
+    # presence-key TTL (60s) so an idle connection is not swept as
+    # disconnected (docs/ws-protocol.md §3).
+    PING_INTERVAL_SECONDS: float = 20.0
+
     def __init__(self, settings: ProviderSettings) -> None:
         self.settings = settings
         self._registration: RegistrationResult | None = None
@@ -71,6 +76,7 @@ class AdminClient:
         self._pending: dict[str, asyncio.Future[Frame]] = {}
         self._recv_task: asyncio.Task[None] | None = None
         self._send_task: asyncio.Task[None] | None = None
+        self._ping_task: asyncio.Task[None] | None = None
         self._connected = asyncio.Event()
 
     # ------------------------------------------------------------------
@@ -143,7 +149,14 @@ class AdminClient:
         self._command_handlers[name] = handler
 
     async def connect(self) -> None:
-        """Dial the admin WS and start send/receive loops."""
+        """Dial the admin WS and start send/receive loops.
+
+        Any loops left over from a previous connection are cancelled first so
+        repeated connect() calls (e.g. from run_forever) never leave a
+        zombie send task draining the outgoing queue onto a dead socket.
+        """
+        if self._recv_task is not None or self._send_task is not None:
+            await self.disconnect()
         reg = self.registration
         url = reg.ws_url
         headers = {"Authorization": f"Bearer {reg.instance_secret}"}
@@ -153,15 +166,17 @@ class AdminClient:
         self._connected.set()
         self._recv_task = asyncio.create_task(self._recv_loop())
         self._send_task = asyncio.create_task(self._send_loop())
+        self._ping_task = asyncio.create_task(self._ping_loop())
 
     async def disconnect(self) -> None:
         self._connected.clear()
-        for task in (self._recv_task, self._send_task):
+        for task in (self._recv_task, self._send_task, self._ping_task):
             if task:
                 task.cancel()
         await asyncio.gather(
             self._recv_task,
             self._send_task,
+            self._ping_task,
             return_exceptions=True,  # type: ignore[arg-type]
         )
         if self._ws:
@@ -194,6 +209,18 @@ class AdminClient:
         while self._ws is not None:
             frame = await self._outgoing.get()
             await self._ws.send(frame.to_json())
+
+    async def _ping_loop(self) -> None:
+        """Send a keepalive `ping` frame periodically so the admin's
+        presence key never expires on an idle connection."""
+        try:
+            while True:
+                await asyncio.sleep(self.PING_INTERVAL_SECONDS)
+                await self._outgoing.put(
+                    Frame(type="ping", id=str(uuid.uuid4()), epoch=self._epoch)
+                )
+        except asyncio.CancelledError:
+            raise
 
     async def _recv_loop(self) -> None:
         assert self._ws is not None
@@ -235,13 +262,24 @@ class AdminClient:
         )
 
     async def run_forever(
-        self, on_connected: Callable[[], Awaitable[None]] | None = None
+        self,
+        on_connected: Callable[[], Awaitable[None]] | None = None,
+        on_disconnected: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
-        """Reconnect loop with exponential backoff."""
+        """Reconnect loop with exponential backoff (1s -> 30s max).
+
+        ``on_connected`` runs after every accepted connection (re-emit
+        status so the admin's mirror is fresh); ``on_disconnected`` runs
+        when an established connection drops (stop dependent tasks such
+        as the metrics emitter). Neither runs when this task itself is
+        cancelled — callers clean up in their own ``finally``.
+        """
         backoff = 1.0
         while True:
+            connected = False
             try:
                 await self.connect()
+                connected = True
                 backoff = 1.0
                 if on_connected:
                     await on_connected()
@@ -251,5 +289,10 @@ class AdminClient:
                 raise
             except Exception as exc:  # noqa: BLE001
                 logger.warning("ws error: %s; reconnecting in %.1fs", exc, backoff)
+            if connected and on_disconnected is not None:
+                try:
+                    await on_disconnected()
+                except Exception:  # noqa: BLE001
+                    logger.exception("on_disconnected callback failed")
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 30.0)

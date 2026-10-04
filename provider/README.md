@@ -153,7 +153,7 @@ Mounted when `BackendOverrides.lifecycle` is set; otherwise 503.
 | Route | Behavior |
 | --- | --- |
 | `GET /v1/models` | `{"object":"list","data":driver.list_models()}`. **503** unless backend RUNNING/IN_USE (a stopped backend has no cheap source of truth; the admin starts it on demand). |
-| `POST /v1/responses` | Slot-admitted SSE (`text/event-stream`). Each event: `event: <type>` + `data: <json>` lines (OpenResponses style, no `[DONE]`). **429** busy, **503** not ready. |
+| `POST /v1/responses` | **`stream: true`**: slot-admitted SSE (`text/event-stream`). Each event: `event: <type>` + `data: <json>` lines (OpenResponses style, no `[DONE]`). **Default/false**: the event stream is drained and the terminal `response.*` object returned as JSON (spec default). **429** busy, **503** not ready. |
 | `POST /v1/chat/completions` | Same discipline; chunks are `chat.completion.chunk` events, terminated with `data: [DONE]`. **501** if the driver has no chat surface. |
 | `GET /health` | Provider identity + `backend_status`, `in_flight`, `capacity`. |
 
@@ -179,11 +179,21 @@ differs, that's the only code your package adds beyond the driver.
 
 `MockBackend` implements the driver: instant start, canned
 `output_text.delta` streams (`delta_count`/`delta_delay`/`hold`
-configurable), model alias adopted from the registration response.
-`provider_mock.main` builds **one** `BackendLifecycle` shared between
-the admin WS command handlers (`backend.start`/`backend.stop` drive it)
-and the FastAPI `/v1` app. Boot is admin-driven: after connect the
-backend stays STOPPED.
+configurable), model alias adopted from the registration response. When
+the request carries a non-empty `tools` list it emits a canned
+`function_call` turn instead, so the tool-forwarding path is exercisable
+without a real model. Terminal response objects are spec-complete
+(`created_at`, `completed_at`, `usage` details, parameter echoes) so the
+conformance suite validates against them. `provider_mock.main` builds
+**one** `BackendLifecycle` shared between the admin WS command handlers
+(`backend.start`/`backend.stop` drive it) and the FastAPI `/v1` app. Boot
+is admin-driven: after connect the backend stays STOPPED.
+
+The entrypoint registers over HTTP once (`register_provider`) and then
+keeps the admin WS alive with `AdminClient.run_forever()`, re-emitting
+`provider.status` on every (re)connect, so the mock survives admin
+restarts like a real hardware provider (`register_and_connect` remains as
+the one-shot connect used by tests).
 
 ## Worked example: llama-cpp provider (provider/llama-cpp)
 

@@ -29,20 +29,22 @@ OpenResponses spec). All pre-overhaul run history (old leases,
 `server_instances`, `inference_slot_protocol`, WS-transport clusters)
 lives in git history and is intentionally not carried forward.
 
-**Applicable tests (HTTP/SSE only):**
+**Applicable tests (HTTP/SSE only):** run 2026-10-04 against a local
+uvicorn admin + mock provider (branch `litellm-architecture-overhaul`,
+commit `8d2d9b8` + this phase's fixes):
 
 | Test ID | Name | Status |
 |---|---|---|
-| `basic-response` | Basic Text Response | ⬜ not yet run (post-overhaul) |
-| `assistant-phase` | Assistant Message Phase | ⬜ |
-| `response-output-phase-schema` | Response Output Phase Schema | ⬜ |
-| `streaming-response` | Streaming Response | ⬜ |
-| `system-prompt` | System Prompt | ⬜ |
-| `tool-calling` | Tool Calling | ⬜ |
-| `image-input` | Image Input | ⬜ (needs a vision-capable provider; mock may not cover) |
-| `multi-turn` | Multi-turn Conversation | ⬜ |
-| `compact-response` | Compaction Endpoint | ⬜ (compaction route status TBD — Phase 6/7) |
-| `compact-missing-model` | Compaction Missing Required Model | ⬜ |
+| `basic-response` | Basic Text Response | ✅ pass |
+| `assistant-phase` | Assistant Message Phase | ✅ pass |
+| `response-output-phase-schema` | Response Output Phase Schema | ✅ pass (local schema fixture) |
+| `streaming-response` | Streaming Response | ✅ pass |
+| `system-prompt` | System Prompt | ✅ pass |
+| `tool-calling` | Tool Calling | ✅ pass (mock emits a canned `function_call` when `tools` present) |
+| `image-input` | Image Input | ✅ pass (mock echoes text; validates acceptance + schema, not vision) |
+| `multi-turn` | Multi-turn Conversation | ✅ pass |
+| `compact-response` | Compaction Endpoint | ❌ 404 — `POST /v1/responses/compact` not implemented (Phase 7+ scope decision; not a Phase 6 blocker) |
+| `compact-missing-model` | Compaction Missing Required Model | ❌ 404 — same missing route |
 
 **Not applicable (transport removed):** all `websocket-*` tests —
 `websocket-response`, `websocket-sequential-responses`,
@@ -51,6 +53,36 @@ lives in git history and is intentionally not carried forward.
 `websocket-failed-continuation-evicts-cache`,
 `websocket-compact-new-chain`. Record as **N/A — WS Responses transport
 dropped in the overhaul.** Do not chase.
+
+All six KEY tests (basic/streaming/system/assistant-phase/output-phase/
+multi-turn) pass, plus tool-calling and image-input. The two compaction
+failures are the absent `/responses/compact` route — the endpoint is not
+in the overhaul's §7 scope; decide Phase 7/8 whether to implement or
+formally drop it from the applicable set.
+
+### Fixes this run required (were failing, now green)
+
+- **Spec default `stream=false`**: the admin route defaulted to
+  streaming; clients that omit `stream` got SSE instead of JSON.
+  (`admin/backend/app/api/v1/responses.py`)
+- **Provider non-stream path**: the provider `/v1/responses` always
+  SSE'd; it now drains the driver stream and returns the terminal
+  response as JSON when `stream` is false.
+  (`provider/lib/provider_lib/app_factory.py`)
+- **Spec-complete response objects**: the mock's terminal response lacked
+  required fields (`created_at`, `tools`, `temperature`, usage details,
+  ...) and `response.output_item.added` items lacked `status`.
+  (`provider/mock/provider_mock/backend.py`)
+- **Null-default injection**: litellm's `exclude_none=False` dump re-adds
+  `phase: null` / `logprobs: null` which the Zod schema rejects
+  (optional but non-nullable); the admin strips them from output items.
+  (`admin/backend/app/api/v1/responses.py` `_clean_output_items`)
+- **Tool calls**: the mock now emits a canned `function_call` turn when
+  the request carries `tools`.
+  (`provider/mock/provider_mock/backend.py`)
+- **Presence keepalive**: the provider client now sends `ping` frames
+  every 20s (`AdminClient.PING_INTERVAL_SECONDS`); previously nothing
+  did, so idle connections were swept `disconnected` after 60s.
 
 ## Where failures live now
 
@@ -69,3 +101,4 @@ Fidelity ground truth: `spike/litellm-fidelity/FINDINGS.md`.
 | Date | Commit | Passed | Failed | N/A | Notes |
 |---|---|---|---|---|---|
 | (overhaul reset) | — | — | — | 7 WS | Tracker reset for litellm overhaul; awaiting Phase 6 conformance run |
+| 2026-10-04 | 8d2d9b8 + docs-phase fixes | 8 | 2 | 7 WS | First post-overhaul run vs local uvicorn admin + mock. All 6 KEY tests pass; failures are `compact-response` / `compact-missing-model` (no `/responses/compact` route). Fixes listed above landed in this run. |

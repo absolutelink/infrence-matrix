@@ -105,14 +105,28 @@ def apply_registration(lifecycle: BackendLifecycle, result: RegistrationResult) 
         lifecycle.driver.model = alias
 
 
-async def register_and_connect(
-    client: AdminClient, lifecycle: BackendLifecycle | None = None
-) -> RegistrationResult:
-    """Register with the admin, adopt its config, dial the WS, emit status.
+async def emit_provider_status(
+    client: AdminClient, lifecycle: BackendLifecycle
+) -> None:
+    """Announce current instance/backend state to the admin."""
+    await client.send_event(
+        "provider.status",
+        {
+            "instance_status": InstanceStatusValue.RUNNING,
+            "backend_status": lifecycle.backend_status,
+            "provider_type": PROVIDER_TYPE,
+            "version": VERSION,
+        },
+    )
 
-    Pass an externally created `lifecycle` to share it with the provider
-    app; when omitted, a fresh mock lifecycle is created (registration
-    still configures it).
+
+async def register_provider(
+    client: AdminClient, lifecycle: BackendLifecycle | None = None
+) -> tuple[RegistrationResult, BackendLifecycle]:
+    """Install command handlers, register over HTTP, adopt the response.
+
+    Does NOT dial the WS — see AdminClient.run_forever for the persistent
+    connection with reconnect/backoff.
     """
     if lifecycle is None:
         lifecycle = make_lifecycle(client)
@@ -124,16 +138,21 @@ async def register_and_connect(
         hardware=FAKE_HARDWARE,
     )
     apply_registration(lifecycle, result)
+    return result, lifecycle
+
+
+async def register_and_connect(
+    client: AdminClient, lifecycle: BackendLifecycle | None = None
+) -> RegistrationResult:
+    """Register with the admin, adopt its config, dial the WS once, emit status.
+
+    One-shot connect for tests and simple callers. Production entrypoints
+    (run_async) split this into register_provider + run_forever so the
+    connection survives admin restarts (ARCHITECTURE.md §5).
+    """
+    result, lifecycle = await register_provider(client, lifecycle)
     await client.connect()
-    await client.send_event(
-        "provider.status",
-        {
-            "instance_status": InstanceStatusValue.RUNNING,
-            "backend_status": lifecycle.backend_status,
-            "provider_type": PROVIDER_TYPE,
-            "version": VERSION,
-        },
-    )
+    await emit_provider_status(client, lifecycle)
     return result
 
 
@@ -151,13 +170,26 @@ async def run_async() -> None:
     settings = ProviderSettings()
     client = AdminClient(settings)
     lifecycle = make_lifecycle(client)
-    await register_and_connect(client, lifecycle)
-    logger.info(
-        "mock provider connected: instance=%s epoch=%s capacity=%s",
-        client.registration.instance_id,
-        client.epoch,
-        lifecycle.capacity,
-    )
+    await register_provider(client, lifecycle)
+
+    # Keep the admin WS alive for the process lifetime alongside uvicorn:
+    # run_forever dials in, re-emits provider.status on every (re)connect,
+    # and reconnects with exponential backoff if the admin restarts
+    # (ARCHITECTURE.md §5).
+    first_connect = asyncio.Event()
+
+    async def on_connected() -> None:
+        await emit_provider_status(client, lifecycle)
+        if not first_connect.is_set():
+            first_connect.set()
+            logger.info(
+                "mock provider connected: instance=%s epoch=%s capacity=%s",
+                client.registration.instance_id,
+                client.epoch,
+                lifecycle.capacity,
+            )
+
+    ws_task = asyncio.create_task(client.run_forever(on_connected=on_connected))
     config = uvicorn.Config(
         build_app(lifecycle),
         host="0.0.0.0",
@@ -168,6 +200,8 @@ async def run_async() -> None:
     try:
         await server.serve()
     finally:
+        ws_task.cancel()
+        await asyncio.gather(ws_task, return_exceptions=True)
         await client.disconnect()
 
 

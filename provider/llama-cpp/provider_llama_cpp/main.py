@@ -155,13 +155,29 @@ def apply_registration(lifecycle: BackendLifecycle, result: RegistrationResult) 
         driver.apply_config(backend_config)
 
 
-async def register_and_connect(
+async def emit_provider_status(
+    client: AdminClient, lifecycle: BackendLifecycle
+) -> None:
+    """Announce current instance/backend state to the admin."""
+    await client.send_event(
+        "provider.status",
+        {
+            "instance_status": InstanceStatusValue.RUNNING,
+            "backend_status": lifecycle.backend_status,
+            "provider_type": PROVIDER_TYPE,
+            "version": VERSION,
+        },
+    )
+
+
+async def register_provider(
     client: AdminClient, lifecycle: BackendLifecycle | None = None
 ) -> tuple[RegistrationResult, BackendLifecycle, MachineMetricsEmitter]:
-    """Register, adopt config, dial the WS, emit initial status.
+    """Build hardware report, register over HTTP, adopt the response config.
 
-    Returns the registration result plus the shared lifecycle and the
-    machine-metrics emitter (started/stopped by metrics.assign/unassign).
+    Installs command handlers and creates the metrics emitter but does NOT
+    dial the WS — see AdminClient.run_forever for the persistent
+    connection with reconnect/backoff.
     """
     settings = client.settings
     hardware = await build_hardware_report(settings)
@@ -177,16 +193,21 @@ async def register_and_connect(
     emitter = MachineMetricsEmitter(lifecycle, client, settings)
     install_command_handlers(client, lifecycle, emitter)
     apply_registration(lifecycle, result)
+    return result, lifecycle, emitter
+
+
+async def register_and_connect(
+    client: AdminClient, lifecycle: BackendLifecycle | None = None
+) -> tuple[RegistrationResult, BackendLifecycle, MachineMetricsEmitter]:
+    """Register, adopt config, dial the WS once, emit initial status.
+
+    One-shot connect for tests and simple callers. Production entrypoints
+    (run_async) split this into register_provider + run_forever so the
+    connection survives admin restarts (ARCHITECTURE.md §5).
+    """
+    result, lifecycle, emitter = await register_provider(client, lifecycle)
     await client.connect()
-    await client.send_event(
-        "provider.status",
-        {
-            "instance_status": InstanceStatusValue.RUNNING,
-            "backend_status": lifecycle.backend_status,
-            "provider_type": PROVIDER_TYPE,
-            "version": VERSION,
-        },
-    )
+    await emit_provider_status(client, lifecycle)
     return result, lifecycle, emitter
 
 
@@ -203,12 +224,32 @@ def build_app(lifecycle: BackendLifecycle | None = None):
 async def run_async() -> None:
     settings = ProviderSettings()
     client = AdminClient(settings)
-    _result, lifecycle, emitter = await register_and_connect(client)
-    logger.info(
-        "llama-cpp provider connected: instance=%s epoch=%s capacity=%s",
-        client.registration.instance_id,
-        client.epoch,
-        lifecycle.capacity,
+    _result, lifecycle, emitter = await register_provider(client)
+
+    # Keep the admin WS alive for the process lifetime alongside uvicorn:
+    # run_forever dials in, re-emits provider.status on every (re)connect,
+    # and reconnects with exponential backoff if the admin restarts
+    # (ARCHITECTURE.md §5). The metrics emitter is stopped on disconnect so
+    # it never queues events onto a dead socket; the admin re-assigns
+    # ownership (metrics.assign) when the new connection is accepted.
+    first_connect = asyncio.Event()
+
+    async def on_connected() -> None:
+        await emit_provider_status(client, lifecycle)
+        if not first_connect.is_set():
+            first_connect.set()
+            logger.info(
+                "llama-cpp provider connected: instance=%s epoch=%s capacity=%s",
+                client.registration.instance_id,
+                client.epoch,
+                lifecycle.capacity,
+            )
+
+    ws_task = asyncio.create_task(
+        client.run_forever(
+            on_connected=on_connected,
+            on_disconnected=emitter.stop,
+        )
     )
     config = uvicorn.Config(
         build_app(lifecycle),
@@ -220,6 +261,8 @@ async def run_async() -> None:
     try:
         await server.serve()
     finally:
+        ws_task.cancel()
+        await asyncio.gather(ws_task, return_exceptions=True)
         await emitter.stop()
         await client.disconnect()
 

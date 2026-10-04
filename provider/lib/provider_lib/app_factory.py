@@ -24,7 +24,7 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from provider_lib.backend import (
     BackendBusy,
@@ -148,7 +148,7 @@ def create_provider_app(
         return {"object": "list", "data": data}
 
     @app.post("/v1/responses")
-    async def responses(request: Request) -> StreamingResponse:
+    async def responses(request: Request) -> Response:
         lifecycle = _require_lifecycle()
         body = await request.json()
         try:
@@ -159,11 +159,32 @@ def create_provider_app(
             raise HTTPException(status_code=429, detail=str(exc)) from exc
         except BackendNotReady as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-        return StreamingResponse(
-            _stream_or_error(stream, terminator=False),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
+        if body.get("stream"):
+            return StreamingResponse(
+                _stream_or_error(stream, terminator=False),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        # Non-streaming (spec default): drain the event stream and return
+        # the terminal response object as JSON. The slot is still owned by
+        # the pump task and released when the upstream closes.
+        terminal: dict[str, Any] | None = None
+        try:
+            async for event in stream:
+                if event.get("type") in (
+                    "response.completed",
+                    "response.incomplete",
+                    "response.failed",
+                ):
+                    terminal = event.get("response")
+        finally:
+            with contextlib.suppress(Exception):
+                await stream.aclose()
+        if terminal is None:
+            raise HTTPException(
+                status_code=502, detail="backend stream ended without a terminal event"
+            )
+        return JSONResponse(content=terminal)
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request) -> StreamingResponse:

@@ -295,9 +295,9 @@ stale-epoch frames are discarded by both sides.
 
 ### Event / command catalog
 Provider → admin: `provider.status`, `backend.status`,
-`backend.boot_requested`, `metrics.machine`, `metrics.inference`,
-`backend.logs`, `provider.logs`, `download.progress`,
-`backend.metadata`, `ping`.
+`backend.boot_requested`, `metrics.machine`, `backend.logs`,
+`provider.logs`, `download.progress`, `backend.metadata`, `ping`
+(`metrics.inference` is defined but reserved — see §8).
 
 Admin → provider: `provider.hello`, `backend.start`, `backend.stop`,
 `backend.restart`, `provider.initialize`, `provider.config.update`,
@@ -370,9 +370,9 @@ Example: streamed Responses API against `https://matrix.thelink.family`.
    streams" and fails with a confusing APIError (see FINDINGS).
 5. scheduler.acquire(alias, request_id) → Admission with base_url.
    (503 NoProviderAvailable / 504 QueueTimeout before the stream starts.)
-6. litellm.aresponses(model="openai/<alias>",
-     api_base=f"{admission.base_url}/v1", custom_llm_provider="openai",
-     stream=True, tools=[client tools + platform local tools], input=...)
+ 6. litellm.aresponses(model=alias,
+      api_base=f"{admission.base_url}/v1", custom_llm_provider="openai",
+      stream=True, tools=[client tools + platform local tools], input=...)
 7. Provider translation layer normalizes the backend's output to spec on
    the instance port; the slot is held for the inbound connection
    lifetime; backend.status → in_use.
@@ -417,8 +417,11 @@ on the same machine can take over. Epoch fencing makes failover safe
 against half-open sockets.
 
 ### Inference metrics (never deduped)
-Each instance always emits `metrics.inference`: available slots, max
-slots, token speed, prompt-processing speed, in-flight counts.
+The `metrics.inference` frame kind is **defined and reserved** (available
+slots, max slots, token speed, prompt-processing speed, in-flight counts)
+but **not yet emitted** by any provider and not yet handled by the admin —
+it lands with Phase 7/8 (see the Reserved row in `docs/ws-protocol.md` §4).
+When it lands it is always-on per instance and never deduped.
 
 ### Categories
 `gpu_usage`, `vram`, `os_ram` (OS usage only — APUs share RAM with VRAM),

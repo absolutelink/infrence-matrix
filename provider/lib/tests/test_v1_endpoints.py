@@ -37,7 +37,11 @@ class EndpointDriver(BackendDriver):
             yield {"type": "response.output_text.delta", "delta": "world"}
             yield {
                 "type": "response.completed",
-                "response": {"id": "r1", "usage": {"total_tokens": 7}},
+                "response": {
+                    "id": "r1",
+                    "status": "completed",
+                    "usage": {"total_tokens": 7},
+                },
             }
 
         return gen()
@@ -117,7 +121,7 @@ async def test_models_503_when_stopped() -> None:
 async def test_responses_streams_sse() -> None:
     lifecycle, client = await _make(EndpointDriver())
     async with client:
-        resp = await client.post("/v1/responses", json={"input": "hi"})
+        resp = await client.post("/v1/responses", json={"input": "hi", "stream": True})
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("text/event-stream")
         types = [e["type"] for e in _events(resp.text)]
@@ -130,6 +134,19 @@ async def test_responses_streams_sse() -> None:
         ]
         event_lines = [ln for ln in resp.text.splitlines() if ln.startswith("event: ")]
         assert event_lines == [f"event: {t}" for t in types]
+        assert lifecycle.in_flight == 0
+
+
+async def test_responses_non_stream_returns_json() -> None:
+    """Spec default (stream absent/false) returns the terminal response as JSON."""
+    lifecycle, client = await _make(EndpointDriver())
+    async with client:
+        resp = await client.post("/v1/responses", json={"input": "hi"})
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("application/json")
+        body = resp.json()
+        assert body["status"] == "completed"
+        assert body["usage"]["total_tokens"] > 0
         assert lifecycle.in_flight == 0
 
 

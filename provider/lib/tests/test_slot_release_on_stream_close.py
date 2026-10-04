@@ -167,7 +167,11 @@ async def test_http_disconnect_cancels_upstream_and_releases_slot() -> None:
         nonlocal request_read
         if not request_read:
             request_read = True
-            return {"type": "http.request", "body": b"{}", "more_body": False}
+            return {
+                "type": "http.request",
+                "body": b'{"stream": true}',
+                "more_body": False,
+            }
         await disconnect.wait()
         return {"type": "http.disconnect"}
 

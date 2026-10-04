@@ -8,8 +8,9 @@ persists the turn as a ``ResponseRecord`` + ``TokenUsageSample``.
 Flow:
 
 1. Parse the body: ``model`` (alias) and ``input`` required; optional
-   ``previous_response_id``, ``stream`` (default true), ``store``
-   (default true), and passthrough params (instructions, tools, ...).
+   ``previous_response_id``, ``stream`` (default false, per spec),
+   ``store`` (default true), and passthrough params (instructions,
+   tools, ...).
 2. Resolve the enabled ``ProviderDefinition`` by alias -> else 404.
 3. Mint ``client_response_id = "resp_" + uuid4().hex`` (the admin owns
    the client-facing id; litellm's wrapped id is stored in parameters).
@@ -114,6 +115,34 @@ def _as_item_list(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, list):
         return [v if isinstance(v, dict) else to_dict(v) for v in value]
     return [{"content": value}]
+
+
+def _clean_output_items(items: list[Any]) -> list[Any]:
+    """Drop spec-optional keys that litellm re-injects as ``None``.
+
+    ``to_dict(exclude_none=False)`` adds litellm model defaults such as
+    ``phase: null`` (assistant message items) and ``logprobs: null``
+    (output text parts). The spec's Zod schema declares those fields
+    optional but *non-nullable*, so a present ``null`` fails validation,
+    while an absent one passes. Required-but-nullable fields
+    (``completed_at``, ``error``, ``usage``, ...) are left untouched —
+    stripping those would break the schema instead.
+    """
+    # key -> only these are safe to remove when None.
+    optional_non_nullable = ("phase", "logprobs")
+
+    def strip(obj: Any) -> Any:
+        if isinstance(obj, dict):
+            return {
+                k: strip(v)
+                for k, v in obj.items()
+                if not (v is None and k in optional_non_nullable)
+            }
+        if isinstance(obj, list):
+            return [strip(v) for v in obj]
+        return obj
+
+    return [strip(item) for item in items]
 
 
 def _usage_tokens(usage: dict[str, Any]) -> tuple[int, int, int, int]:
@@ -257,7 +286,7 @@ async def create_response(request: Request) -> Any:
                     detail=f"previous_response_id '{previous_response_id}' not found",
                 )
 
-    stream = bool(body.get("stream", True))
+    stream = bool(body.get("stream", False))
     store = bool(body.get("store", True))
     client_response_id = f"resp_{uuid.uuid4().hex}"
     request_id = client_response_id
@@ -362,7 +391,12 @@ async def _stream_response(
                         "response.completed",
                         "response.incomplete",
                     ):
-                        terminal_output = _as_item_list(response.get("output"))
+                        terminal_output = _clean_output_items(
+                            _as_item_list(response.get("output"))
+                        )
+                        # Emit the cleaned output too: the client validates
+                        # the terminal frame against the spec schema.
+                        response["output"] = terminal_output
                         terminal_usage = (
                             to_dict(response["usage"])
                             if response.get("usage")
@@ -477,7 +511,8 @@ async def _non_stream_response(
     # The admin owns the client-facing id.
     data["id"] = client_response_id
     usage = data.get("usage")
-    output_items = _as_item_list(data.get("output"))
+    output_items = _clean_output_items(_as_item_list(data.get("output")))
+    data["output"] = output_items
 
     with contextlib.suppress(Exception):
         await asyncio.shield(scheduler.release(alias, request_id))
