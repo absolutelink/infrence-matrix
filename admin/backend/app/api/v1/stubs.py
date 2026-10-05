@@ -9,7 +9,7 @@ error envelope::
               "code": "endpoint_not_supported", "param": "<endpoint>"}}
 
 and HTTP 501, so clients get a clear "not supported here" instead of a
-confusing 404. Do NOT restore old implementations from ``legacy/`` —
+confusing 404. Do NOT restore old implementations from git history —
 re-implement against the provider/scheduler model when a need arises.
 """
 

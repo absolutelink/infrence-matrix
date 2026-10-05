@@ -36,7 +36,6 @@ repos:
         require_serial: true
         language: unsupported
         types: [python]
-        exclude: ^legacy/
 
       - id: local-ruff-format
         name: ruff format
@@ -44,7 +43,6 @@ repos:
         require_serial: true
         language: unsupported
         types: [python]
-        exclude: ^legacy/
 
       # Phase 10: re-enabled. The admin API is complete for the new data
       # model and the UI is wired to the generated SDK; regenerate the

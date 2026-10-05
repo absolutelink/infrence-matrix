@@ -26,7 +26,7 @@ starting a feature, read the linked protocol/doc first.
 | 8 | gufo / halogen / halogen-flash provider ports | ✅ Complete |
 | 9 | `provider.config.update` / fingerprint / cache-clear flow | ✅ Complete |
 | 10 | Admin UI rework | ✅ Complete |
-| 11 | Docs consolidation + full E2E validation | ⬜ Pending |
+| 11 | Docs consolidation + full E2E validation | ✅ Complete |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
 
@@ -68,7 +68,8 @@ Reproduce: `cd spike/litellm-fidelity && uv run python spike2.py`.
   `--no-install-workspace --package matrix-admin`).
 - CI `build-and-push.yml` starts postgres 16 + redis 7 services and tests
   the admin.
-- Old code parked in `legacy/` (reference only; never import).
+- The pre-overhaul code was removed in the final cleanup; it lives in git
+  history only — never restore patterns from it.
 
 ---
 
@@ -630,12 +631,75 @@ stats, dashboard overview) + `GET /admin/api/instances[/{id}]` added to
 
 ---
 
-## Phase 11 — Docs Consolidation + E2E ⬜
+## Phase 11 — Docs Consolidation + E2E ✅
 
-- [ ] Final pass over all docs; fix drift from Phases 6–10.
-- [ ] Full local run with mock provider end-to-end.
-- [ ] Integration + conformance suite green against a deployed admin.
-- [ ] Provider authoring guide complete (`provider/README.md`).
+**Completed 2026-10-05.** Dead-code removal, self-seeding dev bootstrap,
+doc consolidation, and the final full test + conformance gate.
+
+### Dead code removed
+- `legacy/` (whole tree — pre-overhaul backend/agent/recipes; lives in
+  git history only). References purged from `.pre-commit-config.yaml`,
+  root `pyproject.toml` (typos exclude), `.dockerignore`, and all docs.
+- Old-architecture scripts: `scripts/test.sh`, `scripts/test-local.sh`,
+  `scripts/bombard_chat_completions.py`,
+  `scripts/probe_lease_release_disconnect.py`,
+  `scripts/proxy_connection_leak_probe.py`,
+  `scripts/test_responses_keepalive.py`, `debug-container.sh`.
+- FastAPI-template leftovers: `hooks/post_gen_project.py`,
+  `.fastapicloudignore`, `packages/react-email/` (+ the `packages/*`
+  workspaces entry in root `package.json` — no email feature exists in
+  the trusted-LAN model).
+- **Kept (live tooling):** `scripts/prepare_release.py` (referenced by
+  the release workflows), `scripts/add_latest_release_date.py`
+  (pre-commit hook), `scripts/generate-client.sh`,
+  `.claude/skills/` (library-skills agent-integration symlinks into
+  `.venv`, not a duplicate of `.agents/skills`), `img/` (README
+  screenshots).
+  - `scripts/local/run-deployment.sh` is a **gitignored** personal
+    SSH/deploy helper (under `scripts/.gitignore`), not tracked repo
+    tooling — it was never part of the committed tree.
+
+### `scripts/dev.sh` — one-command local dev
+- Auto-detects **docker mode** (compose: postgres + redis + admin +
+  provider-mock) vs **local-processes mode** (migrations via
+  `prestart.sh`, `uvicorn` admin :8000, mock provider :8081 against a
+  local Postgres + Redis).
+- Seeds via the **admin API** (idempotent, 409-tolerant): Machine
+  `mock-machine-1` + ProviderDefinition `mock-model`
+  (`mock-registration-token`, capacity 4).
+- Smoke test: polls instance `websocket_connected`, then asserts
+  `response.completed` in a streamed `/v1/responses`.
+- `up` / `status` / `down` subcommands; logs + PIDs in `.dev-run/`
+  (gitignored); re-run while up detects and reports (no double-start).
+- Verified in this environment (local-processes mode): up PASS → status
+  shows both RUNNING + `ws=True` → re-run reports already-up → down stops
+  both cleanly.
+
+### Doc updates
+- `development.md`: dev.sh quick start replaces the "until Phase 10"
+  manual seeding section (manual curl/psql kept as reference); provider
+  test env-var requirement documented.
+- `AGENTS.md`: dev.sh added to Commands; test.sh/test-local.sh warning
+  removed; legacy/ sentences rewritten to "removed; lives in git
+  history"; litellm registration note corrected to `mode: "chat"`.
+- `ARCHITECTURE.md`: §2 tree drops `legacy/`; header reworded.
+- `README.md`: Quick start now `./scripts/dev.sh`; endpoint table
+  updated (chat/completions + models shipped); layout section refreshed.
+- `CONTRIBUTING.md`: rewritten for this repo (template text + stale
+  architecture references removed).
+
+### Final validation gate (2026-10-05)
+- Admin **156 passed** · lib **71** · mock **11** · llama-cpp **31** ·
+  gufo **36** · halogen **40** · halogen-flash **101** (all baselines).
+- Frontend `bun run build` + `bun run lint` clean.
+- `ruff check` + `ruff format --check` clean over provider,
+  admin/backend/app, admin/backend/tests, scripts/.
+- OpenResponses conformance vs `./scripts/dev.sh` stack: **8 passed /
+  7 WS N/A / 2 compaction failed** — all KEY tests green
+  (basic/streaming/system/assistant-phase/output-phase/multi-turn +
+  tool-calling + image-input); the 2 failures are the accepted
+  `/responses/compact` scope decision. Run log:
+  `docs/integration-testing.md`.
 
 ---
 

@@ -8,7 +8,8 @@ process.
 
 **Status: this document describes the litellm-based architecture on the
 `litellm-architecture-overhaul` branch.** It supersedes the legacy
-broker/agent design (parked under `legacy/` for reference only).
+broker/agent design; the pre-overhaul code was removed in the final
+cleanup and lives in git history only.
 
 ---
 
@@ -119,10 +120,12 @@ provider/
   gufo/                   Provider type: gufo
 spike/litellm-fidelity/   Phase 0 spike: litellm Responses streaming fidelity
 docs/                     ws-protocol.md (canonical RFC), integration-testing.md
-legacy/                   Pre-overhaul code (backend/, agent/, recipes/) — reference only
 compose.yml               postgres + redis + admin + provider-mock
 Dockerfile                Builds admin (frontend + FastAPI) image
 ```
+
+(The pre-overhaul `legacy/` tree was removed in the final cleanup; see
+git history.)
 
 Provider packages are uv workspace members (`admin/backend`,
 `provider/lib`, `provider/mock`, `provider/llama-cpp`, `provider/gufo`,

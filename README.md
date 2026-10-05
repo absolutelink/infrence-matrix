@@ -42,8 +42,8 @@ protocol.
 | Endpoint | Status |
 | --- | --- |
 | `POST /v1/responses` | Supported — streaming + non-streaming, `previous_response_id` chaining, tools |
-| `POST /v1/chat/completions` | Planned (Phase 7) |
-| `GET /v1/models` | Planned (Phase 7) — from provider definitions |
+| `POST /v1/chat/completions` | Supported — streaming + non-streaming |
+| `GET /v1/models` | Supported — from provider definitions |
 | `GET /` | Swagger UI |
 | `GET /openapi.json` | OpenAPI schema |
 
@@ -54,33 +54,26 @@ Implemented` — see Accepted Regressions in
 
 ## Quick start (local, no hardware)
 
-Requires [Docker Compose](https://docs.docker.com/compose/) and
-[Bun](https://bun.sh/).
+Requires [Docker Compose](https://docs.docker.com/compose/) (or a local
+PostgreSQL + Redis) and [Bun](https://bun.sh/).
 
 ```bash
-# Bring up postgres + redis + admin + mock provider
+# One command: starts admin + mock provider, seeds a Machine +
+# ProviderDefinition via the admin API, and smoke-tests a streamed
+# /v1/responses call. Auto-detects docker vs local processes.
+./scripts/dev.sh
+# stop with:  ./scripts/dev.sh down    ·  inspect: ./scripts/dev.sh status
+
+# Or plain compose (postgres + redis + admin + mock provider):
 docker compose up -d --build
-
-# Admin UI        -> http://localhost:8000/admin
-# Swagger UI      -> http://localhost:8000/
-# OpenAPI schema  -> http://localhost:8000/openapi.json
 ```
 
-The stack starts empty: the mock provider cannot register until a Machine
-(uid `mock-machine-1`) and a `mock` ProviderDefinition (registration token
-`mock-registration-token`) exist. Create them via the admin UI once
-Machine/Definition CRUD lands (Phase 10); until then, seed with a `psql`
-insert (see development.md § Seeding for a ready-made snippet), then
-restart the mock provider container:
-
-```bash
-docker compose restart provider-mock
-```
+With the dev stack up:
 
 ```bash
 curl -N http://localhost:8000/v1/responses \
   -H 'Content-Type: application/json' \
-  -d '{"model": "<your-mock-alias>", "input": "Hello!", "stream": true}'
+  -d '{"model": "mock-model", "input": "Hello!", "stream": true}'
 ```
 
 The mock provider exercises the entire real path — registration, WebSocket,
@@ -97,9 +90,9 @@ provider/
   lib/        Shared provider library (registration, WS, lifecycle, metrics)
   mock/       Mock provider (hardware-free development + tests)
   llama-cpp/  llama.cpp provider
-  halogen/ halogen-flash/ gufo/   (pending, Phase 8)
+  halogen/ halogen-flash/ gufo/   hardware provider ports
 docs/         ws-protocol.md, integration-testing.md
-legacy/       Pre-overhaul code (reference only)
+scripts/      dev.sh, generate-client.sh, release tooling
 ```
 
 ## Development

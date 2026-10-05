@@ -34,13 +34,37 @@ Services: `postgres` (5432), `redis` (6379), `admin` (8000),
 ports to the host and adds hot-reload watch for the admin;
 `compose.deploy.yml` adds Traefik TLS (see deployment.md).
 
-**The stack starts empty.** The mock provider cannot register until a
-Machine + ProviderDefinition exist (see Seeding below).
+## Quick start: `./scripts/dev.sh`
 
-### Seeding (until the admin UI CRUD lands — Phase 10)
+One command for a fully working local dev instance:
 
-Create the Machine and a mock ProviderDefinition the mock provider can
-register against:
+```bash
+./scripts/dev.sh          # start + seed + smoke test
+./scripts/dev.sh status   # what's running (PIDs + instance WS state)
+./scripts/dev.sh down     # stop everything (data kept; reset hints printed)
+```
+
+What it does:
+
+- **Docker mode** (when `docker compose` is available): brings up
+  postgres + redis + admin + the mock provider container.
+- **Local-processes mode** (no docker — uses a local Postgres + Redis per
+  `.env`): runs migrations (`admin/backend/scripts/prestart.sh`),
+  starts the admin (`uvicorn app.main:app :8000`) and the mock provider
+  (`python -m provider_mock.main :8081`) as background processes.
+- **Seeds via the admin API** (idempotent — 409 is fine): Machine
+  `mock-machine-1` + ProviderDefinition `mock-model` (provider_type
+  `mock`, registration token `mock-registration-token`, capacity 4).
+- **Smoke tests**: waits for the mock instance's websocket to connect,
+  then streams `POST /v1/responses` and asserts `response.completed`.
+
+Logs and PIDs live in `.dev-run/` (gitignored). Re-running while up
+detects the running stack and reports instead of double-starting.
+
+### Manual seeding (reference)
+
+The dev script seeds through the API; if you prefer raw SQL (compose
+stack), the equivalent is:
 
 ```bash
 docker compose exec -T postgres psql -U inference -d inference_matrix <<'SQL'
@@ -61,7 +85,7 @@ docker compose restart provider-mock   # provider registers on startup only
 The admin reaches the mock provider via `machine.host` — use the Compose
 service name `provider-mock` (as in the snippet above). If you run the
 provider outside Compose (the `uv run` loop below), set `host` to
-`host.docker.internal` instead.
+`host.docker.internal` or `127.0.0.1`.
 
 Then:
 
@@ -73,7 +97,9 @@ curl -N http://localhost:8000/v1/responses \
 
 ## Admin backend dev loop
 
-With postgres + redis up (`docker compose up -d postgres redis`):
+`./scripts/dev.sh` covers the common case (admin + seeded mock provider +
+smoke test). For a hot-reload loop instead, run the admin yourself with
+postgres + redis up (`docker compose up -d postgres redis` or local):
 
 ```bash
 cd admin/backend
@@ -118,9 +144,13 @@ CACHE_DIR=/tmp/im-cache MODELS_DIR=/tmp/im-models \
 uv run python -m provider_mock.main
 ```
 
-Provider tests (from the repo root):
+Provider tests (from the repo root). Provider-package tests expect the
+provider env vars to exist (CI sets them); export a dummy set locally:
 
 ```bash
+export MACHINE_UID=test-machine PROVIDER_REGISTRATION_TOKEN=test-token \
+       ADMIN_BASE_URL=http://localhost:8000 \
+       CACHE_DIR=/tmp/cache MODELS_DIR=/tmp/models
 uv run --project provider/lib pytest provider/lib/tests -q
 uv run --project provider/mock pytest provider/mock/tests -q
 uv run --project provider/llama-cpp pytest provider/llama-cpp/tests -q

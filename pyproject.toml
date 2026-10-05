@@ -29,7 +29,6 @@ extend-exclude = [
     "admin/backend/app/frontend/",
     "admin/frontend/dist/",
     "admin/frontend/public/assets/images/",
-    "legacy/",
 ]
 
 [tool.typos.default]

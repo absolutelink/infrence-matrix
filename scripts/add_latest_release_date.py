@@ -24,7 +24,7 @@ def main() -> None:
             print(f"Latest release {version} already has a date: {date_part}")
             sys.exit(0)
 
-        today = date.today().isoformat()
+        today = date.today().isoformat()  # noqa: DTZ011
         lines[i] = f"## {version} ({today})\n"
         print(f"Added date: {version} ({today})")
 

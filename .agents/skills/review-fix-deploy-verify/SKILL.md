@@ -74,7 +74,7 @@ that instruction. Do not launch parallel agents just to accelerate the cycle.
     require `bash scripts/generate-client.sh`; never edit generated files.
   - Database changes: apply migrations before DB-backed tests as documented in
     `AGENTS.md` (`admin/backend/scripts/prestart.sh`). Never run destructive
-    `scripts/test.sh` on a shared database.
+    reset commands against the shared dev databases.
 - Inspect `git diff --check` and `git status` at handoff. Do not commit unless
   the user explicitly asks. Provide a **concise commit message in a fenced
   code block** when the change is ready for the user to commit/deploy.

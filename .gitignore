@@ -13,3 +13,6 @@ __pycache__/
 AGENTS.md
 
 .devcontainer/additional-services/opencode/
+
+# dev.sh run dir (logs, pids, mock provider cache)
+.dev-run/
