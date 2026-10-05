@@ -80,7 +80,9 @@ jobs:
           POSTGRES_DB: inference_matrix_test
           POSTGRES_HOST: localhost
           POSTGRES_PORT: 5432
+          TEST_DATABASE_URL: postgresql+psycopg://inference:testpassword@localhost:5432/inference_matrix_test
           REDIS_URL: redis://localhost:6379/0
+          TEST_REDIS_URL: redis://localhost:6379/15
           FASTAPI_ENV: development
         run: uv run pytest tests/ -v --tb=short
 
