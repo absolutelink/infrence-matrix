@@ -359,30 +359,98 @@ and the `im:sched:lock` contract is honored around boot/admission
 mutations so a future cross-worker Redis-queue implementation can swap in
 behind the same `acquire`/`release` interface.
 
+### VRAM ledger — per booted instance
+
+VRAM is held **per booted instance, not per request**. A loaded backend
+keeps its weights resident between requests, so the old per-slot ledger
+(`release` cleared the hold → an idle backend counted as 0) was
+physically wrong and made eviction impossible (nothing to free). The
+authoritative ledger is `self._booted: {instance_id: (machine_uid,
+vram_bytes)}`, merged (max per instance) into `held_on(machine)` from
+three sources so no hold is ever under-counted:
+
+- `self._booted` (backends this process booted/adopted),
+- the Redis `im:vram:used:{machine}` mirror (holds recorded before an
+  admin restart), and
+- connected instances whose DB `backend_status` is `running`/`in_use`,
+  at their definition's `vram_required_bytes` (a running backend holds
+  even when this process lost all trace of it).
+
+`release` frees the **capacity slot only** — the booted hold persists
+until the backend is actually stopped (idle reaper or eviction). The
+Redis mirror is refreshed on boot/stop and its TTL kept alive by the
+reaper while booted (see §9 / `redis-keys.md`). **Out-of-band stops
+(Phase 6 review):** because only scheduler-initiated stops clear
+`_booted` directly, `connection_manager` prunes the hold
+(`scheduler.note_backend_stopped`) whenever a `backend.status` /
+`provider.status` frame reports `stopped` or `error` — otherwise a UI
+stop or crash would leave a stale hold that the reaper's TTL refresh
+keeps alive forever and permanently over-counts the machine.
+`stopping` deliberately does NOT prune (weights are still resident until
+the stop completes; pruning early would let a concurrent boot
+transiently oversubscribe).
+
 `acquire(alias, request_id)` semantics:
 1. Zero connected+enabled candidates → `NoProviderAvailable` (503)
    immediately — never queue what can never run.
 2. FIFO fairness: the request is appended to the alias waiter deque and
    only admitted at the head when a slot is available.
-3. A slot = `active_on_instance < definition.capacity` **and** the
-   instance's machine has enough free VRAM for `vram_required_bytes`.
-   Free VRAM = `Machine.total_vram_bytes` minus VRAM held by *other*
-   instances on the machine (merging `im:vram:used` with this process's
-   active slots). The target's own hold is excluded.
-4. A `stopped` candidate is booted with `backend.start` under the
+3. A slot = `active_on_instance < definition.capacity`. An
+   **already-booted** target needs no new VRAM and admits on capacity
+   alone. A target that **needs a boot** is gated on free VRAM =
+   `Machine.total_vram_bytes − held_on(machine)` with the target's own
+   hold excluded.
+4. **Eviction (Phase 6).** If a boot doesn't fit, idle **different-alias**
+   backends on the same machine are stopped (`backend.stop`) **LRU-first**
+   — oldest `last_request_at` (null = oldest) — until room is made.
+   Victims must have **zero active in-process slots** (never evict busy)
+   and a **positive VRAM hold** (evicting something that frees nothing
+   can't help). The DB `backend_status` is *not* a victim filter: any
+   instance with a positive hold in the merged ledger is evictable,
+   including `_booted` instances whose DB mirror is stale. The
+   requesting alias's own instances are never victims. A refused stop
+   (NAK, e.g. a drain race) moves to the next candidate; if nothing
+   works the request stays queued (FIFO/timeout) — busy backends are
+   never force-killed. The whole evict+boot runs under one
+   `im:sched:lock:{alias}` acquisition plus an in-process `_evicting`
+   set, so two concurrent acquires (even different aliases sharing the
+   machine) can't both evict the same victim. **Admit guard (Phase 6
+   review):** because the evictor holds the *requesting* alias's lock —
+   never the victim's — `_try_admit` skips any candidate instance
+   present in `_evicting` on both the already-booted and needs-boot
+   paths: a request is never admitted onto a backend with an in-flight
+   stop (eviction or idle reaper). Evictions log at WARNING.
+5. A `stopped` candidate is booted with `backend.start` under the same
    admission lock; boot failure/timeout falls through to the next
-   candidate. A successful boot is remembered in-process (`_booted`) so a
-   lagging DB mirror never causes a redundant boot.
-5. Waiting is bounded by `queue_timeout` (default 300s) → `QueueTimeout`
+   candidate. A successful boot is remembered in `_booted` so a lagging
+   DB mirror never causes a redundant boot.
+6. Waiting is bounded by `queue_timeout` (default 300s) → `QueueTimeout`
    (504).
-6. Admission records `im:sched:active` + `im:vram:used` and returns an
+7. Admission records `im:sched:active` and returns an
    `Admission{instance_id, base_url, machine_uid}`.
-7. **Eviction of idle different-alias instances to free VRAM is not yet
-   implemented** — `TODO(phase6-eviction)`; the request waits instead.
 
 `release(alias, request_id)` is idempotent and cancellation-safe
 (`asyncio.shield` around cleanup so a client-disconnect-mid-stream still
-releases and wakes the next waiter).
+releases and wakes the next waiter). It does **not** clear the booted
+instance's VRAM hold.
+
+### Idle-timeout reaper (Phase 6)
+
+`_idle_reaper` runs every `IDLE_REAPER_INTERVAL_SECONDS` (default 15.0,
+injectable via the `InferenceScheduler` constructor for tests), started
+by `start_background` and stopped by `stop`. Each tick:
+
+- Refreshes the `im:vram:used` TTL for every hold this process owns (so
+  a long boot outliving the 60s key TTL keeps its mirror alive).
+- Stops every **connected** instance whose `backend_status` is
+  `running`/`in_use`, which has **zero active in-process slots**, and
+  whose `last_request_at` is at least the definition's
+  `idle_timeout_seconds` old (never-requested instances fall back to
+  `created_at`). `idle_timeout_seconds == 0` means **never idle-stop**.
+- On a successful stop the VRAM hold is cleared (ledger + mirror + DB
+  `backend_status=stopped`). A NAK/exception is logged and simply
+  retried next tick. The whole tick is wrapped in try/except so one bad
+  pass never kills the task.
 
 ---
 
@@ -409,7 +477,21 @@ Example: streamed Responses API against `https://matrix.thelink.family`.
    supports_native_streaming and ignores mode — so one registration
    serves both public APIs (see §7 chat specifics).
 5. scheduler.acquire(alias, request_id) → Admission with base_url.
-   (503 NoProviderAvailable / 504 QueueTimeout before the stream starts.)
+   Transport-specific error contract (Phase 6 keepalive):
+   - **Non-stream:** `NoProviderAvailable` → 503, `QueueTimeout` → 504
+     (JSON; the stream never starts).
+   - **Stream:** the SSE response starts immediately and emits
+     `: keep-alive` comment lines every `KEEPALIVE_INTERVAL_SECONDS`
+     (default 10s) while `acquire` blocks on a cold boot (download +
+     load) or the FIFO wait, so proxies (Traefik) don't drop the
+     connection before any event. The cheap zero-candidates check stays
+     pre-stream (HTTP 503 — never open a stream that can't respond),
+     but scheduler errors that arrive *inside* the stream surface as the
+     spec `response.failed` + `error` frames + `[DONE]` (the admin
+     synthesizes terminal frames — FINDINGS §2) and a failed
+     `ResponseRecord`; no HTTP status is possible once bytes are sent.
+   Fast pre-stream checks are HTTP for both: unknown/disabled alias →
+   404, missing `model`/`input` → 400.
  6. litellm.aresponses(model=alias,
       api_base=f"{admission.base_url}/v1", custom_llm_provider="openai",
       stream=True, tools=[client tools + platform local tools], input=...)
@@ -423,14 +505,26 @@ Example: streamed Responses API against `https://matrix.thelink.family`.
    - passes everything else (usage, output[], non-canonical events like
      response.reasoning_text.delta) through untouched.
 9. litellm exceptions (MidStreamFallbackError etc.) → SSEEmitter.failed()
-   synthesizes the spec response.failed + error frames.
+   synthesizes the spec response.failed + error frames. This covers a
+   **call-time** `aresponses` raise too (connection refused, APIError
+   before the first event — Phase 6 review): the awaited call is inside
+   the same try as the `async for`, so the stream always terminates with
+   response.failed + error + [DONE] instead of truncating after the
+   keepalives. A litellm transport error is not a `SchedulerError` and
+   never reaches the admission-error branch.
 10. finally (cancellation-safe): close upstream stream, scheduler.release,
     persist ResponseRecord + TokenUsageSample once.
 ```
 
 Cancellation: client disconnect → FastAPI cancels the emitter task →
 litellm stream closed → provider sees TCP close → slot freed. No separate
-lease-renewal machinery.
+lease-renewal machinery. On the `/v1/responses` stream the cancel can
+also arrive during the cold-boot keepalive phase (before any `Admission`
+exists); the generator's shielded `finally` cancels the pending
+`acquire` (its own shielded `_drop_waiter` removes the waiter) before
+releasing, so no slot or waiter is orphaned. The keepalive + in-stream
+error contract is specific to `/v1/responses`; the Phase 7
+`/v1/chat/completions` route keeps the pre-stream 503/504 acquire.
 
 ### Public endpoint scope (this overhaul)
 | Endpoint | Status |
@@ -523,7 +617,7 @@ a fresh provider registration. All keys namespaced `im:`. Full table in
 | `im:sched:wait:{req_id}` | Hash | 1h | position / enqueued_at / status |
 | `im:sched:active:{alias}` | Set | — | Admitted request ids (cardinality ≤ capacity) |
 | `im:sched:lock:{alias}` | String | 5s (SET NX PX) | Admission lock contract |
-| `im:vram:used:{machine_uid}` | Hash | 60s | `{instance_id}` → bytes held; TTL-bounded so a crashed admin self-heals |
+| `im:vram:used:{machine_uid}` | Hash | 60s | `{instance_id}` → bytes held **per booted instance** (§6); refreshed on boot/stop, TTL kept alive by the reaper |
 
 ---
 
@@ -591,9 +685,16 @@ operation:
    — no cross-definition artifact dedup.
 6. `MACHINE_UID` misuse (same UID on two physical hosts) poisons VRAM
    admission; there is no host-fingerprint check.
-7. Scheduler VRAM eviction of idle co-located backends is not yet
-   implemented (`TODO(phase6-eviction)`); requests wait instead.
-8. Admin-driven idle-timeout reaper is a stub (`TODO(phase6-idle-reaper)`).
+7. Scheduler VRAM eviction is implemented (§6): idle different-alias
+   backends are stopped LRU-first to make room. Remaining nuance:
+   eviction is per-machine (no cross-machine rebalancing) and victims are
+   chosen purely by LRU idle time — there is no priority/weight scheme,
+   so a just-booted large model can be evicted for a newly arriving
+   request if it happens to be the oldest idle hold.
+8. The idle-timeout reaper is implemented (§6). Remaining nuance: idle
+   detection is admin-side from `last_request_at` + in-process slot
+   counts, so a backend kept busy by traffic that bypasses the admin
+   (direct provider-port calls) is invisible to the reaper.
 9. Benchmarks removed; performance testing is out-of-band.
 10. Config-update retry is bounded (3 attempts for drain-refused only);
     a provider that stays busy past the retries surfaces the failure in

@@ -683,8 +683,8 @@ safely ackable regardless of load and never restarts the backend.
    `lifecycle.capacity`, adopt it immediately. Capacity is enforced at
    the provider (slot admission) and never requires a restart.
    `idle_timeout_seconds` is **not** consumed by the provider (the idle
-   reaper is admin-side, `TODO(phase6-idle-reaper)`); it rides in the
-   payload for observability only.
+   reaper is admin-side, `InferenceScheduler._idle_reaper`); it rides in
+   the payload for observability only.
 3. **Fingerprint compare** — received == applied → ack
    `{"ok": true, "detail": {"noop": true, "capacity_adopted": bool,
    ...}}`; nothing else touched (a capacity-only change lands here with

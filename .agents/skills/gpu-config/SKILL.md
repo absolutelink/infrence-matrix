@@ -74,9 +74,12 @@ VRAM, not layers. See `ARCHITECTURE.md` §6.
 - Q4_K_M ≈ 0.7 GB per billion params (full offload) + ~1 GB per 4K ctx.
 - Add a margin; over-reporting is safer than OOM.
 
-> Idle-backend **eviction** to free VRAM is not yet implemented
-> (`TODO(phase6-eviction)`) — requests wait rather than evicting a
-> co-located idle backend. Don't pack models to 100% of a GPU.
+> Idle-backend **eviction** to free VRAM is implemented (Phase 6): when a
+> needed boot doesn't fit, the scheduler stops idle **different-alias**
+> backends on the same machine LRU-first (`backend.stop`). Requests still
+> wait if no evictable victim frees enough. Packing models near 100% of a
+> GPU is now possible but risks eviction churn — leave headroom where a
+> backend must stay resident.
 
 ## Monitoring GPU / VRAM
 

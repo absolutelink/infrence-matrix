@@ -21,7 +21,7 @@ starting a feature, read the linked protocol/doc first.
 | 3 | Provider registration + WS auth + epoch fencing + connection manager | ✅ Complete |
 | 4 | Provider lib: backend lifecycle, `/v1` translation surface, slot admission | ✅ Complete |
 | 5 | llama-cpp provider + model downloader + machine metrics + ownership | ✅ Complete |
-| 6 | Scheduler + `/v1/responses` via litellm + SSE emitter + persistence | 🟡 In progress |
+| 6 | Scheduler + `/v1/responses` via litellm + SSE emitter + persistence + eviction + idle reaper + cold-boot keepalive | ✅ Complete |
 | 7 | `/v1/chat/completions` + `/v1/models` + 501 stubs | ✅ Complete |
 | 8 | gufo / halogen / halogen-flash provider ports | ✅ Complete |
 | 9 | `provider.config.update` / fingerprint / cache-clear flow | ✅ Complete |
@@ -161,18 +161,68 @@ Tests: `provider/llama-cpp/tests`, `test_metrics_ownership.py`.
 
 ---
 
-## Phase 6 — Scheduler + `/v1/responses` 🟡 IN PROGRESS
+## Phase 6 — Scheduler + `/v1/responses` ✅ COMPLETE
 
 **Admin:** `app/services/scheduler.py`, `app/services/sse.py`,
 `app/services/alias_registry.py`, `app/api/v1/responses.py`.
 **Design:** ARCHITECTURE.md §6, §7; FINDINGS.md.
 
+> **⚠ VRAM ledger semantic change (Phase 6 close-out).** VRAM is now
+> accounted **per booted instance**, not per request slot. The previous
+> ledger had `release` clear the `im:vram:used` entry, so a
+> running-but-idle backend was counted as holding **0 VRAM** — physically
+> false (a booted llama-server keeps its weights resident) and it made
+> idle-backend eviction impossible (nothing recorded to free). The
+> authoritative ledger is `self._booted: {instance_id: (machine_uid,
+> vram_bytes)}`, merged with the Redis mirror and the DB's
+> running/in_use×`vram_required_bytes` state. `release` now frees only
+> the capacity slot; the hold persists until the backend is actually
+> stopped by the idle reaper or an eviction. **Any tooling or mental
+> model that read `im:vram:used` as "in-flight requests" must be
+> updated: it is "loaded backends".**
+
 ### Done (tests green)
 - `InferenceScheduler` — in-process per-alias FIFO + Redis mirror.
   `acquire`/`release`; `NoProviderAvailable`→503, `QueueTimeout`→504.
-  Slot = capacity + machine free VRAM. Prefers already-running instances.
-  Boots via `backend.start` under `im:sched:lock`. Remembers `_booted` to
-  avoid redundant boots. `release` cancellation-safe (shielded).
+  Slot = capacity (+ machine free VRAM only when a boot is needed).
+  Prefers already-running instances. Boots via `backend.start` under
+  `im:sched:lock`. Remembers `_booted` to avoid redundant boots.
+  `release` cancellation-safe (shielded) and does **not** clear the
+  booted hold.
+- **VRAM eviction (was `TODO(phase6-eviction)`)** — when a needed boot
+  doesn't fit, **idle different-alias** backends on the same machine are
+  stopped (`backend.stop`) **LRU-first** by `last_request_at` (null =
+  oldest). Victims must have zero active in-process slots and a positive
+  hold; the requesting alias's own instances are never victims. NAK
+  (drain race) → next candidate; if nothing frees enough the request
+  stays queued (no force-kill). Evict+boot share one `im:sched:lock`
+  acquisition plus an in-process `_evicting` set so concurrent acquires
+  can't double-target a victim. Logged at WARNING.
+- **Idle-timeout reaper (was `TODO(phase6-idle-reaper)`)** — real
+  periodic task (`IDLE_REAPER_INTERVAL_SECONDS`, default 15.0,
+  injectable for tests), started by `start_background`, stopped by
+  `stop`. Stops connected, loaded instances with zero active slots whose
+  `last_request_at` (fallback `created_at`) is older than the
+  definition's `idle_timeout_seconds`; `idle_timeout_seconds == 0` means
+  never idle-stop. Clears ledger + mirror + DB status on success; a
+  NAK/exception is retried next tick; each tick is try/except-guarded.
+  Each tick also refreshes the `im:vram:used` TTL for this process's
+  booted holds.
+- **Cold-boot SSE keepalive** — the streaming `POST /v1/responses`
+  response starts immediately and emits `: keep-alive` SSE comment lines
+  every `KEEPALIVE_INTERVAL_SECONDS` (default 10) while
+  `scheduler.acquire` blocks on a cold boot / FIFO wait, so Traefik
+  doesn't kill long cold starts. **Error contract (API-visible):** the
+  fast pre-stream checks stay HTTP for both transports (unknown/disabled
+  alias → 404, missing fields → 400) and the cheap zero-candidates check
+  stays a pre-stream **503** (never open a stream that can't respond);
+  scheduler errors arriving *inside* the stream (`QueueTimeout`, or
+  `NoProviderAvailable` after a race) surface as spec `response.failed`
+  + `error` frames + `[DONE]` and a failed `ResponseRecord` — no HTTP
+  status is possible once bytes are sent. The non-stream path keeps
+  503/504 JSON unchanged. Client disconnect during the keepalive phase
+  cancels the pending acquire (waiter dropped) and releases cleanly — no
+  leaked slot or waiter.
 - `SSEEmitter` — re-frames litellm events: replaces `response.id` with
   admin `resp_<uuid>` on lifecycle frames, reassigns `sequence_number`
   monotonically, passes usage/output[]/non-canonical events through,
@@ -187,23 +237,18 @@ Tests: `provider/llama-cpp/tests`, `test_metrics_ownership.py`.
   model_not_found, else server_error/upstream_failed.
 - Lifespan wires scheduler + presence sweep.
 - Tests: `test_scheduler.py`, `test_sse_emitter.py`, `test_v1_responses.py`
-  (72 admin tests pass).
+  (admin suite green; Phase 6 close-out added eviction, reaper, ledger,
+  and keepalive/error-contract coverage).
 
 ### Remaining for Phase 6
-- [ ] **VRAM eviction** — `TODO(phase6-eviction)`: stop idle
-      different-alias instances on a machine to free VRAM instead of
-      waiting. Priority: LRU-idle first.
-- [ ] **Idle-timeout reaper** — `TODO(phase6-idle-reaper)`: stop
-      instances past `idle_timeout_seconds` with no active requests
-      (background task stub exists; `start_background`/`stop` wired).
+- [x] ~~**VRAM eviction**~~ — see **Done** above.
+- [x] ~~**Idle-timeout reaper**~~ — see **Done** above.
+- [x] ~~**Keepalive during cold boot**~~ — see **Done** above.
 - [x] **Tool forwarding** — client `tools`/`tool_choice` are forwarded to
       litellm (`PASSTHROUGH_FIELDS`); tool *execution* is provider-side
       (the backend emits `function_call` items; the mock emits a canned
       one). An admin-side multi-turn tool-execution loop is a Phase 7
       concern, not Phase 6.
-- [ ] **Keepalive during cold boot** — emit SSE `: keep-alive` comments
-      while `scheduler.acquire` blocks on a boot, so Traefik doesn't kill
-      long cold starts.
 - [x] **Conformance gate** — ran 2026-10-04 against a local uvicorn
       admin + mock provider: **all 6 KEY tests pass**
       (`basic-response`, `streaming-response`, `system-prompt`,
@@ -238,9 +283,41 @@ Tests: `provider/llama-cpp/tests`, `test_metrics_ownership.py`.
   emits spec-complete response objects (`created_at`, `completed_at`,
   `tools`, sampling params, usage details) and `status` on added items.
 
-Phase 6 code items are complete except eviction, the idle reaper, and
-cold-boot SSE keepalive (all explicitly-TODO, non-blocking for the
-conformance contract).
+Phase 6 is complete: eviction, the idle reaper, and cold-boot SSE
+keepalive all landed (with the per-booted-instance VRAM ledger change
+they depend on). The three previously-open items are now Done above.
+
+### Phase 6 close-out review fixes
+- **B1 — admission respects `_evicting`:** the eviction path holds the
+  *requesting* alias's `im:sched:lock`, never the victim's, so a
+  concurrent acquire for the victim's own alias could previously admit
+  onto a backend mid-stop. `_try_admit` now skips any candidate instance
+  present in `self._evicting` (both already-booted and needs-boot paths).
+  Tests: `test_try_admit_skips_instance_in_evicting`,
+  `test_concurrent_acquire_not_admitted_onto_eviction_victim`.
+- **S1 — call-time `aresponses` errors are terminal:** the awaited
+  `litellm.aresponses(...)` in `_stream_response` moved inside the
+  inner try, so a connection-refused/APIError raised before the first
+  event emits `response.failed` + `error` + `[DONE]` instead of
+  truncating the SSE stream after keepalives (still released + persisted
+  failed in the `finally`; not swallowed by the `SchedulerError`
+  branch). Test: `test_stream_aresponses_call_time_error_is_terminal`.
+- **S2 — out-of-band stops prune the VRAM hold:** a `backend.status` /
+  `provider.status` frame reporting `stopped`/`error` now calls
+  `scheduler.note_backend_stopped` from `connection_manager`
+  (event-driven, idempotent), dropping the stale `_booted` hold + Redis
+  `im:vram:used` field so the machine isn't permanently over-counted.
+  `stopping` is excluded (weights still resident). Reached via
+  `app.state.scheduler` — no import cycle. Tests:
+  `test_external_stop_prunes_booted_hold_and_mirror`,
+  `test_running_status_does_not_prune_booted_hold`.
+- **N2 — eviction victims include `_booted` regardless of DB status:**
+  `_eviction_candidates` no longer filters on DB `running/in_use`; the
+  merged-ledger positive-hold requirement is what makes an instance
+  evictable, so a stale-"stopped" `_booted` hold can be reclaimed.
+  Test: `test_eviction_can_reclaim_stopped_status_booted_instance`.
+- **N1:** removed the stale unchecked "Keepalive during cold boot" TODO
+  (already Done above).
 
 ---
 
@@ -511,7 +588,7 @@ convention), `BackendDriver.apply_config` ABC hook +
   `capacity_adopted`); the admin PATCH triggers a push on fingerprint
   **or** capacity change. `idle_timeout_seconds` is NOT a push trigger —
   the provider consumes no idle setting (admin-side reaper
-  `TODO(phase6-idle-reaper)`); documented.
+  `InferenceScheduler._idle_reaper`); documented.
 - **SF-3 (heal storm / fan-out)**: provider order swapped (noop check
   before drain refusal — same-fp is always safely ackable); admin heal
   pushes to the **stale instance only** (not the definition fan-out;

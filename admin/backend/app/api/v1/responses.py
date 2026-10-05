@@ -21,15 +21,27 @@ Flow:
    passed to litellm.
 5. ``ensure_registered(alias)`` so litellm selects native streaming.
 6. ``scheduler.acquire(alias, request_id)`` -> ``Admission`` with the
-   instance base URL. ``NoProviderAvailable`` -> 503, ``QueueTimeout``
-   -> 504 (JSON, since the stream has not started).
-7. Streaming (default): iterate litellm events through the
-   ``SSEEmitter``; on litellm exceptions (``MidStreamFallbackError`` and
-   friends) synthesize the spec ``response.failed`` frame; in a
-   cancellation-safe ``finally`` close the upstream stream, release the
-   scheduler slot, and persist once.
+   instance base URL. **Error contract differs by transport (Phase 6):**
+
+   * Non-stream: ``NoProviderAvailable`` -> 503, ``QueueTimeout`` -> 504
+     (JSON, since the stream never starts).
+   * Stream: the response starts immediately with SSE keepalive comments
+     while ``acquire`` blocks (cold boot + FIFO wait can take minutes and
+     would otherwise trip proxy idle timeouts). The scheduler errors
+     arrive *inside* the stream and are synthesized as the spec
+     ``response.failed`` + ``error`` frames (FINDINGS.md §2: the admin
+     owns terminal frames) plus a failed ``ResponseRecord`` — no HTTP
+     status is possible once the stream has begun.
+
+   The fast pre-stream checks (unknown/disabled alias -> 404, missing
+   ``model``/``input`` -> 400) stay HTTP for both transports.
+7. Streaming: iterate litellm events through the
+    ``SSEEmitter``; on litellm exceptions (``MidStreamFallbackError`` and
+    friends) synthesize the spec ``response.failed`` frame; in a
+    cancellation-safe ``finally`` close the upstream stream, release the
+    scheduler slot, and persist once.
 8. Non-stream: accumulate the terminal response, replace its id, persist,
-   release, return JSON.
+    release, return JSON.
 
 Auth model: trusted LAN — this public route is unauthenticated (see
 ``app/core/config.py``).
@@ -56,12 +68,21 @@ from app.services.scheduler import (
     InferenceScheduler,
     NoProviderAvailable,
     QueueTimeout,
+    SchedulerError,
 )
 from app.services.sse import SSEEmitter, to_dict
 
 logger = logging.getLogger("admin.v1.responses")
 
 router = APIRouter(tags=["responses"])
+
+# SSE keepalive cadence during the cold-boot / queue-wait phase. A comment
+# line (``: keep-alive``) is ignored by spec-compliant SSE clients but
+# resets proxy (Traefik) idle timers so a minutes-long ``scheduler.acquire``
+# (model download + load) does not drop the connection before any event.
+KEEPALIVE_INTERVAL_SECONDS = 10.0
+KEEPALIVE_COMMENT = ": keep-alive\n\n"
+
 
 # Request fields forwarded straight to litellm.aresponses when present.
 PASSTHROUGH_FIELDS = (
@@ -295,13 +316,6 @@ async def create_response(request: Request) -> Any:
     litellm_input = build_litellm_input(body, previous)
 
     scheduler = get_scheduler(request)
-    try:
-        admission = await scheduler.acquire(alias, request_id)
-    except NoProviderAvailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except QueueTimeout as exc:
-        raise HTTPException(status_code=504, detail=str(exc)) from exc
-
     passthrough = {k: body[k] for k in PASSTHROUGH_FIELDS if k in body}
     # Record the accumulated input we hand to litellm as this turn's
     # input_items. Because build_litellm_input prepends the prior record's
@@ -311,6 +325,16 @@ async def create_response(request: Request) -> Any:
     input_items_for_record = _as_item_list(litellm_input)
 
     if stream:
+        # Keep the *cheap, synchronous* zero-candidate check as HTTP: a
+        # stream that can never carry a response should be a 503, not a
+        # keepalive-only SSE. Everything slow (boot + FIFO wait) happens
+        # inside the stream, where scheduler errors surface as spec
+        # response.failed frames instead (see module docstring).
+        if not scheduler.has_candidates(alias):
+            raise HTTPException(
+                status_code=503,
+                detail=f"no connected provider instance for alias '{alias}'",
+            )
         return StreamingResponse(
             _stream_response(
                 scheduler=scheduler,
@@ -320,7 +344,6 @@ async def create_response(request: Request) -> Any:
                 previous_response_id=previous_response_id,
                 input_items_for_record=input_items_for_record,
                 definition_id=definition_id,
-                admission=admission,
                 litellm_input=litellm_input,
                 passthrough=passthrough,
                 base_params=base_params,
@@ -329,6 +352,13 @@ async def create_response(request: Request) -> Any:
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    try:
+        admission = await scheduler.acquire(alias, request_id)
+    except NoProviderAvailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except QueueTimeout as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
 
     return await _non_stream_response(
         scheduler=scheduler,
@@ -355,7 +385,6 @@ async def _stream_response(
     previous_response_id: str | None,
     input_items_for_record: list[dict[str, Any]],
     definition_id: uuid.UUID,
-    admission: Admission,
     litellm_input: Any,
     passthrough: dict[str, Any],
     base_params: dict[str, Any],
@@ -367,18 +396,40 @@ async def _stream_response(
     litellm_wrapped_id: str | None = None
     failed_error: dict[str, Any] | None = None
     completed = False
+    admission: Admission | None = None
 
+    # Cold-boot keepalive: scheduler.acquire can block for minutes
+    # (download + load + FIFO wait). Run it as a task and emit SSE comment
+    # lines every KEEPALIVE_INTERVAL_SECONDS until it settles so proxies
+    # (Traefik) keep the connection open. ``shield`` keeps the acquire
+    # alive across the wait_for timeouts; the loop cancels it explicitly
+    # if the client disconnects mid-admission.
+    acquire_task = asyncio.create_task(scheduler.acquire(alias, request_id))
     stream = None
     try:
-        stream = await litellm.aresponses(
-            model=alias,
-            custom_llm_provider="openai",
-            api_base=f"{admission.base_url}/v1",
-            stream=True,
-            input=litellm_input,
-            **passthrough,
-        )
+        while True:
+            try:
+                admission = await asyncio.wait_for(
+                    asyncio.shield(acquire_task), KEEPALIVE_INTERVAL_SECONDS
+                )
+                break
+            except TimeoutError:
+                yield KEEPALIVE_COMMENT
+
         try:
+            # The awaited call itself can raise (connection refused, bad
+            # request, litellm APIError before the first event): keep it
+            # inside the try so a call-time failure emits the same
+            # terminal response.failed + error + [DONE] frames as a
+            # mid-stream failure instead of truncating the SSE stream.
+            stream = await litellm.aresponses(
+                model=alias,
+                custom_llm_provider="openai",
+                api_base=f"{admission.base_url}/v1",
+                stream=True,
+                input=litellm_input,
+                **passthrough,
+            )
             async for event in stream:
                 data = to_dict(event)
                 response = data.get("response")
@@ -411,10 +462,36 @@ async def _stream_response(
             for frame in emitter.failed(failed_error):
                 yield frame
             yield emitter.done()
+    except SchedulerError as exc:
+        # Admission failed after the SSE response started: NoProvider-
+        # Available / QueueTimeout surface as the spec terminal failed
+        # frames (the admin synthesizes terminal frames — FINDINGS §2);
+        # an HTTP status is no longer possible.
+        failed_error = {
+            "type": "server_error",
+            "code": (
+                "queue_timeout" if isinstance(exc, QueueTimeout) else "no_provider"
+            ),
+            "message": str(exc),
+        }
+        logger.warning("admission failed in-stream for %s: %s", client_response_id, exc)
+        for frame in emitter.failed(failed_error):
+            yield frame
+        yield emitter.done()
     finally:
         # Single shielded cleanup so a cancelled aclose can never skip the
-        # slot release or persistence on the client-disconnect path.
+        # acquire unwind, slot release, or persistence on the client-
+        # disconnect path (including during the keepalive phase, before
+        # any Admission object exists).
         async def _cleanup() -> None:
+            # If the client vanished mid-admission, cancel the acquire and
+            # let its own shielded waiter-drop finish before we release —
+            # so a slot recorded moments before cancellation is never
+            # orphaned.
+            if not acquire_task.done():
+                acquire_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await acquire_task
             # Close the upstream stream on every exit path (normal end,
             # error, or client disconnect) so the provider releases its
             # own slot.
@@ -435,11 +512,11 @@ async def _stream_response(
                 input_items=input_items_for_record,
                 output_items=terminal_output,
                 definition_id=definition_id,
-                instance_id=uuid.UUID(admission.instance_id),
+                instance_id=uuid.UUID(admission.instance_id) if admission else None,
                 parameters={
                     **base_params,
                     "litellm_response_id": litellm_wrapped_id,
-                    "api_base": admission.base_url,
+                    "api_base": admission.base_url if admission else None,
                     "stream": True,
                 },
                 status="completed" if completed else "failed",

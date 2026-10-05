@@ -77,8 +77,8 @@ def _build_payload(definition: ProviderDefinition, new_fp: str) -> dict[str, Any
     ``backend_config`` + ``config_fingerprint`` (restart-worthy change)
     and ``capacity`` (adopted at the provider without restart).
     ``idle_timeout_seconds`` is carried for observability only — the idle
-    reaper is admin-side (TODO(phase6-idle-reaper)); the provider does
-    not adopt it.
+    reaper is admin-side (``InferenceScheduler._idle_reaper``); the
+    provider does not adopt it.
     """
     return {
         "backend_config": definition.backend_config or {},

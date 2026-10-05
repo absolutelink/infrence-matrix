@@ -24,9 +24,9 @@ Config-change semantics (docs/ws-protocol.md §4):
   fatal. A capacity-only change is adopted by the provider without a
   backend restart (see ``provider_lib.config_update``).
   ``idle_timeout_seconds`` is NOT a push trigger: the idle reaper is
-  admin-side only (TODO(phase6-idle-reaper) in the scheduler); the
-  provider carries no idle behavior, so an idle-only PATCH stays
-  admin-side.
+  admin-side only (``InferenceScheduler._idle_reaper``); the provider
+  carries no idle behavior, so an idle-only PATCH stays admin-side and
+  takes effect on the next reaper tick.
 - Other non-config PATCHes (idle timeout, enabled, alias, ...) are
   admin-side only: no provider push. ``enabled=false`` excludes the
   definition from scheduling (the scheduler query); providers keep

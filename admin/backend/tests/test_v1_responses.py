@@ -526,8 +526,9 @@ async def test_stream_generator_aclose_releases_and_persists_failed(
         __import__("os").environ["TEST_REDIS_URL"], decode_responses=True
     )
     scheduler = InferenceScheduler(aredis)
-    admission = await scheduler.acquire("rt-gen", "req-gen")
-
+    # Phase 6 keepalive redesign: the generator owns the acquire (it must,
+    # so it can emit keepalives while a cold boot blocks). No pre-admission
+    # here — the Admission is created inside the generator.
     agen = route_mod._stream_response(
         scheduler=scheduler,
         alias="rt-gen",
@@ -536,7 +537,6 @@ async def test_stream_generator_aclose_releases_and_persists_failed(
         previous_response_id=None,
         input_items_for_record=[{"role": "user", "content": "x"}],
         definition_id=definition_id,
-        admission=admission,
         litellm_input=[{"role": "user", "content": "x"}],
         passthrough={},
         base_params={"model": "rt-gen", "provider_type": "mock"},
@@ -559,3 +559,389 @@ async def test_stream_generator_aclose_releases_and_persists_failed(
         assert rec is not None
         assert rec.status == "failed"
     await aredis.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Cold-boot SSE keepalive + in-stream error contract (Phase 6)
+# ---------------------------------------------------------------------------
+# Chosen contract (documented in ARCHITECTURE.md §7):
+#   * Fast pre-stream checks stay HTTP: unknown/disabled alias -> 404,
+#     missing fields -> 400, and the cheap zero-candidates emptiness check
+#     -> 503 (never open a stream that can never carry a response).
+#   * The SLOW part (cold boot + FIFO queue wait) runs INSIDE the stream,
+#     emitting `: keep-alive` SSE comments so proxies don't drop it.
+#   * Scheduler errors that arrive inside the stream (QueueTimeout, or a
+#     NoProviderAvailable after the pre-check raced away) surface as the
+#     spec response.failed + error frames + [DONE] and a failed
+#     ResponseRecord — no HTTP status is possible once bytes are sent.
+#   * Non-stream path is unchanged: 503/504 JSON.
+# ---------------------------------------------------------------------------
+def _short_keepalive(monkeypatch, interval: float = 0.05) -> None:
+    from app.api.v1 import responses as route_mod
+
+    monkeypatch.setattr(route_mod, "KEEPALIVE_INTERVAL_SECONDS", interval)
+
+
+async def test_stream_emits_keepalive_during_slow_acquire(session, monkeypatch) -> None:
+    """A slow acquire yields `: keep-alive` comments before real events."""
+    import redis.asyncio as aioredis
+
+    from app.api.v1 import responses as route_mod
+    from app.services.scheduler import InferenceScheduler
+
+    _short_keepalive(monkeypatch)
+    instance = seed_instance(session, alias="ka-a", machine_uid="ka-m")
+
+    aredis = aioredis.from_url(
+        __import__("os").environ["TEST_REDIS_URL"], decode_responses=True
+    )
+    scheduler = InferenceScheduler(aredis)
+
+    release = asyncio.Event()
+    original_acquire = scheduler.acquire
+
+    async def slow_acquire(alias, request_id):
+        adm = await original_acquire(alias, request_id)
+        await release.wait()  # hold so the keepalive loop must spin
+        return adm
+
+    monkeypatch.setattr(scheduler, "acquire", slow_acquire)
+
+    events = [
+        {
+            "type": "response.created",
+            "response": {"id": WRAPPED_ID, "status": "in_progress", "output": []},
+        },
+        completed_event([], {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}),
+    ]
+    monkeypatch.setattr(litellm, "aresponses", make_fake_stream(events, {}))
+
+    agen = route_mod._stream_response(
+        scheduler=scheduler,
+        alias="ka-a",
+        request_id="req-ka",
+        client_response_id="resp_ka000",
+        previous_response_id=None,
+        input_items_for_record=[{"role": "user", "content": "x"}],
+        definition_id=instance.provider_definition_id,
+        litellm_input=[{"role": "user", "content": "x"}],
+        passthrough={},
+        base_params={"model": "ka-a", "provider_type": "mock"},
+        store=True,
+    )
+
+    # The generator is pull-driven: each __anext__ blocks up to the
+    # keepalive interval and returns a comment while acquire is stuck on
+    # `release`. Unblock it after a short delay and collect everything.
+    async def unblock() -> None:
+        await asyncio.sleep(0.18)
+        release.set()
+
+    unblock_task = asyncio.create_task(unblock())
+    chunks: list[str] = []
+    while True:
+        chunk = await agen.__anext__()
+        chunks.append(chunk)
+        if "response.created" in chunk:
+            break
+    await unblock_task
+    # Drain the remaining terminal frames.
+    rest = [chunk async for chunk in agen]
+    body = "".join([*chunks, *rest])
+
+    # Bytes flowed (keepalives) before admission resolved.
+    assert body.count(": keep-alive\n\n") >= 2
+    assert chunks[0] == ": keep-alive\n\n"
+    assert "response.created" in body
+    assert body.endswith("data: [DONE]\n\n")
+    # Slot released at terminal.
+    assert scheduler.active_count("ka-a") == 0
+    await aredis.aclose()
+
+
+async def test_stream_queue_timeout_surfaces_as_failed_frames(
+    session, monkeypatch
+) -> None:
+    """QueueTimeout inside the stream -> response.failed + error + [DONE],
+    failed record persisted (no HTTP status possible once streaming)."""
+    import redis.asyncio as aioredis
+
+    from app.api.v1 import responses as route_mod
+    from app.services.scheduler import InferenceScheduler, QueueTimeout
+
+    seed_instance(session, alias="qt-a", machine_uid="qt-m")
+    definition_id = (
+        session.query(ProviderDefinition)
+        .filter(ProviderDefinition.alias == "qt-a")
+        .first()
+        .id
+    )
+    aredis = aioredis.from_url(
+        __import__("os").environ["TEST_REDIS_URL"], decode_responses=True
+    )
+    scheduler = InferenceScheduler(aredis)
+
+    async def timeout_acquire(alias, request_id):  # noqa: ARG001
+        raise QueueTimeout("timed out waiting for a 'qt-a' slot")
+
+    monkeypatch.setattr(scheduler, "acquire", timeout_acquire)
+
+    agen = route_mod._stream_response(
+        scheduler=scheduler,
+        alias="qt-a",
+        request_id="req-qt",
+        client_response_id="resp_qt000",
+        previous_response_id=None,
+        input_items_for_record=[{"role": "user", "content": "x"}],
+        definition_id=definition_id,
+        litellm_input=[{"role": "user", "content": "x"}],
+        passthrough={},
+        base_params={"model": "qt-a", "provider_type": "mock"},
+        store=True,
+    )
+    body = "".join([chunk async for chunk in agen])
+    frames = parse_sse(body)
+    types = [t for t, _ in frames]
+    assert "response.failed" in types
+    assert types[-1] == "__done__"
+    failed = next(p for t, p in frames if t == "response.failed")
+    assert failed["response"]["id"] == "resp_qt000"
+    assert failed["response"]["error"]["code"] == "queue_timeout"
+    assert "error" in types
+    with Session(engine) as check:
+        rec = check.exec(
+            select(ResponseRecord).where(ResponseRecord.response_id == "resp_qt000")
+        ).first()
+        assert rec is not None
+        assert rec.status == "failed"
+        assert rec.error_code == "queue_timeout"
+    await aredis.aclose()
+
+
+async def test_stream_noprovider_after_precheck_surfaces_as_failed(
+    session, monkeypatch
+) -> None:
+    """NoProviderAvailable raised inside the stream (candidates raced away
+    after the pre-stream check) -> response.failed with code no_provider."""
+    import redis.asyncio as aioredis
+
+    from app.api.v1 import responses as route_mod
+    from app.services.scheduler import InferenceScheduler, NoProviderAvailable
+
+    seed_instance(session, alias="np-a", machine_uid="np-m")
+    definition_id = (
+        session.query(ProviderDefinition)
+        .filter(ProviderDefinition.alias == "np-a")
+        .first()
+        .id
+    )
+    aredis = aioredis.from_url(
+        __import__("os").environ["TEST_REDIS_URL"], decode_responses=True
+    )
+    scheduler = InferenceScheduler(aredis)
+
+    async def np_acquire(alias, request_id):  # noqa: ARG001
+        raise NoProviderAvailable("no connected provider instance for alias 'np-a'")
+
+    monkeypatch.setattr(scheduler, "acquire", np_acquire)
+
+    agen = route_mod._stream_response(
+        scheduler=scheduler,
+        alias="np-a",
+        request_id="req-np",
+        client_response_id="resp_np000",
+        previous_response_id=None,
+        input_items_for_record=[{"role": "user", "content": "x"}],
+        definition_id=definition_id,
+        litellm_input=[{"role": "user", "content": "x"}],
+        passthrough={},
+        base_params={"model": "np-a", "provider_type": "mock"},
+        store=True,
+    )
+    body = "".join([chunk async for chunk in agen])
+    frames = parse_sse(body)
+    failed = next(p for t, p in frames if t == "response.failed")
+    assert failed["response"]["error"]["code"] == "no_provider"
+    assert [t for t, _ in frames][-1] == "__done__"
+    await aredis.aclose()
+
+
+async def test_client_disconnect_during_keepalive_releases_slot(
+    session, monkeypatch
+) -> None:
+    """Disconnecting while the keepalive loop blocks on a queued acquire
+    must not leak the waiter or the slot."""
+    import redis.asyncio as aioredis
+
+    from app.api.v1 import responses as route_mod
+    from app.services.scheduler import InferenceScheduler
+
+    _short_keepalive(monkeypatch)
+    seed_instance(session, alias="dl-a", machine_uid="dl-m", capacity=1)
+    aredis = aioredis.from_url(
+        __import__("os").environ["TEST_REDIS_URL"], decode_responses=True
+    )
+    scheduler = InferenceScheduler(aredis)
+    # Occupy the only slot so the generator's acquire genuinely queues and
+    # the keepalive phase is what the client disconnects during.
+    await scheduler.acquire("dl-a", "holder")
+    definition_id = (
+        session.query(ProviderDefinition)
+        .filter(ProviderDefinition.alias == "dl-a")
+        .first()
+        .id
+    )
+
+    agen = route_mod._stream_response(
+        scheduler=scheduler,
+        alias="dl-a",
+        request_id="req-dl",
+        client_response_id="resp_dl000",
+        previous_response_id=None,
+        input_items_for_record=[{"role": "user", "content": "x"}],
+        definition_id=definition_id,
+        litellm_input=[{"role": "user", "content": "x"}],
+        passthrough={},
+        base_params={"model": "dl-a", "provider_type": "mock"},
+        store=True,
+    )
+    # Consume one keepalive (proves we are in the admission-wait phase),
+    # then disconnect.
+    first = await agen.__anext__()
+    assert first == ": keep-alive\n\n"
+    assert "req-dl" in scheduler._states["dl-a"].waiters
+    await agen.aclose()
+
+    # No leaked waiter; only the original holder slot remains.
+    assert list(scheduler._states["dl-a"].waiters) == []
+    assert scheduler.active_count("dl-a") == 1
+    await scheduler.release("dl-a", "holder")
+    assert scheduler.active_count("dl-a") == 0
+    await aredis.aclose()
+
+
+async def test_stream_aresponses_call_time_error_is_terminal(
+    session, monkeypatch
+) -> None:
+    """S1: ``litellm.aresponses`` raising at CALL time (connection
+    refused / APIError before the first event) must produce the same
+    terminal SSE contract as a mid-stream failure: response.failed +
+    error + [DONE], not a bare truncation after the keepalives."""
+    import redis.asyncio as aioredis
+
+    from app.api.v1 import responses as route_mod
+    from app.services.scheduler import InferenceScheduler
+
+    instance = seed_instance(session, alias="ct-a", machine_uid="ct-m")
+
+    async def raise_at_call(*args, **kwargs):  # noqa: ARG001
+        raise litellm.exceptions.APIError(
+            status_code=500,
+            message="connection refused",
+            llm_provider="openai",
+            model="ct-a",
+        )
+
+    monkeypatch.setattr(litellm, "aresponses", raise_at_call)
+
+    aredis = aioredis.from_url(
+        __import__("os").environ["TEST_REDIS_URL"], decode_responses=True
+    )
+    scheduler = InferenceScheduler(aredis)
+    agen = route_mod._stream_response(
+        scheduler=scheduler,
+        alias="ct-a",
+        request_id="req-ct",
+        client_response_id="resp_ct000",
+        previous_response_id=None,
+        input_items_for_record=[{"role": "user", "content": "x"}],
+        definition_id=instance.provider_definition_id,
+        litellm_input=[{"role": "user", "content": "x"}],
+        passthrough={},
+        base_params={"model": "ct-a", "provider_type": "mock"},
+        store=True,
+    )
+    body = "".join([chunk async for chunk in agen])
+    frames = parse_sse(body)
+    types = [t for t, _ in frames]
+    assert "response.failed" in types
+    assert "error" in types
+    assert types[-1] == "__done__"
+    failed = next(p for t, p in frames if t == "response.failed")
+    assert failed["response"]["id"] == "resp_ct000"
+    assert failed["response"]["status"] == "failed"
+    assert failed["response"]["error"]["code"] == "upstream_failed"
+
+    with Session(engine) as check:
+        rec = check.exec(
+            select(ResponseRecord).where(ResponseRecord.response_id == "resp_ct000")
+        ).first()
+        assert rec is not None
+        assert rec.status == "failed"
+        assert rec.error_code == "upstream_failed"
+    # Slot released; the exception was NOT swallowed as a SchedulerError.
+    assert scheduler.active_count("ct-a") == 0
+    await aredis.aclose()
+
+
+def test_non_stream_queue_timeout_still_http_504(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    """Non-stream path keeps the HTTP 504 (unchanged by the keepalive work)."""
+    from app.services.scheduler import QueueTimeout
+
+    seed_instance(session, alias="ns504", machine_uid="ns504-m")
+    scheduler = client.app.state.scheduler
+
+    async def timeout_acquire(alias, request_id):  # noqa: ARG001
+        raise QueueTimeout("nope")
+
+    monkeypatch.setattr(scheduler, "acquire", timeout_acquire)
+    resp = client.post(
+        "/v1/responses", json={"model": "ns504", "input": "x", "stream": False}
+    )
+    assert resp.status_code == 504
+
+
+def test_non_stream_noprovider_still_http_503(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    """Non-stream path keeps the HTTP 503 (unchanged)."""
+    from app.services.scheduler import NoProviderAvailable
+
+    seed_instance(session, alias="ns503", machine_uid="ns503-m")
+    scheduler = client.app.state.scheduler
+
+    async def np_acquire(alias, request_id):  # noqa: ARG001
+        raise NoProviderAvailable("none")
+
+    monkeypatch.setattr(scheduler, "acquire", np_acquire)
+    resp = client.post(
+        "/v1/responses", json={"model": "ns503", "input": "x", "stream": False}
+    )
+    assert resp.status_code == 503
+
+
+def test_stream_zero_candidates_precheck_is_http_503(
+    client: TestClient, session: Session
+) -> None:
+    """Streaming with zero connected candidates keeps the cheap pre-stream
+    HTTP 503 (never opens a keepalive-only stream that can't respond)."""
+    machine = Machine(uid="sc503", name="sc503", host="127.0.0.1")
+    definition = ProviderDefinition(
+        alias="sc503", provider_type="mock", registration_token="tok-sc503"
+    )
+    session.add_all([machine, definition])
+    session.commit()
+    instance = ProviderInstance(
+        machine_id=machine.id,
+        provider_definition_id=definition.id,
+        websocket_connected=False,
+        backend_status="stopped",
+    )
+    session.add(instance)
+    session.commit()
+    resp = client.post(
+        "/v1/responses", json={"model": "sc503", "input": "x", "stream": True}
+    )
+    assert resp.status_code == 503

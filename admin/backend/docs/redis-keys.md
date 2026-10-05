@@ -27,41 +27,66 @@ this key layout.
 
 Admission (Phase 4/6): the head waiter is admitted when it reaches the
 front of the in-process FIFO **and** a slot is free — `active` count <
-capacity **and** the target machine has enough free VRAM (see `im:vram:*`).
-A stopped candidate backend is booted (`backend.start`, acked after the
-provider reaches running) before admission; boot failure falls through to
-the next candidate. If nothing fits, the head waits (up to `queue_timeout`)
-rather than busy-polling. On completion the request is removed from
-`active` and its `im:vram:used` entry is dropped (unless another active
-slot still occupies the same instance).
+capacity **and**, if the target needs a boot, the target machine has
+enough free VRAM (see `im:vram:*`). An already-booted target admits on
+capacity alone (its VRAM is already held). A stopped candidate backend is
+booted (`backend.start`, acked after the provider reaches running) before
+admission; boot failure falls through to the next candidate. If the boot
+doesn't fit, **idle different-alias backends on the machine are evicted**
+(`backend.stop`, LRU by `last_request_at`) under the same lock; if that
+still doesn't free enough, the head waits (up to `queue_timeout`) rather
+than busy-polling. On completion the request is removed from `active`;
+the booted instance's **VRAM hold is NOT released** (the backend is
+still loaded — only an actual stop clears it).
 
 ### In-process vs Redis boundary
 
 - **In-process (authority):** waiter FIFO order, active-slot map
-  (`request_id -> instance + vram`), the set of instances this worker has
-  booted (`self._booted`, so a lagging DB `backend_status` mirror never
-  causes a redundant `backend.start`), and the `queue_timeout` deadline.
+  (`request_id -> instance`), the per-booted-instance VRAM hold ledger
+  (`self._booted: instance_id -> (machine_uid, vram_bytes)`, so a
+  lagging DB `backend_status` mirror never causes a redundant
+  `backend.start` and idle backends stay counted), the set of instances
+  with an in-flight eviction/stop (`self._evicting`, guards victims
+  against concurrent acquires on other aliases), and the `queue_timeout`
+  deadline.
 - **Redis (mirror + contract):** queue depth, active set, per-request wait
   state, the `sched:lock` admission lock, and the `im:vram:used` ledger.
   All mirror writes are best-effort and TTL-bounded so a crashed admin
   self-heals. `release` pops the in-process slot synchronously (immediate
   `active_count` correctness) and shields only the wake-up + Redis cleanup
   so they land even under caller cancellation (client disconnect).
-- **Eviction / idle reaper (Phase 6):** not implemented — see
-  `TODO(phase6-eviction)` and `TODO(phase6-idle-reaper)` in
-  `app/services/scheduler.py`. When VRAM is insufficient the request
-  waits instead of evicting an idle different-alias instance.
+- **Eviction / idle reaper (Phase 6, implemented):** see
+  `ARCHITECTURE.md` §6. Eviction stops idle different-alias backends
+  LRU-first to free VRAM for a needed boot; the reaper stops backends
+  idle past `idle_timeout_seconds` (0 = never) every
+  `IDLE_REAPER_INTERVAL_SECONDS` (15s default) and refreshes the
+  `im:vram:used` TTL for this process's booted holds. Both clear the
+  ledger entry + mirror on a successful stop. Admission never lands on an
+  instance with an in-flight stop: `_try_admit` skips any candidate in
+  `self._evicting`. An out-of-band stop (admin UI, provider side,
+  crash) is reconciled event-driven: the connection manager calls
+  `scheduler.note_backend_stopped` on a `stopped`/`error` status frame,
+  dropping the stale hold + mirror field immediately.
 
 ## VRAM / Machine Resource
 
 | Key | Type | TTL | Purpose |
 |-----|------|-----|---------|
 | `im:vram:total:{machine_uid}` | String (int bytes) | 60s | Total VRAM budget, mirrored from Machine.total_vram_bytes; refreshed on heartbeat. |
-| `im:vram:used:{machine_uid}` | Hash: `{instance_id}` → bytes | 60s | VRAM currently held by each instance on the machine. Expired entries are swept, so a dead instance frees its VRAM without an explicit release. |
+| `im:vram:used:{machine_uid}` | Hash: `{instance_id}` → bytes | 60s | VRAM held **per booted instance** on the machine — a loaded backend keeps its weights resident between requests, so the entry is written on **boot** (`_mark_booted`) and removed on **stop** (idle reaper, eviction, or an out-of-band `backend.status`/`provider.status` frame reporting `stopped`/`error`, which the connection manager prunes via `scheduler.note_backend_stopped`), *not* per request. Refreshed (value + TTL) on every boot/adopt; the idle reaper re-EXPIREs it each tick while the backend stays booted. If the admin crashes the key lapses in 60s and self-heals: the ledger is rebuilt from the DB (`backend_status` running/in_use × `vram_required_bytes`) on the next admission. |
 
-Free VRAM for a machine = `total - sum(used)`. Eviction (Phase 5) picks a
-running-but-idle instance to stop when a higher-priority request needs the
-space.
+**Semantic change (Phase 6 close-out).** The earlier ledger recorded one
+entry per *request slot* and `hdel`-ed it on `release`, so a
+running-but-idle backend appeared to hold 0 VRAM. That is physically
+false (a booted llama-server keeps its weights) and made idle-backend
+eviction impossible — there was nothing recorded to free. VRAM is now
+accounted per booted instance; `release` frees only the capacity slot.
+`held_on(machine)` merges the mirror with `self._booted` and the DB's
+loaded-instance states (max per instance) so no hold is under-counted.
+
+Free VRAM for a machine = `total - sum(used)` (excluding the requesting
+target's own hold). Eviction picks a running-but-idle **different-alias**
+instance to stop when a boot needs the space.
 
 ## Live Metrics
 

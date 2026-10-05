@@ -30,11 +30,24 @@ from sqlmodel import Session
 
 from app.core.db import engine
 from app.core.redis import get_redis_from_app
-from app.models import ProviderInstance
+from app.models import Machine, ProviderInstance
 from app.services import redis_keys
-from app.services.wire import Ack, Frame, FrameKind, now_iso
+from app.services.wire import Ack, BackendStatusValue, Frame, FrameKind, now_iso
 
 logger = logging.getLogger("admin.connection_manager")
+
+# Backend states that mean "definitely not loaded: holds no VRAM". A
+# status frame in one of these states must prune the scheduler's
+# per-booted-instance hold (out-of-band stop). "stopping" is NOT
+# included: the weights are still resident until the stop completes, so
+# pruning early would let a concurrent boot transiently oversubscribe
+# the machine.
+_NON_LOADED_BACKEND_STATUSES = frozenset(
+    {
+        BackendStatusValue.STOPPED,
+        BackendStatusValue.ERROR,
+    }
+)
 
 # TTL for the Redis presence key. The provider must send or receive traffic
 # (pings keep it alive) more often than this. Must be an int (Redis ex=).
@@ -208,12 +221,15 @@ class ConnectionManager:
             return
 
         if frame.type == FrameKind.PROVIDER_STATUS:
-            self._persist_status(
+            machine_uid = self._persist_status(
                 state.instance_id,
                 instance_status=frame.payload.get("instance_status"),
                 backend_status=frame.payload.get("backend_status"),
                 error_message=frame.payload.get("error_message")
                 or frame.payload.get("error"),
+            )
+            await self._prune_stopped_vram(
+                app, state.instance_id, frame.payload.get("backend_status"), machine_uid
             )
             return
 
@@ -227,12 +243,17 @@ class ConnectionManager:
             return
 
         if frame.type == FrameKind.BACKEND_STATUS:
-            self._persist_status(
+            reported = frame.payload.get("backend_status") or frame.payload.get(
+                "status"
+            )
+            machine_uid = self._persist_status(
                 state.instance_id,
-                backend_status=frame.payload.get("backend_status")
-                or frame.payload.get("status"),
+                backend_status=reported,
                 error_message=frame.payload.get("error_message")
                 or frame.payload.get("error"),
+            )
+            await self._prune_stopped_vram(
+                app, state.instance_id, reported, machine_uid
             )
             return
 
@@ -256,14 +277,16 @@ class ConnectionManager:
         instance_status: str | None = None,
         backend_status: str | None = None,
         error_message: str | None = None,
-    ) -> None:
+    ) -> str | None:
+        """Persist a status frame to the DB; returns the instance's
+        machine uid (when the row exists) for VRAM-ledger pruning."""
         with Session(engine) as session:
             inst = session.get(ProviderInstance, _to_uuid(instance_id))
             if inst is None:
                 logger.warning(
                     "status event for unknown instance %s; ignored", instance_id
                 )
-                return
+                return None
             if instance_status:
                 inst.instance_status = instance_status
             if backend_status:
@@ -274,6 +297,37 @@ class ConnectionManager:
             inst.updated_at = datetime.now(UTC)
             session.add(inst)
             session.commit()
+            machine = session.get(Machine, inst.machine_id)
+            return machine.uid if machine is not None else None
+
+    async def _prune_stopped_vram(
+        self,
+        app: Any,
+        instance_id: str,
+        reported_backend_status: str | None,
+        machine_uid: str | None,
+    ) -> None:
+        """Drop the scheduler's per-booted-instance VRAM hold when a
+        status frame says the backend is stopped/error (out-of-band stop:
+        admin UI, provider-side stop, or crash-emitted status).
+
+        Event-driven counterpart to the scheduler-initiated stop path;
+        without it a ``_booted`` hold survives with the DB already
+        ``stopped``, the reaper's TTL refresh keeps the stale mirror
+        entry alive, and the machine stays permanently over-counted.
+        Scheduler reached via ``app.state.scheduler`` (lazy import to
+        avoid a scheduler <-> connection_manager import cycle); no-op
+        when the scheduler isn't running or the instance isn't held.
+        """
+        if machine_uid is None or reported_backend_status is None:
+            return
+        if reported_backend_status not in _NON_LOADED_BACKEND_STATUSES:
+            return
+        scheduler = getattr(app.state, "scheduler", None)
+        if scheduler is None:
+            return
+        with contextlib.suppress(Exception):
+            await scheduler.note_backend_stopped(instance_id, machine_uid)
 
     # ------------------------------------------------------------------
     # Outbound

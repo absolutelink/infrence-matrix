@@ -277,7 +277,7 @@ def install_config_handlers(
         #    is adopted without touching the backend.
         #    NOTE: ``idle_timeout_seconds`` is intentionally NOT adopted
         #    here — the idle reaper is admin-side only
-        #    (TODO(phase6-idle-reaper) in the scheduler); the provider
+        #    (``InferenceScheduler._idle_reaper``); the provider
         #    consumes no idle setting.
         capacity_adopted = False
         capacity = payload.get("capacity")
