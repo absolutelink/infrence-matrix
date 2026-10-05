@@ -54,8 +54,7 @@ jobs:
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Install dependencies
-        working-directory: ./admin/backend
-        run: uv sync --frozen
+        run: uv sync --frozen --package matrix-admin --package matrix-provider-lib
 
       - name: Run linter
         working-directory: ./admin/backend

@@ -17,7 +17,16 @@ import importlib.util
 
 import pytest
 
-if importlib.util.find_spec("provider_lib.wire") is None:
+# NOTE: query the top-level "provider_lib" name, not "provider_lib.wire" —
+# find_spec() on a dotted name imports the parent package and raises
+# ModuleNotFoundError (not returns None) when it is absent, which would
+# crash collection in an isolated admin-only environment.
+try:
+    _provider_lib_spec = importlib.util.find_spec("provider_lib")
+except ModuleNotFoundError:
+    _provider_lib_spec = None
+
+if _provider_lib_spec is None:
     pytest.skip(
         "provider_lib not installed (isolated admin env); drift guard N/A",
         allow_module_level=True,
