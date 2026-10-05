@@ -1,15 +1,11 @@
 import {
-  AudioLines,
-  Box,
-  Braces,
   Cpu,
-  FileText,
-  Gauge,
-  Home,
-  MessageSquare,
+  LayoutDashboard,
   MessagesSquare,
+  Package,
+  Play,
   Server,
-  Type,
+  Settings,
 } from "lucide-react"
 
 import { SidebarAppearance } from "@/components/Common/Appearance"
@@ -23,17 +19,13 @@ import {
 import { type Item, Main } from "./Main"
 
 const baseItems: Item[] = [
-  { icon: Home, title: "Dashboard", path: "/" },
-  { icon: Server, title: "Models", path: "/models" },
-  { icon: Cpu, title: "Agents", path: "/agents" },
-  { icon: Box, title: "Server Instances", path: "/server-instances" },
-  { icon: MessageSquare, title: "Chat", path: "/chat" },
-  { icon: MessagesSquare, title: "Responses API", path: "/responses" },
-  { icon: Type, title: "Text Completion", path: "/completions" },
-  { icon: Braces, title: "Embeddings", path: "/embeddings" },
-  { icon: AudioLines, title: "Transcriptions", path: "/audio" },
-  { icon: FileText, title: "Files", path: "/files" },
-  { icon: Gauge, title: "Benchmarks", path: "/benchmarks" },
+  { icon: LayoutDashboard, title: "Dashboard", path: "/" },
+  { icon: Server, title: "Machines", path: "/machines" },
+  { icon: Package, title: "Definitions", path: "/definitions" },
+  { icon: Cpu, title: "Instances", path: "/instances" },
+  { icon: MessagesSquare, title: "Responses / Usage", path: "/responses" },
+  { icon: Play, title: "Playground", path: "/playground" },
+  { icon: Settings, title: "Settings", path: "/settings" },
 ]
 
 export function AppSidebar() {

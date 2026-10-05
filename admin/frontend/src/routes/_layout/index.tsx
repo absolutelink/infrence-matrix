@@ -1,289 +1,249 @@
-import { useSuspenseQuery } from "@tanstack/react-query"
-import { createFileRoute } from "@tanstack/react-router"
+import { createFileRoute, Link } from "@tanstack/react-router"
 import {
-  Activity,
-  Clock,
+  ArrowRight,
+  Coins,
   Cpu,
-  MemoryStick,
-  MessageSquare,
+  Gauge,
+  MessagesSquare,
+  Package,
   Server,
-  TrendingUp,
 } from "lucide-react"
 import { Suspense } from "react"
 
-import { AgentsService, ModelsService, ServerInstancesService } from "@/client"
+import { EmptyNudge } from "@/components/Common/EmptyNudge"
+import { StatusBadge } from "@/components/Common/StatusBadge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { uniqueGpuSnapshots } from "@/lib/gpuMetrics"
+import { Skeleton } from "@/components/ui/skeleton"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
+import {
+  useDefinitions,
+  useInstances,
+  useOverview,
+  useResponses,
+} from "@/hooks/useAdminData"
 
 export const Route = createFileRoute("/_layout/")({
   component: Dashboard,
-  head: () => ({
-    meta: [
-      {
-        title: "Dashboard - Inference Matrix",
-      },
-    ],
-  }),
+  head: () => ({ meta: [{ title: "Dashboard - Inference Matrix" }] }),
 })
-
-function getModelsQueryOptions() {
-  return {
-    queryFn: async () =>
-      (await ModelsService.readModels({ query: { skip: 0, limit: 100 } })).data,
-    queryKey: ["dashboard-models"],
-  }
-}
-
-function getAgentsQueryOptions() {
-  return {
-    queryFn: async () => {
-      const response = await AgentsService.listAgents()
-      return response.data.agents || []
-    },
-    queryKey: ["dashboard-agents"],
-  }
-}
-
-function getServerInstancesQueryOptions() {
-  return {
-    queryFn: async () =>
-      (await ServerInstancesService.instancesListServerInstances()).data
-        .server_instances || [],
-    queryKey: ["dashboard-server-instances"],
-    refetchInterval: 10000,
-  }
-}
 
 function MetricCard({
   title,
   value,
-  description,
+  sub,
   icon: Icon,
-  trend,
+  to,
 }: {
   title: string
   value: string | number
-  description?: string
+  sub?: string
   icon: React.ElementType
-  trend?: {
-    value: number
-    label: string
-  }
+  to?: string
 }) {
-  return (
-    <Card>
+  const card = (
+    <Card className="transition-colors hover:bg-accent/50">
       <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-        <CardTitle className="text-sm font-medium">{title}</CardTitle>
-        <Icon className="h-4 w-4 text-muted-foreground" />
+        <CardTitle className="text-sm font-medium text-muted-foreground">
+          {title}
+        </CardTitle>
+        <Icon className="size-4 text-muted-foreground" />
       </CardHeader>
       <CardContent>
         <div className="text-2xl font-bold">{value}</div>
-        {description && (
-          <p className="text-xs text-muted-foreground mt-1">{description}</p>
-        )}
-        {trend && (
-          <div className="flex items-center mt-2 text-xs">
-            <TrendingUp className="h-3 w-3 mr-1 text-green-600" />
-            <span className="text-green-600 font-medium">{trend.label}</span>
-          </div>
-        )}
+        {sub && <p className="text-xs text-muted-foreground">{sub}</p>}
       </CardContent>
     </Card>
+  )
+  return to ? (
+    <Link to={to} className="block">
+      {card}
+    </Link>
+  ) : (
+    card
   )
 }
 
 function DashboardContent() {
-  const { data: models } = useSuspenseQuery(getModelsQueryOptions())
-  const { data: agents } = useSuspenseQuery(getAgentsQueryOptions())
-  const { data: serverInstances } = useSuspenseQuery(
-    getServerInstancesQueryOptions(),
-  )
+  const { data: overview } = useOverview()
+  const { data: instances = [] } = useInstances()
+  const { data: definitions = [] } = useDefinitions()
+  const { data: recent } = useResponses(8, 0)
 
-  const onlineAgents = agents.filter((a: any) => a.status === "online").length
-  const runningServers = serverInstances.filter(
-    (s: any) => s.status === "running",
-  ).length
-  const healthyServers = serverInstances.filter(
-    (s: any) => s.status === "running" && s.health_status === "healthy",
-  ).length
-  const totalRequests = serverInstances.reduce(
-    (acc: number, s: any) => acc + (s.total_requests || 0),
-    0,
-  )
-  const gpuSnapshots = uniqueGpuSnapshots(agents)
-  const totalVram = gpuSnapshots.reduce(
-    (sum: number, gpu: any) => sum + (gpu.vram_total || 0),
-    0,
-  )
-  const usedVram = gpuSnapshots.reduce(
-    (sum: number, gpu: any) => sum + (gpu.vram_used || 0),
-    0,
-  )
-  const gpuUtilization = gpuSnapshots.length
-    ? gpuSnapshots.reduce(
-        (sum: number, gpu: any) => sum + (gpu.utilization || 0),
-        0,
-      ) / gpuSnapshots.length
-    : null
-  const formatBytes = (bytes: number) => `${(bytes / 1073741824).toFixed(1)} GB`
+  const enabledAliases = definitions.filter((d) => d.enabled).length
 
   return (
-    <div className="space-y-6">
+    <div className="flex flex-col gap-6">
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
         <p className="text-muted-foreground">
-          Overview of your inference infrastructure
+          Inference Matrix fleet overview — machines, definitions, live
+          instances, and recent turns.
         </p>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-6">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <MetricCard
-          title="Total Models"
-          value={models?.length || 0}
-          description="GGUF models available"
+          title="Machines"
+          value={overview?.machines ?? 0}
           icon={Server}
+          to="/machines"
         />
         <MetricCard
-          title="Agents"
-          value={`${onlineAgents}/${agents?.length || 0}`}
-          description="Online agents"
+          title="Definitions"
+          value={overview?.definitions ?? 0}
+          sub={`${enabledAliases} enabled`}
+          icon={Package}
+          to="/definitions"
+        />
+        <MetricCard
+          title="Connected instances"
+          value={overview?.instances_connected ?? 0}
+          sub={`${overview?.instances ?? 0} total · ${overview?.backends_running ?? 0} backends running`}
           icon={Cpu}
-          trend={
-            onlineAgents === agents?.length
-              ? { value: 100, label: "All online" }
-              : undefined
-          }
+          to="/instances"
         />
         <MetricCard
-          title="Running Servers"
-          value={runningServers}
-          description="Active llama.cpp instances"
-          icon={Activity}
-        />
-        <MetricCard
-          title="Healthy Servers"
-          value={`${healthyServers}/${runningServers}`}
-          description="Ready for inference"
-          icon={Activity}
-        />
-        <MetricCard
-          title="Total Requests"
-          value={totalRequests.toLocaleString()}
-          description="All-time inference requests"
-          icon={MessageSquare}
-        />
-        <MetricCard
-          title="GPU Utilization"
-          value={
-            gpuUtilization === null ? "—" : `${gpuUtilization.toFixed(0)}%`
-          }
-          description={`${gpuSnapshots.length} physical GPU${gpuSnapshots.length === 1 ? "" : "s"} reporting`}
-          icon={Cpu}
-        />
-        <MetricCard
-          title="VRAM Usage"
-          value={
-            totalVram
-              ? `${formatBytes(usedVram)} / ${formatBytes(totalVram)}`
-              : "—"
-          }
-          description="Across connected agents"
-          icon={MemoryStick}
+          title="Live inference"
+          value={`${overview?.active_requests ?? 0} active`}
+          sub={`${overview?.queued_requests ?? 0} queued`}
+          icon={Gauge}
         />
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-7">
-        <Card className="col-span-4">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Activity className="h-5 w-5" />
-              Recent Activity
-            </CardTitle>
+      <div className="grid gap-4 lg:grid-cols-3">
+        <Card className="lg:col-span-2">
+          <CardHeader className="flex flex-row items-center justify-between">
+            <CardTitle>Instance status</CardTitle>
+            <Link
+              to="/instances"
+              className="text-sm text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
+            >
+              All instances <ArrowRight className="size-3" />
+            </Link>
           </CardHeader>
           <CardContent>
-            <div className="space-y-4">
-              {(serverInstances as any[]).slice(0, 5).map((instance: any) => (
-                <div
-                  key={instance.id}
-                  className="flex items-center justify-between border-b pb-2 last:border-0"
-                >
-                  <div className="space-y-1">
-                    <p className="text-sm font-medium">
-                      {instance.model_name || "Unknown Model"}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      Agent: {instance.agent_name || "Unknown"}
-                    </p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-sm font-medium">
-                      {instance.total_requests.toLocaleString()} requests
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      Port: {instance.port}
-                    </p>
-                  </div>
-                </div>
-              ))}
-              {serverInstances.length === 0 && (
-                <p className="text-center text-muted-foreground py-4">
-                  No server activity yet
-                </p>
-              )}
-            </div>
+            {instances.length === 0 ? (
+              <EmptyNudge
+                text="No provider instances yet."
+                actionLabel="Create a definition"
+                to="/definitions"
+              />
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Machine</TableHead>
+                    <TableHead>Alias</TableHead>
+                    <TableHead>Instance</TableHead>
+                    <TableHead>Backend</TableHead>
+                    <TableHead>WS</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {instances.map((i) => (
+                    <TableRow key={i.id}>
+                      <TableCell className="font-mono text-xs">
+                        {i.machine_uid ?? "—"}
+                      </TableCell>
+                      <TableCell className="font-medium">{i.alias}</TableCell>
+                      <TableCell>
+                        <StatusBadge status={i.instance_status} />
+                      </TableCell>
+                      <TableCell>
+                        <StatusBadge status={i.backend_status} />
+                      </TableCell>
+                      <TableCell>
+                        <span
+                          className={
+                            i.websocket_connected
+                              ? "text-emerald-500"
+                              : "text-muted-foreground"
+                          }
+                        >
+                          {i.websocket_connected ? "●" : "○"} ep{i.epoch}
+                        </span>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
           </CardContent>
         </Card>
 
-        <Card className="col-span-3">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Clock className="h-5 w-5" />
-              System Status
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="space-y-1">
-                <p className="text-sm font-medium">Models Available</p>
-                <p className="text-xs text-muted-foreground">
-                  GGUF models in library
+        <div className="flex flex-col gap-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-sm">
+                <Coins className="size-4" /> Token usage
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-1 text-sm">
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Input</span>
+                <span className="font-mono">{overview?.input_tokens ?? 0}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Output</span>
+                <span className="font-mono">
+                  {overview?.output_tokens ?? 0}
+                </span>
+              </div>
+              <div className="flex justify-between border-t pt-1 font-medium">
+                <span>Total</span>
+                <span className="font-mono">{overview?.total_tokens ?? 0}</span>
+              </div>
+              <Link
+                to="/responses"
+                className="mt-2 inline-flex items-center gap-1 text-xs text-primary hover:underline"
+              >
+                Usage details <ArrowRight className="size-3" />
+              </Link>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-sm">
+                <MessagesSquare className="size-4" /> Recent responses
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {(recent?.responses ?? []).length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  Nothing yet — try the Playground.
                 </p>
-              </div>
-              <div className="text-2xl font-bold">{models?.length || 0}</div>
-            </div>
-            <div className="flex items-center justify-between">
-              <div className="space-y-1">
-                <p className="text-sm font-medium">Online Agents</p>
-                <p className="text-xs text-muted-foreground">
-                  Connected agents
-                </p>
-              </div>
-              <div className="text-2xl font-bold text-green-600">
-                {onlineAgents}
-              </div>
-            </div>
-            <div className="flex items-center justify-between">
-              <div className="space-y-1">
-                <p className="text-sm font-medium">Running Servers</p>
-                <p className="text-xs text-muted-foreground">
-                  Active inference servers
-                </p>
-              </div>
-              <div className="text-2xl font-bold">{runningServers}</div>
-            </div>
-            <div className="flex items-center justify-between">
-              <div className="space-y-1">
-                <p className="text-sm font-medium">Total Requests</p>
-                <p className="text-xs text-muted-foreground">
-                  All-time inference count
-                </p>
-              </div>
-              <div className="text-2xl font-bold">
-                {totalRequests.toLocaleString()}
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+              ) : (
+                (recent?.responses ?? []).map((r) => (
+                  <div
+                    key={r.id}
+                    className="flex items-center justify-between gap-2 text-sm"
+                  >
+                    <div className="min-w-0 truncate">
+                      <span className="font-medium">{r.model_alias}</span>{" "}
+                      <span className="text-xs text-muted-foreground">
+                        {r.api_format === "chat_completions" ? "chat" : "resp"}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="font-mono text-xs text-muted-foreground">
+                        {r.total_tokens} tok
+                      </span>
+                      <StatusBadge status={r.status} />
+                    </div>
+                  </div>
+                ))
+              )}
+            </CardContent>
+          </Card>
+        </div>
       </div>
     </div>
   )
@@ -293,8 +253,10 @@ function Dashboard() {
   return (
     <Suspense
       fallback={
-        <div className="flex items-center justify-center py-12">
-          Loading dashboard...
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Skeleton key={i} className="h-28 rounded-lg" />
+          ))}
         </div>
       }
     >

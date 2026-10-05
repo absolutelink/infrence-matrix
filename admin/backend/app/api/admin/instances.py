@@ -1,6 +1,12 @@
-"""Admin provider-instance actions (Phase 9).
+"""Admin provider-instance reads + actions (Phase 9 / Phase 10 UI).
 
-Small operator/UI-facing pushes over the provider WS:
+Reads (Phase 10 UI):
+
+- ``GET /admin/api/instances`` — every provider instance with its
+  machine uid and definition alias denormalized for tables.
+- ``GET /admin/api/instances/{id}`` — single instance.
+
+Actions over the provider WS:
 
 - ``POST /admin/api/instances/{id}/cache/clear`` — send ``cache.clear``
   (prompt-cache dirs only, never model files; see
@@ -9,9 +15,9 @@ Small operator/UI-facing pushes over the provider WS:
   ``storage.prune_unused`` (delete MODELS_DIR files not referenced by
   the driver's resolved artifact set; ``{"dry_run": true}` supported).
 
-Both require the instance's WebSocket to be connected; otherwise 409.
-The provider's ack detail is returned verbatim (deleted paths, bytes
-freed, kept list).
+Both actions require the instance's WebSocket to be connected; otherwise
+409. The provider's ack detail is returned verbatim (deleted paths,
+bytes freed, kept list).
 """
 
 import logging
@@ -20,8 +26,9 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlmodel import Session
+from sqlmodel import Session, select
 
+from app.api.admin.serializers import iso_utc
 from app.core.db import get_session
 from app.models import ProviderInstance
 from app.services.connection_manager import manager
@@ -41,6 +48,53 @@ class ActionBody(BaseModel):
     # cache.clear only: override the backend_in_use refusal (clearing
     # engine caches while requests are live may cause I/O errors).
     force: bool = False
+
+
+def instance_dict(inst: ProviderInstance) -> dict[str, Any]:
+    return {
+        "id": str(inst.id),
+        "machine_id": str(inst.machine_id),
+        "machine_uid": inst.machine.uid if inst.machine else None,
+        "machine_name": inst.machine.name if inst.machine else None,
+        "provider_definition_id": str(inst.provider_definition_id),
+        "alias": (inst.provider_definition.alias if inst.provider_definition else None),
+        "provider_type": (
+            inst.provider_definition.provider_type if inst.provider_definition else None
+        ),
+        "port": inst.port,
+        "version": inst.version,
+        "instance_status": inst.instance_status,
+        "backend_status": inst.backend_status,
+        "websocket_connected": inst.websocket_connected,
+        "epoch": inst.epoch,
+        "last_seen": iso_utc(inst.last_seen),
+        "last_request_at": iso_utc(inst.last_request_at),
+        "config_fingerprint": inst.config_fingerprint,
+        "assigned_gpus": inst.assigned_gpus,
+        "error_message": inst.error_message,
+        "created_at": iso_utc(inst.created_at),
+    }
+
+
+@router.get("")
+def list_instances(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    instances = session.exec(
+        select(ProviderInstance).order_by(ProviderInstance.created_at)
+    ).all()
+    return [instance_dict(i) for i in instances]
+
+
+@router.get("/{instance_id}")
+def get_instance(
+    instance_id: str, session: Session = Depends(get_session)
+) -> dict[str, Any]:
+    try:
+        inst = session.get(ProviderInstance, uuid.UUID(instance_id))
+    except ValueError:
+        raise HTTPException(status_code=404, detail="instance not found") from None
+    if inst is None:
+        raise HTTPException(status_code=404, detail="instance not found")
+    return instance_dict(inst)
 
 
 def _get_connected_instance(session: Session, instance_id: str) -> ProviderInstance:
@@ -75,13 +129,15 @@ async def _send_action(
     ok = bool(reply.payload.get("ok"))
     detail = reply.payload.get("detail") or {}
     if not ok:
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "error": reply.payload.get("error") or "provider refused",
-                "step": detail.get("step"),
-            },
-        )
+        error = {
+            "error": reply.payload.get("error") or "provider refused",
+            "step": detail.get("step"),
+        }
+        # backend_in_use NAKs carry retry_after (docs/ws-protocol.md §4);
+        # surface it so the UI can show "retry in Ns".
+        if detail.get("retry_after") is not None:
+            error["retry_after"] = detail["retry_after"]
+        raise HTTPException(status_code=502, detail=error)
     return detail
 
 

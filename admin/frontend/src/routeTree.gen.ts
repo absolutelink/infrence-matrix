@@ -11,16 +11,12 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as LayoutRouteImport } from './routes/_layout'
 import { Route as LayoutIndexRouteImport } from './routes/_layout/index'
-import { Route as LayoutAgentsRouteImport } from './routes/_layout/agents'
-import { Route as LayoutBenchmarksRouteImport } from './routes/_layout/benchmarks'
-import { Route as LayoutFilesRouteImport } from './routes/_layout/files'
-import { Route as LayoutModelsRouteImport } from './routes/_layout/models'
-import { Route as LayoutServerInstancesRouteImport } from './routes/_layout/server-instances'
-import { Route as LayoutAudioIndexRouteImport } from './routes/_layout/audio/index'
-import { Route as LayoutChatIndexRouteImport } from './routes/_layout/chat/index'
-import { Route as LayoutCompletionsIndexRouteImport } from './routes/_layout/completions/index'
-import { Route as LayoutEmbeddingsIndexRouteImport } from './routes/_layout/embeddings/index'
-import { Route as LayoutResponsesIndexRouteImport } from './routes/_layout/responses/index'
+import { Route as LayoutDefinitionsRouteImport } from './routes/_layout/definitions'
+import { Route as LayoutInstancesRouteImport } from './routes/_layout/instances'
+import { Route as LayoutMachinesRouteImport } from './routes/_layout/machines'
+import { Route as LayoutPlaygroundRouteImport } from './routes/_layout/playground'
+import { Route as LayoutResponsesRouteImport } from './routes/_layout/responses'
+import { Route as LayoutSettingsRouteImport } from './routes/_layout/settings'
 
 const LayoutRoute = LayoutRouteImport.update({
   id: '/_layout',
@@ -31,139 +27,95 @@ const LayoutIndexRoute = LayoutIndexRouteImport.update({
   path: '/',
   getParentRoute: () => LayoutRoute,
 } as any)
-const LayoutAgentsRoute = LayoutAgentsRouteImport.update({
-  id: '/agents',
-  path: '/agents',
+const LayoutDefinitionsRoute = LayoutDefinitionsRouteImport.update({
+  id: '/definitions',
+  path: '/definitions',
   getParentRoute: () => LayoutRoute,
 } as any)
-const LayoutBenchmarksRoute = LayoutBenchmarksRouteImport.update({
-  id: '/benchmarks',
-  path: '/benchmarks',
+const LayoutInstancesRoute = LayoutInstancesRouteImport.update({
+  id: '/instances',
+  path: '/instances',
   getParentRoute: () => LayoutRoute,
 } as any)
-const LayoutFilesRoute = LayoutFilesRouteImport.update({
-  id: '/files',
-  path: '/files',
+const LayoutMachinesRoute = LayoutMachinesRouteImport.update({
+  id: '/machines',
+  path: '/machines',
   getParentRoute: () => LayoutRoute,
 } as any)
-const LayoutModelsRoute = LayoutModelsRouteImport.update({
-  id: '/models',
-  path: '/models',
+const LayoutPlaygroundRoute = LayoutPlaygroundRouteImport.update({
+  id: '/playground',
+  path: '/playground',
   getParentRoute: () => LayoutRoute,
 } as any)
-const LayoutServerInstancesRoute = LayoutServerInstancesRouteImport.update({
-  id: '/server-instances',
-  path: '/server-instances',
+const LayoutResponsesRoute = LayoutResponsesRouteImport.update({
+  id: '/responses',
+  path: '/responses',
   getParentRoute: () => LayoutRoute,
 } as any)
-const LayoutAudioIndexRoute = LayoutAudioIndexRouteImport.update({
-  id: '/audio/',
-  path: '/audio/',
-  getParentRoute: () => LayoutRoute,
-} as any)
-const LayoutChatIndexRoute = LayoutChatIndexRouteImport.update({
-  id: '/chat/',
-  path: '/chat/',
-  getParentRoute: () => LayoutRoute,
-} as any)
-const LayoutCompletionsIndexRoute = LayoutCompletionsIndexRouteImport.update({
-  id: '/completions/',
-  path: '/completions/',
-  getParentRoute: () => LayoutRoute,
-} as any)
-const LayoutEmbeddingsIndexRoute = LayoutEmbeddingsIndexRouteImport.update({
-  id: '/embeddings/',
-  path: '/embeddings/',
-  getParentRoute: () => LayoutRoute,
-} as any)
-const LayoutResponsesIndexRoute = LayoutResponsesIndexRouteImport.update({
-  id: '/responses/',
-  path: '/responses/',
+const LayoutSettingsRoute = LayoutSettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
   getParentRoute: () => LayoutRoute,
 } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof LayoutIndexRoute
-  '/agents': typeof LayoutAgentsRoute
-  '/benchmarks': typeof LayoutBenchmarksRoute
-  '/files': typeof LayoutFilesRoute
-  '/models': typeof LayoutModelsRoute
-  '/server-instances': typeof LayoutServerInstancesRoute
-  '/audio/': typeof LayoutAudioIndexRoute
-  '/chat/': typeof LayoutChatIndexRoute
-  '/completions/': typeof LayoutCompletionsIndexRoute
-  '/embeddings/': typeof LayoutEmbeddingsIndexRoute
-  '/responses/': typeof LayoutResponsesIndexRoute
+  '/definitions': typeof LayoutDefinitionsRoute
+  '/instances': typeof LayoutInstancesRoute
+  '/machines': typeof LayoutMachinesRoute
+  '/playground': typeof LayoutPlaygroundRoute
+  '/responses': typeof LayoutResponsesRoute
+  '/settings': typeof LayoutSettingsRoute
 }
 export interface FileRoutesByTo {
-  '/agents': typeof LayoutAgentsRoute
-  '/benchmarks': typeof LayoutBenchmarksRoute
-  '/files': typeof LayoutFilesRoute
-  '/models': typeof LayoutModelsRoute
-  '/server-instances': typeof LayoutServerInstancesRoute
+  '/definitions': typeof LayoutDefinitionsRoute
+  '/instances': typeof LayoutInstancesRoute
+  '/machines': typeof LayoutMachinesRoute
+  '/playground': typeof LayoutPlaygroundRoute
+  '/responses': typeof LayoutResponsesRoute
+  '/settings': typeof LayoutSettingsRoute
   '/': typeof LayoutIndexRoute
-  '/audio': typeof LayoutAudioIndexRoute
-  '/chat': typeof LayoutChatIndexRoute
-  '/completions': typeof LayoutCompletionsIndexRoute
-  '/embeddings': typeof LayoutEmbeddingsIndexRoute
-  '/responses': typeof LayoutResponsesIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_layout': typeof LayoutRouteWithChildren
-  '/_layout/agents': typeof LayoutAgentsRoute
-  '/_layout/benchmarks': typeof LayoutBenchmarksRoute
-  '/_layout/files': typeof LayoutFilesRoute
-  '/_layout/models': typeof LayoutModelsRoute
-  '/_layout/server-instances': typeof LayoutServerInstancesRoute
+  '/_layout/definitions': typeof LayoutDefinitionsRoute
+  '/_layout/instances': typeof LayoutInstancesRoute
+  '/_layout/machines': typeof LayoutMachinesRoute
+  '/_layout/playground': typeof LayoutPlaygroundRoute
+  '/_layout/responses': typeof LayoutResponsesRoute
+  '/_layout/settings': typeof LayoutSettingsRoute
   '/_layout/': typeof LayoutIndexRoute
-  '/_layout/audio/': typeof LayoutAudioIndexRoute
-  '/_layout/chat/': typeof LayoutChatIndexRoute
-  '/_layout/completions/': typeof LayoutCompletionsIndexRoute
-  '/_layout/embeddings/': typeof LayoutEmbeddingsIndexRoute
-  '/_layout/responses/': typeof LayoutResponsesIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
-    | '/agents'
-    | '/benchmarks'
-    | '/files'
-    | '/models'
-    | '/server-instances'
-    | '/audio/'
-    | '/chat/'
-    | '/completions/'
-    | '/embeddings/'
-    | '/responses/'
+    | '/definitions'
+    | '/instances'
+    | '/machines'
+    | '/playground'
+    | '/responses'
+    | '/settings'
   fileRoutesByTo: FileRoutesByTo
   to:
-    | '/agents'
-    | '/benchmarks'
-    | '/files'
-    | '/models'
-    | '/server-instances'
-    | '/'
-    | '/audio'
-    | '/chat'
-    | '/completions'
-    | '/embeddings'
+    | '/definitions'
+    | '/instances'
+    | '/machines'
+    | '/playground'
     | '/responses'
+    | '/settings'
+    | '/'
   id:
     | '__root__'
     | '/_layout'
-    | '/_layout/agents'
-    | '/_layout/benchmarks'
-    | '/_layout/files'
-    | '/_layout/models'
-    | '/_layout/server-instances'
+    | '/_layout/definitions'
+    | '/_layout/instances'
+    | '/_layout/machines'
+    | '/_layout/playground'
+    | '/_layout/responses'
+    | '/_layout/settings'
     | '/_layout/'
-    | '/_layout/audio/'
-    | '/_layout/chat/'
-    | '/_layout/completions/'
-    | '/_layout/embeddings/'
-    | '/_layout/responses/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -186,105 +138,69 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LayoutIndexRouteImport
       parentRoute: typeof LayoutRoute
     }
-    '/_layout/agents': {
-      id: '/_layout/agents'
-      path: '/agents'
-      fullPath: '/agents'
-      preLoaderRoute: typeof LayoutAgentsRouteImport
+    '/_layout/definitions': {
+      id: '/_layout/definitions'
+      path: '/definitions'
+      fullPath: '/definitions'
+      preLoaderRoute: typeof LayoutDefinitionsRouteImport
       parentRoute: typeof LayoutRoute
     }
-    '/_layout/benchmarks': {
-      id: '/_layout/benchmarks'
-      path: '/benchmarks'
-      fullPath: '/benchmarks'
-      preLoaderRoute: typeof LayoutBenchmarksRouteImport
+    '/_layout/instances': {
+      id: '/_layout/instances'
+      path: '/instances'
+      fullPath: '/instances'
+      preLoaderRoute: typeof LayoutInstancesRouteImport
       parentRoute: typeof LayoutRoute
     }
-    '/_layout/files': {
-      id: '/_layout/files'
-      path: '/files'
-      fullPath: '/files'
-      preLoaderRoute: typeof LayoutFilesRouteImport
+    '/_layout/machines': {
+      id: '/_layout/machines'
+      path: '/machines'
+      fullPath: '/machines'
+      preLoaderRoute: typeof LayoutMachinesRouteImport
       parentRoute: typeof LayoutRoute
     }
-    '/_layout/models': {
-      id: '/_layout/models'
-      path: '/models'
-      fullPath: '/models'
-      preLoaderRoute: typeof LayoutModelsRouteImport
+    '/_layout/playground': {
+      id: '/_layout/playground'
+      path: '/playground'
+      fullPath: '/playground'
+      preLoaderRoute: typeof LayoutPlaygroundRouteImport
       parentRoute: typeof LayoutRoute
     }
-    '/_layout/server-instances': {
-      id: '/_layout/server-instances'
-      path: '/server-instances'
-      fullPath: '/server-instances'
-      preLoaderRoute: typeof LayoutServerInstancesRouteImport
-      parentRoute: typeof LayoutRoute
-    }
-    '/_layout/audio/': {
-      id: '/_layout/audio/'
-      path: '/audio'
-      fullPath: '/audio/'
-      preLoaderRoute: typeof LayoutAudioIndexRouteImport
-      parentRoute: typeof LayoutRoute
-    }
-    '/_layout/chat/': {
-      id: '/_layout/chat/'
-      path: '/chat'
-      fullPath: '/chat/'
-      preLoaderRoute: typeof LayoutChatIndexRouteImport
-      parentRoute: typeof LayoutRoute
-    }
-    '/_layout/completions/': {
-      id: '/_layout/completions/'
-      path: '/completions'
-      fullPath: '/completions/'
-      preLoaderRoute: typeof LayoutCompletionsIndexRouteImport
-      parentRoute: typeof LayoutRoute
-    }
-    '/_layout/embeddings/': {
-      id: '/_layout/embeddings/'
-      path: '/embeddings'
-      fullPath: '/embeddings/'
-      preLoaderRoute: typeof LayoutEmbeddingsIndexRouteImport
-      parentRoute: typeof LayoutRoute
-    }
-    '/_layout/responses/': {
-      id: '/_layout/responses/'
+    '/_layout/responses': {
+      id: '/_layout/responses'
       path: '/responses'
-      fullPath: '/responses/'
-      preLoaderRoute: typeof LayoutResponsesIndexRouteImport
+      fullPath: '/responses'
+      preLoaderRoute: typeof LayoutResponsesRouteImport
+      parentRoute: typeof LayoutRoute
+    }
+    '/_layout/settings': {
+      id: '/_layout/settings'
+      path: '/settings'
+      fullPath: '/settings'
+      preLoaderRoute: typeof LayoutSettingsRouteImport
       parentRoute: typeof LayoutRoute
     }
   }
 }
 
 interface LayoutRouteChildren {
-  LayoutAgentsRoute: typeof LayoutAgentsRoute
-  LayoutBenchmarksRoute: typeof LayoutBenchmarksRoute
-  LayoutFilesRoute: typeof LayoutFilesRoute
-  LayoutModelsRoute: typeof LayoutModelsRoute
-  LayoutServerInstancesRoute: typeof LayoutServerInstancesRoute
+  LayoutDefinitionsRoute: typeof LayoutDefinitionsRoute
+  LayoutInstancesRoute: typeof LayoutInstancesRoute
+  LayoutMachinesRoute: typeof LayoutMachinesRoute
+  LayoutPlaygroundRoute: typeof LayoutPlaygroundRoute
+  LayoutResponsesRoute: typeof LayoutResponsesRoute
+  LayoutSettingsRoute: typeof LayoutSettingsRoute
   LayoutIndexRoute: typeof LayoutIndexRoute
-  LayoutAudioIndexRoute: typeof LayoutAudioIndexRoute
-  LayoutChatIndexRoute: typeof LayoutChatIndexRoute
-  LayoutCompletionsIndexRoute: typeof LayoutCompletionsIndexRoute
-  LayoutEmbeddingsIndexRoute: typeof LayoutEmbeddingsIndexRoute
-  LayoutResponsesIndexRoute: typeof LayoutResponsesIndexRoute
 }
 
 const LayoutRouteChildren: LayoutRouteChildren = {
-  LayoutAgentsRoute: LayoutAgentsRoute,
-  LayoutBenchmarksRoute: LayoutBenchmarksRoute,
-  LayoutFilesRoute: LayoutFilesRoute,
-  LayoutModelsRoute: LayoutModelsRoute,
-  LayoutServerInstancesRoute: LayoutServerInstancesRoute,
+  LayoutDefinitionsRoute: LayoutDefinitionsRoute,
+  LayoutInstancesRoute: LayoutInstancesRoute,
+  LayoutMachinesRoute: LayoutMachinesRoute,
+  LayoutPlaygroundRoute: LayoutPlaygroundRoute,
+  LayoutResponsesRoute: LayoutResponsesRoute,
+  LayoutSettingsRoute: LayoutSettingsRoute,
   LayoutIndexRoute: LayoutIndexRoute,
-  LayoutAudioIndexRoute: LayoutAudioIndexRoute,
-  LayoutChatIndexRoute: LayoutChatIndexRoute,
-  LayoutCompletionsIndexRoute: LayoutCompletionsIndexRoute,
-  LayoutEmbeddingsIndexRoute: LayoutEmbeddingsIndexRoute,
-  LayoutResponsesIndexRoute: LayoutResponsesIndexRoute,
 }
 
 const LayoutRouteWithChildren =

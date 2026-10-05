@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, func, select
 
+from app.api.admin.serializers import iso_utc
 from app.core.db import get_session
 from app.models import Machine, ProviderInstance
 
@@ -59,8 +60,8 @@ def machine_dict(machine: Machine, instance_count: int | None = None) -> dict[st
         "ip": machine.ip,
         "total_vram_bytes": machine.total_vram_bytes,
         "hardware": machine.hardware,
-        "created_at": machine.created_at.isoformat(),
-        "updated_at": machine.updated_at.isoformat() if machine.updated_at else None,
+        "created_at": iso_utc(machine.created_at),
+        "updated_at": iso_utc(machine.updated_at),
     }
     if instance_count is not None:
         d["instance_count"] = instance_count

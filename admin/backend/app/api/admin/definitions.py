@@ -54,6 +54,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.api.admin.providers import compute_config_fingerprint
+from app.api.admin.serializers import iso_utc
 from app.core.db import get_session
 from app.models import PROVIDER_TYPES, ProviderDefinition, ProviderInstance
 from app.services import alias_registry, config_update
@@ -147,10 +148,8 @@ def definition_dict(
         "model_metadata": definition.model_metadata,
         "enabled": definition.enabled,
         "status": definition.status,
-        "created_at": definition.created_at.isoformat(),
-        "updated_at": definition.updated_at.isoformat()
-        if definition.updated_at
-        else None,
+        "created_at": iso_utc(definition.created_at),
+        "updated_at": iso_utc(definition.updated_at),
     }
     if instances is not None:
         d["instances"] = [
@@ -215,15 +214,8 @@ def list_definitions(session: Session = Depends(get_session)) -> list[dict[str, 
     definitions = session.exec(
         select(ProviderDefinition).order_by(ProviderDefinition.alias)
     ).all()
-    out = []
-    for d in definitions:
-        instances = session.exec(
-            select(ProviderInstance).where(
-                ProviderInstance.provider_definition_id == d.id
-            )
-        ).all()
-        out.append(definition_dict(d, instances=list(instances)))
-    return out
+    # `instances` is selectin-loaded on the relationship — no per-row SELECT.
+    return [definition_dict(d, instances=list(d.instances)) for d in definitions]
 
 
 @router.get("/{definition_id}")
@@ -231,12 +223,7 @@ def get_definition(
     definition_id: str, session: Session = Depends(get_session)
 ) -> dict[str, Any]:
     definition = _get_definition(session, definition_id)
-    instances = session.exec(
-        select(ProviderInstance).where(
-            ProviderInstance.provider_definition_id == definition.id
-        )
-    ).all()
-    return definition_dict(definition, instances=list(instances))
+    return definition_dict(definition, instances=list(definition.instances))
 
 
 @router.patch("/{definition_id}")

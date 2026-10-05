@@ -5,977 +5,97 @@ export type ClientOptions = {
 };
 
 /**
- * AgentListResponse
+ * ActionBody
  */
-export type AgentListResponse = {
+export type ActionBody = {
     /**
-     * Agents
+     * Dry Run
      */
-    agents: Array<{
-        [key: string]: unknown;
-    }>;
+    dry_run?: boolean;
+    /**
+     * Force
+     */
+    force?: boolean;
 };
 
 /**
- * AgentRegisterRequest
+ * DefinitionCreate
  */
-export type AgentRegisterRequest = {
+export type DefinitionCreate = {
     /**
-     * Agent Id
+     * Alias
      */
-    agent_id: string;
+    alias: string;
     /**
-     * Name
+     * Provider Type
      */
-    name: string;
+    provider_type: string;
     /**
-     * Platform
+     * Backend Config
      */
-    platform?: string;
-    /**
-     * Type
-     */
-    type?: string;
-    /**
-     * Host
-     */
-    host: string;
-    /**
-     * Port
-     */
-    port: number;
-    /**
-     * Gpu Info
-     */
-    gpu_info?: {
-        [key: string]: unknown;
-    } | null;
-    /**
-     * Running Server Ids
-     */
-    running_server_ids?: Array<string> | null;
-    /**
-     * Healthy Server Ids
-     */
-    healthy_server_ids?: Array<string> | null;
-    /**
-     * Server Statuses
-     */
-    server_statuses?: Array<{
-        [key: string]: unknown;
-    }> | null;
-};
-
-/**
- * AgentRegisterResponse
- */
-export type AgentRegisterResponse = {
-    /**
-     * Registered
-     */
-    registered: boolean;
-    /**
-     * Frontend Version
-     */
-    frontend_version: string;
-};
-
-/**
- * AgentUpdateRequest
- */
-export type AgentUpdateRequest = {
-    /**
-     * Name
-     */
-    name?: string | null;
-    /**
-     * Host
-     */
-    host?: string | null;
-    /**
-     * Port
-     */
-    port?: number | null;
-};
-
-/**
- * AllowedToolsChoice
- */
-export type AllowedToolsChoice = {
-    /**
-     * Type
-     */
-    type?: 'allowed_tools';
-    /**
-     * Tools
-     */
-    tools: Array<SpecificFunctionChoice>;
-    /**
-     * Mode
-     */
-    mode?: 'none' | 'auto' | 'required';
-};
-
-/**
- * BatchData
- *
- * Batch data for OpenAI API response.
- */
-export type BatchData = {
-    /**
-     * Id
-     */
-    id: string;
-    /**
-     * Object
-     */
-    object?: string;
-    /**
-     * Created At
-     */
-    created_at: number;
-    /**
-     * Endpoint
-     */
-    endpoint: string;
-    /**
-     * Input File Id
-     */
-    input_file_id: string;
-    /**
-     * Output File Id
-     */
-    output_file_id?: string | null;
-    /**
-     * Results File Id
-     */
-    results_file_id?: string | null;
-    /**
-     * Status
-     */
-    status: string;
-    /**
-     * Completion Window
-     */
-    completion_window: string;
-    /**
-     * Total Requests
-     */
-    total_requests?: number;
-    /**
-     * Processed Requests
-     */
-    processed_requests?: number;
-    /**
-     * Successful Requests
-     */
-    successful_requests?: number;
-    /**
-     * Failed Requests
-     */
-    failed_requests?: number;
-    /**
-     * Expires At
-     */
-    expires_at?: number | null;
-    /**
-     * Error Message
-     */
-    error_message?: string | null;
-};
-
-/**
- * BatchRequest
- *
- * Batch creation request.
- */
-export type BatchRequest = {
-    /**
-     * Input File Id
-     */
-    input_file_id: string;
-    /**
-     * Endpoint
-     */
-    endpoint: string;
-    /**
-     * Completion Window
-     */
-    completion_window?: string;
-};
-
-/**
- * BatchesList
- *
- * List of batches response.
- */
-export type BatchesList = {
-    /**
-     * Object
-     */
-    object?: string;
-    /**
-     * Data
-     */
-    data: Array<BatchData>;
-};
-
-/**
- * BenchmarkDefinitionInput
- */
-export type BenchmarkDefinitionInput = {
-    /**
-     * Name
-     */
-    name: string;
-    /**
-     * Description
-     */
-    description?: string | null;
-    /**
-     * Source Server Instance Id
-     */
-    source_server_instance_id?: string | null;
-    /**
-     * Config
-     */
-    config?: {
+    backend_config?: {
         [key: string]: unknown;
     };
+    /**
+     * Vram Required Bytes
+     */
+    vram_required_bytes?: number;
+    /**
+     * Idle Timeout Seconds
+     */
+    idle_timeout_seconds?: number;
+    /**
+     * Capacity
+     */
+    capacity?: number;
+    /**
+     * Registration Token
+     */
+    registration_token?: string | null;
+    /**
+     * Enabled
+     */
+    enabled?: boolean;
 };
 
 /**
- * Body_v1/audio-create_transcription
+ * DefinitionPatch
  */
-export type Body_v1_audio_create_transcription = {
+export type DefinitionPatch = {
     /**
-     * File
+     * Alias
      */
-    file: Blob | File;
+    alias?: string | null;
     /**
-     * Model
+     * Provider Type
      */
-    model: string;
+    provider_type?: string | null;
     /**
-     * Language
+     * Backend Config
      */
-    language?: string | null;
-    /**
-     * Prompt
-     */
-    prompt?: string | null;
-    /**
-     * Response Format
-     */
-    response_format?: 'json' | 'text' | 'srt' | 'verbose_json';
-    /**
-     * Temperature
-     */
-    temperature?: number;
-};
-
-/**
- * Body_v1/audio-create_translation
- */
-export type Body_v1_audio_create_translation = {
-    /**
-     * File
-     */
-    file: Blob | File;
-    /**
-     * Model
-     */
-    model: string;
-    /**
-     * Prompt
-     */
-    prompt?: string | null;
-    /**
-     * Response Format
-     */
-    response_format?: 'json' | 'text' | 'srt' | 'verbose_json';
-    /**
-     * Temperature
-     */
-    temperature?: number;
-};
-
-/**
- * Body_v1/files-upload_file
- */
-export type Body_v1_files_upload_file = {
-    /**
-     * File
-     */
-    file: Blob | File;
-    /**
-     * Purpose
-     */
-    purpose: string;
-};
-
-/**
- * ChatCompletionRequest
- *
- * Chat completion request.
- */
-export type ChatCompletionRequest = {
-    /**
-     * Model
-     */
-    model: string;
-    /**
-     * Agent Id
-     */
-    agent_id?: string | null;
-    /**
-     * Messages
-     */
-    messages: Array<ChatMessage>;
-    /**
-     * Stream
-     */
-    stream?: boolean;
-    /**
-     * Temperature
-     */
-    temperature?: number;
-    /**
-     * Max Tokens
-     */
-    max_tokens?: number | null;
-    /**
-     * Top P
-     */
-    top_p?: number | null;
-    /**
-     * Frequency Penalty
-     */
-    frequency_penalty?: number | null;
-    /**
-     * Presence Penalty
-     */
-    presence_penalty?: number | null;
-    /**
-     * Stop
-     */
-    stop?: string | Array<string> | null;
-    /**
-     * Tools
-     */
-    tools?: Array<Tool> | null;
-    /**
-     * Tool Choice
-     */
-    tool_choice?: string | {
+    backend_config?: {
         [key: string]: unknown;
     } | null;
     /**
-     * Reasoning Effort
+     * Vram Required Bytes
      */
-    reasoning_effort?: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | null;
+    vram_required_bytes?: number | null;
     /**
-     * Prompt Cache Options
+     * Idle Timeout Seconds
      */
-    prompt_cache_options?: {
-        [key: string]: unknown;
-    } | null;
-    stream_options?: StreamOptions | null;
-};
-
-/**
- * ChatMessage
- *
- * Chat message with OpenAI-compatible text content.
- */
-export type ChatMessage = {
+    idle_timeout_seconds?: number | null;
     /**
-     * Role
+     * Capacity
      */
-    role: 'system' | 'user' | 'assistant' | 'developer' | 'tool';
+    capacity?: number | null;
     /**
-     * Content
+     * Registration Token
      */
-    content?: string | Array<{
-        [key: string]: unknown;
-    }> | null;
+    registration_token?: string | null;
     /**
-     * Reasoning Content
+     * Enabled
      */
-    reasoning_content?: string | null;
-    /**
-     * Name
-     */
-    name?: string | null;
-    /**
-     * Tool Call Id
-     */
-    tool_call_id?: string | null;
-    /**
-     * Tool Calls
-     */
-    tool_calls?: Array<{
-        [key: string]: unknown;
-    }> | null;
-};
-
-/**
- * CompactRequestBody
- *
- * POST /v1/responses/compact request body (spec 2026-04-24).
- */
-export type CompactRequestBody = {
-    /**
-     * Model
-     */
-    model: string;
-    /**
-     * Input
-     */
-    input: string | Array<({
-        type: 'message';
-    } & UserMessageItemParam) | ({
-        type: 'reasoning';
-    } & ReasoningItemParam) | ({
-        type: 'function_call';
-    } & FunctionCallItemParam) | ({
-        type: 'function_call_output';
-    } & FunctionCallOutputItemParam) | ({
-        type: 'item_reference';
-    } & ItemReferenceParam) | ({
-        type: 'compaction';
-    } & CompactionSummaryItemParam)>;
-    /**
-     * Previous Response Id
-     */
-    previous_response_id?: string | null;
-    /**
-     * Instructions
-     */
-    instructions?: string | null;
-    /**
-     * Prompt Cache Key
-     */
-    prompt_cache_key?: string | null;
-};
-
-/**
- * CompactionSummaryItemParam
- */
-export type CompactionSummaryItemParam = {
-    /**
-     * Type
-     */
-    type?: 'compaction';
-    /**
-     * Id
-     */
-    id: string;
-    /**
-     * Encrypted Content
-     */
-    encrypted_content: string;
-};
-
-/**
- * CompletionRequest
- *
- * Completion request for legacy /v1/completions endpoint.
- */
-export type CompletionRequest = {
-    /**
-     * Model
-     */
-    model: string;
-    /**
-     * Agent Id
-     */
-    agent_id?: string | null;
-    /**
-     * Prompt
-     */
-    prompt: string | Array<string> | Array<number> | Array<Array<number>>;
-    /**
-     * Stream
-     */
-    stream?: boolean;
-    /**
-     * Temperature
-     */
-    temperature?: number;
-    /**
-     * Max Tokens
-     */
-    max_tokens?: number | null;
-    /**
-     * Top P
-     */
-    top_p?: number | null;
-    /**
-     * Frequency Penalty
-     */
-    frequency_penalty?: number | null;
-    /**
-     * Presence Penalty
-     */
-    presence_penalty?: number | null;
-    /**
-     * Stop
-     */
-    stop?: string | Array<string> | null;
-    /**
-     * Echo
-     */
-    echo?: boolean;
-    /**
-     * N
-     */
-    n?: number;
-    /**
-     * Logprobs
-     */
-    logprobs?: number | null;
-    /**
-     * Suffix
-     */
-    suffix?: string | null;
-    stream_options?: StreamOptions | null;
-};
-
-/**
- * CreateResponseBody
- *
- * POST /v1/responses request body.
- */
-export type CreateResponseBody = {
-    /**
-     * Model
-     */
-    model: string;
-    /**
-     * Input
-     */
-    input: string | Array<({
-        type: 'message';
-    } & UserMessageItemParam) | ({
-        type: 'reasoning';
-    } & ReasoningItemParam) | ({
-        type: 'function_call';
-    } & FunctionCallItemParam) | ({
-        type: 'function_call_output';
-    } & FunctionCallOutputItemParam) | ({
-        type: 'item_reference';
-    } & ItemReferenceParam) | ({
-        type: 'compaction';
-    } & CompactionSummaryItemParam)>;
-    /**
-     * Previous Response Id
-     */
-    previous_response_id?: string | null;
-    /**
-     * Include
-     */
-    include?: Array<'reasoning.encrypted_content' | 'message.output_text.logprobs'>;
-    /**
-     * Tools
-     */
-    tools?: Array<FunctionToolParam>;
-    /**
-     * Tool Choice
-     */
-    tool_choice?: 'none' | 'auto' | 'required' | SpecificFunctionChoice | AllowedToolsChoice;
-    /**
-     * Metadata
-     */
-    metadata?: {
-        [key: string]: string;
-    };
-    text?: TextParam | null;
-    /**
-     * Temperature
-     */
-    temperature?: number | null;
-    /**
-     * Top P
-     */
-    top_p?: number | null;
-    /**
-     * Presence Penalty
-     */
-    presence_penalty?: number | null;
-    /**
-     * Frequency Penalty
-     */
-    frequency_penalty?: number | null;
-    /**
-     * Parallel Tool Calls
-     */
-    parallel_tool_calls?: boolean | null;
-    /**
-     * Stream
-     */
-    stream?: boolean;
-    stream_options?: StreamOptionsParam | null;
-    /**
-     * Background
-     */
-    background?: boolean;
-    /**
-     * Max Output Tokens
-     */
-    max_output_tokens?: number | null;
-    /**
-     * Max Tool Calls
-     */
-    max_tool_calls?: number | null;
-    reasoning?: ReasoningParam | null;
-    /**
-     * Safety Identifier
-     */
-    safety_identifier?: string | null;
-    /**
-     * Prompt Cache Key
-     */
-    prompt_cache_key?: string | null;
-    /**
-     * Truncation
-     */
-    truncation?: 'auto' | 'disabled';
-    /**
-     * Instructions
-     */
-    instructions?: string | null;
-    /**
-     * Store
-     */
-    store?: boolean;
-    /**
-     * Service Tier
-     */
-    service_tier?: 'auto' | 'default' | 'flex' | 'priority';
-    /**
-     * Top Logprobs
-     */
-    top_logprobs?: number | null;
-};
-
-/**
- * DecisionRequest
- */
-export type DecisionRequest = {
-    /**
-     * Model
-     *
-     * NPU decision virtual name, e.g. 'myflash-decide'
-     */
-    model: string;
-    /**
-     * Agent Id
-     */
-    agent_id?: string | null;
-    /**
-     * Text
-     *
-     * The text to judge
-     */
-    text: string;
-    /**
-     * Question
-     *
-     * The question asked of the text
-     */
-    question: string;
-    /**
-     * Options
-     *
-     * 2 to 10 answer options
-     */
-    options: Array<string>;
-    /**
-     * System
-     *
-     * Optional system message carrying the question instead of the schema description
-     */
-    system?: string | null;
-};
-
-/**
- * DecisionResponse
- */
-export type DecisionResponse = {
-    /**
-     * Model
-     */
-    model: string;
-    /**
-     * Decision
-     */
-    decision: string;
-    /**
-     * Probabilities
-     */
-    probabilities: {
-        [key: string]: number;
-    };
-};
-
-/**
- * DeleteFileResponse
- *
- * Delete file response.
- */
-export type DeleteFileResponse = {
-    /**
-     * Id
-     */
-    id: string;
-    /**
-     * Object
-     */
-    object?: string;
-    /**
-     * Deleted
-     */
-    deleted: boolean;
-};
-
-/**
- * EmbeddingData
- *
- * Embedding data.
- */
-export type EmbeddingData = {
-    /**
-     * Object
-     */
-    object?: string;
-    /**
-     * Embedding
-     */
-    embedding: Array<number>;
-    /**
-     * Index
-     */
-    index: number;
-};
-
-/**
- * EmbeddingRequest
- *
- * Embedding request.
- */
-export type EmbeddingRequest = {
-    /**
-     * Model
-     */
-    model: string;
-    /**
-     * Agent Id
-     */
-    agent_id?: string | null;
-    /**
-     * Input
-     *
-     * Input text or list of texts
-     */
-    input: string | Array<string>;
-    /**
-     * Encoding Format
-     */
-    encoding_format?: 'float' | 'base64';
-};
-
-/**
- * EmbeddingResponse
- *
- * Embedding response.
- */
-export type EmbeddingResponse = {
-    /**
-     * Object
-     */
-    object?: string;
-    /**
-     * Data
-     */
-    data: Array<EmbeddingData>;
-    /**
-     * Model
-     */
-    model: string;
-    usage: EmbeddingUsage;
-};
-
-/**
- * EmbeddingUsage
- *
- * Embedding usage.
- */
-export type EmbeddingUsage = {
-    /**
-     * Prompt Tokens
-     */
-    prompt_tokens: number;
-    /**
-     * Total Tokens
-     */
-    total_tokens: number;
-};
-
-/**
- * FileData
- *
- * File data for OpenAI API response.
- */
-export type FileData = {
-    /**
-     * Id
-     */
-    id: string;
-    /**
-     * Object
-     */
-    object?: string;
-    /**
-     * Bytes
-     */
-    bytes: number;
-    /**
-     * Created At
-     */
-    created_at: number;
-    /**
-     * Filename
-     */
-    filename: string;
-    /**
-     * Purpose
-     */
-    purpose: string;
-    /**
-     * Status
-     */
-    status: string;
-};
-
-/**
- * FilesList
- *
- * List of files response.
- */
-export type FilesList = {
-    /**
-     * Object
-     */
-    object?: string;
-    /**
-     * Data
-     */
-    data: Array<FileData>;
-};
-
-/**
- * FunctionCallItemParam
- */
-export type FunctionCallItemParam = {
-    /**
-     * Type
-     */
-    type?: 'function_call';
-    /**
-     * Call Id
-     */
-    call_id: string;
-    /**
-     * Name
-     */
-    name: string;
-    /**
-     * Arguments
-     */
-    arguments: string;
-    /**
-     * Id
-     */
-    id?: string | null;
-    /**
-     * Status
-     */
-    status?: 'in_progress' | 'completed' | 'incomplete' | null;
-};
-
-/**
- * FunctionCallOutputItemParam
- */
-export type FunctionCallOutputItemParam = {
-    /**
-     * Type
-     */
-    type?: 'function_call_output';
-    /**
-     * Call Id
-     */
-    call_id: string;
-    /**
-     * Output
-     */
-    output: string | Array<({
-        type: 'input_text';
-    } & InputTextContent) | ({
-        type: 'input_image';
-    } & InputImageContent) | ({
-        type: 'input_file';
-    } & InputFileContent) | ({
-        type: 'input_video';
-    } & InputVideoContent)>;
-    /**
-     * Id
-     */
-    id?: string | null;
-    /**
-     * Status
-     */
-    status?: 'in_progress' | 'completed' | 'incomplete' | null;
-};
-
-/**
- * FunctionToolParam
- *
- * Flat function tool definition (Responses API shape).
- */
-export type FunctionToolParam = {
-    /**
-     * Type
-     */
-    type?: 'function';
-    /**
-     * Name
-     */
-    name: string;
-    /**
-     * Description
-     */
-    description?: string | null;
-    /**
-     * Parameters
-     */
-    parameters?: {
-        [key: string]: unknown;
-    } | null;
-    /**
-     * Strict
-     */
-    strict?: boolean | null;
-};
-
-/**
- * GlobalTokenStats
- */
-export type GlobalTokenStats = {
-    live: LiveRates;
-    last_24h: TokenTotals;
-    last_7d: TokenTotals;
-    last_30d: TokenTotals;
+    enabled?: boolean | null;
 };
 
 /**
@@ -989,1448 +109,101 @@ export type HTTPValidationError = {
 };
 
 /**
- * InputFileContent
- *
- * A file input to the model.
+ * MachineCreate
  */
-export type InputFileContent = {
+export type MachineCreate = {
     /**
-     * Type
+     * Uid
      */
-    type?: 'input_file';
+    uid: string;
     /**
-     * Filename
+     * Name
      */
-    filename?: string | null;
+    name: string;
     /**
-     * File Data
+     * Host
      */
-    file_data?: string | null;
+    host?: string | null;
     /**
-     * File Url
+     * Dns
      */
-    file_url?: string | null;
+    dns?: string | null;
+    /**
+     * Ip
+     */
+    ip?: string | null;
+    /**
+     * Total Vram Bytes
+     */
+    total_vram_bytes?: number;
 };
 
 /**
- * InputImageContent
- *
- * An image input to the model.
+ * MachinePatch
  */
-export type InputImageContent = {
-    /**
-     * Type
-     */
-    type?: 'input_image';
-    /**
-     * Image Url
-     */
-    image_url: string;
-    /**
-     * Detail
-     */
-    detail?: 'low' | 'high' | 'auto';
-};
-
-/**
- * InputTextContent
- *
- * A text input to the model.
- */
-export type InputTextContent = {
-    /**
-     * Type
-     */
-    type?: 'input_text';
-    /**
-     * Text
-     */
-    text: string;
-};
-
-/**
- * InputVideoContent
- *
- * A video input to the model.
- */
-export type InputVideoContent = {
-    /**
-     * Type
-     */
-    type?: 'input_video';
-    /**
-     * Video Url
-     */
-    video_url: string;
-};
-
-/**
- * ItemReferenceParam
- */
-export type ItemReferenceParam = {
-    /**
-     * Type
-     */
-    type?: 'item_reference';
-    /**
-     * Id
-     */
-    id: string;
-};
-
-/**
- * JsonObjectResponseFormat
- */
-export type JsonObjectResponseFormat = {
-    /**
-     * Type
-     */
-    type?: 'json_object';
-};
-
-/**
- * JsonSchemaResponseFormat
- */
-export type JsonSchemaResponseFormat = {
-    /**
-     * Type
-     */
-    type?: 'json_schema';
+export type MachinePatch = {
     /**
      * Name
      */
     name?: string | null;
     /**
-     * Description
+     * Host
      */
-    description?: string | null;
+    host?: string | null;
     /**
-     * Schema
+     * Dns
      */
-    schema?: {
-        [key: string]: unknown;
-    } | null;
+    dns?: string | null;
     /**
-     * Strict
+     * Ip
      */
-    strict?: boolean | null;
+    ip?: string | null;
+    /**
+     * Total Vram Bytes
+     */
+    total_vram_bytes?: number | null;
 };
 
 /**
- * LiveRates
- */
-export type LiveRates = {
-    /**
-     * Runs
-     */
-    runs: number;
-    /**
-     * Decode Tokens Per Second
-     */
-    decode_tokens_per_second?: number | null;
-    /**
-     * Prefill Tokens Per Second
-     */
-    prefill_tokens_per_second?: number | null;
-};
-
-/**
- * Message
+ * RegistrationRequest
  *
- * Generic message response.
+ * Body sent by provider_lib.admin_client.AdminClient.register().
  */
-export type Message = {
+export type RegistrationRequest = {
     /**
-     * Message
+     * Machine Uid
      */
-    message: string;
-};
-
-/**
- * Model
- */
-export type Model = {
+    machine_uid: string;
     /**
-     * Id
+     * Registration Token
      */
-    id?: string;
+    registration_token: string;
     /**
-     * Name
+     * Provider Type
      */
-    name: string;
+    provider_type: string;
     /**
-     * Path
+     * Version
      */
-    path: string;
+    version: string;
     /**
-     * Size Bytes
+     * Port
      */
-    size_bytes: number;
+    port?: number;
     /**
-     * Architecture
+     * Hardware
      */
-    architecture: string;
-    /**
-     * Model Type
-     */
-    model_type?: string;
-    /**
-     * Parameter Count
-     */
-    parameter_count?: number | null;
-    /**
-     * Quantization
-     */
-    quantization: string;
-    /**
-     * Supports Embeddings
-     */
-    supports_embeddings?: boolean;
-    /**
-     * Supports Vision
-     */
-    supports_vision?: boolean;
-    /**
-     * License
-     */
-    license?: string | null;
-    /**
-     * Tags
-     */
-    tags?: Array<string>;
-    /**
-     * Description
-     */
-    description?: string | null;
-    /**
-     * Source
-     */
-    source: string;
-    /**
-     * Source Repo Id
-     */
-    source_repo_id?: string | null;
-    /**
-     * Source Url
-     */
-    source_url?: string | null;
-    /**
-     * Source File
-     */
-    source_file?: string | null;
-    /**
-     * Source Files
-     */
-    source_files?: Array<string> | null;
-    /**
-     * Downloaded At
-     */
-    downloaded_at?: string;
-    /**
-     * Updated At
-     */
-    updated_at?: string | null;
-};
-
-/**
- * ModelCreate
- *
- * Model creation model.
- */
-export type ModelCreate = {
-    /**
-     * Name
-     */
-    name: string;
-    /**
-     * Path
-     */
-    path: string;
-    /**
-     * Size Bytes
-     */
-    size_bytes: number;
-    /**
-     * Architecture
-     */
-    architecture: string;
-    /**
-     * Model Type
-     */
-    model_type?: string;
-    /**
-     * Parameter Count
-     */
-    parameter_count?: number | null;
-    /**
-     * Quantization
-     */
-    quantization: string;
-    /**
-     * Supports Embeddings
-     */
-    supports_embeddings?: boolean;
-    /**
-     * Supports Vision
-     */
-    supports_vision?: boolean;
-    /**
-     * License
-     */
-    license?: string | null;
-    /**
-     * Tags
-     */
-    tags?: Array<string>;
-    /**
-     * Description
-     */
-    description?: string | null;
-    /**
-     * Source
-     */
-    source: string;
-    /**
-     * Source Repo Id
-     */
-    source_repo_id?: string | null;
-    /**
-     * Source Url
-     */
-    source_url?: string | null;
-    /**
-     * Source File
-     */
-    source_file?: string | null;
-    /**
-     * Source Files
-     */
-    source_files?: Array<string> | null;
-};
-
-/**
- * ModelData
- *
- * Model data for OpenAI API response.
- */
-export type ModelData = {
-    /**
-     * Id
-     */
-    id: string;
-    /**
-     * Object
-     */
-    object?: string;
-    /**
-     * Created
-     */
-    created: number;
-    /**
-     * Owned By
-     */
-    owned_by?: string;
-};
-
-/**
- * ModelMetadataUpdate
- *
- * User-editable overrides for discovered OpenAI model metadata.
- */
-export type ModelMetadataUpdate = {
-    /**
-     * Description
-     */
-    description?: string | null;
-    /**
-     * Owned By
-     */
-    owned_by?: string | null;
-    /**
-     * Capabilities
-     */
-    capabilities?: {
-        [key: string]: unknown;
-    } | null;
-    /**
-     * Max Context Length
-     */
-    max_context_length?: number | null;
-    reasoning?: ReasoningMetadata | null;
-};
-
-/**
- * ModelUpdate
- *
- * Model update model.
- */
-export type ModelUpdate = {
-    /**
-     * Name
-     */
-    name?: string | null;
-    /**
-     * Path
-     */
-    path?: string | null;
-    /**
-     * Size Bytes
-     */
-    size_bytes?: number | null;
-    /**
-     * Architecture
-     */
-    architecture?: string | null;
-    /**
-     * Model Type
-     */
-    model_type?: string | null;
-    /**
-     * Parameter Count
-     */
-    parameter_count?: number | null;
-    /**
-     * Quantization
-     */
-    quantization?: string | null;
-    /**
-     * Supports Embeddings
-     */
-    supports_embeddings?: boolean | null;
-    /**
-     * Supports Vision
-     */
-    supports_vision?: boolean | null;
-    /**
-     * License
-     */
-    license?: string | null;
-    /**
-     * Tags
-     */
-    tags?: Array<string> | null;
-    /**
-     * Description
-     */
-    description?: string | null;
-    /**
-     * Source
-     */
-    source?: string | null;
-    /**
-     * Source Repo Id
-     */
-    source_repo_id?: string | null;
-    /**
-     * Source Url
-     */
-    source_url?: string | null;
-    /**
-     * Source File
-     */
-    source_file?: string | null;
-    /**
-     * Source Files
-     */
-    source_files?: Array<string> | null;
-};
-
-/**
- * ModelsList
- *
- * List of models response.
- */
-export type ModelsList = {
-    /**
-     * Object
-     */
-    object?: string;
-    /**
-     * Data
-     */
-    data: Array<ModelData>;
-};
-
-/**
- * ModerationRequest
- */
-export type ModerationRequest = {
-    /**
-     * Model
-     *
-     * NPU moderation virtual name, e.g. 'myflash-guard'
-     */
-    model: string;
-    /**
-     * Agent Id
-     */
-    agent_id?: string | null;
-    /**
-     * Input
-     */
-    input?: string | Array<string> | null;
-    /**
-     * Messages
-     *
-     * Chat-shaped conversation; judges the last reply
-     */
-    messages?: Array<{
-        [key: string]: unknown;
-    }> | null;
-    /**
-     * Strict
-     *
-     * Flag 'Controversial' as well as 'Unsafe'
-     */
-    strict?: boolean | null;
-};
-
-/**
- * ModerationResponse
- */
-export type ModerationResponse = {
-    /**
-     * Id
-     */
-    id: string;
-    /**
-     * Model
-     */
-    model: string;
-    /**
-     * Results
-     */
-    results: Array<{
-        [key: string]: unknown;
-    }>;
-};
-
-/**
- * OutputTextContentParam
- */
-export type OutputTextContentParam = {
-    /**
-     * Type
-     */
-    type?: 'output_text';
-    /**
-     * Text
-     */
-    text: string;
-    /**
-     * Annotations
-     */
-    annotations?: Array<{
-        [key: string]: unknown;
-    }>;
-};
-
-/**
- * ReasoningItemParam
- */
-export type ReasoningItemParam = {
-    /**
-     * Type
-     */
-    type?: 'reasoning';
-    /**
-     * Summary
-     */
-    summary?: Array<ReasoningSummaryContentParam>;
-    /**
-     * Id
-     */
-    id?: string | null;
-    /**
-     * Content
-     */
-    content?: Array<ReasoningTextContent> | null;
-    /**
-     * Encrypted Content
-     */
-    encrypted_content?: string | null;
-    /**
-     * Status
-     */
-    status?: 'in_progress' | 'completed' | 'incomplete' | null;
-};
-
-/**
- * ReasoningMetadata
- *
- * User-editable reasoning support block for a model's metadata.
- */
-export type ReasoningMetadata = {
-    /**
-     * Supported
-     */
-    supported?: boolean;
-    /**
-     * Efforts
-     */
-    efforts?: Array<'none' | 'low' | 'medium' | 'high' | 'xhigh'>;
-    /**
-     * Default
-     */
-    default?: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | null;
-};
-
-/**
- * ReasoningParam
- */
-export type ReasoningParam = {
-    /**
-     * Effort
-     */
-    effort?: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | null;
-    /**
-     * Summary
-     */
-    summary?: 'concise' | 'detailed' | 'auto' | null;
-};
-
-/**
- * ReasoningSummaryContentParam
- */
-export type ReasoningSummaryContentParam = {
-    /**
-     * Type
-     */
-    type?: 'summary_text';
-    /**
-     * Text
-     */
-    text: string;
-};
-
-/**
- * ReasoningTextContent
- *
- * Raw reasoning text content.
- */
-export type ReasoningTextContent = {
-    /**
-     * Type
-     */
-    type?: 'reasoning_text';
-    /**
-     * Text
-     */
-    text: string;
-};
-
-/**
- * RefusalContentParam
- */
-export type RefusalContentParam = {
-    /**
-     * Type
-     */
-    type?: 'refusal';
-    /**
-     * Refusal
-     */
-    refusal: string;
-};
-
-/**
- * RerankRequest
- *
- * Broker-shaped rerank request.
- */
-export type RerankRequest = {
-    /**
-     * Model
-     *
-     * NPU rerank virtual name, e.g. 'myflash-rerank'
-     */
-    model: string;
-    /**
-     * Agent Id
-     */
-    agent_id?: string | null;
-    /**
-     * Query
-     */
-    query: string;
-    /**
-     * Documents
-     */
-    documents: Array<string>;
-    /**
-     * Top N
-     */
-    top_n?: number | null;
-    /**
-     * Instruct
-     *
-     * Replaces the model's default task line
-     */
-    instruct?: string | null;
-    /**
-     * Return Documents
-     */
-    return_documents?: boolean;
-};
-
-/**
- * RerankResponse
- */
-export type RerankResponse = {
-    /**
-     * Model
-     */
-    model: string;
-    /**
-     * Results
-     */
-    results: Array<RerankResult>;
-    usage: RerankUsage;
-};
-
-/**
- * RerankResult
- */
-export type RerankResult = {
-    /**
-     * Index
-     */
-    index: number;
-    /**
-     * Relevance Score
-     */
-    relevance_score: number;
-    /**
-     * Document
-     */
-    document?: string | null;
-};
-
-/**
- * RerankUsage
- */
-export type RerankUsage = {
-    /**
-     * Prompt Tokens
-     */
-    prompt_tokens?: number;
-    /**
-     * Total Tokens
-     */
-    total_tokens?: number;
-};
-
-/**
- * RunInput
- */
-export type RunInput = {
-    /**
-     * Definition Id
-     */
-    definition_id: string;
-};
-
-/**
- * ServerInstanceListResponse
- */
-export type ServerInstanceListResponse = {
-    /**
-     * Server Instances
-     */
-    server_instances: Array<ServerInstanceResponse>;
-};
-
-/**
- * ServerInstanceResponse
- */
-export type ServerInstanceResponse = {
-    /**
-     * Id
-     */
-    id: string;
-    /**
-     * Model Id
-     */
-    model_id: string;
-    /**
-     * Model Name
-     */
-    model_name?: string | null;
-    /**
-     * Mmproj Model Id
-     */
-    mmproj_model_id?: string | null;
-    /**
-     * Mmproj Model Name
-     */
-    mmproj_model_name?: string | null;
-    /**
-     * Dflash Model Id
-     */
-    dflash_model_id?: string | null;
-    /**
-     * Dflash Model Name
-     */
-    dflash_model_name?: string | null;
-    /**
-     * Alias
-     */
-    alias: string;
-    /**
-     * Engine
-     */
-    engine?: 'llamacpp' | 'halogen' | 'halogen-flash' | 'gufo';
-    /**
-     * Engine Options
-     */
-    engine_options?: {
+    hardware?: {
         [key: string]: unknown;
     };
     /**
-     * Status
+     * Metrics Categories
      */
-    status: string;
+    metrics_categories?: Array<string>;
     /**
-     * Health Status
+     * Registered At
      */
-    health_status: string;
-    /**
-     * Error Message
-     */
-    error_message?: string | null;
-    /**
-     * Agent Id
-     */
-    agent_id: string;
-    /**
-     * Agent Name
-     */
-    agent_name?: string | null;
-    /**
-     * Agent Host
-     */
-    agent_host?: string | null;
-    /**
-     * Agent Port
-     */
-    agent_port?: number | null;
-    /**
-     * Proxy Url
-     */
-    proxy_url?: string | null;
-    /**
-     * Started At
-     */
-    started_at?: string | null;
-    /**
-     * Last Health Check
-     */
-    last_health_check?: string | null;
-    /**
-     * Total Requests
-     */
-    total_requests: number;
-    /**
-     * Cpu Usage Percent
-     */
-    cpu_usage_percent?: number | null;
-    /**
-     * Ram Usage Bytes
-     */
-    ram_usage_bytes?: number | null;
-    /**
-     * Vram Usage Bytes
-     */
-    vram_usage_bytes?: number | null;
-    /**
-     * Vram Required Bytes
-     */
-    vram_required_bytes?: number | null;
-    /**
-     * Gpu Layers
-     */
-    gpu_layers?: number;
-    /**
-     * Context Size
-     */
-    context_size?: number;
-    /**
-     * Flash Attn
-     */
-    flash_attn?: boolean;
-    /**
-     * Mtp Draft Max
-     */
-    mtp_draft_max?: number | null;
-    /**
-     * Inactivity Timeout Seconds
-     */
-    inactivity_timeout_seconds?: number;
-    /**
-     * Server Options
-     */
-    server_options?: {
-        [key: string]: unknown;
-    };
-    /**
-     * Model Metadata
-     */
-    model_metadata?: {
-        [key: string]: unknown;
-    };
-    /**
-     * Download Progress
-     */
-    download_progress?: {
-        [key: string]: unknown;
-    };
-};
-
-/**
- * ServerOptions
- *
- * Core llama-server options exposed by the UI.
- *
- * None means that llama.cpp should use its own default and the agent omits
- * the corresponding command-line flag.
- */
-export type ServerOptions = {
-    /**
-     * Threads
-     */
-    threads?: number | null;
-    /**
-     * Threads Batch
-     */
-    threads_batch?: number | null;
-    /**
-     * Batch Size
-     */
-    batch_size?: number | null;
-    /**
-     * Ubatch Size
-     */
-    ubatch_size?: number | null;
-    /**
-     * Keep
-     */
-    keep?: number | null;
-    /**
-     * Predict
-     */
-    predict?: number | null;
-    /**
-     * Swa Full
-     */
-    swa_full?: boolean | null;
-    /**
-     * Cache Type K
-     */
-    cache_type_k?: 'f32' | 'f16' | 'bf16' | 'q8_0' | 'q4_0' | 'q4_1' | 'iq4_nl' | 'q5_0' | 'q5_1' | 'turbo4' | null;
-    /**
-     * Cache Type V
-     */
-    cache_type_v?: 'f32' | 'f16' | 'bf16' | 'q8_0' | 'q4_0' | 'q4_1' | 'iq4_nl' | 'q5_0' | 'q5_1' | 'turbo4' | null;
-    /**
-     * Kv Offload
-     */
-    kv_offload?: boolean | null;
-    /**
-     * Cache Prompt
-     */
-    cache_prompt?: boolean | null;
-    /**
-     * Cache Reuse
-     */
-    cache_reuse?: number | null;
-    /**
-     * Ctx Checkpoints
-     */
-    ctx_checkpoints?: number | null;
-    /**
-     * Checkpoint Every
-     */
-    checkpoint_every?: number | null;
-    /**
-     * Cache Ram
-     */
-    cache_ram?: number | null;
-    /**
-     * Slot Save Path
-     */
-    slot_save_path?: string | null;
-    /**
-     * Gpu Layers
-     */
-    gpu_layers?: number | string | null;
-    /**
-     * Device
-     */
-    device?: string | null;
-    /**
-     * Split Mode
-     */
-    split_mode?: 'none' | 'layer' | 'row' | 'tensor' | null;
-    /**
-     * Tensor Split
-     */
-    tensor_split?: string | null;
-    /**
-     * Main Gpu
-     */
-    main_gpu?: number | null;
-    /**
-     * Fit
-     */
-    fit?: 'on' | 'off' | null;
-    /**
-     * Fit Target
-     */
-    fit_target?: string | null;
-    /**
-     * Fit Ctx
-     */
-    fit_ctx?: number | null;
-    /**
-     * Temperature
-     */
-    temperature?: number | null;
-    /**
-     * Top K
-     */
-    top_k?: number | null;
-    /**
-     * Top P
-     */
-    top_p?: number | null;
-    /**
-     * Min P
-     */
-    min_p?: number | null;
-    /**
-     * Repeat Penalty
-     */
-    repeat_penalty?: number | null;
-    /**
-     * Presence Penalty
-     */
-    presence_penalty?: number | null;
-    /**
-     * Frequency Penalty
-     */
-    frequency_penalty?: number | null;
-    /**
-     * Seed
-     */
-    seed?: number | null;
-    /**
-     * Parallel
-     */
-    parallel?: number | null;
-    /**
-     * Reasoning
-     */
-    reasoning?: 'on' | 'off' | 'auto' | null;
-    /**
-     * Reasoning Budget
-     */
-    reasoning_budget?: number | null;
-    /**
-     * Spec Draft P Min
-     */
-    spec_draft_p_min?: number | null;
-    /**
-     * Strict Mtp Qwen
-     */
-    strict_mtp_qwen?: boolean | null;
-    /**
-     * Kv Unified
-     */
-    kv_unified?: boolean | null;
-    /**
-     * No Mmap
-     */
-    no_mmap?: boolean | null;
-    /**
-     * No Cache Idle Slots
-     */
-    no_cache_idle_slots?: boolean | null;
-    /**
-     * Cont Batching
-     */
-    cont_batching?: boolean | null;
-    /**
-     * Warmup
-     */
-    warmup?: boolean | null;
-    /**
-     * Context Shift
-     */
-    context_shift?: boolean | null;
-    /**
-     * Jinja
-     */
-    jinja?: boolean | null;
-};
-
-/**
- * ServerTokenStats
- */
-export type ServerTokenStats = {
-    /**
-     * Id
-     */
-    id: string;
-    /**
-     * Alias
-     */
-    alias: string;
-    /**
-     * Decode Tokens Per Second
-     */
-    decode_tokens_per_second?: number | null;
-    /**
-     * Prefill Tokens Per Second
-     */
-    prefill_tokens_per_second?: number | null;
-    last_7d: TokenTotals;
-    last_30d: TokenTotals;
-};
-
-/**
- * SpecificFunctionChoice
- */
-export type SpecificFunctionChoice = {
-    /**
-     * Type
-     */
-    type?: 'function';
-    /**
-     * Name
-     */
-    name: string;
-};
-
-/**
- * SpeechRequest
- *
- * Speech generation request.
- */
-export type SpeechRequest = {
-    /**
-     * Model
-     */
-    model: string;
-    /**
-     * Input
-     */
-    input: string;
-    /**
-     * Voice
-     */
-    voice?: string;
-    /**
-     * Response Format
-     */
-    response_format?: 'mp3' | 'wav' | 'flac' | 'opus' | 'aac';
-    /**
-     * Speed
-     */
-    speed?: number;
-};
-
-/**
- * StartServerRequest
- */
-export type StartServerRequest = {
-    /**
-     * Model Id
-     */
-    model_id?: string | null;
-    /**
-     * Agent Id
-     */
-    agent_id?: string | null;
-    /**
-     * Gpu Layers
-     */
-    gpu_layers?: number;
-    /**
-     * Context Size
-     */
-    context_size?: number;
-    /**
-     * Vram Required Bytes
-     */
-    vram_required_bytes?: number | null;
-    /**
-     * Mmproj Model Id
-     */
-    mmproj_model_id?: string | null;
-    /**
-     * Dflash Model Id
-     */
-    dflash_model_id?: string | null;
-    /**
-     * Mtp Draft Max
-     */
-    mtp_draft_max?: number | null;
-    server_options?: ServerOptions;
-    /**
-     * Alias
-     */
-    alias: string;
-    /**
-     * Engine
-     */
-    engine?: 'llamacpp' | 'halogen' | 'halogen-flash' | 'gufo';
-    /**
-     * Engine Options
-     */
-    engine_options?: {
-        [key: string]: unknown;
-    };
-};
-
-/**
- * StreamOptions
- *
- * OpenAI stream_options (include_usage emits a final usage chunk).
- */
-export type StreamOptions = {
-    /**
-     * Include Usage
-     */
-    include_usage?: boolean;
-};
-
-/**
- * StreamOptionsParam
- */
-export type StreamOptionsParam = {
-    /**
-     * Include Obfuscation
-     */
-    include_obfuscation?: boolean;
-};
-
-/**
- * TextParam
- */
-export type TextParam = {
-    /**
-     * Format
-     */
-    format?: ({
-        type: 'text';
-    } & TextResponseFormat) | ({
-        type: 'json_object';
-    } & JsonObjectResponseFormat) | ({
-        type: 'json_schema';
-    } & JsonSchemaResponseFormat) | null;
-    /**
-     * Verbosity
-     */
-    verbosity?: 'low' | 'medium' | 'high' | null;
-};
-
-/**
- * TextResponseFormat
- */
-export type TextResponseFormat = {
-    /**
-     * Type
-     */
-    type?: 'text';
-};
-
-/**
- * TokenStatsResponse
- */
-export type TokenStatsResponse = {
-    global: GlobalTokenStats;
-    /**
-     * Servers
-     */
-    servers: Array<ServerTokenStats>;
-};
-
-/**
- * TokenTotals
- */
-export type TokenTotals = {
-    /**
-     * Prompt Tokens
-     */
-    prompt_tokens: number;
-    /**
-     * Completion Tokens
-     */
-    completion_tokens: number;
-    /**
-     * Total Tokens
-     */
-    total_tokens: number;
-};
-
-/**
- * Tool
- *
- * OpenAI tool definition ({"type": "function", "function": {...}}).
- */
-export type Tool = {
-    /**
-     * Type
-     */
-    type?: string;
-    function: ToolFunction;
-};
-
-/**
- * ToolFunction
- *
- * OpenAI tool function definition.
- */
-export type ToolFunction = {
-    /**
-     * Name
-     */
-    name: string;
-    /**
-     * Description
-     */
-    description?: string;
-    /**
-     * Parameters
-     */
-    parameters?: {
-        [key: string]: unknown;
-    };
-};
-
-/**
- * TranscriptionResponse
- *
- * Transcription response.
- */
-export type TranscriptionResponse = {
-    /**
-     * Text
-     */
-    text: string;
-};
-
-/**
- * TranslationResponse
- *
- * Translation response.
- */
-export type TranslationResponse = {
-    /**
-     * Text
-     */
-    text: string;
-};
-
-/**
- * UpdateServerRequest
- *
- * Editable server settings. All fields optional.
- */
-export type UpdateServerRequest = {
-    /**
-     * Alias
-     */
-    alias?: string | null;
-    /**
-     * Engine
-     */
-    engine?: 'llamacpp' | 'halogen' | 'halogen-flash' | 'gufo' | null;
-    /**
-     * Engine Options
-     */
-    engine_options?: {
-        [key: string]: unknown;
-    } | null;
-    /**
-     * Model Id
-     */
-    model_id?: string | null;
-    /**
-     * Gpu Layers
-     */
-    gpu_layers?: number | null;
-    /**
-     * Context Size
-     */
-    context_size?: number | null;
-    /**
-     * Flash Attn
-     */
-    flash_attn?: boolean | null;
-    /**
-     * Mtp Draft Max
-     */
-    mtp_draft_max?: number | null;
-    /**
-     * Inactivity Timeout Seconds
-     */
-    inactivity_timeout_seconds?: number | null;
-    /**
-     * Vram Required Bytes
-     */
-    vram_required_bytes?: number | null;
-    /**
-     * Mmproj Model Id
-     */
-    mmproj_model_id?: string | null;
-    /**
-     * Dflash Model Id
-     */
-    dflash_model_id?: string | null;
-    server_options?: ServerOptions | null;
-    /**
-     * Restart
-     */
-    restart?: boolean;
-};
-
-/**
- * UserMessageItemParam
- */
-export type UserMessageItemParam = {
-    /**
-     * Type
-     */
-    type?: 'message';
-    /**
-     * Role
-     */
-    role?: 'user' | 'assistant' | 'system' | 'developer';
-    /**
-     * Content
-     */
-    content: string | Array<({
-        type: 'input_text';
-    } & InputTextContent) | ({
-        type: 'input_image';
-    } & InputImageContent) | ({
-        type: 'input_file';
-    } & InputFileContent) | ({
-        type: 'input_video';
-    } & InputVideoContent) | OutputTextContentParam | RefusalContentParam>;
-    /**
-     * Id
-     */
-    id?: string | null;
-    /**
-     * Status
-     */
-    status?: 'in_progress' | 'completed' | 'incomplete' | null;
-    /**
-     * Phase
-     */
-    phase?: 'commentary' | 'final_answer' | null;
+    registered_at?: string | null;
 };
 
 /**
@@ -2461,71 +234,45 @@ export type ValidationError = {
     };
 };
 
-export type agentsRegisterAgentData = {
-    body: AgentRegisterRequest;
-    path?: never;
-    query?: never;
-    url: '/api/v1/agents/register';
-};
-
-export type agentsRegisterAgentErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type agentsRegisterAgentError = agentsRegisterAgentErrors[keyof agentsRegisterAgentErrors];
-
-export type agentsRegisterAgentResponses = {
-    /**
-     * Successful Response
-     */
-    200: AgentRegisterResponse;
-};
-
-export type agentsRegisterAgentResponse = agentsRegisterAgentResponses[keyof agentsRegisterAgentResponses];
-
-export type agentsListAgentsData = {
+export type adminAdminHealthData = {
     body?: never;
     path?: never;
     query?: never;
-    url: '/api/v1/agents';
+    url: '/admin/api/health';
 };
 
-export type agentsListAgentsResponses = {
+export type adminAdminHealthResponses = {
     /**
+     * Response Admin-Admin Health
+     *
      * Successful Response
      */
-    200: AgentListResponse;
-};
-
-export type agentsListAgentsResponse = agentsListAgentsResponses[keyof agentsListAgentsResponses];
-
-export type agentsDeleteAgentData = {
-    body?: never;
-    path: {
-        /**
-         * Agent Id
-         */
-        agent_id: string;
+    200: {
+        [key: string]: string;
     };
-    query?: never;
-    url: '/api/v1/agents/{agent_id}';
 };
 
-export type agentsDeleteAgentErrors = {
+export type adminAdminHealthResponse = adminAdminHealthResponses[keyof adminAdminHealthResponses];
+
+export type adminRegisterProviderData = {
+    body: RegistrationRequest;
+    path?: never;
+    query?: never;
+    url: '/admin/api/providers/register';
+};
+
+export type adminRegisterProviderErrors = {
     /**
      * Validation Error
      */
     422: HTTPValidationError;
 };
 
-export type agentsDeleteAgentError = agentsDeleteAgentErrors[keyof agentsDeleteAgentErrors];
+export type adminRegisterProviderError = adminRegisterProviderErrors[keyof adminRegisterProviderErrors];
 
-export type agentsDeleteAgentResponses = {
+export type adminRegisterProviderResponses = {
     /**
-     * Response Agents-Delete Agent
+     * Response Admin-Register Provider
      *
      * Successful Response
      */
@@ -2534,1671 +281,578 @@ export type agentsDeleteAgentResponses = {
     };
 };
 
-export type agentsDeleteAgentResponse = agentsDeleteAgentResponses[keyof agentsDeleteAgentResponses];
+export type adminRegisterProviderResponse = adminRegisterProviderResponses[keyof adminRegisterProviderResponses];
 
-export type agentsGetAgentData = {
-    body?: never;
-    path: {
-        /**
-         * Agent Id
-         */
-        agent_id: string;
-    };
-    query?: never;
-    url: '/api/v1/agents/{agent_id}';
-};
-
-export type agentsGetAgentErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type agentsGetAgentError = agentsGetAgentErrors[keyof agentsGetAgentErrors];
-
-export type agentsGetAgentResponses = {
-    /**
-     * Response Agents-Get Agent
-     *
-     * Successful Response
-     */
-    200: {
-        [key: string]: unknown;
-    };
-};
-
-export type agentsGetAgentResponse = agentsGetAgentResponses[keyof agentsGetAgentResponses];
-
-export type agentsUpdateAgentData = {
-    body: AgentUpdateRequest;
-    path: {
-        /**
-         * Agent Id
-         */
-        agent_id: string;
-    };
-    query?: never;
-    url: '/api/v1/agents/{agent_id}';
-};
-
-export type agentsUpdateAgentErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type agentsUpdateAgentError = agentsUpdateAgentErrors[keyof agentsUpdateAgentErrors];
-
-export type agentsUpdateAgentResponses = {
-    /**
-     * Response Agents-Update Agent
-     *
-     * Successful Response
-     */
-    200: {
-        [key: string]: unknown;
-    };
-};
-
-export type agentsUpdateAgentResponse = agentsUpdateAgentResponses[keyof agentsUpdateAgentResponses];
-
-export type agentsSendCommandData = {
-    /**
-     * Command
-     */
-    body: {
-        [key: string]: unknown;
-    };
-    path: {
-        /**
-         * Agent Id
-         */
-        agent_id: string;
-    };
-    query?: never;
-    url: '/api/v1/agents/{agent_id}/command';
-};
-
-export type agentsSendCommandErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type agentsSendCommandError = agentsSendCommandErrors[keyof agentsSendCommandErrors];
-
-export type agentsSendCommandResponses = {
-    /**
-     * Response Agents-Send Command
-     *
-     * Successful Response
-     */
-    200: {
-        [key: string]: unknown;
-    };
-};
-
-export type agentsSendCommandResponse = agentsSendCommandResponses[keyof agentsSendCommandResponses];
-
-export type metricsMetricsData = {
+export type adminListMachinesData = {
     body?: never;
     path?: never;
     query?: never;
-    url: '/api/v1/metrics';
+    url: '/admin/api/machines';
 };
 
-export type metricsMetricsResponses = {
+export type adminListMachinesResponses = {
     /**
+     * Response Admin-List Machines
+     *
+     * Successful Response
+     */
+    200: Array<{
+        [key: string]: unknown;
+    }>;
+};
+
+export type adminListMachinesResponse = adminListMachinesResponses[keyof adminListMachinesResponses];
+
+export type adminCreateMachineData = {
+    body: MachineCreate;
+    path?: never;
+    query?: never;
+    url: '/admin/api/machines';
+};
+
+export type adminCreateMachineErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminCreateMachineError = adminCreateMachineErrors[keyof adminCreateMachineErrors];
+
+export type adminCreateMachineResponses = {
+    /**
+     * Response Admin-Create Machine
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminCreateMachineResponse = adminCreateMachineResponses[keyof adminCreateMachineResponses];
+
+export type adminDeleteMachineData = {
+    body?: never;
+    path: {
+        /**
+         * Machine Id
+         */
+        machine_id: string;
+    };
+    query?: never;
+    url: '/admin/api/machines/{machine_id}';
+};
+
+export type adminDeleteMachineErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminDeleteMachineError = adminDeleteMachineErrors[keyof adminDeleteMachineErrors];
+
+export type adminDeleteMachineResponses = {
+    /**
+     * Response Admin-Delete Machine
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminDeleteMachineResponse = adminDeleteMachineResponses[keyof adminDeleteMachineResponses];
+
+export type adminGetMachineData = {
+    body?: never;
+    path: {
+        /**
+         * Machine Id
+         */
+        machine_id: string;
+    };
+    query?: never;
+    url: '/admin/api/machines/{machine_id}';
+};
+
+export type adminGetMachineErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminGetMachineError = adminGetMachineErrors[keyof adminGetMachineErrors];
+
+export type adminGetMachineResponses = {
+    /**
+     * Response Admin-Get Machine
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminGetMachineResponse = adminGetMachineResponses[keyof adminGetMachineResponses];
+
+export type adminPatchMachineData = {
+    body: MachinePatch;
+    path: {
+        /**
+         * Machine Id
+         */
+        machine_id: string;
+    };
+    query?: never;
+    url: '/admin/api/machines/{machine_id}';
+};
+
+export type adminPatchMachineErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminPatchMachineError = adminPatchMachineErrors[keyof adminPatchMachineErrors];
+
+export type adminPatchMachineResponses = {
+    /**
+     * Response Admin-Patch Machine
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminPatchMachineResponse = adminPatchMachineResponses[keyof adminPatchMachineResponses];
+
+export type adminListDefinitionsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/admin/api/definitions';
+};
+
+export type adminListDefinitionsResponses = {
+    /**
+     * Response Admin-List Definitions
+     *
+     * Successful Response
+     */
+    200: Array<{
+        [key: string]: unknown;
+    }>;
+};
+
+export type adminListDefinitionsResponse = adminListDefinitionsResponses[keyof adminListDefinitionsResponses];
+
+export type adminCreateDefinitionData = {
+    body: DefinitionCreate;
+    path?: never;
+    query?: never;
+    url: '/admin/api/definitions';
+};
+
+export type adminCreateDefinitionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminCreateDefinitionError = adminCreateDefinitionErrors[keyof adminCreateDefinitionErrors];
+
+export type adminCreateDefinitionResponses = {
+    /**
+     * Response Admin-Create Definition
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminCreateDefinitionResponse = adminCreateDefinitionResponses[keyof adminCreateDefinitionResponses];
+
+export type adminDeleteDefinitionData = {
+    body?: never;
+    path: {
+        /**
+         * Definition Id
+         */
+        definition_id: string;
+    };
+    query?: never;
+    url: '/admin/api/definitions/{definition_id}';
+};
+
+export type adminDeleteDefinitionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminDeleteDefinitionError = adminDeleteDefinitionErrors[keyof adminDeleteDefinitionErrors];
+
+export type adminDeleteDefinitionResponses = {
+    /**
+     * Response Admin-Delete Definition
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminDeleteDefinitionResponse = adminDeleteDefinitionResponses[keyof adminDeleteDefinitionResponses];
+
+export type adminGetDefinitionData = {
+    body?: never;
+    path: {
+        /**
+         * Definition Id
+         */
+        definition_id: string;
+    };
+    query?: never;
+    url: '/admin/api/definitions/{definition_id}';
+};
+
+export type adminGetDefinitionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminGetDefinitionError = adminGetDefinitionErrors[keyof adminGetDefinitionErrors];
+
+export type adminGetDefinitionResponses = {
+    /**
+     * Response Admin-Get Definition
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminGetDefinitionResponse = adminGetDefinitionResponses[keyof adminGetDefinitionResponses];
+
+export type adminPatchDefinitionData = {
+    body: DefinitionPatch;
+    path: {
+        /**
+         * Definition Id
+         */
+        definition_id: string;
+    };
+    query?: never;
+    url: '/admin/api/definitions/{definition_id}';
+};
+
+export type adminPatchDefinitionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminPatchDefinitionError = adminPatchDefinitionErrors[keyof adminPatchDefinitionErrors];
+
+export type adminPatchDefinitionResponses = {
+    /**
+     * Response Admin-Patch Definition
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminPatchDefinitionResponse = adminPatchDefinitionResponses[keyof adminPatchDefinitionResponses];
+
+export type adminListInstancesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/admin/api/instances';
+};
+
+export type adminListInstancesResponses = {
+    /**
+     * Response Admin-List Instances
+     *
+     * Successful Response
+     */
+    200: Array<{
+        [key: string]: unknown;
+    }>;
+};
+
+export type adminListInstancesResponse = adminListInstancesResponses[keyof adminListInstancesResponses];
+
+export type adminGetInstanceData = {
+    body?: never;
+    path: {
+        /**
+         * Instance Id
+         */
+        instance_id: string;
+    };
+    query?: never;
+    url: '/admin/api/instances/{instance_id}';
+};
+
+export type adminGetInstanceErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminGetInstanceError = adminGetInstanceErrors[keyof adminGetInstanceErrors];
+
+export type adminGetInstanceResponses = {
+    /**
+     * Response Admin-Get Instance
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminGetInstanceResponse = adminGetInstanceResponses[keyof adminGetInstanceResponses];
+
+export type adminClearCacheData = {
+    /**
+     * Body
+     */
+    body?: ActionBody | null;
+    path: {
+        /**
+         * Instance Id
+         */
+        instance_id: string;
+    };
+    query?: never;
+    url: '/admin/api/instances/{instance_id}/cache/clear';
+};
+
+export type adminClearCacheErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminClearCacheError = adminClearCacheErrors[keyof adminClearCacheErrors];
+
+export type adminClearCacheResponses = {
+    /**
+     * Response Admin-Clear Cache
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminClearCacheResponse = adminClearCacheResponses[keyof adminClearCacheResponses];
+
+export type adminPruneStorageData = {
+    /**
+     * Body
+     */
+    body?: ActionBody | null;
+    path: {
+        /**
+         * Instance Id
+         */
+        instance_id: string;
+    };
+    query?: never;
+    url: '/admin/api/instances/{instance_id}/storage/prune';
+};
+
+export type adminPruneStorageErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminPruneStorageError = adminPruneStorageErrors[keyof adminPruneStorageErrors];
+
+export type adminPruneStorageResponses = {
+    /**
+     * Response Admin-Prune Storage
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminPruneStorageResponse = adminPruneStorageResponses[keyof adminPruneStorageResponses];
+
+export type adminListResponsesData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Limit
+         */
+        limit?: number;
+        /**
+         * Offset
+         */
+        offset?: number;
+    };
+    url: '/admin/api/responses';
+};
+
+export type adminListResponsesErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminListResponsesError = adminListResponsesErrors[keyof adminListResponsesErrors];
+
+export type adminListResponsesResponses = {
+    /**
+     * Response Admin-List Responses
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminListResponsesResponse = adminListResponsesResponses[keyof adminListResponsesResponses];
+
+export type adminUsageStatsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Limit
+         */
+        limit?: number;
+    };
+    url: '/admin/api/stats/usage';
+};
+
+export type adminUsageStatsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminUsageStatsError = adminUsageStatsErrors[keyof adminUsageStatsErrors];
+
+export type adminUsageStatsResponses = {
+    /**
+     * Response Admin-Usage Stats
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminUsageStatsResponse = adminUsageStatsResponses[keyof adminUsageStatsResponses];
+
+export type adminOverviewStatsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/admin/api/stats/overview';
+};
+
+export type adminOverviewStatsResponses = {
+    /**
+     * Response Admin-Overview Stats
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminOverviewStatsResponse = adminOverviewStatsResponses[keyof adminOverviewStatsResponses];
+
+export type responsesCreateResponseData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/responses';
+};
+
+export type responsesCreateResponseResponses = {
+    /**
+     * Response Responses-Create Response
+     *
      * Successful Response
      */
     200: unknown;
 };
 
-export type serverInstancesListServerInstancesData = {
+export type chatCreateChatCompletionData = {
     body?: never;
     path?: never;
     query?: never;
-    url: '/api/v1/server-instances';
+    url: '/v1/chat/completions';
 };
 
-export type serverInstancesListServerInstancesResponses = {
+export type chatCreateChatCompletionResponses = {
     /**
-     * Successful Response
-     */
-    200: ServerInstanceListResponse;
-};
-
-export type serverInstancesListServerInstancesResponse = serverInstancesListServerInstancesResponses[keyof serverInstancesListServerInstancesResponses];
-
-export type serverInstancesDeleteServerData = {
-    body?: never;
-    path: {
-        /**
-         * Server Id
-         */
-        server_id: string;
-    };
-    query?: never;
-    url: '/api/v1/server-instances/{server_id}';
-};
-
-export type serverInstancesDeleteServerErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type serverInstancesDeleteServerError = serverInstancesDeleteServerErrors[keyof serverInstancesDeleteServerErrors];
-
-export type serverInstancesDeleteServerResponses = {
-    /**
-     * Response Server-Instances-Delete Server
+     * Response Chat-Create Chat Completion
      *
      * Successful Response
      */
-    200: {
-        [key: string]: string;
-    };
+    200: unknown;
 };
 
-export type serverInstancesDeleteServerResponse = serverInstancesDeleteServerResponses[keyof serverInstancesDeleteServerResponses];
-
-export type serverInstancesGetServerInstanceData = {
-    body?: never;
-    path: {
-        /**
-         * Server Id
-         */
-        server_id: string;
-    };
-    query?: never;
-    url: '/api/v1/server-instances/{server_id}';
-};
-
-export type serverInstancesGetServerInstanceErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type serverInstancesGetServerInstanceError = serverInstancesGetServerInstanceErrors[keyof serverInstancesGetServerInstanceErrors];
-
-export type serverInstancesGetServerInstanceResponses = {
-    /**
-     * Successful Response
-     */
-    200: ServerInstanceResponse;
-};
-
-export type serverInstancesGetServerInstanceResponse = serverInstancesGetServerInstanceResponses[keyof serverInstancesGetServerInstanceResponses];
-
-export type serverInstancesUpdateServerData = {
-    body: UpdateServerRequest;
-    path: {
-        /**
-         * Server Id
-         */
-        server_id: string;
-    };
-    query?: never;
-    url: '/api/v1/server-instances/{server_id}';
-};
-
-export type serverInstancesUpdateServerErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type serverInstancesUpdateServerError = serverInstancesUpdateServerErrors[keyof serverInstancesUpdateServerErrors];
-
-export type serverInstancesUpdateServerResponses = {
-    /**
-     * Response Server-Instances-Update Server
-     *
-     * Successful Response
-     */
-    200: {
-        [key: string]: unknown;
-    };
-};
-
-export type serverInstancesUpdateServerResponse = serverInstancesUpdateServerResponses[keyof serverInstancesUpdateServerResponses];
-
-export type serverInstancesStartServerData = {
-    body: StartServerRequest;
-    path?: never;
-    query?: never;
-    url: '/api/v1/server-instances/start';
-};
-
-export type serverInstancesStartServerErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type serverInstancesStartServerError = serverInstancesStartServerErrors[keyof serverInstancesStartServerErrors];
-
-export type serverInstancesStartServerResponses = {
-    /**
-     * Response Server-Instances-Start Server
-     *
-     * Successful Response
-     */
-    200: {
-        [key: string]: unknown;
-    };
-};
-
-export type serverInstancesStartServerResponse = serverInstancesStartServerResponses[keyof serverInstancesStartServerResponses];
-
-export type serverInstancesInitializeExistingServerData = {
-    body?: never;
-    path: {
-        /**
-         * Server Id
-         */
-        server_id: string;
-    };
-    query?: never;
-    url: '/api/v1/server-instances/{server_id}/initialize';
-};
-
-export type serverInstancesInitializeExistingServerErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type serverInstancesInitializeExistingServerError = serverInstancesInitializeExistingServerErrors[keyof serverInstancesInitializeExistingServerErrors];
-
-export type serverInstancesInitializeExistingServerResponses = {
-    /**
-     * Response Server-Instances-Initialize Existing Server
-     *
-     * Successful Response
-     */
-    200: {
-        [key: string]: unknown;
-    };
-};
-
-export type serverInstancesInitializeExistingServerResponse = serverInstancesInitializeExistingServerResponses[keyof serverInstancesInitializeExistingServerResponses];
-
-export type serverInstancesUpdateServerMetadataData = {
-    body: ModelMetadataUpdate;
-    path: {
-        /**
-         * Server Id
-         */
-        server_id: string;
-    };
-    query?: never;
-    url: '/api/v1/server-instances/{server_id}/metadata';
-};
-
-export type serverInstancesUpdateServerMetadataErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type serverInstancesUpdateServerMetadataError = serverInstancesUpdateServerMetadataErrors[keyof serverInstancesUpdateServerMetadataErrors];
-
-export type serverInstancesUpdateServerMetadataResponses = {
-    /**
-     * Response Server-Instances-Update Server Metadata
-     *
-     * Successful Response
-     */
-    200: {
-        [key: string]: unknown;
-    };
-};
-
-export type serverInstancesUpdateServerMetadataResponse = serverInstancesUpdateServerMetadataResponses[keyof serverInstancesUpdateServerMetadataResponses];
-
-export type serverInstancesRestartServerData = {
-    body?: never;
-    path: {
-        /**
-         * Server Id
-         */
-        server_id: string;
-    };
-    query?: never;
-    url: '/api/v1/server-instances/{server_id}/start';
-};
-
-export type serverInstancesRestartServerErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type serverInstancesRestartServerError = serverInstancesRestartServerErrors[keyof serverInstancesRestartServerErrors];
-
-export type serverInstancesRestartServerResponses = {
-    /**
-     * Response Server-Instances-Restart Server
-     *
-     * Successful Response
-     */
-    200: {
-        [key: string]: unknown;
-    };
-};
-
-export type serverInstancesRestartServerResponse = serverInstancesRestartServerResponses[keyof serverInstancesRestartServerResponses];
-
-export type serverInstancesStopServerData = {
-    body?: never;
-    path: {
-        /**
-         * Server Id
-         */
-        server_id: string;
-    };
-    query?: {
-        /**
-         * Force
-         */
-        force?: boolean;
-    };
-    url: '/api/v1/server-instances/{server_id}/stop';
-};
-
-export type serverInstancesStopServerErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type serverInstancesStopServerError = serverInstancesStopServerErrors[keyof serverInstancesStopServerErrors];
-
-export type serverInstancesStopServerResponses = {
-    /**
-     * Response Server-Instances-Stop Server
-     *
-     * Successful Response
-     */
-    200: {
-        [key: string]: string;
-    };
-};
-
-export type serverInstancesStopServerResponse = serverInstancesStopServerResponses[keyof serverInstancesStopServerResponses];
-
-export type benchmarksListDefinitionsData = {
-    body?: never;
-    path?: never;
-    query?: never;
-    url: '/api/v1/benchmarks/definitions';
-};
-
-export type benchmarksListDefinitionsResponses = {
-    /**
-     * Response Benchmarks-List Definitions
-     *
-     * Successful Response
-     */
-    200: Array<{
-        [key: string]: unknown;
-    }>;
-};
-
-export type benchmarksListDefinitionsResponse = benchmarksListDefinitionsResponses[keyof benchmarksListDefinitionsResponses];
-
-export type benchmarksCreateDefinitionData = {
-    body: BenchmarkDefinitionInput;
-    path?: never;
-    query?: never;
-    url: '/api/v1/benchmarks/definitions';
-};
-
-export type benchmarksCreateDefinitionErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type benchmarksCreateDefinitionError = benchmarksCreateDefinitionErrors[keyof benchmarksCreateDefinitionErrors];
-
-export type benchmarksCreateDefinitionResponses = {
-    /**
-     * Response Benchmarks-Create Definition
-     *
-     * Successful Response
-     */
-    200: {
-        [key: string]: unknown;
-    };
-};
-
-export type benchmarksCreateDefinitionResponse = benchmarksCreateDefinitionResponses[keyof benchmarksCreateDefinitionResponses];
-
-export type benchmarksDeleteDefinitionData = {
-    body?: never;
-    path: {
-        /**
-         * Definition Id
-         */
-        definition_id: string;
-    };
-    query?: never;
-    url: '/api/v1/benchmarks/definitions/{definition_id}';
-};
-
-export type benchmarksDeleteDefinitionErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type benchmarksDeleteDefinitionError = benchmarksDeleteDefinitionErrors[keyof benchmarksDeleteDefinitionErrors];
-
-export type benchmarksDeleteDefinitionResponses = {
-    /**
-     * Successful Response
-     */
-    204: void;
-};
-
-export type benchmarksDeleteDefinitionResponse = benchmarksDeleteDefinitionResponses[keyof benchmarksDeleteDefinitionResponses];
-
-export type benchmarksUpdateDefinitionData = {
-    body: BenchmarkDefinitionInput;
-    path: {
-        /**
-         * Definition Id
-         */
-        definition_id: string;
-    };
-    query?: never;
-    url: '/api/v1/benchmarks/definitions/{definition_id}';
-};
-
-export type benchmarksUpdateDefinitionErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type benchmarksUpdateDefinitionError = benchmarksUpdateDefinitionErrors[keyof benchmarksUpdateDefinitionErrors];
-
-export type benchmarksUpdateDefinitionResponses = {
-    /**
-     * Response Benchmarks-Update Definition
-     *
-     * Successful Response
-     */
-    200: {
-        [key: string]: unknown;
-    };
-};
-
-export type benchmarksUpdateDefinitionResponse = benchmarksUpdateDefinitionResponses[keyof benchmarksUpdateDefinitionResponses];
-
-export type benchmarksListRunsData = {
-    body?: never;
-    path?: never;
-    query?: never;
-    url: '/api/v1/benchmarks/runs';
-};
-
-export type benchmarksListRunsResponses = {
-    /**
-     * Response Benchmarks-List Runs
-     *
-     * Successful Response
-     */
-    200: Array<{
-        [key: string]: unknown;
-    }>;
-};
-
-export type benchmarksListRunsResponse = benchmarksListRunsResponses[keyof benchmarksListRunsResponses];
-
-export type benchmarksCreateRunData = {
-    body: RunInput;
-    path?: never;
-    query?: never;
-    url: '/api/v1/benchmarks/runs';
-};
-
-export type benchmarksCreateRunErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type benchmarksCreateRunError = benchmarksCreateRunErrors[keyof benchmarksCreateRunErrors];
-
-export type benchmarksCreateRunResponses = {
-    /**
-     * Response Benchmarks-Create Run
-     *
-     * Successful Response
-     */
-    200: {
-        [key: string]: unknown;
-    };
-};
-
-export type benchmarksCreateRunResponse = benchmarksCreateRunResponses[keyof benchmarksCreateRunResponses];
-
-export type benchmarksGetResultsData = {
-    body?: never;
-    path: {
-        /**
-         * Run Id
-         */
-        run_id: string;
-    };
-    query?: never;
-    url: '/api/v1/benchmarks/runs/{run_id}/results';
-};
-
-export type benchmarksGetResultsErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type benchmarksGetResultsError = benchmarksGetResultsErrors[keyof benchmarksGetResultsErrors];
-
-export type benchmarksGetResultsResponses = {
-    /**
-     * Response Benchmarks-Get Results
-     *
-     * Successful Response
-     */
-    200: {
-        [key: string]: unknown;
-    } | null;
-};
-
-export type benchmarksGetResultsResponse = benchmarksGetResultsResponses[keyof benchmarksGetResultsResponses];
-
-export type benchmarksCancelRunData = {
-    body?: never;
-    path: {
-        /**
-         * Run Id
-         */
-        run_id: string;
-    };
-    query?: never;
-    url: '/api/v1/benchmarks/runs/{run_id}/cancel';
-};
-
-export type benchmarksCancelRunErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type benchmarksCancelRunError = benchmarksCancelRunErrors[keyof benchmarksCancelRunErrors];
-
-export type benchmarksCancelRunResponses = {
-    /**
-     * Response Benchmarks-Cancel Run
-     *
-     * Successful Response
-     */
-    200: {
-        [key: string]: unknown;
-    };
-};
-
-export type benchmarksCancelRunResponse = benchmarksCancelRunResponses[keyof benchmarksCancelRunResponses];
-
-export type benchmarksAbortRunData = {
-    body?: never;
-    path: {
-        /**
-         * Run Id
-         */
-        run_id: string;
-    };
-    query?: never;
-    url: '/api/v1/benchmarks/runs/{run_id}/abort';
-};
-
-export type benchmarksAbortRunErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type benchmarksAbortRunError = benchmarksAbortRunErrors[keyof benchmarksAbortRunErrors];
-
-export type benchmarksAbortRunResponses = {
-    /**
-     * Response Benchmarks-Abort Run
-     *
-     * Successful Response
-     */
-    200: {
-        [key: string]: unknown;
-    };
-};
-
-export type benchmarksAbortRunResponse = benchmarksAbortRunResponses[keyof benchmarksAbortRunResponses];
-
-export type benchmarksForceStopRunData = {
-    body?: never;
-    path: {
-        /**
-         * Run Id
-         */
-        run_id: string;
-    };
-    query?: never;
-    url: '/api/v1/benchmarks/runs/{run_id}/force-stop';
-};
-
-export type benchmarksForceStopRunErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type benchmarksForceStopRunError = benchmarksForceStopRunErrors[keyof benchmarksForceStopRunErrors];
-
-export type benchmarksForceStopRunResponses = {
-    /**
-     * Response Benchmarks-Force Stop Run
-     *
-     * Successful Response
-     */
-    200: {
-        [key: string]: unknown;
-    };
-};
-
-export type benchmarksForceStopRunResponse = benchmarksForceStopRunResponses[keyof benchmarksForceStopRunResponses];
-
-export type modelsReadModelsData = {
-    body?: never;
-    path?: never;
-    query?: {
-        /**
-         * Skip
-         */
-        skip?: number;
-        /**
-         * Limit
-         */
-        limit?: number;
-    };
-    url: '/api/v1/models/';
-};
-
-export type modelsReadModelsErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type modelsReadModelsError = modelsReadModelsErrors[keyof modelsReadModelsErrors];
-
-export type modelsReadModelsResponses = {
-    /**
-     * Response Models-Read Models
-     *
-     * Successful Response
-     */
-    200: Array<Model>;
-};
-
-export type modelsReadModelsResponse = modelsReadModelsResponses[keyof modelsReadModelsResponses];
-
-export type modelsCreateModelData = {
-    body: ModelCreate;
-    path?: never;
-    query?: never;
-    url: '/api/v1/models/';
-};
-
-export type modelsCreateModelErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type modelsCreateModelError = modelsCreateModelErrors[keyof modelsCreateModelErrors];
-
-export type modelsCreateModelResponses = {
-    /**
-     * Successful Response
-     */
-    200: Model;
-};
-
-export type modelsCreateModelResponse = modelsCreateModelResponses[keyof modelsCreateModelResponses];
-
-export type modelsDeleteModelData = {
-    body?: never;
-    path: {
-        /**
-         * Id
-         */
-        id: string;
-    };
-    query?: never;
-    url: '/api/v1/models/{id}';
-};
-
-export type modelsDeleteModelErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type modelsDeleteModelError = modelsDeleteModelErrors[keyof modelsDeleteModelErrors];
-
-export type modelsDeleteModelResponses = {
-    /**
-     * Successful Response
-     */
-    200: Message;
-};
-
-export type modelsDeleteModelResponse = modelsDeleteModelResponses[keyof modelsDeleteModelResponses];
-
-export type modelsReadModelData = {
-    body?: never;
-    path: {
-        /**
-         * Id
-         */
-        id: string;
-    };
-    query?: never;
-    url: '/api/v1/models/{id}';
-};
-
-export type modelsReadModelErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type modelsReadModelError = modelsReadModelErrors[keyof modelsReadModelErrors];
-
-export type modelsReadModelResponses = {
-    /**
-     * Successful Response
-     */
-    200: Model;
-};
-
-export type modelsReadModelResponse = modelsReadModelResponses[keyof modelsReadModelResponses];
-
-export type modelsUpdateModelData = {
-    body: ModelUpdate;
-    path: {
-        /**
-         * Id
-         */
-        id: string;
-    };
-    query?: never;
-    url: '/api/v1/models/{id}';
-};
-
-export type modelsUpdateModelErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type modelsUpdateModelError = modelsUpdateModelErrors[keyof modelsUpdateModelErrors];
-
-export type modelsUpdateModelResponses = {
-    /**
-     * Successful Response
-     */
-    200: Model;
-};
-
-export type modelsUpdateModelResponse = modelsUpdateModelResponses[keyof modelsUpdateModelResponses];
-
-export type queueInferenceRequestStatusData = {
-    body?: never;
-    path: {
-        /**
-         * Request Id
-         */
-        request_id: string;
-    };
-    query?: never;
-    url: '/api/v1/queue/{request_id}';
-};
-
-export type queueInferenceRequestStatusErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type queueInferenceRequestStatusError = queueInferenceRequestStatusErrors[keyof queueInferenceRequestStatusErrors];
-
-export type queueInferenceRequestStatusResponses = {
-    /**
-     * Response Queue-Inference Request Status
-     *
-     * Successful Response
-     */
-    200: {
-        [key: string]: string | null;
-    };
-};
-
-export type queueInferenceRequestStatusResponse = queueInferenceRequestStatusResponses[keyof queueInferenceRequestStatusResponses];
-
-export type queueClearInferenceQueueData = {
-    body?: never;
-    path?: never;
-    query?: never;
-    url: '/api/v1/queue/clear';
-};
-
-export type queueClearInferenceQueueResponses = {
-    /**
-     * Response Queue-Clear Inference Queue
-     *
-     * Successful Response
-     */
-    200: {
-        [key: string]: number | string;
-    };
-};
-
-export type queueClearInferenceQueueResponse = queueClearInferenceQueueResponses[keyof queueClearInferenceQueueResponses];
-
-export type statsGetTokenStatsData = {
-    body?: never;
-    path?: never;
-    query?: never;
-    url: '/api/v1/stats/tokens';
-};
-
-export type statsGetTokenStatsResponses = {
-    /**
-     * Successful Response
-     */
-    200: TokenStatsResponse;
-};
-
-export type statsGetTokenStatsResponse = statsGetTokenStatsResponses[keyof statsGetTokenStatsResponses];
-
-export type huggingfaceSearchModelsData = {
-    body?: never;
-    path?: never;
-    query: {
-        /**
-         * Search
-         *
-         * Search query
-         */
-        search: string;
-        /**
-         * Limit
-         *
-         * Max results
-         */
-        limit?: number;
-        /**
-         * Full
-         *
-         * Include full model info
-         */
-        full?: boolean;
-    };
-    url: '/api/v1/huggingface/search';
-};
-
-export type huggingfaceSearchModelsErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type huggingfaceSearchModelsError = huggingfaceSearchModelsErrors[keyof huggingfaceSearchModelsErrors];
-
-export type huggingfaceSearchModelsResponses = {
-    /**
-     * Response Huggingface-Search Models
-     *
-     * Successful Response
-     */
-    200: Array<{
-        [key: string]: unknown;
-    }>;
-};
-
-export type huggingfaceSearchModelsResponse = huggingfaceSearchModelsResponses[keyof huggingfaceSearchModelsResponses];
-
-export type huggingfaceListModelFilesData = {
-    body?: never;
-    path?: never;
-    query: {
-        /**
-         * Repo Id
-         *
-         * HuggingFace repository ID (e.g., 'unsloth/Qwen3.8-27B-GGUF')
-         */
-        repo_id: string;
-    };
-    url: '/api/v1/huggingface/models/files';
-};
-
-export type huggingfaceListModelFilesErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type huggingfaceListModelFilesError = huggingfaceListModelFilesErrors[keyof huggingfaceListModelFilesErrors];
-
-export type huggingfaceListModelFilesResponses = {
-    /**
-     * Response Huggingface-List Model Files
-     *
-     * Successful Response
-     */
-    200: Array<{
-        [key: string]: unknown;
-    }>;
-};
-
-export type huggingfaceListModelFilesResponse = huggingfaceListModelFilesResponses[keyof huggingfaceListModelFilesResponses];
-
-export type huggingfaceGetModelInfoData = {
-    body?: never;
-    path?: never;
-    query: {
-        /**
-         * Repo Id
-         *
-         * HuggingFace repository ID
-         */
-        repo_id: string;
-    };
-    url: '/api/v1/huggingface/models/info';
-};
-
-export type huggingfaceGetModelInfoErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type huggingfaceGetModelInfoError = huggingfaceGetModelInfoErrors[keyof huggingfaceGetModelInfoErrors];
-
-export type huggingfaceGetModelInfoResponses = {
-    /**
-     * Response Huggingface-Get Model Info
-     *
-     * Successful Response
-     */
-    200: {
-        [key: string]: unknown;
-    };
-};
-
-export type huggingfaceGetModelInfoResponse = huggingfaceGetModelInfoResponses[keyof huggingfaceGetModelInfoResponses];
-
-export type huggingfaceGetParameterCountData = {
-    body?: never;
-    path?: never;
-    query: {
-        /**
-         * Repo Id
-         *
-         * HuggingFace repository ID
-         */
-        repo_id: string;
-    };
-    url: '/api/v1/huggingface/models/params';
-};
-
-export type huggingfaceGetParameterCountErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type huggingfaceGetParameterCountError = huggingfaceGetParameterCountErrors[keyof huggingfaceGetParameterCountErrors];
-
-export type huggingfaceGetParameterCountResponses = {
-    /**
-     * Response Huggingface-Get Parameter Count
-     *
-     * Successful Response
-     */
-    200: {
-        [key: string]: unknown;
-    };
-};
-
-export type huggingfaceGetParameterCountResponse = huggingfaceGetParameterCountResponses[keyof huggingfaceGetParameterCountResponses];
-
-export type utilsHealthCheckData = {
-    body?: never;
-    path?: never;
-    query?: never;
-    url: '/api/v1/utils/health-check/';
-};
-
-export type utilsHealthCheckResponses = {
-    /**
-     * Response Utils-Health Check
-     *
-     * Successful Response
-     */
-    200: boolean;
-};
-
-export type utilsHealthCheckResponse = utilsHealthCheckResponses[keyof utilsHealthCheckResponses];
-
-export type v1ModelsListModelsData = {
+export type modelsListModelsData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/v1/models';
 };
 
-export type v1ModelsListModelsResponses = {
+export type modelsListModelsResponses = {
     /**
+     * Response Models-List Models
+     *
      * Successful Response
      */
-    200: ModelsList;
-};
-
-export type v1ModelsListModelsResponse = v1ModelsListModelsResponses[keyof v1ModelsListModelsResponses];
-
-export type v1ModelsRetrieveModelData = {
-    body?: never;
-    path: {
-        /**
-         * Model Id
-         */
-        model_id: string;
+    200: {
+        [key: string]: unknown;
     };
-    query?: never;
-    url: '/v1/models/{model_id}';
 };
 
-export type v1ModelsRetrieveModelErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type v1ModelsRetrieveModelError = v1ModelsRetrieveModelErrors[keyof v1ModelsRetrieveModelErrors];
-
-export type v1ModelsRetrieveModelResponses = {
-    /**
-     * Successful Response
-     */
-    200: ModelData;
-};
-
-export type v1ModelsRetrieveModelResponse = v1ModelsRetrieveModelResponses[keyof v1ModelsRetrieveModelResponses];
-
-export type v1ChatCreateChatCompletionData = {
-    body: ChatCompletionRequest;
-    path?: never;
-    query?: never;
-    url: '/v1/chat/completions';
-};
-
-export type v1ChatCreateChatCompletionErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type v1ChatCreateChatCompletionError = v1ChatCreateChatCompletionErrors[keyof v1ChatCreateChatCompletionErrors];
-
-export type v1ChatCreateChatCompletionResponses = {
-    /**
-     * Successful Response
-     */
-    200: unknown;
-};
-
-export type v1CompletionsCreateCompletionData = {
-    body: CompletionRequest;
-    path?: never;
-    query?: never;
-    url: '/v1/completions';
-};
-
-export type v1CompletionsCreateCompletionErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type v1CompletionsCreateCompletionError = v1CompletionsCreateCompletionErrors[keyof v1CompletionsCreateCompletionErrors];
-
-export type v1CompletionsCreateCompletionResponses = {
-    /**
-     * Successful Response
-     */
-    200: unknown;
-};
-
-export type v1EmbeddingsCreateEmbeddingData = {
-    body: EmbeddingRequest;
-    path?: never;
-    query?: never;
-    url: '/v1/embeddings';
-};
-
-export type v1EmbeddingsCreateEmbeddingErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type v1EmbeddingsCreateEmbeddingError = v1EmbeddingsCreateEmbeddingErrors[keyof v1EmbeddingsCreateEmbeddingErrors];
-
-export type v1EmbeddingsCreateEmbeddingResponses = {
-    /**
-     * Successful Response
-     */
-    200: EmbeddingResponse;
-};
-
-export type v1EmbeddingsCreateEmbeddingResponse = v1EmbeddingsCreateEmbeddingResponses[keyof v1EmbeddingsCreateEmbeddingResponses];
-
-export type v1RerankRerankData = {
-    body: RerankRequest;
-    path?: never;
-    query?: never;
-    url: '/v1/rerank';
-};
-
-export type v1RerankRerankErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type v1RerankRerankError = v1RerankRerankErrors[keyof v1RerankRerankErrors];
-
-export type v1RerankRerankResponses = {
-    /**
-     * Successful Response
-     */
-    200: RerankResponse;
-};
-
-export type v1RerankRerankResponse = v1RerankRerankResponses[keyof v1RerankRerankResponses];
-
-export type v1DecisionsDecideData = {
-    body: DecisionRequest;
-    path?: never;
-    query?: never;
-    url: '/v1/decisions';
-};
-
-export type v1DecisionsDecideErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type v1DecisionsDecideError = v1DecisionsDecideErrors[keyof v1DecisionsDecideErrors];
-
-export type v1DecisionsDecideResponses = {
-    /**
-     * Successful Response
-     */
-    200: DecisionResponse;
-};
-
-export type v1DecisionsDecideResponse = v1DecisionsDecideResponses[keyof v1DecisionsDecideResponses];
-
-export type v1ModerationsModerateData = {
-    body: ModerationRequest;
-    path?: never;
-    query?: never;
-    url: '/v1/moderations';
-};
-
-export type v1ModerationsModerateErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type v1ModerationsModerateError = v1ModerationsModerateErrors[keyof v1ModerationsModerateErrors];
-
-export type v1ModerationsModerateResponses = {
-    /**
-     * Successful Response
-     */
-    200: ModerationResponse;
-};
-
-export type v1ModerationsModerateResponse = v1ModerationsModerateResponses[keyof v1ModerationsModerateResponses];
-
-export type v1ResponsesCreateResponseData = {
-    body: CreateResponseBody;
-    path?: never;
-    query?: never;
-    url: '/v1/responses';
-};
-
-export type v1ResponsesCreateResponseErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type v1ResponsesCreateResponseError = v1ResponsesCreateResponseErrors[keyof v1ResponsesCreateResponseErrors];
-
-export type v1ResponsesCreateResponseResponses = {
-    /**
-     * Successful Response
-     */
-    200: unknown;
-};
-
-export type v1ResponsesCompactResponseData = {
-    body: CompactRequestBody;
-    path?: never;
-    query?: never;
-    url: '/v1/responses/compact';
-};
-
-export type v1ResponsesCompactResponseErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type v1ResponsesCompactResponseError = v1ResponsesCompactResponseErrors[keyof v1ResponsesCompactResponseErrors];
-
-export type v1ResponsesCompactResponseResponses = {
-    /**
-     * Successful Response
-     */
-    200: unknown;
-};
-
-export type v1FilesListFilesData = {
-    body?: never;
-    path?: never;
-    query?: {
-        /**
-         * Purpose
-         */
-        purpose?: string | null;
-    };
-    url: '/v1/files';
-};
-
-export type v1FilesListFilesErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type v1FilesListFilesError = v1FilesListFilesErrors[keyof v1FilesListFilesErrors];
-
-export type v1FilesListFilesResponses = {
-    /**
-     * Successful Response
-     */
-    200: FilesList;
-};
-
-export type v1FilesListFilesResponse = v1FilesListFilesResponses[keyof v1FilesListFilesResponses];
-
-export type v1FilesUploadFileData = {
-    body: Body_v1_files_upload_file;
-    path?: never;
-    query?: never;
-    url: '/v1/files';
-};
-
-export type v1FilesUploadFileErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type v1FilesUploadFileError = v1FilesUploadFileErrors[keyof v1FilesUploadFileErrors];
-
-export type v1FilesUploadFileResponses = {
-    /**
-     * Successful Response
-     */
-    200: FileData;
-};
-
-export type v1FilesUploadFileResponse = v1FilesUploadFileResponses[keyof v1FilesUploadFileResponses];
-
-export type v1FilesDeleteFileData = {
-    body?: never;
-    path: {
-        /**
-         * File Id
-         */
-        file_id: string;
-    };
-    query?: never;
-    url: '/v1/files/{file_id}';
-};
-
-export type v1FilesDeleteFileErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type v1FilesDeleteFileError = v1FilesDeleteFileErrors[keyof v1FilesDeleteFileErrors];
-
-export type v1FilesDeleteFileResponses = {
-    /**
-     * Successful Response
-     */
-    200: DeleteFileResponse;
-};
-
-export type v1FilesDeleteFileResponse = v1FilesDeleteFileResponses[keyof v1FilesDeleteFileResponses];
-
-export type v1FilesRetrieveFileData = {
-    body?: never;
-    path: {
-        /**
-         * File Id
-         */
-        file_id: string;
-    };
-    query?: never;
-    url: '/v1/files/{file_id}';
-};
-
-export type v1FilesRetrieveFileErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type v1FilesRetrieveFileError = v1FilesRetrieveFileErrors[keyof v1FilesRetrieveFileErrors];
-
-export type v1FilesRetrieveFileResponses = {
-    /**
-     * Successful Response
-     */
-    200: FileData;
-};
-
-export type v1FilesRetrieveFileResponse = v1FilesRetrieveFileResponses[keyof v1FilesRetrieveFileResponses];
-
-export type v1FilesRetrieveFileContentData = {
-    body?: never;
-    path: {
-        /**
-         * File Id
-         */
-        file_id: string;
-    };
-    query?: never;
-    url: '/v1/files/{file_id}/content';
-};
-
-export type v1FilesRetrieveFileContentErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type v1FilesRetrieveFileContentError = v1FilesRetrieveFileContentErrors[keyof v1FilesRetrieveFileContentErrors];
-
-export type v1FilesRetrieveFileContentResponses = {
-    /**
-     * Successful Response
-     */
-    200: unknown;
-};
-
-export type v1BatchesListBatchesData = {
-    body?: never;
-    path?: never;
-    query?: {
-        /**
-         * Status
-         */
-        status?: string | null;
-    };
-    url: '/v1/batches';
-};
-
-export type v1BatchesListBatchesErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type v1BatchesListBatchesError = v1BatchesListBatchesErrors[keyof v1BatchesListBatchesErrors];
-
-export type v1BatchesListBatchesResponses = {
-    /**
-     * Successful Response
-     */
-    200: BatchesList;
-};
-
-export type v1BatchesListBatchesResponse = v1BatchesListBatchesResponses[keyof v1BatchesListBatchesResponses];
-
-export type v1BatchesCreateBatchData = {
-    body: BatchRequest;
-    path?: never;
-    query?: never;
-    url: '/v1/batches';
-};
-
-export type v1BatchesCreateBatchErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type v1BatchesCreateBatchError = v1BatchesCreateBatchErrors[keyof v1BatchesCreateBatchErrors];
-
-export type v1BatchesCreateBatchResponses = {
-    /**
-     * Successful Response
-     */
-    200: BatchData;
-};
-
-export type v1BatchesCreateBatchResponse = v1BatchesCreateBatchResponses[keyof v1BatchesCreateBatchResponses];
-
-export type v1BatchesRetrieveBatchData = {
-    body?: never;
-    path: {
-        /**
-         * Batch Id
-         */
-        batch_id: string;
-    };
-    query?: never;
-    url: '/v1/batches/{batch_id}';
-};
-
-export type v1BatchesRetrieveBatchErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type v1BatchesRetrieveBatchError = v1BatchesRetrieveBatchErrors[keyof v1BatchesRetrieveBatchErrors];
-
-export type v1BatchesRetrieveBatchResponses = {
-    /**
-     * Successful Response
-     */
-    200: BatchData;
-};
-
-export type v1BatchesRetrieveBatchResponse = v1BatchesRetrieveBatchResponses[keyof v1BatchesRetrieveBatchResponses];
-
-export type v1BatchesCancelBatchData = {
-    body?: never;
-    path: {
-        /**
-         * Batch Id
-         */
-        batch_id: string;
-    };
-    query?: never;
-    url: '/v1/batches/{batch_id}/cancel';
-};
-
-export type v1BatchesCancelBatchErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type v1BatchesCancelBatchError = v1BatchesCancelBatchErrors[keyof v1BatchesCancelBatchErrors];
-
-export type v1BatchesCancelBatchResponses = {
-    /**
-     * Successful Response
-     */
-    200: BatchData;
-};
-
-export type v1BatchesCancelBatchResponse = v1BatchesCancelBatchResponses[keyof v1BatchesCancelBatchResponses];
-
-export type v1AudioCreateTranscriptionData = {
-    body: Body_v1_audio_create_transcription;
-    path?: never;
-    query?: never;
-    url: '/v1/audio/transcriptions';
-};
-
-export type v1AudioCreateTranscriptionErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type v1AudioCreateTranscriptionError = v1AudioCreateTranscriptionErrors[keyof v1AudioCreateTranscriptionErrors];
-
-export type v1AudioCreateTranscriptionResponses = {
-    /**
-     * Successful Response
-     */
-    200: TranscriptionResponse;
-};
-
-export type v1AudioCreateTranscriptionResponse = v1AudioCreateTranscriptionResponses[keyof v1AudioCreateTranscriptionResponses];
-
-export type v1AudioCreateTranslationData = {
-    body: Body_v1_audio_create_translation;
-    path?: never;
-    query?: never;
-    url: '/v1/audio/translations';
-};
-
-export type v1AudioCreateTranslationErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type v1AudioCreateTranslationError = v1AudioCreateTranslationErrors[keyof v1AudioCreateTranslationErrors];
-
-export type v1AudioCreateTranslationResponses = {
-    /**
-     * Successful Response
-     */
-    200: TranslationResponse;
-};
-
-export type v1AudioCreateTranslationResponse = v1AudioCreateTranslationResponses[keyof v1AudioCreateTranslationResponses];
-
-export type v1AudioCreateSpeechData = {
-    body: SpeechRequest;
-    path?: never;
-    query?: never;
-    url: '/v1/audio/speech';
-};
-
-export type v1AudioCreateSpeechErrors = {
-    /**
-     * Validation Error
-     */
-    422: HTTPValidationError;
-};
-
-export type v1AudioCreateSpeechError = v1AudioCreateSpeechErrors[keyof v1AudioCreateSpeechErrors];
-
-export type v1AudioCreateSpeechResponses = {
-    /**
-     * Successful Response
-     */
-    200: unknown;
-};
+export type modelsListModelsResponse = modelsListModelsResponses[keyof modelsListModelsResponses];

@@ -1,10 +1,10 @@
 # Inference Matrix — Implementation Status
 
 **Overhaul branch:** `litellm-architecture-overhaul`
-**Last updated:** 2026-10-04 (Phase 9 complete: admin Machines/
-Definitions CRUD + `provider.config.update` / fingerprint / cache-clear
-/ prune flow — fake-tested + live local validation; Phase 8 NPU
-pre-download deviation closed)
+**Last updated:** 2026-10-05 (Phase 10 complete: admin UI rework —
+Machines/Definitions/Instances/Responses/Dashboard/Playground/Settings
+on the regenerated SDK + new admin read endpoints; old agent-era UI
+removed; `generate-frontend-sdk` pre-commit hook re-enabled)
 
 This file tracks the litellm-based architecture overhaul (see
 [ARCHITECTURE.md](ARCHITECTURE.md)). Each phase lists its features with
@@ -25,7 +25,7 @@ starting a feature, read the linked protocol/doc first.
 | 7 | `/v1/chat/completions` + `/v1/models` + 501 stubs | ✅ Complete |
 | 8 | gufo / halogen / halogen-flash provider ports | ✅ Complete |
 | 9 | `provider.config.update` / fingerprint / cache-clear flow | ✅ Complete |
-| 10 | Admin UI rework | ⬜ Pending |
+| 10 | Admin UI rework | ✅ Complete |
 | 11 | Docs consolidation + full E2E validation | ⬜ Pending |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
@@ -551,17 +551,82 @@ convention), `BackendDriver.apply_config` ABC hook +
 
 ---
 
-## Phase 10 — Admin UI Rework ⬜
+## Phase 10 — Admin UI Rework ✅
 
-- [ ] **Machines** page: create (uid, name, host/dns/ip, total_vram),
-    view merged hardware.
-- [ ] **Provider Definitions** page: alias, provider_type, `backend_config`
-    editor (JSON schema-validated), vram/idle/capacity, **copyable
-    registration token**, discovered metadata.
-- [ ] **Provider Instances** page: dual status (instance + backend),
-    version, port, epoch, last_seen, assigned metrics, live logs.
-- [ ] Wire to regenerated client; TanStack routes under `/admin` base.
-- [ ] Remove old Agents / Server Instances / Benchmarks pages.
+**Admin reads (new):** `app/api/admin/responses.py` (response log, usage
+stats, dashboard overview) + `GET /admin/api/instances[/{id}]` added to
+`app/api/admin/instances.py`. **Frontend:** full rebuild of
+`admin/frontend` around the new data model on the regenerated SDK
+(`AdminService`, `ResponsesService`, `ChatService`, `ModelsService`).
+
+- [x] **Machines** page (`/machines`): table (uid, name, address,
+    total VRAM, instance count) with expandable merged-hardware view
+    (gpus/cpu/ram). Create + Edit dialogs (uid disabled/immutable on
+    edit), Delete with inline 409 "instances attached" surfacing.
+- [x] **Provider Definitions** page (`/definitions`): table (alias,
+    provider_type, enabled, capacity, vram req, idle, connected/total
+    instances) + expandable detail (copyable masked registration token,
+    config fingerprint, discovered `model_metadata`, full `backend_config`,
+    instance list). Create/Edit form: provider-type Select, numeric
+    validation (capacity ≥ 1, vram/idle ≥ 0), **backend_config JSON
+    editor** validated on submit with per-type schema hints + "Load
+    example" (mock/llama-cpp/halogen/halogen-flash/gufo, from
+    `provider/README.md`). PATCH that changes `backend_config`/`capacity`
+    surfaces `config_update_results` (ok/noop/error per instance) in the
+    toast. Delete surfaces the 409 (connected) → "disable instead".
+- [x] **Provider Instances** page (`/instances`): table (machine uid,
+    alias, dual status, ws badge, version, port, epoch, last_seen,
+    last_request_at, config fingerprint). Row actions: **Clear cache**
+    (dry-run toggle + force) and **Prune storage** (dry-run preview of
+    files + bytes) with result rendering from the ack detail.
+    **Live logs skipped** — `backend.logs`/`provider.logs` are WS-only;
+    no REST read endpoint exists (noted in the page).
+- [x] **Responses / Usage** page (`/responses`): paginated recent
+    `ResponseRecord`s (response_id, model, chat/responses format,
+    status + error, in/out/total tokens, previous_response_id chain,
+    created) + a Token-usage tab (all-time totals, avg rates, CSS-bar
+    chart of prompt/cached/completion per recent request — no charting
+    dep added).
+- [x] **Dashboard** (`/`): overview cards (machines, definitions,
+    connected instances, live active/queued), instance status strip,
+    token-usage summary, recent responses, link tiles.
+- [x] **Playground** (`/playground`): minimal `/v1/responses` +
+    `/v1/chat/completions` streaming panel (SSE deltas + event chips)
+    against any enabled alias.
+- [x] **Settings** (`/settings`): admin VERSION (from `/admin/api/health`),
+    connected-provider + enabled-alias counts, provider-env deploy
+    pointer to `deployment.md`.
+- [x] Regenerated the API client (`scripts/generate-client.sh`) and
+    **re-enabled the `generate-frontend-sdk` pre-commit hook** in
+    `.pre-commit-config.yaml` (was deferred from Phase 7).
+- [x] Removed the old UI: routes `agents`, `server-instances`,
+    `benchmarks`, `models`, `files`, `audio`, `chat`, `completions`,
+    `embeddings`, old `responses`; components `Agents/`, `Benchmarks/`,
+    `Files/`, `Models/`, `Pending/`, `Queue/`, `ServerInstances/`; dead
+    hooks (`useQueueStatus`, `useLogFeed`, `useAgentEvents`,
+    `useTokenStats`, `logMerge`) and libs (`benchmarkApi`, `gpuMetrics`).
+    Kept `ui/`, `Common/`, `Sidebar/`, `theme-provider`. Sidebar nav
+    rewritten to the new page set; no dangling imports (build clean).
+- [x] TanStack Query polling (3–5s) on dashboard + instances +
+    definitions; mutations invalidate the right keys; loading/empty/error
+    states throughout; dark-mode-aware status badges via the existing
+    theme-provider.
+
+### Deviations
+- **New read endpoints added** (Phase 9 shipped CRUD + actions only, no
+  list reads for the UI): `GET /admin/api/instances[/{id}]`,
+  `GET /admin/api/responses`, `GET /admin/api/stats/usage`,
+  `GET /admin/api/stats/overview`. Read-only; the overview reads the
+  scheduler's Redis mirror for live queue/active counts (best-effort,
+  observability only).
+- **Live logs not shown**: `backend.logs`/`provider.logs` flow over the
+  WS only; there is no REST read endpoint, so the Instances page omits a
+  log stream rather than inventing one (per task scope).
+- **Usage chart is CSS bars**, not a charting library — the repo had no
+  charting pattern; kept the bundle lean per the task's guidance.
+- **backend_config is a validated JSON editor with per-type examples**,
+  not a per-field form — provider-specific deep validation stays
+  provider-side (ARCHITECTURE.md §4 / provider/README.md).
 
 ---
 
