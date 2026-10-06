@@ -333,8 +333,10 @@ async def _stream_chat(
                 aggregator.consume(data)
                 if data.get("usage"):
                     terminal_usage = _normalize_chat_usage(data["usage"])
-                # The admin owns the client-facing id on every chunk.
+                # The admin owns the client-facing id AND model name on
+                # every chunk (provider may echo the raw backend path).
                 data["id"] = client_completion_id
+                data["model"] = alias
                 yield f"data: {json.dumps(data)}\n\n"
             yield "data: [DONE]\n\n"
         except Exception as exc:  # noqa: BLE001 - mid-stream litellm failures
@@ -447,8 +449,11 @@ async def _non_stream_chat(
 
         data = to_dict(result)
         litellm_id = data.get("id")
-        # The admin owns the client-facing id.
+        # The admin owns the client-facing id AND the model name: the
+        # provider echoes its raw backend path (e.g. a GGUF path) as the
+        # model, which must not leak to clients using a different alias.
         data["id"] = client_completion_id
+        data["model"] = alias
         usage = _normalize_chat_usage(data.get("usage"))
         output_items: list[dict[str, Any]] = []
         for choice in data.get("choices") or []:

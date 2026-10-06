@@ -191,6 +191,16 @@ def create_provider_app(
     async def chat_completions(request: Request) -> Response:
         lifecycle = _require_lifecycle()
         body = await request.json()
+        if not body.get("stream"):
+            # Non-stream (spec default): the upstream llama.cpp chat SSE
+            # only carries a usage chunk when stream_options.include_usage
+            # is set — force it so the aggregated chat.completion carries
+            # usage per OpenAI spec (llama.cpp direct non-stream calls
+            # report usage, but its SSE aggregation path does not without
+            # this).
+            options = dict(body.get("stream_options") or {})
+            options["include_usage"] = True
+            body["stream_options"] = options
         try:
             # Eager acquire inside: BackendBusy/BackendNotReady surface
             # here, before any bytes are committed to the client.
