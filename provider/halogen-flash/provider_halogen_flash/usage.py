@@ -73,14 +73,24 @@ def calculate_usage(
     reported_counts = any(k in raw for k in _COUNT_KEYS)
 
     input_tokens = _int(
-        raw.get("input_tokens")
-        or raw.get("prompt_tokens")
-        or raw.get("tokens_evaluated")
+        next(
+            (
+                raw[key]
+                for key in ("input_tokens", "prompt_tokens", "tokens_evaluated")
+                if key in raw
+            ),
+            0,
+        )
     )
     output_tokens = _int(
-        raw.get("output_tokens")
-        or raw.get("completion_tokens")
-        or raw.get("tokens_predicted")
+        next(
+            (
+                raw[key]
+                for key in ("output_tokens", "completion_tokens", "tokens_predicted")
+                if key in raw
+            ),
+            0,
+        )
     )
     if not reported_counts:
         # Nothing in-stream: estimate the generation from streamed chars.

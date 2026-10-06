@@ -1,7 +1,7 @@
 # Inference Matrix — Implementation Status
 
 **Overhaul branch:** `litellm-architecture-overhaul`
-**Last updated:** 2026-10-05 (Phase 10 complete: admin UI rework —
+**Last updated:** 2026-10-06 (halogen-flash legacy-parity fixes: embedded app settings reuse, zero-preserving usage normalization, and terminal timing-rate forwarding; Phase 10 complete: admin UI rework —
 Machines/Definitions/Instances/Responses/Dashboard/Playground/Settings
 on the regenerated SDK + new admin read endpoints; old agent-era UI
 removed; `generate-frontend-sdk` pre-commit hook re-enabled)

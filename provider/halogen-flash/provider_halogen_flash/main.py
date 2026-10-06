@@ -239,7 +239,19 @@ async def register_and_connect(
 
 
 def build_app(lifecycle: BackendLifecycle | None = None):
-    settings = ProviderSettings()
+    # Reuse the settings bound to the driver when an embedded caller already
+    # constructed the lifecycle. This avoids a second env parse and keeps the
+    # provider HTTP app aligned with the backend configuration.
+    settings = (
+        getattr(getattr(lifecycle, "driver", None), "_settings", None)
+        if lifecycle is not None
+        else None
+    )
+    if settings is None:
+        # Route construction is useful without provider wiring (for schema
+        # checks and health probes); mandatory registration settings are only
+        # needed by AdminClient, not by create_provider_app.
+        settings = ProviderSettings.model_construct()
     overrides = BackendOverrides(
         provider_type=PROVIDER_TYPE,
         version=VERSION,

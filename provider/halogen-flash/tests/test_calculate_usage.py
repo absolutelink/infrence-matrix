@@ -180,3 +180,17 @@ def test_garbage_rates_ignored() -> None:
         {"input_tokens": 1, "output_tokens": 1, "timings": {"prompt_per_second": "x"}}
     )
     assert "completion_tokens_details" not in usage
+
+
+def test_reported_zero_counts_are_not_replaced_by_fallback_keys() -> None:
+    usage = calculate_usage(
+        {
+            "input_tokens": 0,
+            "prompt_tokens": 12,
+            "output_tokens": 0,
+            "completion_tokens": 9,
+        },
+        fallback_chars=100,
+    )
+    assert usage["input_tokens"] == 0
+    assert usage["output_tokens"] == 0

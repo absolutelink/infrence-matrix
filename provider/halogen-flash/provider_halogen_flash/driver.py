@@ -485,6 +485,10 @@ class HalogenFlashBackend(BackendDriver):
                     raw_usage = response.get("usage")
                     if not isinstance(raw_usage, dict):
                         raw_usage = response
+                    elif isinstance(response.get("timings"), dict):
+                        # Some Flash builds report timing rates beside, rather
+                        # than inside, the usage object.
+                        raw_usage = {**raw_usage, "timings": response["timings"]}
                     event["response"]["usage"] = calculate_usage(
                         raw_usage,
                         fallback_chars=text_chars,

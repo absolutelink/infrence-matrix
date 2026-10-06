@@ -12,6 +12,7 @@ env:
   MATRIX_APP_IMAGE: ${{ github.repository_owner }}/matrix-app
   LLAMA_CPP_IMAGE: ${{ github.repository_owner }}/provider-llama-cpp
   LLAMA_CPP_CUDA12_IMAGE: ${{ github.repository_owner }}/provider-llama-cpp-cuda12
+  HALOGEN_FLASH_IMAGE: ${{ github.repository_owner }}/provider-halogen-flash
 
 jobs:
   test-admin:
@@ -106,12 +107,12 @@ jobs:
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Install dependencies
-        run: uv sync --frozen --package matrix-provider-mock
+        run: uv sync --frozen --package matrix-provider-mock --package matrix-provider-halogen-flash
 
       - name: Run linter
         run: |
-          uv run ruff check provider/lib provider/mock
-          uv run ruff format --check provider/lib provider/mock
+          uv run ruff check provider/lib provider/mock provider/halogen-flash
+          uv run ruff format --check provider/lib provider/mock provider/halogen-flash
 
       - name: Run provider-lib tests
         env:
@@ -141,6 +142,16 @@ jobs:
           CACHE_DIR: /tmp/cache
           MODELS_DIR: /tmp/models
         working-directory: ./provider/llama-cpp
+        run: uv run pytest -v --tb=short
+
+      - name: Run halogen-flash provider tests
+        env:
+          MACHINE_UID: test-machine
+          PROVIDER_REGISTRATION_TOKEN: test-token
+          ADMIN_BASE_URL: http://localhost:8000
+          CACHE_DIR: /tmp/cache
+          MODELS_DIR: /tmp/models
+        working-directory: ./provider/halogen-flash
         run: uv run pytest -v --tb=short
 
   build-matrix-app:
@@ -288,12 +299,60 @@ jobs:
           build-args: |
             BUILDKIT_INLINE_CACHE=1
 
-  # Per-provider-type images: ONLY llama-cpp is built in CI — Vulkan
-  # (ghcr.io/ggml-org/llama.cpp:full-vulkan) is built; CUDA 12
+  build-provider-halogen-flash:
+    needs: [test-admin, test-provider]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.HALOGEN_FLASH_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=
+
+      - name: Build and push halogen-flash provider image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./provider/halogen-flash/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+
+  # Per-provider-type images: llama-cpp and halogen-flash are built in CI.
+  # Vulkan (ghcr.io/ggml-org/llama.cpp:full-vulkan) is built; CUDA 12
   # (ghcr.io/ggml-org/llama.cpp:server-cuda12) builds layers the provider
   # package on the official base the same way but its CI job is currently
   # disabled (see build-provider-llama-cpp-cuda12). gufo /
-  # halogen / halogen-flash gate on NPU/ROCm hardware and ship their
-  # binaries out-of-band (see provider/<type>/Dockerfile); their CI builds
-  # land with the real hardware types. The mock provider is built locally
-  # via compose.
+  # halogen gates on ROCm hardware and ships its binary out-of-band (see
+  # provider/<type>/Dockerfile); its CI build lands with the real hardware
+  # type. halogen-flash's provider image is hardware-independent; the
+  # halogen-flash server binary remains deployment-supplied. The mock
+  # provider is built locally via compose.
