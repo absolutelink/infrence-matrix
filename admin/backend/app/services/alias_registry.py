@@ -64,6 +64,14 @@ def ensure_registered(alias: str) -> None:
                 "mode": "chat",
                 "input_cost_per_token": 0,
                 "output_cost_per_token": 0,
+                # Declare reasoning support: litellm refuses `reasoning.*`
+                # params with UnsupportedParamsError when the model info
+                # lacks `supports_reasoning` (production: /v1/responses
+                # reasoning.effort -> 502 on a perfectly healthy backend).
+                # Self-hosted backends accept-and-ignore the param, so
+                # blanket-declaring it is safe; reasoning models then get
+                # real effort control and instruct models simply ignore it.
+                "supports_reasoning": True,
             }
         }
     )

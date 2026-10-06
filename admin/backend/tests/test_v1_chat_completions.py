@@ -589,9 +589,14 @@ def test_ensure_registered_enables_native_chat_streaming() -> None:
     assert info["supports_native_streaming"] is True
     assert info["litellm_provider"] == "openai"
     assert info["mode"] == "chat"
-    from litellm.utils import supports_native_streaming
+    # Declared reasoning support: without it litellm refuses reasoning.*
+    # params with UnsupportedParamsError even against a healthy self-hosted
+    # backend (production: reasoning.effort -> 502).
+    assert info["supports_reasoning"] is True
+    from litellm.utils import supports_native_streaming, supports_reasoning
 
     assert supports_native_streaming(alias, "openai") is True
+    assert supports_reasoning(alias, "openai") is True
     # The responses-mode bridge must NOT fire for this alias.
     from litellm.main import responses_api_bridge_check
 

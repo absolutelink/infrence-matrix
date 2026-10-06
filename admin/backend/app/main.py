@@ -13,6 +13,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import litellm
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
 from starlette.middleware.cors import CORSMiddleware
@@ -37,6 +38,13 @@ async def lifespan(_app: FastAPI):
     # worker makes this the authoritative admission path (see
     # app/services/scheduler.py).
     from app.services.scheduler import InferenceScheduler
+
+    # litellm param discipline: drop client params a backend's model info
+    # doesn't declare instead of hard-failing with UnsupportedParamsError
+    # (belt to alias_registry's supports_reasoning declaration — a
+    # self-hosted backend accepts-and-ignores unknown params, so dropping
+    # is ALWAYS preferable to failing the request).
+    litellm.drop_params = True
 
     scheduler = InferenceScheduler(redis_client)
     _app.state.scheduler = scheduler
