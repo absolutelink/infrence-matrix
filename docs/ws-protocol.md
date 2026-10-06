@@ -108,12 +108,22 @@ schema + fingerprint and (optionally) a **pending** schema + fingerprint
 | --- | --- | --- |
 | Type not registered | Create `ProviderType` with `schema` as committed; `status=active`. | Registration proceeds normally (200). |
 | `sha256(schema)` == committed fingerprint | No change. | Registration proceeds normally (200). |
-| `sha256(schema)` != committed, **no pending staged** | Stage `pending_schema`/`pending_fingerprint`, `pending_voters=[this instance]`, `status=consensus_pending`. | **409 `schema_pending`** — registration refused; the agent stays in `waiting_schema` and retries. |
+| `sha256(schema)` != committed, **no pending staged** | If the voter universe is just this instance (unanimous) → commit immediately. Otherwise stage `pending_schema`/`pending_fingerprint`, `pending_voters=[this instance]`, `status=consensus_pending`. | **200** when solo/unanimous; else **409 `schema_pending`** — registration refused; the agent stays in `waiting_schema` and retries. |
 | `sha256(schema)` == pending fingerprint | Add this instance to `pending_voters`. If voters now cover **every `ProviderInstance` row of this type** → commit: `committed = pending`, clear pending, `status=active`. | **409 `schema_pending`** while incomplete (voter count in detail); **200** once the last outstanding voter registers (the commit happens on that call). |
 | `sha256(schema)` != committed and != a staged pending | Record `reported_schema_fingerprint`; do not overwrite pending. | **409 `schema_conflict`**. |
 
 Notes:
 
+- **TRANSITION (Phase 12 → D):** `schema` is optional until every
+  provider package ships its `schema.json`. When omitted:
+  - unknown type → the admin bootstraps a permissive committed schema
+    `{"type": "object"}` (`status=active`) and the registration proceeds
+    (200); `reported_schema_fingerprint` is the permissive fingerprint.
+  - known type → the consensus gate is skipped and the registration
+    proceeds (200); `reported_schema_fingerprint` is left `None` (the
+    instance never proved its schema, so the UI must not show it as
+    on-committed). This keeps old providers working in the admin-first
+    deploy window. Remove this path once Phase D ships real schemas.
 - The **voter universe** is every `ProviderInstance` row whose
   `provider_definition.provider_type == this type`, regardless of
   connection state. A decommissioned machine's row must be deleted or
