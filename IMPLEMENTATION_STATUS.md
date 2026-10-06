@@ -68,8 +68,9 @@ Reproduce: `cd spike/litellm-fidelity && uv run python spike2.py`.
   `--no-install-workspace --package matrix-admin`).
 - CI `build-and-push.yml` starts postgres 16 + redis 7 services and tests
   the admin. It also builds `matrix-app` and (added post-overhaul) the
-  **llama-cpp (Vulkan) provider image** via the official
-  `ghcr.io/ggml-org/llama.cpp:full-vulkan` base — `provider/llama-cpp`
+  two **llama-cpp provider images** — Vulkan (official
+  `full-vulkan` base) and CUDA 12 (`server-cuda12` base) — via
+  `provider/llama-cpp/{Dockerfile,Dockerfile.cuda12}`; `provider/llama-cpp`
   tests run in the `test-provider` job. No `:latest` tag is produced.
 - The pre-overhaul code was removed in the final cleanup; it lives in git
   history only — never restore patterns from it.

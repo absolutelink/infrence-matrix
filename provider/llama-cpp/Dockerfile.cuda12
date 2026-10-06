@@ -1,0 +1,50 @@
+# llama.cpp Inference Matrix provider — NVIDIA CUDA 12 build.
+#
+# Layers this provider package on top of the OFFICIAL llama.cpp CUDA image
+# instead of compiling llama.cpp; the llama-server binary ships in the
+# image at /app/llama-server.
+#
+# Build (context = repo root):
+#   docker build -f provider/llama-cpp/Dockerfile.cuda12 \
+#     -t matrix-provider-llama-cpp-cuda12 .
+#
+# RUNTIME (CUDA): requires the NVIDIA Container Toolkit on the host; run
+# with `--gpus all` (compose `gpus: all`) so the container sees the GPU.
+# Machine-metrics use nvidia-smi when present in the base image; if the
+# official flavor omits it (flavor-dependent), GPU telemetry is omitted
+# gracefully and VRAM admission falls back to the admin-configured
+# Machine.total_vram_bytes — the provider's behavior is unchanged either
+# way.
+#
+# The model artifacts live OUTSIDE the image: mount MODELS_DIR (e.g.
+# /models) and CACHE_DIR (e.g. /cache) as named volumes / host paths.
+FROM ghcr.io/ggml-org/llama.cpp:server-cuda12
+
+WORKDIR /app
+
+# Workspace root manifests
+COPY pyproject.toml uv.lock /app/
+
+# Provider sources
+COPY provider/lib /app/provider/lib
+COPY provider/llama-cpp /app/provider/llama-cpp
+
+# The official image may or may not ship uv; install it defensively and
+# sync ONLY this provider package + provider_lib — never the admin or the
+# other provider packages.
+RUN uv sync --frozen --package matrix-provider-llama-cpp \
+    || (pip install --no-cache-dir uv \
+        && uv sync --frozen --package matrix-provider-llama-cpp)
+
+ENV PATH="/app/.venv/bin:$PATH" \
+    PROVIDER_PORT=8081 \
+    # The official image's llama-server (NOT on PATH by default).
+    LLAMA_SERVER_PATH=/app/llama-server \
+    CACHE_DIR=/cache \
+    MODELS_DIR=/models
+
+EXPOSE 8081
+
+# Override the base image's ENTRYPOINT (the ggml-org server images enter
+# straight into llama-server) so our shell command actually runs.
+ENTRYPOINT ["sh", "-c", "exec python -m provider_llama_cpp.main"]

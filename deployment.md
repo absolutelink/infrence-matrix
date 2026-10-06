@@ -16,13 +16,19 @@ Deployment of the overhauled stack. Architecture:
 - **Admin**: built from the root `Dockerfile` — multi-stage (bun builds the
   frontend → python 3.14 + uv installs `matrix-admin` only,
   `--no-install-workspace`). Image: `ghcr.io/<owner>/matrix-app`.
-- **llama-cpp (Vulkan)**: built in CI from `provider/llama-cpp/Dockerfile`,
-  which layers the provider package on the official
-  `ghcr.io/ggml-org/llama.cpp:full-vulkan` base (no compile step; the
-  binary is `/app/llama-server`). Image:
-  `ghcr.io/<owner>/provider-llama-cpp`. Needs host Vulkan/GPU passthrough
-  at runtime (`gpus: all` for NVIDIA, or `/dev/dri` + Vulkan ICDs for
-  Mesa/AMD/Intel — see the commented compose example).
+- **llama-cpp**: two CI-built variants layering the provider package on
+  official llama.cpp bases (no compile step; the binary is
+  `/app/llama-server`):
+  - **Vulkan** (`provider/llama-cpp/Dockerfile`, base
+    `ghcr.io/ggml-org/llama.cpp:full-vulkan`) →
+    `ghcr.io/<owner>/provider-llama-cpp`. Needs host Vulkan/GPU
+    passthrough (`gpus: all` for NVIDIA, or `/dev/dri` + Vulkan ICDs for
+    Mesa/AMD/Intel — see the commented compose example).
+  - **CUDA 12** (`provider/llama-cpp/Dockerfile.cuda12`, base
+    `ghcr.io/ggml-org/llama.cpp:server-cuda12`) →
+    `ghcr.io/<owner>/provider-llama-cpp-cuda12`. Needs the NVIDIA
+    Container Toolkit; run with `gpus: all`. Machine metrics report via
+    in-image `nvidia-smi`.
 - **Other providers** (`gufo`, `halogen`, `halogen-flash`): built from
   `provider/<type>/Dockerfile` out-of-band — they gate on NPU/ROCm
   hardware and their backend binaries are not in CI.

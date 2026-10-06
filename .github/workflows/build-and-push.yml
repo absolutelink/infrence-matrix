@@ -11,6 +11,7 @@ env:
   REGISTRY: ghcr.io
   MATRIX_APP_IMAGE: ${{ github.repository_owner }}/matrix-app
   LLAMA_CPP_IMAGE: ${{ github.repository_owner }}/provider-llama-cpp
+  LLAMA_CPP_CUDA12_IMAGE: ${{ github.repository_owner }}/provider-llama-cpp-cuda12
 
 jobs:
   test-admin:
@@ -236,9 +237,58 @@ jobs:
           build-args: |
             BUILDKIT_INLINE_CACHE=1
 
-  # Per-provider-type images: ONLY llama-cpp (Vulkan) is built in CI — the
-  # official ghcr.io/ggml-org/llama.cpp:full-vulkan base means no compile
-  # step. gufo / halogen / halogen-flash gate on NPU/ROCm hardware and ship
-  # their binaries out-of-band (see provider/<type>/Dockerfile); their CI
-  # builds land with the real hardware types. The mock provider is built
-  # locally via compose.
+  build-provider-llama-cpp-cuda12:
+    needs: [test-admin, test-provider]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.LLAMA_CPP_CUDA12_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=
+
+      - name: Build and push llama-cpp (CUDA 12) provider image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./provider/llama-cpp/Dockerfile.cuda12
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+
+  # Per-provider-type images: ONLY llama-cpp is built in CI — Vulkan
+  # (ghcr.io/ggml-org/llama.cpp:full-vulkan) and CUDA 12
+  # (ghcr.io/ggml-org/llama.cpp:server-cuda12) both layer the provider
+  # package on the official bases, so there is no compile step. gufo /
+  # halogen / halogen-flash gate on NPU/ROCm hardware and ship their
+  # binaries out-of-band (see provider/<type>/Dockerfile); their CI builds
+  # land with the real hardware types. The mock provider is built locally
+  # via compose.

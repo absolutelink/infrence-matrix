@@ -109,11 +109,18 @@ services:
   #     - /usr/share/vulkan/icd.d:/usr/share/vulkan/icd.d:ro  # ICDs
   #     - llama_cache:/cache
   #     - llama_models:/models
-  #   # For NVIDIA hosts prefer `gpus: all` (Container Toolkit) instead
-  #   # of the /dev/dri mounts.
+  #   # For NVIDIA hosts prefer the CUDA 12 variant (below) with
+  #   # `gpus: all` instead of the /dev/dri mounts.
   #   depends_on:
   #     admin:
   #       condition: service_healthy
+  #
+  # provider-llama-cpp (NVIDIA CUDA 12) — same env as above; needs the
+  # NVIDIA Container Toolkit and `gpus: all` (compose `deploy` block or
+  # the CLI `--gpus all`):
+  #   build:
+  #     context: .
+  #     dockerfile: provider/llama-cpp/Dockerfile.cuda12
   #
   # provider-gufo:
   #   build:

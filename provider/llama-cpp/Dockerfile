@@ -46,4 +46,6 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 EXPOSE 8081
 
-CMD ["sh", "-c", "exec python -m provider_llama_cpp.main"]
+# Override the base image's ENTRYPOINT (the ggml-org images enter straight
+# into llama-server) so our shell command actually runs.
+ENTRYPOINT ["sh", "-c", "exec python -m provider_llama_cpp.main"]
