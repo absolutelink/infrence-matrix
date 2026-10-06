@@ -306,7 +306,7 @@ Events do **not** require an ack; the admin persists/acts on them.
 | `backend.status` | `{"backend_status": "..." (or "status"), "error_message": "..."}` | Live | Updates `ProviderInstance.backend_status` (+ optional error), `last_seen=now`. |
 | `metrics.machine` | machine-level snapshot (vram/gpu_usage/os_ram/cpu/storage) for assigned resources only | Live | Persisted to Redis `im:metrics:machine:{machine_uid}`; refreshes the ownership lease. Emitted by `MachineMetricsEmitter` while owned. |
 | `download.progress` | `{filename, progress_percent, bytes_downloaded, total_bytes, speed_mbps, phase}` | Live | Emitted by `provider_lib.downloader` (throttled). |
-| `backend.logs` | `{"lines": [{"ts": iso, "stream": "stdout"\|"stderr", "text": "..."}], "dropped": int}` | **Live (Phase 13)** | Captured backend subprocess stdout/stderr. Provider tees the spawn pipes into a bounded ring (~5k lines); flushes throttled batches (~1s / max 100 lines per frame) while connected; `dropped` is the cumulative lost-line counter since connect. Admin appends to Redis `im:logs:backend:{instance_id}` (capped ~2000, TTL 1h). Catch-up after reconnect via `backend.logs.get`. |
+| `backend.logs` | `{"lines": [{"ts": iso, "stream": "stdout"\|"stderr", "text": "..."}], "dropped": int}` | **Live (Phase 13)** | Captured backend subprocess stdout/stderr. Provider tees the spawn pipes into a bounded ring (`provider_lib.log_ring.CursorLogRing`, `LOG_RING_LINES` default 2000); flushes throttled batches (~1s / max 100 lines per frame) while connected; `dropped` is the cumulative lost-line counter since connect. Admin appends to Redis `im:logs:backend:{instance_id}` (capped ~2000, TTL 1h). Catch-up after reconnect via `backend.logs.get`. |
 | `metrics.inference` | available/max slots, token speed, prompt-processing speed, in-flight | Reserved (defined in `FrameKind`, not yet emitted; the admin does not handle it yet) | Always-on per-instance telemetry; lands with Phase 7/8. |
 | `backend.boot_requested` | `{}` | Reserved | Observability only; boot is admin-driven (scheduler sends `backend.start`). |
 | `provider.logs` | `{"lines": [{"ts": iso, "stream": "stdout", "text": "..."}], "dropped": int}` | **Live (Phase 13)** | The provider process's own logger output, captured via a ring-buffer handler and flushed with the same throttle as `backend.logs`. Admin stores in Redis `im:logs:provider:{instance_id}`. |
@@ -343,7 +343,19 @@ timeout)` sends the command and awaits the matching ack (default 30s).
 | `metrics.category.start` | category name | Reserved | Enable a `METRICS_CATEGORIES` category. |
 | `cache.clear` | `{"dry_run": bool = false, "force": bool = false}` | **Live (Phase 9)** | **Prompt-cache files only** — never model files. Deletes `CACHE_DIR/prompt_cache` plus the provider's engine cache dirs (`extra_cache_dirs`: gufo `CACHE_DIR/<MACHINE_UID>`, halogen-flash `CACHE_DIR/halogen-flash`). **Refused while the backend is `in_use`** (NAK `{"ok": false, "error": "backend_in_use", "detail": {"step": "drain", ...}}`) unless `force: true` — clearing engine caches under live streams can cause I/O errors; `dry_run` never touches files and is always allowed. Ack detail: `{"dry_run", "deleted": [...], "bytes_freed": N}`. Admin surface: `POST /admin/api/instances/{id}/cache/clear` (body `{dry_run?, force?}`). |
 | `storage.prune_unused` | `{"dry_run": bool = false}` | **Live (Phase 9)** | Delete `MODELS_DIR` files not referenced by the driver's current `resolved_artifacts` set (main/mmproj/draft/tokenizer/NPU pins; a referenced directory protects its subtree). **Refuses** (NAK `no_resolved_artifacts`) when the driver has not resolved its set yet — never deletes blind. Ack detail: `{"dry_run", "deleted": [...], "bytes_freed": N, "kept": [...]}`. Admin surface: `POST /admin/api/instances/{id}/storage/prune`. |
-| `backend.logs.get` | `{"kind": "backend"\|"provider"\|"all", "since": <ring seq or null>}` | **Live (Phase 13)** | Ask the provider for its current ring buffer (catch-up after an admin restart / long disconnect; the Redis tail may be older than the ring). Ack detail: `{"lines": [...], "dropped": int, "seq": int}` — `since` resumes at the ring sequence; omitting it returns the whole buffer. |
+| `backend.logs.get` | `{"kind": "backend"\|"provider"\|"all", "since": <ring seq or null>}` | **Live (Phase 13)** | Ask the provider for its current ring buffer (catch-up after an admin restart / long disconnect; the Redis tail may be older than the ring). Ack detail: `{"lines": [...], "dropped": int, "seq": int}` — `since` resumes at the ring sequence; omitting it returns the whole buffer. For `kind=all` the backend and provider rings share one `SeqCounter` (installed by `install_log_streaming`), so a single `since`/`seq` cursor resumes both correctly. |
+
+**Two unrelated log seq spaces (Phase 13).** The `seq` in the
+`backend.logs.get` ack is the **provider-side ring sequence** (a shared
+`SeqCounter` across the backend+provider rings, starting at 0 per
+provider process/connect lifetime). The `since`/`cursor` on the admin
+REST `GET /admin/api/instances/{id}/logs` is the **admin ingest
+sequence** (`im:logs:seq:{instance_id}`, Redis `INCRBY`, 1-based).
+These are independent counters and MUST NOT be passed interchangeably by
+a client. The admin `read_logs` response also carries `gap`/`oldest_seq`
+(eviction below the retained window) and `unseen_total` (pre-trim count
+of `seq > since`) so the UI can warn when lines were skipped between
+polls rather than silently dropping them.
 
 The provider lifecycle, `BackendDriver` interface, slot admission, and the
 release-on-upstream-close invariant are documented in `provider/README.md`.

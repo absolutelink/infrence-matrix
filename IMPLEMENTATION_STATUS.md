@@ -1,7 +1,7 @@
 # Inference Matrix — Implementation Status
 
 **Overhaul branch:** `litellm-architecture-overhaul`
-**Last updated:** 2026-10-06 (Phase 12 started: schema-driven backend config — `ProviderType` registry + JSON Schema consensus + HF picker + rjsf form; docs/ARCHITECTURE/WS-protocol/provider README/redis-keys/AGENTS updated first. Phase 13 (log views) scoped. Prior: halogen-flash legacy-parity fixes; Phase 10 admin UI rework complete.)
+**Last updated:** 2026-10-06 (Phase 12 ✅ schema-driven backend config — `ProviderType` registry + JSON Schema consensus + HF picker + rjsf form. Phase 13 ✅ log views — batched provider capture, Redis tails, LogsSheet UI. Docs/ARCHITECTURE/WS-protocol/provider README/redis-keys/AGENTS updated first. Prior: halogen-flash legacy-parity fixes; Phase 10 admin UI rework complete.)
 
 This file tracks the litellm-based architecture overhaul (see
 [ARCHITECTURE.md](ARCHITECTURE.md)). Each phase lists its features with
@@ -25,7 +25,7 @@ starting a feature, read the linked protocol/doc first.
 | 10 | Admin UI rework | ✅ Complete |
 | 11 | Docs consolidation + full E2E validation | ✅ Complete |
 | 12 | Schema-driven backend config: `ProviderType` registry + JSON Schema consensus + HF picker + rjsf form | ✅ Complete |
-| 13 | Server + backend log capture, Redis tails, UI log views | ⬜ Pending |
+| 13 | Server + backend log capture, Redis tails, UI log views | ✅ Complete |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
 
@@ -913,36 +913,91 @@ are additive UI/validation hints; the driver still maps real flags in
 
 ---
 
-## Phase 13 — Server + backend log views ⬜
+## Phase 13 — Server + backend log views ✅
 
-**Pending.** Fills in the `backend.logs` / `provider.logs` frame kinds
+**Completed 2026-10-06** (commits: F1+F2 `aac73e5`, F3 `536025c`).
+Fills in the `backend.logs` / `provider.logs` frame kinds
 (previously reserved) with a Redis-backed tail and UI log views.
 
 **Decisions locked:**
 - Storage: **Redis-only** (`im:logs:backend:{id}`, `im:logs:provider:{id}`),
   ~2000-line cap, 1h TTL. Never Postgres.
-- Provider ring buffer ~5k lines; flush throttle ~1s / 100 lines per
+- Provider ring buffer; flush throttle ~1s / 100 lines per
   frame; `dropped` cumulative counter.
 - `backend.logs.get` command for catch-up after admin restart /
   long disconnect (Redis tail may lag the provider ring).
 
 ### Sub-tasks
 
-- [ ] **Provider capture** — tee backend subprocess stdout/stderr into a
-      bounded ring in `BackendLifecycle`/driver spawn path (halogen/
-      halogen-flash already merge stderr→stdout; reuse). `AdminClient`
-      flushes `backend.logs` batches while connected; a logging handler
-      flushes the provider's own output as `provider.logs`.
-      `backend.logs.get` handler replies with ring + seq + dropped.
-- [ ] **Admin storage + read** — consume `backend.logs`/`provider.logs`
-      events → LPUSH+LTRIM Redis lists; `GET
-      /admin/api/instances/{id}/logs?kind=backend|provider&since=&limit=`.
-- [ ] **UI logs view** — per-instance logs page/dialog: Backend/Provider
-      tabs, live tail (poll `since` ~2s), auto-scroll + pause-on-scroll-
-      up, stream filter (stdout/stderr), search/highlight, download-tail.
-- [ ] **Tests** — ring bounds + drop counting, flush throttle, Redis
-      cap/cursor, endpoint tests. Keep both `wire.py` FrameKind mirrors
-      in sync (constants already exist).
+- [x] **F1. Provider capture** — consolidated the four duplicated
+      per-provider `log_ring.py` into one canonical
+      `provider_lib.log_ring.CursorLogRing` (seq-addressable, `ts`,
+      `dropped` on eviction, `threading.Lock`); added
+      `provider_lib.log_stream.LogStreamer` (batched ~1s / ≤100 lines
+      per `backend.logs` frame, cursor resume across stop/start) +
+      `ProviderLogHandler` (captures the provider's own logger →
+      `provider.logs`, reentrancy-guarded, no recursion) +
+      `install_log_streaming()` wired into every provider `main.py`
+      (start on connect, stop on disconnect). `backend.logs.get` command
+      handler replies with ring + seq + dropped.
+- [x] **F2. Admin storage + read** — `connection_manager` consumes
+      `backend.logs`/`provider.logs` (best-effort, tolerates the legacy
+      single-line payload); `app/services/log_store.py` LPUSH+LTRIM(2000)
+      +EXPIRE(1h) with a per-entry monotonic **ingest seq** (Redis
+      `INCRBY im:logs:seq:{id}`, shared across both lists so `kind=all`
+      merges on one cursor); `GET /admin/api/instances/{id}/logs?kind=
+      backend|provider|all&since=&limit=` returns
+      `{entries (newest-first), cursor, dropped, gap, oldest_seq,
+      unseen_total}`.
+- [x] **F3. UI logs view** — `components/Common/LogsSheet.tsx` (opened
+      from a "Logs" button per instance row): Backend/Provider/All tabs,
+      live tail (poll `since` ~2s), newest-first API rendered
+      chronologically (Map<seq> merge, ascending, newest at bottom),
+      auto-scroll + pause-on-scroll-up with "Jump to latest (N new)",
+      stdout/stderr filter, client-side search with `<mark>` (React
+      children — no XSS), level color hints, gap + dropped + skipped
+      banners, download-visible-lines `.log`, MAX_LINES=2000 cap.
+- [x] **Tests** — ring bounds/drop/atomic-after, streamer batching +
+      cursor resume + shared-counter `kind=all` no-gap/no-dup, provider
+      handler recursion guard, Redis cap/cursor/gap/unseen_total,
+      endpoint + legacy-payload tolerance. Both `wire.py` FrameKind
+      mirrors carry `BACKEND_LOGS_GET` (drift guard passes).
+
+### Implementation notes / deviations
+- **Consolidation**: the four near-duplicate provider `log_ring.py`
+  files were deleted in favor of the shared `provider_lib.log_ring`
+  (single source). Drivers keep their "recent stderr on startup failure"
+  behavior (tail of the shared ring).
+- **Shared seq space (provider side)**: `install_log_streaming` gives the
+  backend ring and provider ring a SHARED `SeqCounter`, so
+  `backend.logs.get kind=all` resumes correctly with a single cursor.
+- **Two unrelated seq spaces** (IMPORTANT for any client): the provider
+  `backend.logs.get` ack `seq` is the **provider-side ring sequence**
+  (starts at 0 per provider process/connect lifetime); the admin REST
+  `GET /logs?since=`/`cursor` is the **admin ingest sequence**
+  (`im:logs:seq:{id}`, Redis INCRBY, 1-based). They MUST NOT be passed
+  interchangeably. (Orchestrator: add this note to ws-protocol §4.)
+- **F2.3 connect-catchup skipped**: the provider streamer resumes from
+  `last_flushed_cursor` on WS reconnect, so the disconnect-window lines
+  flush automatically; the admin does NOT fire `backend.logs.get` at
+  connect (avoids timing races alongside metrics-assign + config-heal).
+  `backend.logs.get` remains available for future use.
+- **Post-provider-process-restart gap**: the ring is in-memory, so a
+  provider *process* restart loses the un-flushed tail; Redis holds the
+  historical tail (live gap ≤ ring lifetime). Accepted — logs are
+  ephemeral ops telemetry.
+- **`unseen_total`** added to `read_logs` so the UI can warn when >limit
+  lines arrive between polls (realistic on verbose backends) rather than
+  silently skipping them.
+- **UI is a Sheet, not a route**: matches the app's existing
+  row-triggered Dialog/Sheet pattern (Cache/Prune) and avoids
+  `routeTree.gen.ts` churn.
+
+**Test totals after Phase 13:** admin **257** · provider/lib **105** ·
+mock **23** · llama-cpp **61** · halogen-flash **140** · halogen **67** ·
+gufo **67**. Frontend `bun run build` + biome lint clean. Logs are
+best-effort end-to-end: capture, transport, storage, and read never block
+or crash the request/WS path.
 
 ---
 

@@ -648,16 +648,23 @@ When it lands it is always-on per instance and never deduped.
 `provider_lib/metrics.py` (NVML / rocm-sysfs / psutil).
 
 ### Log streams (Phase 13)
-`backend.logs` / `provider.logs` (reserved in §5's catalog until Phase
-13) carry captured lines from the backend subprocess (stdout/stderr,
-tagged per stream) and from the provider's own logger. The provider
-buffers in a bounded ring (~5k lines), flushes throttled batches
-(~1s / 100 lines per frame) while connected, and answers
-`backend.logs.get` with the current buffer + `dropped` counter for
-catch-up after a reconnect. The admin stores **Redis-only** capped
-lists (`im:logs:backend:{instance_id}`, ~2000 lines / TTL 1h) —
-logs are ephemeral ops telemetry, never persisted to Postgres — and
-serves them to the UI via `GET /admin/api/instances/{id}/logs`.
+`backend.logs` / `provider.logs` carry captured lines from the backend
+subprocess (stdout/stderr, tagged per stream) and from the provider's
+own logger. The provider buffers in a bounded ring
+(`provider_lib.log_ring.CursorLogRing`, `LOG_RING_LINES` default 2000),
+flushes throttled batches (~1s / 100 lines per frame) while connected,
+and answers `backend.logs.get` with the current buffer + `dropped`
+counter for catch-up after a reconnect. `install_log_streaming` gives
+the backend and provider rings a **shared `SeqCounter`** so
+`kind=all` resumes on one cursor. The admin stores **Redis-only**
+capped lists (`im:logs:backend:{instance_id}`, ~2000 lines / TTL 1h)
+with a per-entry **ingest seq** (`im:logs:seq:{id}`, Redis `INCRBY`,
+1-based) — logs are ephemeral ops telemetry, never persisted to
+Postgres — and serves them via `GET /admin/api/instances/{id}/logs`.
+The provider ring seq and the admin ingest seq are **unrelated spaces**
+(see `docs/ws-protocol.md` §4); never mix their cursors. The read
+response carries `gap`/`oldest_seq`/`unseen_total` so the UI can warn
+about dropped or skipped lines rather than silently losing them.
 
 ---
 
