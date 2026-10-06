@@ -24,7 +24,7 @@ starting a feature, read the linked protocol/doc first.
 | 9 | `provider.config.update` / fingerprint / cache-clear flow | ✅ Complete |
 | 10 | Admin UI rework | ✅ Complete |
 | 11 | Docs consolidation + full E2E validation | ✅ Complete |
-| 12 | Schema-driven backend config: `ProviderType` registry + JSON Schema consensus + HF picker + rjsf form | 🟡 In progress |
+| 12 | Schema-driven backend config: `ProviderType` registry + JSON Schema consensus + HF picker + rjsf form | ✅ Complete |
 | 13 | Server + backend log capture, Redis tails, UI log views | ⬜ Pending |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
@@ -82,8 +82,10 @@ Reproduce: `cd spike/litellm-fidelity && uv run python spike2.py`.
 **Redis doc:** `admin/backend/docs/redis-keys.md`
 **Migration:** `admin/backend/alembic/versions/0140d6ad9f48_initial_squashed_schema.py`
 
-Five tables: `Machine`, `ProviderDefinition`, `ProviderInstance`,
+Six tables: `Machine`, `ProviderDefinition`, `ProviderInstance`,
 `ResponseRecord`, `TokenUsageSample` (fields in ARCHITECTURE.md §4).
+Phase 12 added `ProviderType` (the committed backend_config schema +
+consensus state) in a follow-up migration — see §Phase 12.
 `Machine.reachable_address()` = `dns or host or ip`. Uniqueness:
 `ProviderInstance` unique on `(machine_id, provider_definition_id)`.
 
@@ -785,9 +787,11 @@ doc consolidation, and the final full test + conformance gate.
 
 ---
 
-## Phase 12 — Schema-driven backend config 🟡
+## Phase 12 — Schema-driven backend config ✅
 
-**In progress.** Moves `backend_config` from a free-form JSON blob (with
+**Completed 2026-10-06** (commits: docs `e4a56a2`, B `94565e5`, C `4f1894d` +
+`078ff10`, D1 `391a6bf`, D2 `347ca13`, D3 `7858e70`, D4 `e6c1332`, E `2c5fa9a`).
+Moves `backend_config` from a free-form JSON blob (with
 a hand-maintained doc) to a **JSON Schema (2020-12)** owned by each
 provider package and registered in the admin under a new `ProviderType`
 table. The schema is the single source of truth for admin validation,
@@ -813,33 +817,92 @@ the UI form render, and the HuggingFace file picker. Docs updated first
 ### Sub-tasks
 
 - [x] **A. Docs** — this section + ARCHITECTURE/WS-protocol/provider README/redis-keys/AGENTS.
-- [ ] **B. Admin registry** — `ProviderType` table + Alembic migration
+- [x] **B. Admin registry** — `ProviderType` table + Alembic migration
       (`provider_types`, plus `ProviderInstance.reported_schema_fingerprint`);
       `providers.py` accepts `schema` + consensus gate (409
       `schema_pending`/`schema_conflict`, structured detail);
       `definitions.py` validates `backend_config` with
       `jsonschema.Draft202012Validator` on create/PATCH (422 per-field);
       `/admin/api/provider-types*` endpoints (list/get/commit/dismiss);
-      prestart report-only migration check. Remove `PROVIDER_TYPES`
-      constant. Tests: consensus matrix, bootstrap, validation, overrides.
-- [ ] **C. HF proxy** — `admin/backend/app/api/admin/huggingface.py`
+      prestart report-only migration check. `PROVIDER_TYPES`
+      constant removed. Tests: consensus matrix, bootstrap, validation, overrides.
+- [x] **C. HF proxy** — `admin/backend/app/api/admin/huggingface.py`
       ported from legacy `huggingface.py` (search + files with sizes +
       `cardData.gguf` quantization; generalized beyond GGUF-only to
       `.hgn`/tokenizer dirs). Tests with mocked HF API.
-- [ ] **D. Provider schemas** — `provider_lib/schema.py` (load bundled
+- [x] **D. Provider schemas** — `provider_lib/schema.py` (load bundled
       `schema.json` via importlib.resources, fingerprint, send in
       register); `admin_client.py` surfaces `schema_pending`/`conflict`
-      as `waiting_schema`; ship `schema.json` for llama-cpp (from the
+      as `SchemaPendingError` (readable vote message); shipped
+      `schema.json` for all five providers — llama-cpp (from the
       upstream server README flag list), halogen-flash (from HALOGEN_*
       FLAGS.md — full list, unwired flags `x-supported: false`),
-      halogen, gufo, mock. Enum-drift guard test (parse `llama-server
-      --help`).
-- [ ] **E. Frontend** — rjsf + custom theme; collapseable-section
-      `ObjectFieldTemplate`; `HfFileWidget` (picker dialog over C's
-      endpoints, `x-widget: hf-file`); `definitions.tsx` form replaces
-      the textarea (raw-JSON toggle kept); Provider Types page (schema
-      viewer + consensus banner + commit/dismiss); `waiting_schema`
-      badge on Instances. `scripts/generate-client.sh`.
+      halogen, gufo, mock. Sectioned `backend_config` shape with
+      `command.py`/`env.py` flatten adapters.
+- [x] **E. Frontend** — rjsf + custom Tailwind/Radix theme;
+      collapseable-section `ObjectFieldTemplate`; `HfFileWidget`
+      (picker dialog over C's endpoints, `x-widget: hf-file`);
+      `definitions.tsx` form replaces the textarea (raw-JSON toggle kept);
+      Provider Types page (schema viewer + consensus banner +
+      commit/dismiss); `waiting_schema` badge on Instances.
+      `scripts/generate-client.sh` regenerated.
+
+### Implementation deviations (deliberate, reviewed)
+- **Full config restructure** (operator decision): `backend_config` is
+  now NAMED COLLAPSEABLE SECTIONS per provider, not the old flat
+  `args{}`/`options{}` blob. Drivers read the sectioned shape via a
+  `flatten_args`/`flatten_options` adapter (legacy flat input still
+  honored as a fallback). This is a **breaking migration**: old flat
+  configs fail schema validation and are flagged by the report-only
+  prestart check; fix them in the UI.
+- **TRANSITION path (schema-omitted)**: `RegistrationRequest.schema` is
+  optional until every provider ships a real schema. Omitted + unknown
+  type → permissive `{"type":"object"}` bootstrap; omitted + known type
+  → gate skipped, `reported_schema_fingerprint=None`. Remove once all
+  providers ship `schema.json` (documented in ws-protocol §2).
+- **llama-cpp default changes** (upstream parity): `gpu_layers` 35→
+  `auto`; `flash_attn` now tri-state `on|off|auto` (AGENTS.md
+  corrected); `batch_size` default reconciled to 2048 (schema == driver).
+  **Operator action needed:** audit existing llama-cpp definitions'
+  `vram_required_bytes` — `auto` offloads more layers than the old 35.
+- **halogen/halogen-flash ATOMIC port resolution**: a port pair is
+  honored only when BOTH come from the same source (the `networking`
+  section or the legacy top-level keys); a lone half-pair derives the
+  full default pair. Prevents cross-source mixes that would shift the
+  on-disk prompt-cache fingerprint.
+- **gufo `cache_disk` directory** keyed by the real registered
+  `instance_id` (MACHINE_UID only as a pre-registration fallback), so
+  two gufo definitions on one machine no longer share a cache dir.
+- **Frontend stack correction**: the plan said "Chakra theme" — the app is
+  actually Tailwind 4 + Radix (shadcn-style), so a custom Tailwind/Radix
+  rjsf theme was built (no Chakra/MUI package installed).
+- **Secret handling**: `x-secret` fields are write-only — stripped from
+  the detail view and the raw-JSON seed (never rendered in DOM),
+  `restoreSecrets` on both form and raw submit (empty = keep current,
+  type a value = rotate). No "remove secret" affordance by design.
+- **No-fingerprint-churn saves**: `pruneUntouchedDefaults` ensures saving
+  an untouched definition emits byte-identical `backend_config` (rjsf's
+  default materialization is pruned against the stored config).
+- **Fingerprints pinned** in each provider's `test_schema_sections.py`
+  (the fleet consensus contract): llama-cpp `0af969e6…`,
+  halogen-flash `7d2a8f49…`, halogen `07e4a3b4…`, gufo `3e5882d7…`,
+  mock `19144f76…`. Any deliberate schema edit must bump the pin and
+  coordinate fleet re-registration.
+- The `x-flag`/`x-widget`/`x-numeric-effect`/`x-secret`/`x-supported`
+  keywords are additive UI/validation hints; the driver still maps real
+  flags in `command.py`/`env.py`.
+- **Not done**: the llama-cpp enum-drift guard that parses `llama-server
+  --help` at runtime (the schema enums are hand-verified against the
+  upstream README; a CI smoke test against the built binary is a
+  follow-up nicety, not blocking).
+
+**Test totals after Phase 12:** admin **245** · provider/lib **87** ·
+mock **23** · llama-cpp **60** · halogen-flash **139** · halogen **66** ·
+gufo **66** (all with required env; a few `build_app()`/`ProviderSettings`
+tests need `MACHINE_UID`/`PROVIDER_REGISTRATION_TOKEN`/`ADMIN_BASE_URL`
+exported — pre-existing pattern). Frontend `bun run build` + biome lint
+clean. Live dev-stack (`./scripts/dev.sh`) round-trip verified the mock
+registers through the real gate with the committed fingerprint.
 
 **Gotchas:** `flash_attn` is now `on|off|auto` (upstream default `auto`)
 — AGENTS.md corrected. Do NOT import provider packages from the admin or
