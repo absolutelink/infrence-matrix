@@ -292,8 +292,9 @@ differs, that's the only code your package adds beyond the driver.
 ## Mock provider (provider/mock)
 
 `MockBackend` implements the driver: instant start, canned
-`output_text.delta` streams (`delta_count`/`delta_delay`/`hold`
-configurable), model alias adopted from the registration response. When
+`output_text.delta` streams (`stream.delta_count`/`stream.delta_delay`
+from `backend_config`, `hold` on the constructor) configurable, model
+alias adopted from the registration response. When
 the request carries a non-empty `tools` list it emits a canned
 `function_call` turn instead, so the tool-forwarding path is exercisable
 without a real model. Terminal response objects are spec-complete
@@ -308,6 +309,29 @@ keeps the admin WS alive with `AdminClient.run_forever()`, re-emitting
 `provider.status` on every (re)connect, so the mock survives admin
 restarts like a real hardware provider (`register_and_connect` remains as
 the one-shot connect used by tests).
+
+### backend_config schema
+
+The mock ships `provider_mock/schema.json` (Phase 12) and sends it at
+registration. Canonical example:
+
+```json
+{
+  "artifacts": {"model": {"source": "hf", "repo": "mock-org/models", "file": "mock.gguf"}},
+  "context":   {"ctx": 4096, "predict": -1},
+  "sampling":  {"temperature": 0.8, "top_k": 40, "top_p": 0.95, "seed": -1},
+  "stream":    {"delta_count": 3, "delta_delay": 0.0},
+  "server":    {"backend_port": 8082}
+}
+```
+
+Every section is optional (top-level `additionalProperties: false` closes
+the set). `artifacts.model` is an `hf-file` descriptor for UI
+consistency — the mock never downloads. `stream` holds the mock's real
+behavioral knobs (the canned delta shape); `context`/`sampling`/`server`
+are recorded by the driver (`driver.context`, `driver.sampling`,
+`driver.server`) to prove the nested read paths without a real engine.
+`x-flag` is omitted: the mock maps no CLI flags.
 
 ## Worked example: llama-cpp provider (provider/llama-cpp)
 

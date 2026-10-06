@@ -34,7 +34,7 @@ from provider_lib.config import ProviderSettings
 from provider_lib.config_update import ConfigState, install_config_handlers
 from provider_lib.wire import Frame, InstanceStatusValue
 
-from provider_mock.backend import MockBackend
+from provider_mock.backend import SCHEMA, MockBackend
 
 logger = logging.getLogger("provider.mock")
 
@@ -155,6 +155,10 @@ async def register_provider(
         version=VERSION,
         port=client.settings.PROVIDER_PORT,
         hardware=FAKE_HARDWARE,
+        # Single shared load (provider_mock.backend.SCHEMA) so the schema
+        # registered with the admin and the schema the driver validates
+        # against are provably the same object.
+        schema=SCHEMA,
     )
     apply_registration(lifecycle, result, config_state)
     return result, lifecycle

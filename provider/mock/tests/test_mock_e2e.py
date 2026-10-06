@@ -32,6 +32,11 @@ class _FakeAdminHTTP(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(length))
         assert body["provider_type"] == "mock"
         assert body["machine_uid"] == "mock-e2e"
+        # Phase 12: registration must carry the shipped schema.json.
+        schema = body.get("schema")
+        assert isinstance(schema, dict), "register() must send schema in the body"
+        assert schema.get("$schema", "").endswith("2020-12/schema")
+        assert "sampling" in schema.get("properties", {})
         payload = json.dumps(
             {
                 "instance_id": INSTANCE_ID,

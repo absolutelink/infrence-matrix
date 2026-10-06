@@ -49,12 +49,48 @@ docker_mode() {
     && docker info >/dev/null 2>&1
 }
 
+# Phase 12: definition create validates provider_type against the
+# ProviderType registry, which normally bootstraps on the first provider
+# registration — but on a fresh DB the definition is seeded *before* any
+# provider exists. Seed the `mock` type row directly from the shipped
+# schema.json (upsert: keeps dev re-runs working after schema edits).
+# A live consensus vote (pending_fingerprint NOT NULL) is never clobbered:
+# the update is guarded and the script warns instead.
+# $@ = psql invocation (docker exec or local psql).
+seed_provider_type() {
+  local schema="$ROOT/provider/mock/provider_mock/schema.json"
+  local fp
+  fp=$(python3 -c 'import json,sys,hashlib
+s = json.load(open(sys.argv[1]))
+print(hashlib.sha256(json.dumps(s, sort_keys=True, separators=(",", ":")).encode()).hexdigest())' "$schema")
+  local pending
+  pending=$("$@" -tA -c "SELECT pending_fingerprint FROM provider_types WHERE name = 'mock'" 2>/dev/null || true)
+  if [[ -n "$pending" ]]; then
+    log "  provider type 'mock' has a pending consensus vote (pending_fingerprint=$pending) — committed schema left untouched"
+    log "  (dismiss or force-commit via /admin/api/provider-types/mock/pending/{dismiss,commit}, then re-run to re-seed)"
+    return 0
+  fi
+  "$@" -v schema="$(cat "$schema")" <<SQL || return 1
+INSERT INTO provider_types (id, name, "schema", schema_fingerprint, pending_voters, status, created_at)
+VALUES (gen_random_uuid(), 'mock', :'schema'::json, '$fp', '[]', 'active', now())
+ON CONFLICT (name) DO UPDATE
+  SET "schema" = EXCLUDED."schema",
+      schema_fingerprint = EXCLUDED.schema_fingerprint,
+      updated_at = now()
+  WHERE provider_types.pending_fingerprint IS NULL;
+SQL
+  log "  provider type 'mock' seeded"
+}
+
 # Seed machine + definition through the admin API. 409 = already seeded.
 # $1 = host the admin should use to reach the mock provider.
+# $2.. = psql invocation used for the Phase 12 provider-type bootstrap.
 seed() {
   local provider_host="$1"
+  shift
   log "seeding machine '$MACHINE_UID' + definition '$DEF_ALIAS' via admin API..."
   local code
+  seed_provider_type "$@" || { err "  provider type seed failed"; return 1; }
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$ADMIN_URL/admin/api/machines" \
     -H 'Content-Type: application/json' \
     -d "{\"uid\":\"$MACHINE_UID\",\"name\":\"Mock Machine\",\"host\":\"$provider_host\",\"total_vram_bytes\":32000000000}") || true
@@ -63,9 +99,11 @@ seed() {
     409) log "  machine already exists" ;;
     *) err "  machine seed failed (HTTP $code)"; return 1 ;;
   esac
+  # backend_config uses the Phase 12 sectioned shape (see the mock's
+  # provider_mock/schema.json).
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$ADMIN_URL/admin/api/definitions" \
     -H 'Content-Type: application/json' \
-    -d "{\"alias\":\"$DEF_ALIAS\",\"provider_type\":\"mock\",\"registration_token\":\"$DEF_TOKEN\",\"capacity\":4,\"vram_required_bytes\":0,\"idle_timeout_seconds\":300,\"backend_config\":{}}") || true
+    -d "{\"alias\":\"$DEF_ALIAS\",\"provider_type\":\"mock\",\"registration_token\":\"$DEF_TOKEN\",\"capacity\":4,\"vram_required_bytes\":0,\"idle_timeout_seconds\":300,\"backend_config\":{\"artifacts\":{\"model\":{\"path\":\"/models/mock.gguf\"}},\"context\":{\"ctx\":4096,\"predict\":-1},\"sampling\":{\"temperature\":0.8,\"top_k\":40,\"top_p\":0.95,\"seed\":-1},\"stream\":{\"delta_count\":3,\"delta_delay\":0.0},\"server\":{\"backend_port\":8082}}}") || true
   case "$code" in
     2*) log "  definition created" ;;
     409) log "  definition already exists" ;;
@@ -147,7 +185,8 @@ up_docker() {
     sleep 1
   done
   curl -sf "$ADMIN_URL/admin/api/health" >/dev/null 2>&1 || { err "admin not healthy"; return 1; }
-  seed "provider-mock"
+  seed "provider-mock" \
+    docker compose -f "$ROOT/compose.yml" exec -T postgres psql -U inference -d inference_matrix
   log "starting mock provider..."
   docker compose -f "$ROOT/compose.yml" up -d --build provider-mock
   smoke_test
@@ -185,7 +224,10 @@ up_local() {
   curl -sf "$ADMIN_URL/admin/api/health" >/dev/null 2>&1 \
     || { err "admin failed to start — see $RUN_DIR/admin.log"; return 1; }
 
-  seed "127.0.0.1"
+  seed "127.0.0.1" \
+    env PGPASSWORD="${POSTGRES_PASSWORD:-}" psql \
+         -h "${POSTGRES_HOST:-localhost}" -p "${POSTGRES_PORT:-5432}" \
+         -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-inference_matrix}"
 
   log "starting mock provider (:$PROVIDER_PORT)..."
   mkdir -p "$RUN_DIR/provider-cache" "$RUN_DIR/provider-models"

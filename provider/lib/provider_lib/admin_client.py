@@ -30,6 +30,41 @@ class RegistrationError(RuntimeError):
         self.status_code = status_code
 
 
+class SchemaPendingError(RegistrationError):
+    """Registration refused by the Phase 12 schema consensus gate
+    (409 `schema_pending` / `schema_conflict`, docs/ws-protocol.md §2).
+
+    Subclasses RegistrationError so callers keep retrying with the
+    normal backoff while the fleet converges on the new schema.
+    """
+
+    def __init__(self, status_code: int, message: str, detail: dict[str, Any]) -> None:
+        super().__init__(status_code, message)
+        self.error: str = detail.get("error", "")
+        self.provider_type: str | None = detail.get("provider_type")
+        self.committed_fingerprint: str | None = detail.get("committed_fingerprint")
+        self.pending_fingerprint: str | None = detail.get("pending_fingerprint")
+        self.voted: list[str] = list(detail.get("voted") or [])
+        self.waiting_on: list[str] = list(detail.get("waiting_on") or [])
+
+
+def _schema_refusal_message(detail: dict[str, Any]) -> str:
+    """Readable operator log line for a Phase 12 schema-gate 409."""
+    error = detail.get("error", "")
+    voted = detail.get("voted") or []
+    waiting_on = detail.get("waiting_on") or []
+    if error == "schema_pending":
+        kind = "waiting for all agents to update schema"
+    elif error == "schema_conflict":
+        kind = "schema conflict: another schema is pending consensus"
+    else:
+        return f"registration refused: {error or 'unknown schema error'}"
+    return (
+        f"{kind} ({len(voted)} voted, waiting on {len(waiting_on)}: "
+        f"{waiting_on}; detail={detail})"
+    )
+
+
 class RegistrationResult:
     def __init__(self, data: dict[str, Any]) -> None:
         self.raw = data
@@ -89,6 +124,7 @@ class AdminClient:
         version: str,
         port: int,
         hardware: dict[str, Any],
+        schema: dict[str, Any] | None = None,
     ) -> RegistrationResult:
         body = {
             "machine_uid": self.settings.MACHINE_UID,
@@ -100,6 +136,13 @@ class AdminClient:
             "metrics_categories": sorted(self.settings.metrics_categories),
             "registered_at": now_iso(),
         }
+        # Phase 12: the provider package's committed schema.json rides
+        # along with the registration; the admin derives the fingerprint
+        # and runs the consensus gate itself (docs/ws-protocol.md §2).
+        # `None` keeps the TRANSITION (schema-omitted) path alive for
+        # packages that haven't shipped a schema yet.
+        if schema is not None:
+            body["schema"] = schema
         url = self.settings.ADMIN_BASE_URL.rstrip("/") + "/admin/api/providers/register"
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(url, json=body)
@@ -108,6 +151,13 @@ class AdminClient:
                 detail = resp.json().get("detail", resp.text)
             except Exception:  # noqa: BLE001
                 detail = resp.text
+            if resp.status_code == 409 and isinstance(detail, dict):
+                # Structured Phase 12 schema-gate refusal (docs/ws-protocol.md
+                # §2). Unknown/empty `error` kinds are still surfaced as
+                # SchemaPendingError (retryable) with a generic message.
+                raise SchemaPendingError(
+                    resp.status_code, _schema_refusal_message(detail), detail
+                )
             raise RegistrationError(resp.status_code, f"registration failed: {detail}")
         result = RegistrationResult(resp.json())
         self._registration = result

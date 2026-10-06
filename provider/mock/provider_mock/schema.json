@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mock backend_config",
+  "description": "Sectioned backend_config for the hardware-free mock provider. The mock fakes inference: no real engine, no downloads. Sections mirror the canonical layout used by real providers (Phase 12).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "artifacts": {
+      "type": "object",
+      "title": "Model files",
+      "description": "Artifact descriptors. The mock accepts them but never downloads; they exist for UI/form consistency.",
+      "x-order": 1,
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "$ref": "#/$defs/hfFile",
+          "title": "Main model",
+          "description": "Fake model artifact descriptor (hf-file widget). Unused by the mock engine.",
+          "x-order": 1
+        }
+      }
+    },
+    "context": {
+      "type": "object",
+      "title": "Context",
+      "x-order": 2,
+      "additionalProperties": false,
+      "properties": {
+        "ctx": {
+          "type": "integer",
+          "default": 4096,
+          "minimum": 1,
+          "maximum": 1048576,
+          "title": "Context size",
+          "description": "Context window tokens (fake; recorded by the driver)."
+        },
+        "predict": {
+          "type": "integer",
+          "default": -1,
+          "minimum": -1,
+          "maximum": 1048576,
+          "title": "Max predicted tokens",
+          "description": "-1 = unlimited (fake; recorded by the driver)."
+        }
+      }
+    },
+    "sampling": {
+      "type": "object",
+      "title": "Sampling",
+      "x-order": 3,
+      "additionalProperties": false,
+      "properties": {
+        "temperature": {
+          "type": "number",
+          "default": 0.8,
+          "minimum": 0,
+          "maximum": 2,
+          "title": "Temperature",
+          "description": "Sampling temperature (fake; recorded by the driver)."
+        },
+        "top_k": {
+          "type": "integer",
+          "default": 40,
+          "minimum": 0,
+          "title": "Top-k",
+          "description": "Top-k sampling cutoff (fake; recorded by the driver)."
+        },
+        "top_p": {
+          "type": "number",
+          "default": 0.95,
+          "minimum": 0,
+          "maximum": 1,
+          "title": "Top-p",
+          "description": "Nucleus sampling probability (fake; recorded by the driver)."
+        },
+        "seed": {
+          "type": "integer",
+          "default": -1,
+          "minimum": -1,
+          "title": "Seed",
+          "description": "RNG seed; -1 = random (fake; recorded by the driver)."
+        }
+      }
+    },
+    "stream": {
+      "type": "object",
+      "title": "Mock stream",
+      "description": "The mock's real behavioral knobs: the canned token stream shape.",
+      "x-order": 4,
+      "additionalProperties": false,
+      "properties": {
+        "delta_count": {
+          "type": "integer",
+          "default": 3,
+          "minimum": 0,
+          "maximum": 100000,
+          "title": "Delta count",
+          "description": "Number of output_text deltas emitted per response."
+        },
+        "delta_delay": {
+          "type": "number",
+          "default": 0.0,
+          "minimum": 0,
+          "title": "Delta delay (s)",
+          "description": "Seconds to sleep between emitted deltas."
+        }
+      }
+    },
+    "server": {
+      "type": "object",
+      "title": "Server",
+      "x-order": 5,
+      "additionalProperties": false,
+      "properties": {
+        "backend_port": {
+          "type": "integer",
+          "default": 8082,
+          "minimum": 1,
+          "maximum": 65535,
+          "title": "Backend port",
+          "description": "Port the fake backend would listen on (recorded; the mock has no subprocess)."
+        }
+      }
+    }
+  },
+  "$defs": {
+    "hfFile": {
+      "title": "HuggingFace file",
+      "oneOf": [
+        {
+          "type": "object",
+          "x-widget": "hf-file",
+          "properties": {
+            "source": {"const": "hf"},
+            "repo": {"type": "string"},
+            "file": {"type": "string"},
+            "revision": {"type": "string"}
+          },
+          "required": ["source", "repo", "file"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {"path": {"type": "string"}},
+          "required": ["path"],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

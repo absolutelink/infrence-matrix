@@ -67,20 +67,46 @@ The dev script seeds through the API; if you prefer raw SQL (compose
 stack), the equivalent is:
 
 ```bash
-docker compose exec -T postgres psql -U inference -d inference_matrix <<'SQL'
+# Phase 12: definitions validate provider_type against the ProviderType
+# registry (normally bootstrapped by the first provider registration).
+# Seed it from the shipped schema.json with a matching fingerprint:
+SCHEMA=$(cat provider/mock/provider_mock/schema.json)
+FP=$(python3 -c 'import json,sys,hashlib
+s = json.load(sys.stdin)
+print(hashlib.sha256(json.dumps(s, sort_keys=True, separators=(",", ":")).encode()).hexdigest())' <<<"$SCHEMA")
+
+docker compose exec -T postgres psql -U inference -d inference_matrix \
+  -v schema="$SCHEMA" -v fp="$FP" <<'SQL'
 INSERT INTO machines (id, uid, name, host, total_vram_bytes, hardware, created_at)
 VALUES (gen_random_uuid(), 'mock-machine-1', 'Mock Machine', 'provider-mock', 32000000000, '{}', now());
 
+INSERT INTO provider_types (id, name, "schema", schema_fingerprint, pending_voters, status, created_at)
+VALUES (gen_random_uuid(), 'mock', :'schema'::json, :'fp', '[]', 'active', now())
+ON CONFLICT (name) DO UPDATE
+  SET "schema" = EXCLUDED."schema", schema_fingerprint = EXCLUDED.schema_fingerprint,
+      updated_at = now();
+
+-- backend_config uses the Phase 12 sectioned shape (see the mock schema).
 INSERT INTO provider_definitions (id, alias, provider_type, backend_config,
     vram_required_bytes, idle_timeout_seconds, capacity, registration_token,
     model_metadata, enabled, status, created_at)
-VALUES (gen_random_uuid(), 'mock-model', 'mock', '{}',
+VALUES (gen_random_uuid(), 'mock-model', 'mock',
+    '{"artifacts": {"model": {"path": "/models/mock.gguf"}},
+      "context": {"ctx": 4096, "predict": -1},
+      "sampling": {"temperature": 0.8, "top_k": 40, "top_p": 0.95, "seed": -1},
+      "stream": {"delta_count": 3, "delta_delay": 0.0},
+      "server": {"backend_port": 8082}}',
     8000000000, 300, 4, 'mock-registration-token',
     '{}', true, 'stopped', now());
 SQL
 
 docker compose restart provider-mock   # provider registers on startup only
 ```
+
+Prefer the API path (`./scripts/dev.sh`) — it bootstraps the provider type
+and seeds consistently. The `schema_fingerprint` must equal
+`sha256(canonical_json(schema))` with `sort_keys=True,
+separators=(",", ":")` (see `admin/backend/app/services/hashing.py`).
 
 The admin reaches the mock provider via `machine.host` — use the Compose
 service name `provider-mock` (as in the snippet above). If you run the

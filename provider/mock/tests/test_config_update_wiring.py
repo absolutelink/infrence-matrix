@@ -71,7 +71,7 @@ async def test_config_update_end_to_end_on_mock(tmp_path: Any) -> None:
         client,
         "provider.config.update",
         {
-            "backend_config": {"delta_count": 7},
+            "backend_config": {"stream": {"delta_count": 7}},
             "config_fingerprint": "fp-new",
             "capacity": 2,
         },
@@ -91,7 +91,10 @@ async def test_config_update_end_to_end_on_mock(tmp_path: Any) -> None:
     ack = await _dispatch(
         client,
         "provider.config.update",
-        {"backend_config": {"delta_count": 7}, "config_fingerprint": "fp-new"},
+        {
+            "backend_config": {"stream": {"delta_count": 7}},
+            "config_fingerprint": "fp-new",
+        },
     )
     assert ack["ok"] is True
     assert ack["detail"]["noop"] is True

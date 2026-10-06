@@ -11,12 +11,20 @@ release-on-upstream-close invariant end to end.
 """
 
 import asyncio
+import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
 from provider_lib.backend import BackendDriver
+from provider_lib.schema import load_schema, validate_backend_config
+
+logger = logging.getLogger("provider.mock.backend")
+
+# The mock's committed backend_config schema (Phase 12): the sectioned
+# shape the admin registers, validates against, and renders in the UI.
+SCHEMA: dict[str, Any] = load_schema("provider_mock")
 
 
 class MockBackend(BackendDriver):
@@ -45,17 +53,45 @@ class MockBackend(BackendDriver):
         # downloads nothing; tests can seed this list directly.
         self.resolved_artifacts: list[str] = []
         self.applied_configs: list[dict[str, Any]] = []
+        # Phase 12: the sectioned backend_config, recorded per section so
+        # tests (and log inspection) can assert what the driver read.
+        # The mock fakes everything: these values never drive a real
+        # engine, they only prove the nested config paths flow.
+        self.context: dict[str, Any] = {}
+        self.sampling: dict[str, Any] = {}
+        self.server: dict[str, Any] = {}
+        self.artifacts: dict[str, Any] = {}
 
     def apply_config(self, backend_config: dict[str, Any]) -> None:
-        """Adopt mock stream knobs from (updated) backend_config."""
+        """Adopt the sectioned backend_config (Phase 12 shape).
+
+        Sections: `artifacts` (hf-file descriptors; accepted, never
+        downloaded), `context` (ctx/predict), `sampling`
+        (temperature/top_k/top_p/seed), `stream` (delta_count/
+        delta_delay — the mock's real behavioral knobs), `server`
+        (backend_port). Schema violations are logged as warnings, not
+        raised: the authoritative gates are the admin's registration
+        gate and definition validation; the mock stays maximally
+        permissive for dev flows.
+        """
         cfg = backend_config or {}
         self.applied_configs.append(dict(cfg))
-        if isinstance(cfg.get("model"), str) and cfg["model"]:
-            self.model = cfg["model"]
-        if isinstance(cfg.get("delta_count"), int):
-            self.delta_count = cfg["delta_count"]
-        if isinstance(cfg.get("delta_delay"), (int, float)):
-            self.delta_delay = float(cfg["delta_delay"])
+        errors = validate_backend_config(SCHEMA, cfg)
+        for err in errors:
+            logger.warning("backend_config schema violation: %s", err)
+
+        stream = cfg.get("stream") or {}
+        if isinstance(stream.get("delta_count"), int):
+            self.delta_count = stream["delta_count"]
+        if isinstance(stream.get("delta_delay"), (int, float)):
+            self.delta_delay = float(stream["delta_delay"])
+
+        self.artifacts = dict(cfg.get("artifacts") or {})
+        self.context = dict(cfg.get("context") or {})
+        self.sampling = dict(cfg.get("sampling") or {})
+        self.server = dict(cfg.get("server") or {})
+        # Config changed: previously resolved artifacts are stale.
+        self.resolved_artifacts = []
 
     async def start(self) -> None:
         self.start_calls += 1
