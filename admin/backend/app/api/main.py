@@ -4,6 +4,7 @@ from app.api.admin.definitions import router as admin_definitions_router
 from app.api.admin.health import router as admin_health_router
 from app.api.admin.instances import router as admin_instances_router
 from app.api.admin.machines import router as admin_machines_router
+from app.api.admin.provider_types import router as admin_provider_types_router
 from app.api.admin.providers import router as admin_providers_router
 from app.api.admin.responses import router as admin_responses_router
 from app.api.v1.chat_completions import router as v1_chat_router
@@ -21,6 +22,8 @@ api_router.include_router(admin_providers_router)
 api_router.include_router(admin_machines_router)
 api_router.include_router(admin_definitions_router)
 api_router.include_router(admin_instances_router)
+# Phase 12: ProviderType registry reads + schema-consensus overrides.
+api_router.include_router(admin_provider_types_router)
 # Phase 10 UI reads: response log, usage stats, dashboard overview.
 api_router.include_router(admin_responses_router)
 # Public OpenAI-compatible inference API lives at /v1 (NOT under /admin/api).

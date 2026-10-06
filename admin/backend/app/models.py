@@ -1,8 +1,10 @@
 """Inference Matrix admin data model (Phase 2).
 
-Five tables replace the old agent/server_instance/model/lease set:
+Six tables replace the old agent/server_instance/model/lease set:
 
   Machine            a physical/virtual host, pre-registered in the UI by uid.
+  ProviderType       registered provider type (Phase 12): the committed JSON
+                     Schema for its backend_config + schema consensus state.
   ProviderDefinition the client-facing "model": how to boot a backend +
                      scheduling hints (vram, idle timeout, capacity) + the
                      registration token that binds instances to it.
@@ -88,11 +90,67 @@ class Machine(SQLModel, table=True):
 
 
 # ============================================================================
+# ProviderType (Phase 12)
+# ============================================================================
+class ProviderType(SQLModel, table=True):
+    """A registered provider **type**, created by the first registration
+    of that type (ARCHITECTURE.md §4 / docs/ws-protocol.md §2).
+
+    Owns the committed JSON Schema (2020-12) describing this type's
+    ``backend_config``. Every ``ProviderDefinition.provider_type`` must
+    reference a row here — the registry, not a constant, is the source of
+    truth. The schema itself ships inside each provider package
+    (``provider/<type>/provider_<type>/schema.json``) and is presented at
+    registration; the admin never holds provider code.
+
+    Schema consensus: a new schema must be presented by every known
+    ``ProviderInstance`` of the type before it commits. While awaiting
+    consensus the staged schema lives in ``pending_*`` and the
+    registration is refused 409 ``schema_pending``; a third distinct
+    fingerprint while pending flips ``status`` to ``conflict``.
+    Force-commit / dismiss are operator overrides exposed under
+    ``/admin/api/provider-types/{name}/pending/*``.
+
+    NOTE: the field is named ``schema`` (it shadows the deprecated
+    ``BaseModel.schema()`` — SQLModel emits a UserWarning at class-creation
+    time; the mapping round-trips cleanly via the explicit ``sa_column``).
+    """
+
+    __tablename__ = "provider_types"
+
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        sa_column=Column(_uuid_col(), primary_key=True),
+    )
+
+    # Type id: "llama-cpp", "halogen", "halogen-flash", "gufo", "mock", ...
+    name: str = Field(max_length=64, unique=True)
+
+    # Committed JSON Schema (2020-12) for this type's backend_config.
+    schema: dict = Field(
+        default_factory=dict,
+        sa_column=Column("schema", JSON, nullable=False),
+    )
+    # sha256 of canonical json(schema) — same canonicalization as
+    # config_fingerprint (app.services.hashing).
+    schema_fingerprint: str = Field(max_length=64)
+
+    # Staged schema awaiting consensus (None when nothing is pending).
+    pending_schema: dict | None = Field(default=None, sa_column=Column(JSON))
+    pending_fingerprint: str | None = Field(default=None, max_length=64)
+    # Instance ids that registered presenting ``pending_fingerprint``.
+    pending_voters: list = Field(default_factory=list, sa_column=Column(JSON))
+
+    # active | consensus_pending | conflict
+    status: str = Field(default="active", max_length=32)
+
+    created_at: datetime = Field(default_factory=get_datetime_utc)
+    updated_at: datetime | None = None
+
+
+# ============================================================================
 # ProviderDefinition
 # ============================================================================
-PROVIDER_TYPES = ("llama-cpp", "halogen", "halogen-flash", "gufo", "mock")
-
-
 class ProviderDefinition(SQLModel, table=True):
     """A client-facing model: how to boot a backend and how to schedule it.
 
@@ -115,7 +173,7 @@ class ProviderDefinition(SQLModel, table=True):
     )
 
     alias: str = Field(max_length=255, unique=True)
-    provider_type: str = Field(max_length=64)  # one of PROVIDER_TYPES
+    provider_type: str = Field(max_length=64)  # references ProviderType.name (Phase 12)
 
     # Everything the provider needs to start the backend. Schema documented
     # in provider/README.md. Example:
@@ -218,6 +276,11 @@ class ProviderInstance(SQLModel, table=True):
     # Hash of the backend_config the instance last applied. Drives auto
     # cache-clear on config change (Phase 9).
     config_fingerprint: str | None = Field(default=None, max_length=64)
+
+    # Schema fingerprint the instance presented at its last registration
+    # attempt (Phase 12; written on success AND on 409 schema-gate refusals
+    # — drives the waiting_schema badge and the pending voter roster).
+    reported_schema_fingerprint: str | None = Field(default=None, max_length=64)
 
     # Instance-reported hardware this backend is bound to (subset of the
     # machine's GPUs), used for VRAM accounting and metrics dedup.

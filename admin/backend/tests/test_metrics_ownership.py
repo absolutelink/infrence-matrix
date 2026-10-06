@@ -69,6 +69,7 @@ def _register(
             "machine_uid": machine_uid,
             "registration_token": f"tok-{machine_uid}-{suffix}",
             "provider_type": "mock",
+            "schema": {"type": "object"},
             "version": settings.VERSION,
             "port": 8081,
             "hardware": {"gpus": [], "total_vram_bytes": 1},

@@ -51,6 +51,7 @@ _TABLE_ORDER = [
     models.ResponseRecord,
     models.ProviderInstance,
     models.ProviderDefinition,
+    models.ProviderType,
     models.Machine,
 ]
 

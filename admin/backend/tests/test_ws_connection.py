@@ -48,6 +48,7 @@ def _register(client: TestClient, session: Session) -> dict:
             "machine_uid": "ws-mach",
             "registration_token": "ws-token",
             "provider_type": "mock",
+            "schema": {"type": "object"},
             "version": settings.VERSION,
             "port": 8081,
             "hardware": {"gpus": [], "total_vram_bytes": 1000},

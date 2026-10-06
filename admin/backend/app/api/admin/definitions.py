@@ -7,12 +7,14 @@ operator-side create/update/delete the UI (Phase 10) consumes.
 
 Validation boundary (provider/README.md): the admin validates only the
 fields **it owns** — non-empty ``alias``/``provider_type``,
-``provider_type`` in ``PROVIDER_TYPES``, ``capacity >= 1``,
-``vram_required_bytes >= 0``, ``idle_timeout_seconds >= 0``, and that
-``backend_config`` is a JSON-object that round-trips through the
-canonical fingerprint serializer. Deep per-provider-type
-``backend_config`` validation stays provider-side (the driver raises at
-start and the failure surfaces through the config.update NAK).
+``provider_type`` present in the ``ProviderType`` registry (Phase 12),
+``capacity >= 1``, ``vram_required_bytes >= 0``,
+``idle_timeout_seconds >= 0``, and that ``backend_config`` is a
+JSON-object that round-trips through the canonical fingerprint
+serializer **and validates against the type's committed JSON Schema
+(2020-12)** — per-field errors are returned as a structured 422.
+Runtime failure of provider-specific interpretation still surfaces
+through the config.update NAK.
 
 Config-change semantics (docs/ws-protocol.md §4):
 - A PATCH that changes what the **provider consumes** — ``backend_config``
@@ -48,6 +50,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+import jsonschema
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
@@ -56,7 +59,7 @@ from sqlmodel import Session, select
 from app.api.admin.providers import compute_config_fingerprint
 from app.api.admin.serializers import iso_utc
 from app.core.db import get_session
-from app.models import PROVIDER_TYPES, ProviderDefinition, ProviderInstance
+from app.models import ProviderDefinition, ProviderInstance, ProviderType
 from app.services import alias_registry, config_update
 
 logger = logging.getLogger("admin.definitions")
@@ -104,18 +107,37 @@ _NON_NULLABLE_FIELDS = frozenset(
 )
 
 
-def _validate_provider_type(provider_type: str) -> None:
-    if provider_type not in PROVIDER_TYPES:
+def _get_provider_type(session: Session, provider_type: str) -> ProviderType:
+    """Resolve a provider_type against the Phase 12 registry (the source
+    of truth; the old PROVIDER_TYPES constant is gone). 422 with the
+    registered-type list when unknown."""
+    ptype = session.exec(
+        select(ProviderType).where(ProviderType.name == provider_type)
+    ).first()
+    if ptype is None:
+        known = [
+            t.name
+            for t in session.exec(
+                select(ProviderType).order_by(ProviderType.name)
+            ).all()
+        ]
+        known_desc = ", ".join(known) if known else "(none registered yet)"
         raise HTTPException(
             status_code=422,
             detail=(
                 f"unknown provider_type '{provider_type}'; "
-                f"must be one of {', '.join(PROVIDER_TYPES)}"
+                f"registered types: {known_desc}"
             ),
         )
+    return ptype
 
 
-def _validate_backend_config(backend_config: dict[str, Any]) -> None:
+def _validate_backend_config(
+    ptype: ProviderType, backend_config: dict[str, Any]
+) -> None:
+    """Validate a backend_config against the type's committed JSON Schema
+    (Phase 12). The caller resolves the ProviderType row once via
+    ``_get_provider_type`` and passes it here (no per-validator query)."""
     # Must survive the canonical fingerprint serializer (rejects
     # non-JSON-serializable values sneaking in via odd Pydantic input).
     try:
@@ -125,6 +147,33 @@ def _validate_backend_config(backend_config: dict[str, Any]) -> None:
             status_code=422,
             detail=f"backend_config is not JSON-serializable: {exc}",
         ) from exc
+    # Phase 12: validate against the type's committed JSON Schema.
+    errors = sorted(
+        jsonschema.Draft202012Validator(ptype.schema or {}).iter_errors(backend_config),
+        # H1: str() each path part — absolute_path mixes str keys and int
+        # array indices, which are not order-comparable.
+        key=lambda e: [str(p) for p in e.absolute_path],
+    )
+    if errors:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "backend_config_schema_validation_failed",
+                "provider_type": ptype.name,
+                "schema_fingerprint": ptype.schema_fingerprint,
+                "errors": [
+                    {
+                        "path": "$"
+                        + "".join(
+                            f"[{part!r}]" if isinstance(part, int) else f".{part}"
+                            for part in err.absolute_path
+                        ),
+                        "message": err.message,
+                    }
+                    for err in errors
+                ],
+            },
+        )
 
 
 def definition_dict(
@@ -187,8 +236,8 @@ def _get_definition(session: Session, definition_id: str) -> ProviderDefinition:
 async def create_definition(
     body: DefinitionCreate, session: Session = Depends(get_session)
 ) -> dict[str, Any]:
-    _validate_provider_type(body.provider_type)
-    _validate_backend_config(body.backend_config)
+    ptype = _get_provider_type(session, body.provider_type)
+    _validate_backend_config(ptype, body.backend_config)
     definition = ProviderDefinition(
         **body.model_dump(exclude={"registration_token"}),
         registration_token=body.registration_token or secrets.token_urlsafe(24),
@@ -241,27 +290,33 @@ async def patch_definition(
         if changes[key] is None and key in _NON_NULLABLE_FIELDS:
             raise HTTPException(status_code=422, detail=f"field '{key}' cannot be null")
 
-    if "provider_type" in changes:
-        _validate_provider_type(changes["provider_type"])
-        if changes["provider_type"] != definition.provider_type:
-            attached = session.exec(
-                select(ProviderInstance).where(
-                    ProviderInstance.provider_definition_id == definition.id
-                )
-            ).all()
-            if attached:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f"definition '{definition.alias}' has "
-                        f"{len(attached)} instance(s) attached; changing "
-                        "provider_type would break their binding — delete "
-                        "the instances (or create a new definition) "
-                        "instead"
-                    ),
-                )
-    if "backend_config" in changes:
-        _validate_backend_config(changes["backend_config"])
+    # M3: validate the EFFECTIVE config (post-change) against the
+    # EFFECTIVE type's committed schema — a retype without a config
+    # change must still satisfy the new schema. The type is resolved once
+    # up front so an unknown provider_type keeps its original 422-before-
+    # 409 ordering.
+    effective_type_name = changes.get("provider_type", definition.provider_type)
+    ptype = _get_provider_type(session, effective_type_name)
+    if "provider_type" in changes and effective_type_name != definition.provider_type:
+        attached = session.exec(
+            select(ProviderInstance).where(
+                ProviderInstance.provider_definition_id == definition.id
+            )
+        ).all()
+        if attached:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"definition '{definition.alias}' has "
+                    f"{len(attached)} instance(s) attached; changing "
+                    "provider_type would break their binding — delete "
+                    "the instances (or create a new definition) "
+                    "instead"
+                ),
+            )
+    if "provider_type" in changes or "backend_config" in changes:
+        effective_config = changes.get("backend_config", definition.backend_config)
+        _validate_backend_config(ptype, effective_config)
 
     old_fp = compute_config_fingerprint(definition.backend_config or {})
     old_capacity = definition.capacity

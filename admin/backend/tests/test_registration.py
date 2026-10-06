@@ -52,6 +52,7 @@ def _body(**overrides) -> dict:
         "machine_uid": "mach-1",
         "registration_token": "reg-token-1",
         "provider_type": "mock",
+        "schema": {"type": "object"},
         "version": settings.VERSION,
         "port": 8081,
         "hardware": {

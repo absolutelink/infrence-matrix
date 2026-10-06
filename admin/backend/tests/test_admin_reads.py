@@ -452,6 +452,7 @@ def test_live_websocket_reflected_in_reads(
             "machine_uid": machine.uid,
             "registration_token": "tok-ov-live",
             "provider_type": "mock",
+            "schema": {"type": "object"},
             "version": settings.VERSION,
             "port": 8081,
             "hardware": {"gpus": [], "total_vram_bytes": 1},

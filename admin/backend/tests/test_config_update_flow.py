@@ -60,6 +60,7 @@ def _register(client: TestClient) -> dict:
             "machine_uid": "flow-mach",
             "registration_token": "flow-token",
             "provider_type": "mock",
+            "schema": {"type": "object"},
             "version": settings.VERSION,
             "port": 8081,
             "hardware": {"gpus": [], "total_vram_bytes": 1},

@@ -15,22 +15,30 @@ dials /provider/ws with ``Authorization: Bearer <secret>``.
 See docs/ws-protocol.md for the full handshake.
 """
 
-import hashlib
 import json
 import logging
 import secrets
+import uuid
 from typing import Any
 
+import jsonschema
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.core.config import settings
 from app.core.db import get_session
 from app.core.redis import get_redis
-from app.models import Machine, ProviderDefinition, ProviderInstance
+from app.models import (
+    Machine,
+    ProviderDefinition,
+    ProviderInstance,
+    ProviderType,
+)
 from app.services import redis_keys
+from app.services.hashing import canonical_json_sha256
 
 logger = logging.getLogger("admin.providers")
 
@@ -42,11 +50,23 @@ SECRET_TTL_SECONDS = 30 * 24 * 3600
 
 
 class RegistrationRequest(BaseModel):
-    """Body sent by provider_lib.admin_client.AdminClient.register()."""
+    """Body sent by provider_lib.admin_client.AdminClient.register().
+
+    ``schema`` (Phase 12) is the provider package's committed
+    ``schema.json`` (JSON Schema 2020-12 for this type's
+    ``backend_config``). The admin derives the fingerprint itself; the
+    provider never sends it separately.
+
+    TRANSITION (Phase 12): ``schema`` is optional until every provider
+    package ships a real ``schema.json`` (Phase D) — an admin-first
+    deploy must not 422 the currently-deployed providers that don't send
+    it yet. See the schema-omitted path in ``register_provider``.
+    """
 
     machine_uid: str
     registration_token: str
     provider_type: str
+    schema: dict[str, Any] | None = None
     version: str
     port: int = 8081
     hardware: dict[str, Any] = Field(default_factory=dict)
@@ -55,8 +75,7 @@ class RegistrationRequest(BaseModel):
 
 
 def compute_config_fingerprint(backend_config: dict[str, Any]) -> str:
-    canonical = json.dumps(backend_config, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return canonical_json_sha256(backend_config)
 
 
 def _machine_dict(machine: Machine) -> dict[str, Any]:
@@ -86,6 +105,220 @@ def _definition_dict(
         "vram_required_bytes": definition.vram_required_bytes,
         "model_metadata": definition.model_metadata,
     }
+
+
+def _schema_refusal_detail(
+    provider_type: str,
+    committed_fingerprint: str,
+    pending_fingerprint: str | None,
+    voted: list[str],
+    waiting_on: list[str],
+    error: str,
+) -> dict[str, Any]:
+    """Structured 409 detail per docs/ws-protocol.md §2 (Phase 12).
+
+    ``voted`` / ``waiting_on`` values are ProviderInstance id UUID strings.
+    """
+    return {
+        "error": error,
+        "provider_type": provider_type,
+        "committed_fingerprint": committed_fingerprint,
+        "pending_fingerprint": pending_fingerprint,
+        "voted": voted,
+        "waiting_on": waiting_on,
+    }
+
+
+def type_instances_of(session: Session, provider_type: str) -> list[ProviderInstance]:
+    """Voter universe: every ProviderInstance row whose definition is of
+    this provider type, regardless of connection state
+    (docs/ws-protocol.md §2)."""
+    return list(
+        session.exec(
+            select(ProviderInstance)
+            .join(
+                ProviderDefinition,
+                ProviderInstance.provider_definition_id == ProviderDefinition.id,
+            )
+            .where(ProviderDefinition.provider_type == provider_type)
+        ).all()
+    )
+
+
+# TRANSITION (Phase 12): committed schema recorded when a provider
+# registers without presenting one (old provider packages that predate
+# schema.json). Accepts any JSON object; replace when Phase D ships real
+# schemas in every provider package.
+PERMISSIVE_SCHEMA: dict[str, Any] = {"type": "object"}
+PERMISSIVE_FINGERPRINT = canonical_json_sha256(PERMISSIVE_SCHEMA)
+
+
+def _gate_existing_type(
+    session: Session,
+    ptype: ProviderType,
+    provider_type: str,
+    schema: dict[str, Any],
+    instance_id: uuid.UUID,
+    fp: str,
+) -> dict[str, Any] | None:
+    """Consensus decision for an already-registered type. Mutates ``ptype``
+    in the caller's session; returns None to allow the registration or
+    the structured 409 detail to refuse it."""
+    sid = str(instance_id)
+
+    if fp == ptype.schema_fingerprint:
+        # L2: a match against committed resolves any stale conflict as
+        # long as nothing is pending (a live pending vote is kept).
+        if ptype.pending_fingerprint is None and ptype.status != "active":
+            ptype.status = "active"
+        return None
+
+    universe = [str(i.id) for i in type_instances_of(session, provider_type)]
+
+    if ptype.pending_fingerprint is None:
+        waiting_on = [uid for uid in universe if uid != sid]
+        if not waiting_on:
+            # L1: this instance is the only member of the voter universe,
+            # so its vote is unanimous — commit immediately instead of
+            # staging a pending that nobody else can ever complete.
+            ptype.schema = schema
+            ptype.schema_fingerprint = fp
+            ptype.status = "active"
+            return None
+        # Stage the new schema; this instance is the first voter.
+        ptype.pending_schema = schema
+        ptype.pending_fingerprint = fp
+        ptype.pending_voters = [sid]
+        ptype.status = "consensus_pending"
+        return _schema_refusal_detail(
+            provider_type,
+            ptype.schema_fingerprint,
+            fp,
+            [sid],
+            waiting_on,
+            "schema_pending",
+        )
+
+    if fp == ptype.pending_fingerprint:
+        voters = [str(v) for v in (ptype.pending_voters or [])]
+        if sid not in voters:
+            voters.append(sid)
+        ptype.pending_voters = voters
+        waiting_on = [uid for uid in universe if uid not in voters]
+        if not waiting_on:
+            # Consensus reached: promote pending -> committed.
+            ptype.schema = ptype.pending_schema or {}
+            ptype.schema_fingerprint = fp
+            ptype.pending_schema = None
+            ptype.pending_fingerprint = None
+            ptype.pending_voters = []
+            ptype.status = "active"
+            return None
+        return _schema_refusal_detail(
+            provider_type,
+            ptype.schema_fingerprint,
+            fp,
+            voters,
+            waiting_on,
+            "schema_pending",
+        )
+
+    # Third distinct fingerprint while a pending is staged: conflict.
+    # The pending state is left untouched (the fleet's in-flight vote is
+    # preserved for the operator to inspect / force-commit / dismiss).
+    ptype.status = "conflict"
+    voters = [str(v) for v in (ptype.pending_voters or [])]
+    waiting_on = [uid for uid in universe if uid not in voters]
+    return _schema_refusal_detail(
+        provider_type,
+        ptype.schema_fingerprint,
+        ptype.pending_fingerprint,
+        voters,
+        waiting_on,
+        "schema_conflict",
+    )
+
+
+def _schema_gate(
+    session: Session,
+    provider_type: str,
+    schema: dict[str, Any] | None,
+    instance_id: uuid.UUID,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Run the Phase 12 schema consensus gate.
+
+    Mutates the ProviderType row (create/commit/stage/conflict) in the
+    caller's session — the caller commits on both paths. Returns
+    ``(None, reported_fingerprint)`` when registration may proceed (type
+    bootstrapped, fingerprint matches committed, or this vote completed
+    consensus), or ``(409 detail, reported_fingerprint)`` when the
+    registration must be refused. The caller persists
+    ``reported_fingerprint`` on ProviderInstance.reported_schema_fingerprint.
+
+    TRANSITION (Phase 12): schema-omitted path; remove once all providers
+    ship schema.json (Phase D). When ``schema`` is None:
+    - unknown type -> bootstrap with the permissive ``{"type":
+      "object"}`` schema committed (reported fp = permissive fp), so the
+      type exists for definition validation;
+    - known type -> the consensus gate is skipped entirely (reported fp =
+      None: the instance did not report a schema, and the UI must not
+      show it as on-committed when it never proved so).
+    """
+    if schema is None:
+        ptype = session.exec(
+            select(ProviderType).where(ProviderType.name == provider_type)
+        ).first()
+        if ptype is None:
+            _bootstrap_type(session, provider_type, PERMISSIVE_SCHEMA)
+            return None, PERMISSIVE_FINGERPRINT
+        return None, None
+
+    fp = canonical_json_sha256(schema)
+    ptype = session.exec(
+        select(ProviderType).where(ProviderType.name == provider_type)
+    ).first()
+    if ptype is None:
+        # Bootstrap: first registration of the type commits immediately.
+        # L4: a concurrent worker may create the same row between our
+        # lookup and the caller's commit; flush inside a SAVEPOINT so an
+        # IntegrityError costs only the insert, then re-read and apply
+        # the normal consensus logic against the existing row.
+        ptype = _bootstrap_type(session, provider_type, schema)
+        if ptype.schema_fingerprint == fp:
+            return None, fp
+        return _gate_existing_type(
+            session, ptype, provider_type, schema, instance_id, fp
+        ), fp
+
+    return _gate_existing_type(
+        session, ptype, provider_type, schema, instance_id, fp
+    ), fp
+
+
+def _bootstrap_type(
+    session: Session, provider_type: str, schema: dict[str, Any]
+) -> ProviderType:
+    """Create the ProviderType row for a first-seen type (L4: savepoint +
+    IntegrityError re-read for multi-worker safety)."""
+    fp = canonical_json_sha256(schema)
+    try:
+        with session.begin_nested():
+            session.add(
+                ProviderType(
+                    name=provider_type,
+                    schema=schema,
+                    schema_fingerprint=fp,
+                    status="active",
+                )
+            )
+    except IntegrityError:
+        pass  # another worker won the race; fall through to the re-read
+    ptype = session.exec(
+        select(ProviderType).where(ProviderType.name == provider_type)
+    ).first()
+    if ptype is None:  # pragma: no cover - only if the row vanished twice
+        raise RuntimeError(f"provider type '{provider_type}' bootstrap failed")
+    return ptype
 
 
 @router.post("/register")
@@ -139,10 +372,26 @@ async def register_provider(
             ),
         )
 
-    # 5. Config fingerprint from the canonical backend_config.
-    config_fingerprint = compute_config_fingerprint(definition.backend_config)
+    # 5. Schema must parse as JSON Schema 2020-12 (docs/ws-protocol.md §2
+    #    rule 6) — checked before any mutation so a malformed schema never
+    #    touches the registry. An omitted schema is the transition path
+    #    (see _schema_gate).
+    if body.schema is not None:
+        try:
+            jsonschema.Draft202012Validator.check_schema(body.schema)
+        except jsonschema.SchemaError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"invalid JSON Schema (2020-12) for "
+                    f"'{body.provider_type}': {exc.message}"
+                ),
+            ) from exc
 
-    # 6. Upsert the instance for (machine, definition).
+    # 6. Upsert the instance for (machine, definition). The instance id
+    #    is assigned here (default_factory=uuid4, known pre-flush) so it
+    #    can be recorded as a schema voter even when the gate refuses the
+    #    registration below.
     instance = session.exec(
         select(ProviderInstance).where(
             ProviderInstance.machine_id == machine.id,
@@ -157,26 +406,57 @@ async def register_provider(
     instance.port = body.port
     instance.version = body.version
     instance.instance_status = "registering"
-    instance.config_fingerprint = config_fingerprint
+    instance.config_fingerprint = compute_config_fingerprint(definition.backend_config)
     session.add(instance)
+    # L3: flush so the voter-universe query inside the gate sees this row
+    # even with autoflush disabled (the id itself is known pre-flush).
+    session.flush()
 
     # 7. Merge the hardware report into the machine (latest report wins).
+    #    M1: done BEFORE the gate and inside the same commit — the box is
+    #    real and its hardware report is valid regardless of the schema
+    #    consensus outcome, so a refused registration still refreshes it.
     machine.hardware = body.hardware
     reported_total = body.hardware.get("total_vram_bytes")
     if isinstance(reported_total, int):
         machine.total_vram_bytes = reported_total
     session.add(machine)
+
+    # 8. Schema consensus gate (Phase 12). Runs before the secret mint: a
+    #    refusal must not complete the registration. All DB side effects
+    #    (instance upsert, hardware merge, gate state, reported
+    #    fingerprint) commit atomically here, on BOTH the accept and the
+    #    refuse path.
+    refusal, reported_schema_fingerprint = _schema_gate(
+        session, body.provider_type, body.schema, instance.id
+    )
+    # Reported fingerprint is written on EVERY attempt (success or 409)
+    # so the UI can show who is on what schema (None when the provider
+    # omitted its schema — transition path).
+    instance.reported_schema_fingerprint = reported_schema_fingerprint
+    session.add(instance)
+    # Single atomic commit of the whole registration side-effect set.
     session.commit()
     session.refresh(instance)
 
-    # 8. Mint a fresh per-instance secret; store in Redis only (never Postgres).
+    if refusal is not None:
+        logger.info(
+            "registration refused by schema gate for instance %s (type %s): %s",
+            instance.id,
+            body.provider_type,
+            refusal["error"],
+        )
+        raise HTTPException(status_code=409, detail=refusal)
+
+    # 9. Mint a fresh per-instance secret; store in Redis only (never Postgres).
+    config_fingerprint = instance.config_fingerprint
     instance_secret = secrets.token_urlsafe(32)
     await redis_client.set(
         redis_keys.secret_key(str(instance.id)), instance_secret, ex=SECRET_TTL_SECONDS
     )
 
-    # 9. Persist the declared machine-metrics categories so the metrics
-    #    ownership service can read them back at WS-connect time.
+    # 10. Persist the declared machine-metrics categories so the metrics
+    #     ownership service can read them back at WS-connect time.
     await redis_client.set(
         redis_keys.metrics_cats_key(str(instance.id)),
         json.dumps(sorted(set(body.metrics_categories))),

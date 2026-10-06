@@ -1,4 +1,12 @@
-"""Phase 9 admin provider-definitions CRUD + config-change push."""
+"""Phase 9 admin provider-definitions CRUD + config-change push.
+
+Phase 12: ``provider_type`` must reference a registered ``ProviderType``
+row and ``backend_config`` is validated against that type's committed
+JSON Schema. The autouse fixture below seeds the known types with a
+permissive schema so the Phase 9 push/CRUD semantics stay the focus of
+these tests; the schema-validation specifics are covered in
+``test_provider_types.py``.
+"""
 
 import uuid
 
@@ -7,7 +15,8 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
 from app.api.admin.providers import compute_config_fingerprint
-from app.models import ProviderDefinition
+from app.models import ProviderDefinition, ProviderType
+from app.services.hashing import canonical_json_sha256
 
 
 @pytest.fixture
@@ -16,6 +25,25 @@ def client() -> TestClient:
 
     with TestClient(app) as c:
         yield c
+
+
+@pytest.fixture(autouse=True)
+def _seed_provider_types(session: Session) -> None:
+    """Register the known types with a permissive (any-object) schema."""
+    for name in ("mock", "llama-cpp", "halogen", "halogen-flash", "gufo"):
+        if (
+            session.exec(select(ProviderType).where(ProviderType.name == name)).first()
+            is None
+        ):
+            session.add(
+                ProviderType(
+                    name=name,
+                    schema={"type": "object"},
+                    schema_fingerprint=canonical_json_sha256({"type": "object"}),
+                    status="active",
+                )
+            )
+    session.commit()
 
 
 def _create(client: TestClient, **overrides) -> dict:
@@ -362,17 +390,18 @@ def test_patch_same_backend_config_no_push(client: TestClient, monkeypatch) -> N
     assert resp.json()["config_update_results"] == []
 
 
-def test_backend_config_serialization_validation() -> None:
+def test_backend_config_serialization_validation(session: Session) -> None:
     # A set is accepted by Pydantic's dict[str, Any] but cannot survive
     # the canonical fingerprint serializer -> 422 from the admin's own
     # validation (unit-level: not expressible over a JSON transport).
     from fastapi import HTTPException
 
-    from app.api.admin.definitions import _validate_backend_config
+    from app.api.admin.definitions import _get_provider_type, _validate_backend_config
 
-    _validate_backend_config({"ok": [1, {"a": 2}]})  # must not raise
+    ptype = _get_provider_type(session, "mock")
+    _validate_backend_config(ptype, {"ok": [1, {"a": 2}]})  # must not raise
     with pytest.raises(HTTPException) as exc:
-        _validate_backend_config({"bad": {1, 2, 3}})
+        _validate_backend_config(ptype, {"bad": {1, 2, 3}})
     assert exc.value.status_code == 422
 
 
