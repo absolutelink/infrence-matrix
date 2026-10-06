@@ -29,12 +29,17 @@ COPY pyproject.toml uv.lock /app/
 COPY provider/lib /app/provider/lib
 COPY provider/llama-cpp /app/provider/llama-cpp
 
-# The official image may or may not ship uv; install it defensively and
-# sync ONLY this provider package + provider_lib — never the admin or the
-# other provider packages.
-RUN uv sync --frozen --package matrix-provider-llama-cpp \
-    || (pip install --no-cache-dir uv \
-        && uv sync --frozen --package matrix-provider-llama-cpp)
+# The server-cuda12 base is a CUDA/Ubuntu build image with NO python, pip
+# or uv. Install uv via the standalone installer (no python needed); uv
+# then fetches its managed CPython 3.14 (the workspace requires >=3.14,
+# which this Ubuntu 24.04 base cannot provide via apt) and creates the
+# venv. Sync ONLY this provider package + provider_lib — never the admin
+# or the other provider packages.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -LsSf https://astral.sh/uv/install.sh | env CARGO_HOME=/tmp UV_INSTALL_PATH=/usr/local/bin sh \
+    && uv sync --frozen --package matrix-provider-llama-cpp
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PROVIDER_PORT=8081 \
