@@ -129,7 +129,9 @@ async def test_admin_driven_boot_and_v1_streaming(
     client = AdminClient(settings)
     lifecycle = make_lifecycle(client, BACKEND_CONFIG)
     try:
-        result, _lifecycle, _emitter = await register_and_connect(client, lifecycle)
+        result, _lifecycle, _emitter, _logs = await register_and_connect(
+            client, lifecycle
+        )
         assert result.instance_id == INSTANCE_ID
         assert lifecycle.capacity == CAPACITY
 

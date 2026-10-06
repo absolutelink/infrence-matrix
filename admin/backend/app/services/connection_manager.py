@@ -257,6 +257,28 @@ class ConnectionManager:
             )
             return
 
+        if frame.type in (FrameKind.BACKEND_LOGS, FrameKind.PROVIDER_LOGS):
+            # Phase 13: batched log tail ingest into Redis. Best-effort —
+            # never let a malformed log frame break the WS read loop.
+            from app.services import log_store
+
+            kind = (
+                log_store.KIND_BACKEND
+                if frame.type == FrameKind.BACKEND_LOGS
+                else log_store.KIND_PROVIDER
+            )
+            try:
+                await log_store.ingest_log_batch(
+                    app, state.instance_id, kind, frame.payload
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "log ingest failed for instance %s",
+                    state.instance_id,
+                    exc_info=True,
+                )
+            return
+
         # A reply to an outstanding admin command.
         if frame.reply_to:
             fut = state.pending.get(frame.reply_to)

@@ -132,7 +132,7 @@ async def test_admin_driven_boot_and_normalized_stream(
     client = AdminClient(settings)
     lifecycle = make_lifecycle(client, BACKEND_CONFIG)
     try:
-        result, _lc, _em = await register_and_connect(client, lifecycle)
+        result, _lc, _em, _logs = await register_and_connect(client, lifecycle)
         assert result.instance_id == INSTANCE_ID
         assert lifecycle.capacity == CAPACITY
         assert lifecycle.backend_status == BackendStatusValue.STOPPED

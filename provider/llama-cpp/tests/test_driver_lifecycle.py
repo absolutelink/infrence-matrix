@@ -157,18 +157,20 @@ async def test_early_exit_includes_stderr_tail(
 
 
 async def test_get_logs_ring(tmp_path, fake_llama_binary, local_model_file) -> None:
-    logs: list[tuple[str, str]] = []
-
-    async def log_cb(stream: str, line: str) -> None:
-        logs.append((stream, line))
-
     settings = make_settings(tmp_path, fake_llama_binary)
     driver = LlamaCppBackend(
-        settings, {"artifacts": {"model": {"path": local_model_file}}}, log_cb=log_cb
+        settings, {"artifacts": {"model": {"path": local_model_file}}}
     )
     try:
         await driver.start()
         await asyncio.sleep(0.1)
-        assert isinstance(driver.get_logs(10), list)
+        driver._append_log("stderr", "hello ring")
+        logs = driver.get_logs(10)
+        assert isinstance(logs, list)
+        assert logs, "recent entries should be present"
+        # Phase 13: ring entries carry ts/stream/text.
+        assert {"stream", "text"} <= set(logs[-1])
+        assert logs[-1]["text"] == "hello ring"
+        assert driver.log_ring.last_cursor >= len(driver.log_ring)
     finally:
         await driver.aclose()

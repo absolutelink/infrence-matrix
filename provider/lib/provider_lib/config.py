@@ -60,6 +60,13 @@ class ProviderSettings(BaseSettings):
     # Minimum seconds between download.progress events.
     DOWNLOAD_PROGRESS_INTERVAL: float = 1.0
 
+    # Log streaming (Phase 13): backend.logs / provider.logs flush
+    # interval in seconds. Ring capacity is owned by each driver
+    # (_LOG_BUFFER_LINES) and defaults to LOG_RING_LINES for the
+    # provider's own log handler.
+    LOG_FLUSH_INTERVAL_SECONDS: float = 1.0
+    LOG_RING_LINES: int = 2000
+
     @property
     def metrics_categories(self) -> set[str]:
         return {c for c in self.METRICS_CATEGORIES.split() if c}

@@ -2,7 +2,7 @@
 
 import type { Client, Options as Options2, TDataShape } from './client';
 import { client } from './client.gen';
-import type { adminAdminHealthData, adminAdminHealthResponses, adminClearCacheData, adminClearCacheErrors, adminClearCacheResponses, adminCommitPendingData, adminCommitPendingErrors, adminCommitPendingResponses, adminCreateDefinitionData, adminCreateDefinitionErrors, adminCreateDefinitionResponses, adminCreateMachineData, adminCreateMachineErrors, adminCreateMachineResponses, adminDeleteDefinitionData, adminDeleteDefinitionErrors, adminDeleteDefinitionResponses, adminDeleteMachineData, adminDeleteMachineErrors, adminDeleteMachineResponses, adminDismissPendingData, adminDismissPendingErrors, adminDismissPendingResponses, adminGetDefinitionData, adminGetDefinitionErrors, adminGetDefinitionResponses, adminGetInstanceData, adminGetInstanceErrors, adminGetInstanceResponses, adminGetMachineData, adminGetMachineErrors, adminGetMachineResponses, adminGetProviderTypeData, adminGetProviderTypeErrors, adminGetProviderTypeResponses, adminListDefinitionsData, adminListDefinitionsResponses, adminListInstancesData, adminListInstancesResponses, adminListMachinesData, adminListMachinesResponses, adminListProviderTypesData, adminListProviderTypesResponses, adminListRepoFilesData, adminListRepoFilesErrors, adminListRepoFilesResponses, adminListResponsesData, adminListResponsesErrors, adminListResponsesResponses, adminOverviewStatsData, adminOverviewStatsResponses, adminPatchDefinitionData, adminPatchDefinitionErrors, adminPatchDefinitionResponses, adminPatchMachineData, adminPatchMachineErrors, adminPatchMachineResponses, adminPruneStorageData, adminPruneStorageErrors, adminPruneStorageResponses, adminRegisterProviderData, adminRegisterProviderErrors, adminRegisterProviderResponses, adminSearchModelsData, adminSearchModelsErrors, adminSearchModelsResponses, adminUsageStatsData, adminUsageStatsErrors, adminUsageStatsResponses, chatCreateChatCompletionData, chatCreateChatCompletionResponses, modelsListModelsData, modelsListModelsResponses, responsesCreateResponseData, responsesCreateResponseResponses } from './types.gen';
+import type { adminAdminHealthData, adminAdminHealthResponses, adminClearCacheData, adminClearCacheErrors, adminClearCacheResponses, adminCommitPendingData, adminCommitPendingErrors, adminCommitPendingResponses, adminCreateDefinitionData, adminCreateDefinitionErrors, adminCreateDefinitionResponses, adminCreateMachineData, adminCreateMachineErrors, adminCreateMachineResponses, adminDeleteDefinitionData, adminDeleteDefinitionErrors, adminDeleteDefinitionResponses, adminDeleteMachineData, adminDeleteMachineErrors, adminDeleteMachineResponses, adminDismissPendingData, adminDismissPendingErrors, adminDismissPendingResponses, adminGetDefinitionData, adminGetDefinitionErrors, adminGetDefinitionResponses, adminGetInstanceData, adminGetInstanceErrors, adminGetInstanceLogsData, adminGetInstanceLogsErrors, adminGetInstanceLogsResponses, adminGetInstanceResponses, adminGetMachineData, adminGetMachineErrors, adminGetMachineResponses, adminGetProviderTypeData, adminGetProviderTypeErrors, adminGetProviderTypeResponses, adminListDefinitionsData, adminListDefinitionsResponses, adminListInstancesData, adminListInstancesResponses, adminListMachinesData, adminListMachinesResponses, adminListProviderTypesData, adminListProviderTypesResponses, adminListRepoFilesData, adminListRepoFilesErrors, adminListRepoFilesResponses, adminListResponsesData, adminListResponsesErrors, adminListResponsesResponses, adminOverviewStatsData, adminOverviewStatsResponses, adminPatchDefinitionData, adminPatchDefinitionErrors, adminPatchDefinitionResponses, adminPatchMachineData, adminPatchMachineErrors, adminPatchMachineResponses, adminPruneStorageData, adminPruneStorageErrors, adminPruneStorageResponses, adminRegisterProviderData, adminRegisterProviderErrors, adminRegisterProviderResponses, adminSearchModelsData, adminSearchModelsErrors, adminSearchModelsResponses, adminUsageStatsData, adminUsageStatsErrors, adminUsageStatsResponses, chatCreateChatCompletionData, chatCreateChatCompletionResponses, modelsListModelsData, modelsListModelsResponses, responsesCreateResponseData, responsesCreateResponseResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -224,6 +224,24 @@ export class AdminService {
                 'Content-Type': 'application/json',
                 ...options.headers
             }
+        });
+    }
+    
+    /**
+     * Get Instance Logs
+     *
+     * Phase 13 log tail (Redis-backed, cursor-based).
+     *
+     * Entries newest-first; pass the returned ``cursor`` back as
+     * ``since=`` to tail. ``kind=all`` merges backend + provider by the
+     * ingest-assigned monotonic ``seq``. Empty (not an error) when Redis
+     * holds nothing yet; 404 only when the instance is unknown.
+     */
+    public static getInstanceLogs<ThrowOnError extends boolean = true>(options: Options<adminGetInstanceLogsData, ThrowOnError>) {
+        return (options.client ?? client).get<adminGetInstanceLogsResponses, adminGetInstanceLogsErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/admin/api/instances/{instance_id}/logs',
+            ...options
         });
     }
     

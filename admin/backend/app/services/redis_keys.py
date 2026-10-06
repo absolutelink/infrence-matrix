@@ -57,6 +57,18 @@ SCHED_LOCK_PREFIX = "im:sched:lock"
 
 VRAM_USED_PREFIX = "im:vram:used"
 
+LOGS_BACKEND_PREFIX = "im:logs:backend"
+LOGS_PROVIDER_PREFIX = "im:logs:provider"
+# Per-instance ingest sequence counter (shared across both kinds so
+# kind=all merges by a single monotonic cursor) and the latest
+# provider-reported dropped-line count per kind.
+LOGS_SEQ_PREFIX = "im:logs:seq"
+LOGS_DROPPED_PREFIX = "im:logs:dropped"
+
+# Phase 13 log tail bounds (docs/ws-protocol.md §5).
+LOGS_CAP = 2000
+LOGS_TTL_SECONDS = 3600
+
 # TTL for the metrics ownership lease and the machine snapshot. The owner
 # must refresh it by emitting metrics.machine more often than this; on
 # expiry another instance on the same machine can take over.
@@ -114,3 +126,19 @@ def sched_lock_key(alias: str) -> str:
 
 def vram_used_key(machine_uid: str) -> str:
     return f"{VRAM_USED_PREFIX}:{machine_uid}"
+
+
+def logs_backend_key(instance_id: str) -> str:
+    return f"{LOGS_BACKEND_PREFIX}:{instance_id}"
+
+
+def logs_provider_key(instance_id: str) -> str:
+    return f"{LOGS_PROVIDER_PREFIX}:{instance_id}"
+
+
+def logs_seq_key(instance_id: str) -> str:
+    return f"{LOGS_SEQ_PREFIX}:{instance_id}"
+
+
+def logs_dropped_key(instance_id: str, kind: str) -> str:
+    return f"{LOGS_DROPPED_PREFIX}:{kind}:{instance_id}"

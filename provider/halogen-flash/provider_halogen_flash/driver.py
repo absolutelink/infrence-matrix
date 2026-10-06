@@ -44,6 +44,7 @@ import httpx
 from provider_lib.backend import BackendDriver
 from provider_lib.config import ProviderSettings
 from provider_lib.downloader import ensure_artifact
+from provider_lib.log_ring import CursorLogRing
 from provider_lib.schema import load_schema, validate_backend_config
 
 from provider_halogen_flash.env import (
@@ -53,7 +54,6 @@ from provider_halogen_flash.env import (
     flatten_options,
     resolve_ports,
 )
-from provider_halogen_flash.log_ring import CursorLogRing
 from provider_halogen_flash.npu import (
     load_npu_pins,
     probe_npu,
@@ -64,7 +64,6 @@ from provider_halogen_flash.usage import calculate_usage
 logger = logging.getLogger("provider.halogen_flash")
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
-LogCallback = Callable[[str, str], Awaitable[None]]
 
 _LOG_BUFFER_LINES = 2000
 _HEALTH_POLL_INTERVAL = 0.25
@@ -88,13 +87,11 @@ class HalogenFlashBackend(BackendDriver):
         backend_config: dict[str, Any],
         *,
         progress_cb: ProgressCallback | None = None,
-        log_cb: LogCallback | None = None,
         npu_probe: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self._settings = settings
         self._config = backend_config or {}
         self._progress_cb = progress_cb
-        self._log_cb = log_cb
         self._binary = settings.HALOGEN_FLASH_SERVER_PATH
         self._npu_probe = npu_probe
         self._ports = resolve_ports(self._config, settings.MACHINE_UID)
@@ -404,7 +401,7 @@ class HalogenFlashBackend(BackendDriver):
         )
 
     def _early_exit_message(self, exit_code: int | None) -> str:
-        lines = [e.line for e in self._log_ring.tail(100)]
+        lines = [e.text for e in self._log_ring.tail(100)]
         detail = "\n".join(lines[-_STDERR_TAIL_LINES:])
         message = f"halogen-flash exited with code {exit_code}"
         if detail:
@@ -456,14 +453,19 @@ class HalogenFlashBackend(BackendDriver):
                 if line:
                     self._append_log("stdout", line)
 
+    @property
+    def log_ring(self) -> CursorLogRing:
+        """Shared Phase 13 ring (provider_lib.log_stream reads this)."""
+        return self._log_ring
+
     def _append_log(self, stream_name: str, line: str) -> None:
+        # Phase 13: the ring is the single sink; the LogStreamer (wired
+        # in main.py) drains it into batched backend.logs frames. No
+        # per-line WS send happens here anymore.
         self._log_ring.append(stream_name, line)
-        if self._log_cb is not None:
-            with contextlib.suppress(RuntimeError):
-                asyncio.get_running_loop().create_task(self._log_cb(stream_name, line))
 
     def get_logs(self, tail: int = 100) -> list[dict[str, str]]:
-        return [{"stream": e.stream, "line": e.line} for e in self._log_ring.tail(tail)]
+        return [{"stream": e.stream, "text": e.text} for e in self._log_ring.tail(tail)]
 
     # ------------------------------------------------------------------
     # Health / models

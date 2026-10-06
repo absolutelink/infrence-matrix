@@ -24,13 +24,16 @@ import logging
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+import redis.asyncio as aioredis
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.api.admin.serializers import iso_utc
 from app.core.db import get_session
+from app.core.redis import get_redis
 from app.models import ProviderInstance
+from app.services import log_store
 from app.services.connection_manager import manager
 
 logger = logging.getLogger("admin.instances")
@@ -186,3 +189,30 @@ async def prune_storage(
         dry_run,
     )
     return {"ok": True, "instance_id": instance_id, **detail}
+
+
+@router.get("/{instance_id}/logs")
+async def get_instance_logs(
+    instance_id: str,
+    kind: str = Query("backend", pattern="^(backend|provider|all)$"),
+    since: int = Query(0, ge=0),
+    limit: int = Query(500, ge=1, le=5000),
+    session: Session = Depends(get_session),
+    redis_client: aioredis.Redis = Depends(get_redis),
+) -> dict[str, Any]:
+    """Phase 13 log tail (Redis-backed, cursor-based).
+
+    Entries newest-first; pass the returned ``cursor`` back as
+    ``since=`` to tail. ``kind=all`` merges backend + provider by the
+    ingest-assigned monotonic ``seq``. Empty (not an error) when Redis
+    holds nothing yet; 404 only when the instance is unknown.
+    """
+    try:
+        exists = session.get(ProviderInstance, uuid.UUID(instance_id)) is not None
+    except ValueError:
+        exists = False
+    if not exists:
+        raise HTTPException(status_code=404, detail="instance not found")
+    return await log_store.read_logs(
+        redis_client, instance_id, kind=kind, since=since, limit=limit
+    )

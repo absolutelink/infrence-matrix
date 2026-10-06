@@ -729,6 +729,53 @@ export type adminPruneStorageResponses = {
 
 export type adminPruneStorageResponse = adminPruneStorageResponses[keyof adminPruneStorageResponses];
 
+export type adminGetInstanceLogsData = {
+    body?: never;
+    path: {
+        /**
+         * Instance Id
+         */
+        instance_id: string;
+    };
+    query?: {
+        /**
+         * Kind
+         */
+        kind?: string;
+        /**
+         * Since
+         */
+        since?: number;
+        /**
+         * Limit
+         */
+        limit?: number;
+    };
+    url: '/admin/api/instances/{instance_id}/logs';
+};
+
+export type adminGetInstanceLogsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminGetInstanceLogsError = adminGetInstanceLogsErrors[keyof adminGetInstanceLogsErrors];
+
+export type adminGetInstanceLogsResponses = {
+    /**
+     * Response Admin-Get Instance Logs
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminGetInstanceLogsResponse = adminGetInstanceLogsResponses[keyof adminGetInstanceLogsResponses];
+
 export type adminListProviderTypesData = {
     body?: never;
     path?: never;

@@ -32,6 +32,7 @@ from provider_lib.app_factory import BackendOverrides, create_provider_app
 from provider_lib.backend import BackendLifecycle
 from provider_lib.config import ProviderSettings
 from provider_lib.config_update import ConfigState, install_config_handlers
+from provider_lib.log_stream import install_log_streaming
 from provider_lib.wire import Frame, InstanceStatusValue
 
 from provider_mock.backend import SCHEMA, MockBackend
@@ -194,6 +195,9 @@ async def run_async() -> None:
     client = AdminClient(settings)
     lifecycle = make_lifecycle(client)
     await register_provider(client, lifecycle)
+    # Phase 13: provider.logs streaming + backend.logs.get handler (the
+    # mock driver has no subprocess ring, so only provider.logs flows).
+    log_bundle = install_log_streaming(client, lifecycle)
 
     # Keep the admin WS alive for the process lifetime alongside uvicorn:
     # run_forever dials in, re-emits provider.status on every (re)connect,
@@ -202,6 +206,7 @@ async def run_async() -> None:
     first_connect = asyncio.Event()
 
     async def on_connected() -> None:
+        log_bundle.start()
         await emit_provider_status(client, lifecycle)
         if not first_connect.is_set():
             first_connect.set()
@@ -212,7 +217,12 @@ async def run_async() -> None:
                 lifecycle.capacity,
             )
 
-    ws_task = asyncio.create_task(client.run_forever(on_connected=on_connected))
+    ws_task = asyncio.create_task(
+        client.run_forever(
+            on_connected=on_connected,
+            on_disconnected=log_bundle.stop,
+        )
+    )
     config = uvicorn.Config(
         build_app(lifecycle),
         host="0.0.0.0",
@@ -225,6 +235,7 @@ async def run_async() -> None:
     finally:
         ws_task.cancel()
         await asyncio.gather(ws_task, return_exceptions=True)
+        await log_bundle.stop()
         await client.disconnect()
 
 

@@ -22,6 +22,7 @@ from provider_lib.app_factory import BackendOverrides, create_provider_app
 from provider_lib.backend import BackendLifecycle
 from provider_lib.config import ProviderSettings
 from provider_lib.config_update import ConfigState, install_config_handlers
+from provider_lib.log_stream import LogStreamingBundle, install_log_streaming
 from provider_lib.metrics import MachineMetricsEmitter, collect_machine_snapshot
 from provider_lib.wire import Frame, InstanceStatusValue
 
@@ -69,13 +70,7 @@ def make_driver(
         if client is not None:
             await client.send_event("download.progress", payload)
 
-    async def on_log(stream: str, line: str) -> None:
-        if client is not None:
-            await client.send_event("backend.logs", {"stream": stream, "line": line})
-
-    return HalogenBackend(
-        settings, backend_config, progress_cb=on_progress, log_cb=on_log
-    )
+    return HalogenBackend(settings, backend_config, progress_cb=on_progress)
 
 
 def make_lifecycle(client: AdminClient, backend_config: dict[str, Any] | None = None):
@@ -177,7 +172,12 @@ async def emit_provider_status(
 
 async def register_provider(
     client: AdminClient, lifecycle: BackendLifecycle | None = None
-) -> tuple[RegistrationResult, BackendLifecycle, MachineMetricsEmitter]:
+) -> tuple[
+    RegistrationResult,
+    BackendLifecycle,
+    MachineMetricsEmitter,
+    LogStreamingBundle,
+]:
     """Register over HTTP, adopt config, install handlers, build emitter.
 
     Does NOT dial the WS — see AdminClient.run_forever.
@@ -201,17 +201,28 @@ async def register_provider(
     emitter = MachineMetricsEmitter(lifecycle, client, settings)
     install_command_handlers(client, lifecycle, emitter, config_state)
     apply_registration(lifecycle, result, config_state)
-    return result, lifecycle, emitter
+    # Phase 13: batched backend.logs / provider.logs streaming + the
+    # backend.logs.get catch-up handler. The streamer is started on every
+    # WS connect (run_async) and stopped on disconnect; cursors persist
+    # so lines produced while disconnected ship on reconnect.
+    log_bundle = install_log_streaming(client, lifecycle)
+    return result, lifecycle, emitter, log_bundle
 
 
 async def register_and_connect(
     client: AdminClient, lifecycle: BackendLifecycle | None = None
-) -> tuple[RegistrationResult, BackendLifecycle, MachineMetricsEmitter]:
+) -> tuple[
+    RegistrationResult,
+    BackendLifecycle,
+    MachineMetricsEmitter,
+    LogStreamingBundle,
+]:
     """Register, adopt config, dial the WS once, emit initial status."""
-    result, lifecycle, emitter = await register_provider(client, lifecycle)
+    result, lifecycle, emitter, log_bundle = await register_provider(client, lifecycle)
     await client.connect()
+    log_bundle.start()
     await emit_provider_status(client, lifecycle)
-    return result, lifecycle, emitter
+    return result, lifecycle, emitter, log_bundle
 
 
 def build_app(lifecycle: BackendLifecycle | None = None):
@@ -227,11 +238,12 @@ def build_app(lifecycle: BackendLifecycle | None = None):
 async def run_async() -> None:
     settings = ProviderSettings()
     client = AdminClient(settings)
-    _result, lifecycle, emitter = await register_provider(client)
+    _result, lifecycle, emitter, log_bundle = await register_provider(client)
 
     first_connect = asyncio.Event()
 
     async def on_connected() -> None:
+        log_bundle.start()
         await emit_provider_status(client, lifecycle)
         if not first_connect.is_set():
             first_connect.set()
@@ -242,10 +254,14 @@ async def run_async() -> None:
                 lifecycle.capacity,
             )
 
+    async def on_disconnected() -> None:
+        await log_bundle.stop()
+        await emitter.stop()
+
     ws_task = asyncio.create_task(
         client.run_forever(
             on_connected=on_connected,
-            on_disconnected=emitter.stop,
+            on_disconnected=on_disconnected,
         )
     )
     config = uvicorn.Config(
@@ -260,6 +276,7 @@ async def run_async() -> None:
     finally:
         ws_task.cancel()
         await asyncio.gather(ws_task, return_exceptions=True)
+        await log_bundle.stop()
         await emitter.stop()
         await client.disconnect()
 

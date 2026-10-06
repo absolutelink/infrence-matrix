@@ -27,15 +27,14 @@ import httpx
 from provider_lib.backend import BackendDriver
 from provider_lib.config import ProviderSettings
 from provider_lib.downloader import ensure_artifact
+from provider_lib.log_ring import CursorLogRing
 from provider_lib.schema import load_schema, validate_backend_config
 
 from provider_llama_cpp.command import build_llama_command
-from provider_llama_cpp.log_ring import CursorLogRing
 
 logger = logging.getLogger("provider.llama_cpp")
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
-LogCallback = Callable[[str, str], Awaitable[None]]
 
 _LOG_BUFFER_LINES = 2000
 _HEALTH_POLL_INTERVAL = 0.25
@@ -65,12 +64,10 @@ class LlamaCppBackend(BackendDriver):
         backend_config: dict[str, Any],
         *,
         progress_cb: ProgressCallback | None = None,
-        log_cb: LogCallback | None = None,
     ) -> None:
         self._settings = settings
         self._config = backend_config or {}
         self._progress_cb = progress_cb
-        self._log_cb = log_cb
         self._binary = settings.LLAMA_SERVER_PATH
         self.backend_port = _read_backend_port(self._config, settings)
         self._proc: subprocess.Popen[str] | None = None
@@ -102,6 +99,11 @@ class LlamaCppBackend(BackendDriver):
     @property
     def process(self) -> subprocess.Popen[str] | None:
         return self._proc
+
+    @property
+    def log_ring(self) -> CursorLogRing:
+        """Shared Phase 13 ring (provider_lib.log_stream reads this)."""
+        return self._log_ring
 
     # ------------------------------------------------------------------
     # Artifact resolution
@@ -215,7 +217,7 @@ class LlamaCppBackend(BackendDriver):
 
     def _early_exit_message(self, exit_code: int | None) -> str:
         stderr_lines = [
-            e.line for e in self._log_ring.tail(100) if e.stream == "stderr"
+            e.text for e in self._log_ring.tail(100) if e.stream == "stderr"
         ]
         detail = "\n".join(stderr_lines[-_STDERR_TAIL_LINES:])
         message = f"llama-server exited with code {exit_code}"
@@ -268,14 +270,14 @@ class LlamaCppBackend(BackendDriver):
                         self._append_log(name, line)
 
     def _append_log(self, stream_name: str, line: str) -> None:
+        # Phase 13: the ring is the single sink; the LogStreamer (wired
+        # in main.py) drains it into batched backend.logs frames. No
+        # per-line WS send happens here anymore.
         self._log_ring.append(stream_name, line)
-        if self._log_cb is not None:
-            with contextlib.suppress(RuntimeError):
-                asyncio.get_running_loop().create_task(self._log_cb(stream_name, line))
 
     def get_logs(self, tail: int = 100) -> list[dict[str, str]]:
-        """Recent stdout/stderr lines as {stream, line} dicts."""
-        return [{"stream": e.stream, "line": e.line} for e in self._log_ring.tail(tail)]
+        """Recent stdout/stderr lines as {stream, text} dicts."""
+        return [{"stream": e.stream, "text": e.text} for e in self._log_ring.tail(tail)]
 
     # ------------------------------------------------------------------
     # Health / models

@@ -212,6 +212,37 @@ States follow `BackendStatusValue` (`stopped|initializing|starting|running|
 in_use|stopping|error`); every transition is emitted as a `backend.status`
 WS event.
 
+## Log streaming (Phase 13)
+
+Provider packages no longer forward backend log lines one-by-one. The
+contract is now:
+
+1. **Driver → ring.** Each subprocess driver appends captured lines to a
+   shared `provider_lib.log_ring.CursorLogRing` (exposed as the
+   `driver.log_ring` property). The old per-provider copies of
+   `log_ring.py` and the `log_cb` driver callback are gone — do not
+   reintroduce them. Drivers must keep `self._append_log(stream, line)`
+   writing into that ring (this is what preserves the "recent stderr on
+   startup failure" behavior via `ring.tail(100)`).
+2. **Ring → WS (batched).** `provider_lib.log_stream.install_log_streaming(client,
+   lifecycle)` (called from each package's `register_provider`) builds a
+   `LogStreamer` that drains the backend ring and the provider's own log
+   ring (`ProviderLogHandler` on the `provider` logger namespace) into
+   `backend.logs` / `provider.logs` frames:
+   `{"lines": [{"ts", "stream", "text"}...], "dropped": int}`, throttled
+   to ~1s (`LOG_FLUSH_INTERVAL_SECONDS`) and max 100 lines per frame.
+   The bundle is **started on every WS connect and stopped on
+   disconnect** (`run_async`'s `on_connected` / `on_disconnected`);
+   cursors persist, so lines produced while disconnected are flushed on
+   reconnect.
+3. **Catch-up.** The same install registers the `backend.logs.get`
+   command handler: `{"kind": "backend"|"provider"|"all", "since": seq}`
+   → ack detail `{"lines": [...], "dropped": int, "seq": int}`.
+
+Logs are best-effort end to end: the streamer never blocks the request
+path, `ProviderLogHandler.emit` never calls a logger (thread-local
+re-entrancy guard), and the admin swallows malformed log frames.
+
 ### Slot admission rule
 
 - Backend must be `RUNNING` or `IN_USE`; otherwise `BackendNotReady` → **503**.

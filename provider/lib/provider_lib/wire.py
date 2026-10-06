@@ -67,6 +67,7 @@ class FrameKind:
     METRICS_CATEGORY_START = "metrics.category.start"
     CACHE_CLEAR = "cache.clear"
     STORAGE_PRUNE_UNUSED = "storage.prune_unused"
+    BACKEND_LOGS_GET = "backend.logs.get"
     PONG = "pong"
 
     # both directions
