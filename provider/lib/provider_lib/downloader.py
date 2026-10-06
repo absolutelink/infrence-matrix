@@ -17,6 +17,7 @@ without it.
 """
 
 import asyncio
+import contextlib
 import threading
 import time
 from collections.abc import Awaitable, Callable
@@ -79,7 +80,12 @@ class _EventPublishingTqdm:
             return
         self.n += n
         now = time.monotonic()
-        if now - self._last_publish >= self.throttle:
+        # Always publish the FIRST update: a small one-chunk download would
+        # otherwise never emit progress (fresh-process monotonic() can sit
+        # below the throttle window, and only close() publishes after that).
+        if self.n and (
+            self._last_publish == 0.0 or now - self._last_publish >= self.throttle
+        ):
             self._last_publish = now
             self._publish(finished=False)
 
@@ -173,6 +179,37 @@ def _throttle_seconds() -> float:
         return 1.0
 
 
+async def _emit_progress(cb: ProgressCallback | None, payload: dict[str, Any]) -> None:
+    """Deliver one progress event; a callback failure never aborts the
+    download (events are best-effort)."""
+    if cb is None:
+        return
+    with contextlib.suppress(Exception):
+        await cb(payload)
+
+
+async def _hf_file_size(
+    repo: str, filename: str, revision: str | None = None
+) -> int | None:
+    """Total transfer size in bytes from a metadata HEAD (None when the
+    server does not report a length). Best-effort: a failure yields None
+    (indeterminate progress), never an error."""
+    try:
+        import asyncio as _a
+
+        def probe() -> int | None:
+            from huggingface_hub import get_hf_file_metadata
+            from huggingface_hub.constants import ENDPOINT
+            from huggingface_hub.utils import build_hf_headers
+
+            url = f"{ENDPOINT}/{repo}/resolve/{revision or 'main'}/{filename}"
+            return get_hf_file_metadata(url, headers=build_hf_headers()).size
+
+        return await _a.to_thread(probe)
+    except Exception:  # noqa: BLE001 - indeterminate progress is fine
+        return None
+
+
 async def _download_hf(
     repo: str,
     filename: str,
@@ -193,20 +230,110 @@ async def _download_hf(
         local_dir = Path(models_dir) / local_subdir
     else:
         local_dir = Path(models_dir) / _validate_relative(repo, "repo")
-    loop = asyncio.get_running_loop()
-    tqdm_class = _make_tqdm_class(filename, progress_cb, loop) if progress_cb else None
     kwargs: dict[str, Any] = {}
     if revision:
         kwargs["revision"] = revision
-    return await asyncio.to_thread(
-        lambda: hf_hub_download(
-            repo_id=repo,
-            filename=filename,
-            local_dir=str(local_dir),
-            **({"tqdm_class": tqdm_class} if tqdm_class else {}),
-            **kwargs,
+
+    # Progress reporting (size-polling; version-proof).
+    #
+    # Production history: huggingface_hub 0.36.2 REMOVED the public
+    # `tqdm_class` kwarg (TypeError on every download), the private
+    # `_tqdm_bar` hook is absent from hf_hub_download's signature, AND —
+    # decisive — `hf_xet` (installed transitively with modern hub) transfers
+    # blob data on its own path that bypasses `file_download.http_get` and
+    # its progress bar entirely. Chasing hub internals across versions is a
+    # tar pit; instead, WATCH THE DISK: poll the incomplete-file size on a
+    # 1s cadence for the duration of the download and publish throttled
+    # progress events from that. Works under xet, plain http, resume, and
+    # any future hub download strategy; costs one stat() per second.
+    #
+    # hub ≥0.36 local_dir layout: <local_dir>/.cache/huggingface/download/
+    # <name>.incomplete (+ optional xet shard area, same tree). `total`
+    # comes from a metadata HEAD before the transfer (None when the server
+    # does not report a length → indeterminate progress).
+    total = await _hf_file_size(repo, filename, revision)
+    incomplete_candidates = [
+        local_dir
+        / ".cache"
+        / "huggingface"
+        / "download"
+        / f"{Path(filename).name}.incomplete",
+        local_dir
+        / ".cache"
+        / "huggingface"
+        / "download"
+        / str(Path(filename).with_suffix(""))
+        / f"{Path(filename).name}.incomplete",
+    ]
+
+    hub_task: asyncio.Task[str] = asyncio.ensure_future(
+        asyncio.to_thread(
+            lambda: hf_hub_download(
+                repo_id=repo,
+                filename=filename,
+                local_dir=str(local_dir),
+                **kwargs,
+            )
         )
     )
+
+    async def _poll_progress() -> None:
+        """Publish throttled progress until the hub transfer completes."""
+        last_bytes = -1
+        last_publish = 0.0
+        while not hub_task.done():
+            current = 0
+            for cand in incomplete_candidates:
+                with contextlib.suppress(OSError):
+                    current += cand.stat().st_size
+            if current != last_bytes:
+                now = time.monotonic()
+                if last_publish == 0.0 or now - last_publish >= _throttle_seconds():
+                    last_publish = now
+                    last_bytes = current
+                    await _emit_progress(
+                        progress_cb,
+                        {
+                            "file": filename,
+                            "bytes_downloaded": current,
+                            "total": total,
+                            "progress_percent": (
+                                round(min(current / total * 100.0, 100.0), 2)
+                                if total
+                                else 0.0
+                            ),
+                            "finished": False,
+                        },
+                    )
+            # 1s cadence independent of the throttle: cheap stat() beats a
+            # missed window on a fast transfer.
+            await asyncio.sleep(1.0)
+
+    poller = asyncio.ensure_future(_poll_progress())
+    try:
+        return await asyncio.shield(hub_task)
+    finally:
+        # Stop the poller on every exit (success, failure, cancellation)
+        # and publish the terminal event. hub_task.result() may raise —
+        # that is the real download error and must propagate AFTER the
+        # terminal event fires.
+        poller.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await poller
+        local: Path | None = None
+        if hub_task.done() and not hub_task.cancelled():
+            with contextlib.suppress(BaseException):  # noqa: PT017, BLE001
+                local = Path(hub_task.result())
+        await _emit_progress(
+            progress_cb,
+            {
+                "file": filename,
+                "bytes_downloaded": local.stat().st_size if local else 0,
+                "total": total,
+                "progress_percent": 100.0 if local else 0.0,
+                "finished": local is not None,
+            },
+        )
 
 
 async def ensure_artifact(

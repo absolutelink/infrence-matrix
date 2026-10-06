@@ -56,26 +56,43 @@ async def test_flat_resolution_without_download(tmp_path: Path) -> None:
     assert got == str(flat)
 
 
-async def test_download_called_with_tqdm_and_returns_path(
-    tmp_path, monkeypatch
-) -> None:
+async def test_download_progress_events_and_returns_path(tmp_path, monkeypatch) -> None:
+    """Progress (0.36+ reality): hf_hub_download exposes NO bar hook and
+    hf_xet bypasses http_get's tqdm entirely — _download_hf therefore polls
+    the incomplete file and publishes throttled events + a terminal one."""
     calls: list[dict] = []
 
     def fake_hf_hub_download(**kwargs):
         calls.append(kwargs)
         target = Path(kwargs["local_dir"]) / kwargs["filename"]
+        # Simulate the hub writing under the incomplete candidates the
+        # poller watches, then finishing.
+        incomplete = (
+            Path(kwargs["local_dir"])
+            / ".cache"
+            / "huggingface"
+            / "download"
+            / "m.gguf.incomplete"
+        )
+        incomplete.parent.mkdir(parents=True, exist_ok=True)
+        incomplete.write_bytes(b"x" * 40)
+        time.sleep(1.2)  # let one poll tick observe bytes
+        incomplete.write_bytes(b"x" * 80)
+        time.sleep(1.2)  # second observed tick
+        incomplete.unlink()
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(b"downloaded")
-        # Drive the tqdm_class like huggingface_hub does.
-        bar = kwargs["tqdm_class"](total=100, initial=0)
-        bar.update(50)
-        time.sleep(1.05)  # exceed the throttle window
-        bar.update(50)
-        bar.close()
         return str(target)
+
+    # No real metadata HEAD in the unit test (total unknown OK).
+    async def fake_size(*a, **k):  # noqa: ARG001
+        return None
 
     monkeypatch.setattr(
         "huggingface_hub.hf_hub_download", fake_hf_hub_download, raising=True
+    )
+    monkeypatch.setattr(
+        "provider_lib.downloader._hf_file_size", fake_size, raising=True
     )
 
     events: list[dict] = []
@@ -90,15 +107,15 @@ async def test_download_called_with_tqdm_and_returns_path(
     )
     assert got.endswith("my/repo/m.gguf")
     assert calls and calls[0]["repo_id"] == "my/repo"
-    # Let the run_coroutine_threadsafe callbacks land.
-    for _ in range(200):
-        if len(events) >= 2:
-            break
-        await asyncio.sleep(0.01)
-    assert len(events) >= 2
-    assert events[-1]["finished"] is True
-    assert events[-1]["bytes_downloaded"] == 100
-    assert events[-1]["file"] == "m.gguf"
+    assert len(events) >= 3  # start + intermediate + terminal
+    # Intermediate events carry observed bytes; terminal marks finished.
+    intermediates = [e for e in events if not e["finished"]]
+    assert intermediates and max(e["bytes_downloaded"] for e in intermediates) >= 40
+    last = events[-1]
+    assert last["finished"] is True
+    assert last["file"] == "m.gguf"
+    assert last["bytes_downloaded"] == len(b"downloaded")
+    assert last["progress_percent"] == 100.0
 
 
 async def test_inflight_dedup_single_download(tmp_path, monkeypatch) -> None:
