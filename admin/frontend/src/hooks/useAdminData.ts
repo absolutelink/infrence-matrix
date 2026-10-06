@@ -2,6 +2,8 @@ import { useQuery } from "@tanstack/react-query"
 
 import { AdminService } from "@/client"
 import type {
+  LogKind,
+  LogsResponse,
   Machine,
   OverviewStats,
   ProviderDefinition,
@@ -25,6 +27,11 @@ export const overviewKeys = { all: ["stats", "overview"] as const }
 export const providerTypeKeys = {
   all: ["provider-types"] as const,
   detail: (name: string) => ["provider-types", name] as const,
+}
+export const logsKeys = {
+  all: ["instance-logs"] as const,
+  tail: (instanceId: string, kind: LogKind, since: number, limit: number) =>
+    ["instance-logs", instanceId, kind, since, limit] as const,
 }
 
 // The generated SDK types the admin dict responses as loose JSON maps;
@@ -92,6 +99,43 @@ export function useOverview(refetchInterval = 4000) {
     queryFn: async () =>
       cast<OverviewStats>((await AdminService.overviewStats()).data),
     refetchInterval,
+  })
+}
+
+// Phase 13: per-instance log tail (Redis-backed). The API returns
+// entries NEWEST FIRST; callers reverse for chronological display.
+// ``since`` means "seq > since"; poll with the last cursor for live
+// tailing. ``live`` drives the ~2s refetchInterval (paused when false;
+// react-query also pauses intervals when the tab is not focused).
+export function useInstanceLogs(
+  instanceId: string | null,
+  opts: {
+    kind: LogKind
+    since?: number
+    limit?: number
+    live?: boolean
+    enabled?: boolean
+  },
+) {
+  const since = opts.since ?? 0
+  const limit = opts.limit ?? 500
+  return useQuery({
+    queryKey: logsKeys.tail(instanceId ?? "", opts.kind, since, limit),
+    queryFn: async () =>
+      cast<LogsResponse>(
+        (
+          await AdminService.getInstanceLogs({
+            path: { instance_id: instanceId as string },
+            query: { kind: opts.kind, since, limit },
+          })
+        ).data,
+      ),
+    enabled: (opts.enabled ?? true) && instanceId !== null && instanceId !== "",
+    refetchInterval: opts.live ? 2000 : false,
+    // M2: the key carries `since` so each poll is a fresh key; sweep
+    // superseded snapshots immediately instead of caching ~150 x 500
+    // entries per 5-minute live session.
+    gcTime: 1000,
   })
 }
 

@@ -156,7 +156,10 @@ async def read_logs(
 
     Returns ``{"entries": [ {seq, ts, stream, text} ... ] (newest
     first), "cursor": int, "dropped": int, "gap": bool, "oldest_seq":
-    int}``. Missing keys read as empty, not an error.
+    int, "unseen_total": int}``. Missing keys read as empty, not an
+    error. ``unseen_total`` is the count of entries matching
+    ``seq > since`` *before* the newest-``limit`` trim, so a client can
+    detect skipped entries when ``unseen_total > len(entries)``.
 
     ``gap`` is True when ``since`` points before the oldest entry still
     retained in the Redis list(s) (``since + 1 < oldest_seq``): entries
@@ -187,12 +190,12 @@ async def read_logs(
     else:
         raise ValueError(f"unknown log kind: {kind!r}")
 
-    # Over-fetch: with two merged lists each may hold the newest entries;
-    # 2*limit keeps the merge window honest before filtering by seq.
-    fetch = limit * len(list_keys)
+    # Read the full retained list per key (bounded by LOGS_CAP) so
+    # ``unseen_total`` is the honest count of everything with
+    # seq > since, not just what fits a narrow over-fetch window.
     pipe = redis_client.pipeline()
     for key in list_keys:
-        pipe.lrange(key, 0, fetch - 1)
+        pipe.lrange(key, 0, -1)
         # Tail of the list = oldest retained entry (for gap detection).
         pipe.lrange(key, -1, -1)
     for dk in dropped_kinds:
@@ -234,6 +237,10 @@ async def read_logs(
                     }
                 )
     entries.sort(key=lambda e: e["seq"], reverse=True)
+    # Pre-trim count of everything unseen (seq > since): lets the UI
+    # tell the operator that more than `limit` new entries arrived in
+    # one poll window instead of silently skipping the older ones.
+    unseen_total = len(entries)
     entries = entries[:limit]
     cursor = entries[0]["seq"] if entries else since
     oldest_seq = min(oldest_seqs) if oldest_seqs else 0
@@ -244,4 +251,5 @@ async def read_logs(
         "dropped": dropped,
         "gap": gap,
         "oldest_seq": oldest_seq,
+        "unseen_total": unseen_total,
     }

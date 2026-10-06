@@ -311,6 +311,58 @@ def test_logs_endpoint_cursor_and_merge(
     assert resp.json()["entries"][0]["text"] == "p1"
 
 
+def test_logs_endpoint_unseen_total_pre_trim(client: TestClient, session: Session) -> None:
+    """H1: unseen_total is the pre-trim count of entries with
+    seq > since, so the UI can warn when >limit new lines arrived."""
+    import asyncio
+
+    instance_id = _seed(client, session)
+
+    async def seed() -> None:
+        r = aioredis.from_url(os.environ["TEST_REDIS_URL"], decode_responses=True)
+        try:
+            key = redis_keys.logs_backend_key(instance_id)
+            pipe = r.pipeline()
+            # Newest left: seqs 900..1.
+            for seq in range(900, 0, -1):
+                pipe.lpush(
+                    key,
+                    json.dumps(
+                        {"seq": seq, "ts": "t", "stream": "stdout", "text": f"l{seq}"}
+                    ),
+                )
+            await pipe.execute()
+        finally:
+            await r.aclose()
+
+    asyncio.run(seed())
+
+    resp = client.get(
+        f"/admin/api/instances/{instance_id}/logs?kind=backend&since=0&limit=500"
+    )
+    body = resp.json()
+    assert len(body["entries"]) == 500
+    assert body["unseen_total"] == 900
+    assert body["cursor"] == 900
+    assert body["entries"][0]["seq"] == 900
+
+    # Caught-up reads: nothing unseen, unseen_total == 0.
+    resp = client.get(
+        f"/admin/api/instances/{instance_id}/logs?kind=backend&since=900"
+    )
+    body = resp.json()
+    assert body["entries"] == []
+    assert body["unseen_total"] == 0
+
+    # unseen_total equals the page size when everything fits.
+    resp = client.get(
+        f"/admin/api/instances/{instance_id}/logs?kind=backend&since=800&limit=500"
+    )
+    body = resp.json()
+    assert body["unseen_total"] == 100
+    assert len(body["entries"]) == 100
+
+
 def test_logs_endpoint_empty_not_error(client: TestClient, session: Session) -> None:
     instance_id = _seed(client, session)
     resp = client.get(f"/admin/api/instances/{instance_id}/logs?kind=all")
@@ -321,6 +373,7 @@ def test_logs_endpoint_empty_not_error(client: TestClient, session: Session) -> 
         "dropped": 0,
         "gap": False,
         "oldest_seq": 0,
+        "unseen_total": 0,
     }
 
 

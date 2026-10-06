@@ -1,9 +1,10 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { createFileRoute, Link } from "@tanstack/react-router"
-import { Eraser, HardDriveDownload } from "lucide-react"
+import { Eraser, HardDriveDownload, ScrollText } from "lucide-react"
 import { useState } from "react"
 
 import { AdminService } from "@/client"
+import { LogsSheet } from "@/components/Common/LogsSheet"
 import { ConnectionBadge, StatusBadge } from "@/components/Common/StatusBadge"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -42,10 +43,6 @@ export const Route = createFileRoute("/_layout/instances")({
   head: () => ({ meta: [{ title: "Instances - Inference Matrix" }] }),
 })
 
-// NOTE: live backend.logs / provider.logs are WS events only — there is
-// no REST read endpoint for them, so the UI does not show log streams.
-// (provider.logs is still Reserved in docs/ws-protocol.md §4.)
-
 // sha256 of canonical JSON {"type":"object"} — the admin's permissive
 // bootstrap schema (Phase 12 transition). An instance reporting this fp
 // never proved a real schema; it is not "waiting" on anything.
@@ -60,6 +57,7 @@ function InstancesPage() {
   )
   const [cacheTarget, setCacheTarget] = useState<ProviderInstance | null>(null)
   const [pruneTarget, setPruneTarget] = useState<ProviderInstance | null>(null)
+  const [logsTarget, setLogsTarget] = useState<ProviderInstance | null>(null)
 
   return (
     <div className="flex flex-col gap-6">
@@ -174,6 +172,14 @@ function InstancesPage() {
                       <Button
                         variant="outline"
                         size="sm"
+                        onClick={() => setLogsTarget(i)}
+                        title="View backend + provider logs"
+                      >
+                        <ScrollText /> Logs
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
                         disabled={!i.websocket_connected}
                         onClick={() => setCacheTarget(i)}
                         title={
@@ -215,6 +221,12 @@ function InstancesPage() {
         kind="prune"
         instance={pruneTarget}
         onClose={() => setPruneTarget(null)}
+      />
+      <LogsSheet
+        instance={logsTarget}
+        onOpenChange={(o) => {
+          if (!o) setLogsTarget(null)
+        }}
       />
     </div>
   )

@@ -170,6 +170,27 @@ export interface StorageActionResult {
   kept?: string[]
 }
 
+// Phase 13: log tails (mirrors admin/backend/app/services/log_store.read_logs).
+// ``entries`` arrive NEWEST FIRST from the API; the UI reverses them for
+// chronological (oldest-top → newest-bottom) display.
+export type LogKind = "backend" | "provider" | "all"
+
+export interface LogEntry {
+  seq: number
+  ts: string
+  stream: string
+  text: string
+}
+
+export interface LogsResponse {
+  entries: LogEntry[]
+  cursor: number
+  dropped: number
+  gap: boolean
+  oldest_seq: number
+  unseen_total: number
+}
+
 // Phase 12: provider type registry (mirrors
 // admin/backend/app/api/admin/provider_types.py dicts).
 export interface ProviderTypeConsensus {
