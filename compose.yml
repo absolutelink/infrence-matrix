@@ -19,7 +19,12 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    # REDIS_PASSWORD (optional): empty = no auth (local dev default).
+    # Set it in .env for a deployed stack; the admin's REDIS_URL below
+    # picks it up. REDISCLI_AUTH lets the healthcheck authenticate.
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-}", "--save", "60", "1", "--loglevel", "warning"]
+    environment:
+      - REDISCLI_AUTH=${REDIS_PASSWORD:-}
     volumes:
       - redis_data:/data
     healthcheck:
@@ -43,7 +48,10 @@ services:
       - POSTGRES_DB=inference_matrix
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
-      - REDIS_URL=redis://redis:6379/0
+      # With REDIS_PASSWORD set (redis --requirepass above) the credentials
+      # ride in the URL as redis://default:<pw>@redis:6379/0 (the
+      # "default" username is the ACL default user).
+      - REDIS_URL=redis://default:${REDIS_PASSWORD:-}@redis:6379/0
     depends_on:
       postgres:
         condition: service_healthy

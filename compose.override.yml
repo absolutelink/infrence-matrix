@@ -21,7 +21,7 @@ services:
     environment:
       FASTAPI_ENV: "development"
       POSTGRES_HOST: postgres
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://default:${REDIS_PASSWORD:-}@redis:6379/0
     develop:
       watch:
         - path: ./admin/backend
