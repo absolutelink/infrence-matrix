@@ -38,7 +38,7 @@ COPY provider/llama-cpp /app/provider/llama-cpp
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && curl -LsSf https://astral.sh/uv/install.sh | env CARGO_HOME=/tmp UV_INSTALL_PATH=/usr/local/bin sh \
+    && curl -LsSf https://astral.sh/uv/install.sh | env CARGO_HOME=/tmp UV_INSTALL_DIR=/usr/local/bin sh \
     && uv sync --frozen --package matrix-provider-llama-cpp
 
 ENV PATH="/app/.venv/bin:$PATH" \
