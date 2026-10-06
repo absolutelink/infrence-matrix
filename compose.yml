@@ -88,6 +88,33 @@ services:
   # token) in the admin UI first; deploy admin before providers
   # (version hard-fail).
   #
+  # provider-llama-cpp (Vulkan):
+  #   build:
+  #     context: .
+  #     dockerfile: provider/llama-cpp/Dockerfile
+  #   restart: unless-stopped
+  #   ports:
+  #     - "8083:8081"
+  #   environment:
+  #     - MACHINE_UID=<machine-uid>
+  #     - PROVIDER_REGISTRATION_TOKEN=<llama-cpp-definition-token>
+  #     - ADMIN_BASE_URL=http://admin:8000
+  #     - PROVIDER_PORT=8081
+  #     - CACHE_DIR=/cache
+  #     - MODELS_DIR=/models
+  #     - LLAMA_SERVER_PATH=/app/llama-server   # default in the image
+  #     - METRICS_CATEGORIES=gpu_usage vram os_ram cpu storage
+  #   volumes:
+  #     - /dev/dri:/dev/dri               # Mesa/AMD/Intel compute devices
+  #     - /usr/share/vulkan/icd.d:/usr/share/vulkan/icd.d:ro  # ICDs
+  #     - llama_cache:/cache
+  #     - llama_models:/models
+  #   # For NVIDIA hosts prefer `gpus: all` (Container Toolkit) instead
+  #   # of the /dev/dri mounts.
+  #   depends_on:
+  #     admin:
+  #       condition: service_healthy
+  #
   # provider-gufo:
   #   build:
   #     context: .

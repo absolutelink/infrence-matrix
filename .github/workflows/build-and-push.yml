@@ -10,6 +10,7 @@ on:
 env:
   REGISTRY: ghcr.io
   MATRIX_APP_IMAGE: ${{ github.repository_owner }}/matrix-app
+  LLAMA_CPP_IMAGE: ${{ github.repository_owner }}/provider-llama-cpp
 
 jobs:
   test-admin:
@@ -131,6 +132,16 @@ jobs:
         working-directory: ./provider/mock
         run: uv run pytest -v --tb=short
 
+      - name: Run llama-cpp provider tests
+        env:
+          MACHINE_UID: test-machine
+          PROVIDER_REGISTRATION_TOKEN: test-token
+          ADMIN_BASE_URL: http://localhost:8000
+          CACHE_DIR: /tmp/cache
+          MODELS_DIR: /tmp/models
+        working-directory: ./provider/llama-cpp
+        run: uv run pytest -v --tb=short
+
   build-matrix-app:
     needs: [test-admin, test-provider]
     runs-on: ubuntu-24.04
@@ -178,6 +189,56 @@ jobs:
           build-args: |
             BUILDKIT_INLINE_CACHE=1
 
-  # NOTE: Per-provider-type images (llama-cpp, gufo, halogen, halogen-flash)
-  # are rebuilt from provider/<type>/Dockerfile in Phase 8. The mock provider
-  # is built locally via compose; a CI build job is added with the real types.
+  build-provider-llama-cpp:
+    needs: [test-admin, test-provider]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.LLAMA_CPP_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=
+
+      - name: Build and push llama-cpp (Vulkan) provider image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./provider/llama-cpp/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+
+  # Per-provider-type images: ONLY llama-cpp (Vulkan) is built in CI — the
+  # official ghcr.io/ggml-org/llama.cpp:full-vulkan base means no compile
+  # step. gufo / halogen / halogen-flash gate on NPU/ROCm hardware and ship
+  # their binaries out-of-band (see provider/<type>/Dockerfile); their CI
+  # builds land with the real hardware types. The mock provider is built
+  # locally via compose.

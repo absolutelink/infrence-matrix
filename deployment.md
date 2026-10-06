@@ -16,13 +16,21 @@ Deployment of the overhauled stack. Architecture:
 - **Admin**: built from the root `Dockerfile` — multi-stage (bun builds the
   frontend → python 3.14 + uv installs `matrix-admin` only,
   `--no-install-workspace`). Image: `ghcr.io/<owner>/matrix-app`.
-- **Providers**: each provider type builds from `provider/<type>/Dockerfile`
-  (e.g. `provider/mock/Dockerfile`, `provider/llama-cpp/Dockerfile`).
-  Real-engine images layer the backend binary (llama-server, halogen, gufo)
-  onto the provider package.
+- **llama-cpp (Vulkan)**: built in CI from `provider/llama-cpp/Dockerfile`,
+  which layers the provider package on the official
+  `ghcr.io/ggml-org/llama.cpp:full-vulkan` base (no compile step; the
+  binary is `/app/llama-server`). Image:
+  `ghcr.io/<owner>/provider-llama-cpp`. Needs host Vulkan/GPU passthrough
+  at runtime (`gpus: all` for NVIDIA, or `/dev/dri` + Vulkan ICDs for
+  Mesa/AMD/Intel — see the commented compose example).
+- **Other providers** (`gufo`, `halogen`, `halogen-flash`): built from
+  `provider/<type>/Dockerfile` out-of-band — they gate on NPU/ROCm
+  hardware and their backend binaries are not in CI.
 
-CI (`build-and-push.yml`) builds and pushes on push to `main`/`develop` and
-version tags.
+CI (`build-and-push.yml`) builds `matrix-app` and `provider-llama-cpp` on
+push to `main`/`develop` and version tags. Tags follow the ref pushed
+(`:main`/`:develop`, `pr-<n>`, semver on `v*.*.*` + `major.minor`, and a
+short sha) — there is deliberately **no `:latest`** tag.
 
 ## Deploy order (IMPORTANT — version hard-fail)
 

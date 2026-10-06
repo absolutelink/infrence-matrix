@@ -67,7 +67,10 @@ Reproduce: `cd spike/litellm-fidelity && uv run python spike2.py`.
 - Root `Dockerfile` builds frontend (bun) → admin image (python 3.14, uv,
   `--no-install-workspace --package matrix-admin`).
 - CI `build-and-push.yml` starts postgres 16 + redis 7 services and tests
-  the admin.
+  the admin. It also builds `matrix-app` and (added post-overhaul) the
+  **llama-cpp (Vulkan) provider image** via the official
+  `ghcr.io/ggml-org/llama.cpp:full-vulkan` base — `provider/llama-cpp`
+  tests run in the `test-provider` job. No `:latest` tag is produced.
 - The pre-overhaul code was removed in the final cleanup; it lives in git
   history only — never restore patterns from it.
 
@@ -805,6 +808,8 @@ stubbed. Re-implement against the new model only when a feature needs it.
 2. Version hard-fail requires coordinated admin+provider deploys.
 3. `MACHINE_UID` must not be reused across physical hosts (no host
    fingerprint).
-4. Phase 6 eviction + idle reaper are TODO (see Phase 6 remaining).
+4. VRAM eviction reclaims only idle different-alias backends on the
+   request's machine — there is no cross-machine rebalancing and no
+   workload priority scheme (see ARCHITECTURE.md §6).
 5. Single uvicorn worker (in-process scheduler authority); multi-worker
    needs the Redis-queue swap behind the `acquire`/`release` interface.
