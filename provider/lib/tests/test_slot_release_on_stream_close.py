@@ -223,3 +223,69 @@ async def test_capacity_two_streams_release_independently() -> None:
     assert lifecycle.in_flight == 0
     assert lifecycle.backend_status == BackendStatusValue.RUNNING
     assert driver.closed == 2
+
+
+async def test_pump_cancelled_while_upstream_fails_still_releases() -> None:
+    """Production-observed leak: the pump task is cancelled (client abort)
+    while it sits INSIDE its finally's first await (upstream teardown that
+    blocks after the upstream had already failed mid-iteration). Cancelled-
+    Error is a BaseException, so the old finally — `suppress(Exception):
+    await upstream.aclose()` — re-raised at that await and skipped both
+    _STREAM_END and release_slot(): /health reported in_flight: 1 forever
+    and every new request got a 429. The fix (shield + uncancel + suppress
+    BaseException) must land the release DESPITE the pending cancellation."""
+    import asyncio as _asyncio
+
+    aclose_gate = _asyncio.Event()
+
+    class _DyingDriver(RecordingDriver):
+        async def stream_responses(
+            self, request: dict[str, Any]
+        ) -> AsyncIterator[dict[str, Any]]:
+            self.opened += 1
+            try:
+                yield {"type": "response.created"}
+                raise RuntimeError("peer closed connection")
+            finally:
+                # Simulate slow/hung upstream teardown: the generator's own
+                # aclose blocks until released (the pump awaits this in its
+                # finally via upstream.aclose()).
+                await aclose_gate.wait()
+                self.closed += 1
+
+    driver = _DyingDriver()
+    lifecycle = BackendLifecycle(driver, capacity=1)
+    await lifecycle.start()
+    await lifecycle.acquire_slot()
+
+    upstream = driver.stream_responses({})
+    queue: _asyncio.Queue[object] = _asyncio.Queue()
+    pump = _asyncio.create_task(lifecycle._pump(upstream, queue))
+    first = await _asyncio.wait_for(queue.get(), 2)
+    assert first == {"type": "response.created"}
+
+    # The upstream failure propagates into the pump's finally, which blocks
+    # on the gated generator aclose.
+    await _asyncio.sleep(0.05)
+    assert not pump.done(), "pump should be suspended in finally on gate"
+
+    # THE PRODUCTION RACE: cancel the pump while it is suspended inside its
+    # own finally. Old code: CancelledError re-raised at that await →
+    # release_slot never ran → slot leaked forever. Fixed code: the shield
+    # keeps each finally-await alive, and the slot release lands even with
+    # the cancellation pending and the gated aclose still unfinished.
+    pump.cancel()
+    await _asyncio.sleep(0.05)
+
+    assert lifecycle.in_flight == 0, "slot leaked after pump cancel in finally"
+    assert lifecycle.backend_status == BackendStatusValue.RUNNING
+
+    # Drain state settles: open the teardown gate so the shielded aclose
+    # child completes and the pump task finishes with its CancelledError.
+    aclose_gate.set()
+    await _asyncio.wait_for(_asyncio.gather(pump, return_exceptions=True), 5)
+    await _asyncio.sleep(0.05)
+    # NOTE: deliberately NO `driver.closed` assert here — aclose() throws
+    # GeneratorExit into the generator while it is suspended at the gate,
+    # so its post-gate line never runs. The contract under test is the
+    # slot release above.

@@ -380,14 +380,38 @@ class BackendLifecycle:
         The `finally` runs on normal exhaustion, upstream exception, or
         task cancellation — i.e., on upstream close — which is the
         release trigger, never the downstream client's lifecycle.
+
+        Cancellation discipline (the production-observed leak this guards
+        against): when this task is cancelled mid-iteration, EVERY `await`
+        in the finally re-raises CancelledError until it actually completes
+        — and `suppress(Exception)` does NOT catch CancelledError
+        (BaseException since 3.8). An unsuppressed aclose here skipped both
+        `_STREAM_END` and `release_slot()`, leaking the slot while the
+        provider's health endpoint kept reporting `in_flight: 1` forever.
+
+        So: shield every finally-await (shield keeps the child running to
+        completion even when the parent is being cancelled), suppress
+        BaseException around each (CancelledError included), and run the
+        slot release LAST under its own shield. The final
+        `asyncio.current_task().uncancel()` is the 3.11+ belt: a cancelling
+        task's awaits would otherwise keep raising even after the shielded
+        work is done.
         """
         try:
             async for event in upstream:
                 await queue.put(event)
         except Exception as exc:  # noqa: BLE001
-            await queue.put(_StreamFailure(exc))
+            with contextlib.suppress(BaseException):  # noqa: SIM105 - noqa: BLE001
+                await asyncio.shield(queue.put(_StreamFailure(exc)))
+            raise
         finally:
-            with contextlib.suppress(Exception):
-                await upstream.aclose()  # type: ignore[attr-defined]
-            await queue.put(_STREAM_END)
-            await self.release_slot()
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(upstream.aclose())  # type: ignore[attr-defined]
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(queue.put(_STREAM_END))
+            try:
+                asyncio.current_task().uncancel()  # type: ignore[union-attr]
+            except Exception:  # noqa: BLE001 - pre-3.11 / no running task
+                pass
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(self.release_slot())
