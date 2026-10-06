@@ -1,19 +1,22 @@
 import { zodResolver } from "@hookform/resolvers/zod"
-import { useMutation, useQueryClient } from "@tanstack/react-query"
+import type { RJSFSchema } from "@rjsf/utils"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { createFileRoute, Link } from "@tanstack/react-router"
 import {
+  AlertTriangle,
   Check,
   ChevronDown,
   ChevronRight,
+  Code2,
   Copy,
   Eye,
   EyeOff,
+  FormInput,
   Pencil,
   Plus,
-  RefreshCw,
   Trash2,
 } from "lucide-react"
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import { useForm } from "react-hook-form"
 import { z } from "zod"
 
@@ -21,6 +24,19 @@ import type { DefinitionCreate, DefinitionPatch } from "@/client"
 import { AdminService } from "@/client"
 import { EmptyNudge } from "@/components/Common/EmptyNudge"
 import { StatusBadge } from "@/components/Common/StatusBadge"
+import {
+  collectSecretPaths,
+  getByDotPath,
+  setByDotPath,
+} from "@/components/schema-form/keywords"
+import {
+  materializedDefaults,
+  pruneUntouchedDefaults,
+  restoreSecrets,
+  SchemaForm,
+  serverErrorsToErrorSchema,
+  stripSecrets,
+} from "@/components/schema-form/SchemaForm"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -61,13 +77,17 @@ import { Textarea } from "@/components/ui/textarea"
 import {
   definitionKeys,
   instanceKeys,
+  providerTypeKeys,
   useDefinitions,
+  useProviderType,
 } from "@/hooks/useAdminData"
 import useCustomToast from "@/hooks/useCustomToast"
 import { extractError } from "@/lib/errors"
-import { BACKEND_CONFIG_EXAMPLES } from "@/lib/providerConfigExamples"
-import type { ConfigUpdateResult, ProviderDefinition } from "@/types/admin"
-import { PROVIDER_TYPES } from "@/types/admin"
+import type {
+  ConfigUpdateResult,
+  ProviderDefinition,
+  ProviderTypeSummary,
+} from "@/types/admin"
 
 export const Route = createFileRoute("/_layout/definitions")({
   component: DefinitionsPage,
@@ -76,18 +96,7 @@ export const Route = createFileRoute("/_layout/definitions")({
 
 const definitionSchema = z.object({
   alias: z.string().min(1, "alias is required").max(255),
-  provider_type: z.enum(PROVIDER_TYPES),
-  backend_config_text: z.string().refine((t) => {
-    if (!t.trim()) return true
-    try {
-      const parsed = JSON.parse(t)
-      return (
-        typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
-      )
-    } catch {
-      return false
-    }
-  }, "backend_config must be valid JSON (an object)"),
+  provider_type: z.string().min(1, "provider type is required"),
   capacity: z
     .string()
     .refine((t) => Number.isInteger(Number(t)) && Number(t) >= 1, {
@@ -138,7 +147,12 @@ function DefinitionsPage() {
           </h1>
           <p className="text-muted-foreground">
             Client-facing model aliases: how to boot a backend and how to
-            schedule it.
+            schedule it. backend_config is rendered from each provider type's
+            committed{" "}
+            <Link to="/provider-types" className="text-primary hover:underline">
+              schema
+            </Link>
+            .
           </p>
         </div>
         <Button onClick={() => setCreating(true)}>
@@ -184,8 +198,7 @@ function DefinitionsPage() {
       )}
 
       <DefinitionFormDialog
-        // Remount per target: useForm defaultValues are read only at first
-        // mount, so editing B after A would otherwise show A's values.
+        // Remount per target: defaultValues are read only at first mount.
         key={editing?.id ?? (creating ? "create" : "closed")}
         open={creating || editing !== null}
         definition={editing}
@@ -338,6 +351,25 @@ function DefinitionDetail({
   definition: ProviderDefinition
 }) {
   const discovered = (d.model_metadata?.models ?? []) as unknown[]
+  // H1: the admin API returns unredacted backend_config — strip every
+  // x-secret leaf before rendering so stored secrets never hit the DOM.
+  const { data: typeDetail } = useProviderType(d.provider_type)
+  const displayConfig = useMemo(() => {
+    const schema = (typeDetail?.schema ?? null) as RJSFSchema | null
+    if (!schema) return d.backend_config
+    const stripped = stripSecrets(schema, d.backend_config)
+    const secretPaths = collectSecretPaths(schema)
+    if (secretPaths.length === 0) return stripped
+    // Replace stripped leaves with a marker so the operator knows a
+    // secret is stored there (the path exists, the value doesn't).
+    let out: Record<string, unknown> = stripped
+    for (const p of secretPaths) {
+      if (getByDotPath(d.backend_config, p) !== undefined) {
+        out = setByDotPath(out, p, "•••••• (secret — hidden)")
+      }
+    }
+    return out
+  }, [typeDetail, d.backend_config])
   return (
     <div className="grid gap-6 md:grid-cols-2">
       <div>
@@ -368,8 +400,12 @@ function DefinitionDetail({
       </div>
       <div className="md:col-span-2">
         <h4 className="mb-2 text-sm font-semibold">backend_config</h4>
+        <p className="mb-1 text-xs text-muted-foreground">
+          x-secret fields are hidden (write-only — edit via the schema form;
+          leaving the input blank keeps the stored value).
+        </p>
         <pre className="max-h-64 overflow-auto rounded-md bg-muted p-3 font-mono text-xs">
-          {JSON.stringify(d.backend_config, null, 2)}
+          {JSON.stringify(displayConfig, null, 2)}
         </pre>
         {(d.instances ?? []).length > 0 && (
           <>
@@ -398,6 +434,12 @@ function DefinitionDetail({
   )
 }
 
+/**
+ * The definition editor. The backend_config section is now a
+ * schema-driven rjsf form (Phase 12) fetched from
+ * AdminService.getProviderType for the selected provider type, with a
+ * raw-JSON escape hatch. All other fields keep their previous shape.
+ */
 function DefinitionFormDialog({
   open,
   definition,
@@ -410,17 +452,16 @@ function DefinitionFormDialog({
   const queryClient = useQueryClient()
   const { showErrorToast, showSuccessToast } = useCustomToast()
   const isEdit = definition !== null
+  const storedConfig = (definition?.backend_config ?? {}) as Record<
+    string,
+    unknown
+  >
 
   const form = useForm<DefinitionFormValues>({
     resolver: zodResolver(definitionSchema),
     defaultValues: {
       alias: definition?.alias ?? "",
-      provider_type: (definition?.provider_type as never) ?? "mock",
-      backend_config_text: JSON.stringify(
-        definition?.backend_config ?? {},
-        null,
-        2,
-      ),
+      provider_type: definition?.provider_type ?? "",
       capacity: String(definition?.capacity ?? 1),
       vram_required_bytes: String(definition?.vram_required_bytes ?? 0),
       idle_timeout_seconds: String(definition?.idle_timeout_seconds ?? 300),
@@ -430,16 +471,168 @@ function DefinitionFormDialog({
   })
 
   const providerType = form.watch("provider_type")
-  const schemaHint =
-    BACKEND_CONFIG_EXAMPLES[
-      (providerType ?? "mock") as keyof typeof BACKEND_CONFIG_EXAMPLES
-    ]
+
+  const { data: providerTypes = [] } = useQuery({
+    queryKey: providerTypeKeys.all,
+    queryFn: async () =>
+      ((await AdminService.listProviderTypes()).data ??
+        []) as unknown as ProviderTypeSummary[],
+    enabled: open,
+    staleTime: 30_000,
+  })
+
+  const { data: typeDetail, isLoading: schemaLoading } = useQuery({
+    queryKey: providerTypeKeys.detail(providerType ?? ""),
+    queryFn: async () =>
+      (
+        await AdminService.getProviderType({
+          path: { name: providerType as string },
+        })
+      ).data as Record<string, unknown>,
+    enabled: open && providerType !== "" && providerType !== undefined,
+    staleTime: 30_000,
+  })
+
+  const schema = (typeDetail?.schema ?? null) as RJSFSchema | null
+  const schemaHasFields =
+    schema !== null &&
+    typeof schema === "object" &&
+    Object.keys((schema as Record<string, unknown>).properties ?? {}).length > 0
+
+  // Controlled backend_config editor state: `rawMode` toggles between
+  // the schema form and the raw-JSON escape hatch.
+  //
+  // H1: every display surface (form data AND the raw textarea) is
+  // seeded from the SECRET-STRIPPED stored config — the admin API
+  // returns unredacted values, so the UI must never render them.
+  // C1: the raw-mode submit path also runs restoreSecrets() so an
+  // edit→toggle-raw→save cycle can't drop a stored secret.
+  // H2: the form keeps `initialConfig` (the stripped stored config) as
+  // the diff base so rjsf-materialized schema defaults are pruned on
+  // submit (see pruneUntouchedDefaults) — an untouched save is
+  // byte-identical to what was stored.
+  const strippedInitial = useMemo<Record<string, unknown>>(
+    () => (schema ? stripSecrets(schema, storedConfig) : storedConfig),
+    [schema, storedConfig],
+  )
+  const [rawMode, setRawMode] = useState(false)
+  const [configValue, setConfigValue] =
+    useState<Record<string, unknown>>(strippedInitial)
+  const [rawText, setRawText] = useState(() =>
+    JSON.stringify(strippedInitial, null, 2),
+  )
+  const [rawError, setRawError] = useState<string | null>(null)
+  const [extraErrors, setExtraErrors] =
+    useState<ReturnType<typeof serverErrorsToErrorSchema>>(undefined)
+  // Snapshot of the diff base at editor (re)init time; submit prunes
+  // against THIS, not the live query result, so mid-edit refetches
+  // can't shift the baseline under the operator.
+  const [initialConfig, setInitialConfig] =
+    useState<Record<string, unknown>>(strippedInitial)
+  // Track the type the current form state was initialized for so a
+  // provider_type switch resets the editor instead of leaking config.
+  const [initType, setInitType] = useState<string>(
+    definition?.provider_type ?? "",
+  )
+
+  // Re-initialize the editor when the type (or its schema) changes.
+  if (providerType !== initType) {
+    setInitType(providerType)
+    const next = schema ? stripSecrets(schema, storedConfig) : storedConfig
+    setConfigValue(next)
+    setInitialConfig(next)
+    setRawText(JSON.stringify(next, null, 2))
+    setExtraErrors(undefined)
+    setRawError(null)
+  }
+  // A schema that just arrived (async) re-strips the secrets.
+  const [initSchemaFp, setInitSchemaFp] = useState<string | null>(
+    (typeDetail?.schema_fingerprint as string) ?? null,
+  )
+  const nowFp = (typeDetail?.schema_fingerprint as string) ?? null
+  if (nowFp !== initSchemaFp) {
+    setInitSchemaFp(nowFp)
+    if (schema) {
+      const next = stripSecrets(schema, storedConfig)
+      setConfigValue(next)
+      setInitialConfig(next)
+      setRawText(JSON.stringify(next, null, 2))
+      setExtraErrors(undefined)
+    }
+  }
+
+  // Permissive / empty schemas (bootstrap path) can't drive a form —
+  // force the raw-JSON hatch.
+  const effectiveRawMode = rawMode || !schemaHasFields
+
+  const toggleRawMode = () => {
+    if (effectiveRawMode) {
+      // raw → form: parse first; invalid JSON keeps the operator in raw.
+      try {
+        const parsed = JSON.parse(rawText)
+        if (typeof parsed !== "object" || parsed === null) throw new Error()
+        setConfigValue(
+          schema
+            ? stripSecrets(schema, parsed as Record<string, unknown>)
+            : parsed,
+        )
+        setRawError(null)
+        setRawMode(false)
+      } catch {
+        setRawError("Invalid JSON — fix it before switching to the form.")
+      }
+    } else {
+      // form → raw: snapshot current form data (never contains stored
+      // secrets; a freshly typed secret is the operator's own input).
+      setRawText(JSON.stringify(configValue, null, 2))
+      setRawMode(true)
+    }
+  }
 
   const mutation = useMutation({
     mutationFn: async (values: DefinitionFormValues) => {
-      const backendConfig = values.backend_config_text.trim()
-        ? JSON.parse(values.backend_config_text)
-        : {}
+      let backendConfig: Record<string, unknown>
+      if (effectiveRawMode) {
+        try {
+          const parsed = JSON.parse(rawText)
+          if (
+            typeof parsed !== "object" ||
+            parsed === null ||
+            Array.isArray(parsed)
+          ) {
+            throw new Error()
+          }
+          // C1: raw mode shows the secret-STRIPPED config, so merge the
+          // stored secrets back for anything the operator didn't
+          // explicitly set. An explicit non-empty value in the raw text
+          // wins (rotate); a missing/empty one keeps the stored value.
+          backendConfig = schema
+            ? restoreSecrets(
+                schema,
+                parsed as Record<string, unknown>,
+                storedConfig,
+              )
+            : (parsed as Record<string, unknown>)
+        } catch {
+          setRawError("backend_config must be valid JSON (an object).")
+          throw new Error("backend_config must be valid JSON (an object)")
+        }
+      } else {
+        setRawError(null)
+        // H2: prune everything rjsf materialized (defaults/consts)
+        // that the operator didn't actually change, then restore
+        // write-only secrets they left empty.
+        const pruned = schema
+          ? pruneUntouchedDefaults(
+              initialConfig,
+              materializedDefaults(schema, initialConfig),
+              configValue,
+            )
+          : configValue
+        backendConfig = schema
+          ? restoreSecrets(schema, pruned, storedConfig)
+          : pruned
+      }
       const body = {
         alias: values.alias,
         provider_type: values.provider_type,
@@ -449,9 +642,9 @@ function DefinitionFormDialog({
         idle_timeout_seconds: Number(values.idle_timeout_seconds),
         enabled: values.enabled,
       }
+      setExtraErrors(undefined)
       if (isEdit && definition) {
         const patch: DefinitionPatch = { ...body }
-        // Only send the token when it changed (empty = keep current).
         if (
           values.registration_token &&
           values.registration_token !== definition.registration_token
@@ -494,7 +687,31 @@ function DefinitionFormDialog({
       }
       onClose()
     },
-    onError: (err: Error) => showErrorToast(extractError(err)),
+    onError: (err: Error) => {
+      // Surface the admin's 422 schema-validation per-field errors into
+      // the form when we can map them.
+      const detail = (
+        err as {
+          response?: { data?: { detail?: unknown } }
+        }
+      )?.response?.data?.detail
+      const es = serverErrorsToErrorSchema(detail, schema)
+      if (es) {
+        setExtraErrors(es)
+        if (
+          detail &&
+          typeof detail === "object" &&
+          (detail as Record<string, unknown>).error ===
+            "backend_config_schema_validation_failed"
+        ) {
+          showErrorToast(
+            "backend_config failed schema validation — see field errors.",
+          )
+          return
+        }
+      }
+      showErrorToast(extractError(err))
+    },
   })
 
   return (
@@ -504,7 +721,7 @@ function DefinitionFormDialog({
         if (!o) onClose()
       }}
     >
-      <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
+      <DialogContent className="sm:max-w-3xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>
             {isEdit ? `Edit ${definition?.alias}` : "Add definition"}
@@ -556,9 +773,9 @@ function DefinitionFormDialog({
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
-                        {PROVIDER_TYPES.map((t) => (
-                          <SelectItem key={t} value={t}>
-                            {t}
+                        {providerTypes.map((t) => (
+                          <SelectItem key={t.name} value={t.name}>
+                            {t.name}
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -566,7 +783,7 @@ function DefinitionFormDialog({
                     <FormDescription>
                       {isEdit && (definition?.instances?.length ?? 0) > 0
                         ? "Locked: instances are attached (changing the type would break their binding)."
-                        : "Must match the provider container's type."}
+                        : "Registered types only — see the Provider Types page."}
                     </FormDescription>
                     <FormMessage />
                   </FormItem>
@@ -621,44 +838,81 @@ function DefinitionFormDialog({
               />
             </div>
 
-            <FormField
-              control={form.control}
-              name="backend_config_text"
-              render={({ field }) => (
-                <FormItem>
-                  <div className="flex items-center justify-between">
-                    <FormLabel>backend_config (JSON)</FormLabel>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => {
-                        const ex =
-                          BACKEND_CONFIG_EXAMPLES[
-                            providerType as keyof typeof BACKEND_CONFIG_EXAMPLES
-                          ]
-                        if (ex) {
-                          field.onChange(JSON.stringify(ex.example, null, 2))
-                        }
-                      }}
-                    >
-                      <RefreshCw /> Load {providerType} example
-                    </Button>
-                  </div>
-                  <FormControl>
-                    <Textarea
-                      {...field}
-                      rows={12}
-                      spellCheck={false}
-                      className="font-mono text-xs"
-                      placeholder='{"model": {...}, "args": {...}}'
-                    />
-                  </FormControl>
-                  <FormDescription>{schemaHint?.hint}</FormDescription>
-                  <FormMessage />
-                </FormItem>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <FormLabel className="text-sm font-semibold">
+                  backend_config
+                </FormLabel>
+                {schemaHasFields && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={toggleRawMode}
+                  >
+                    {effectiveRawMode ? (
+                      <>
+                        <FormInput /> Schema form
+                      </>
+                    ) : (
+                      <>
+                        <Code2 /> Raw JSON
+                      </>
+                    )}
+                  </Button>
+                )}
+              </div>
+              {!providerType ? (
+                <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+                  Select a provider type to load its schema.
+                </p>
+              ) : schemaLoading ? (
+                <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+                  Loading {providerType} schema…
+                </p>
+              ) : !schema ? (
+                <p className="rounded-md border border-destructive/40 p-3 text-xs text-destructive">
+                  Provider type "{providerType}" has no committed schema.
+                </p>
+              ) : effectiveRawMode ? (
+                <>
+                  {!schemaHasFields && (
+                    <p className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-500">
+                      <AlertTriangle className="size-3.5" />
+                      This type's committed schema has no fields (permissive
+                      bootstrap) — raw JSON only.
+                    </p>
+                  )}
+                  {schemaHasFields && (
+                    <p className="text-xs text-muted-foreground">
+                      Secret fields are omitted from this view — edit them via
+                      the schema form (leave blank to keep the current value).
+                      Saving here keeps stored secrets intact.
+                    </p>
+                  )}
+                  <Textarea
+                    value={rawText}
+                    rows={12}
+                    spellCheck={false}
+                    className="font-mono text-xs"
+                    onChange={(e) => {
+                      setRawText(e.target.value)
+                      setRawError(null)
+                    }}
+                  />
+                  {rawError && (
+                    <p className="text-xs text-destructive">{rawError}</p>
+                  )}
+                </>
+              ) : (
+                <SchemaForm
+                  schema={schema}
+                  value={configValue}
+                  onChange={setConfigValue}
+                  extraErrors={extraErrors}
+                />
               )}
-            />
+            </div>
 
             <FormField
               control={form.control}

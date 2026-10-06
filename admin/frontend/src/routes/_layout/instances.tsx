@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query"
-import { createFileRoute } from "@tanstack/react-router"
+import { createFileRoute, Link } from "@tanstack/react-router"
 import { Eraser, HardDriveDownload } from "lucide-react"
 import { useState } from "react"
 
@@ -30,6 +30,7 @@ import {
   definitionKeys,
   instanceKeys,
   useInstances,
+  useProviderTypes,
 } from "@/hooks/useAdminData"
 import useCustomToast from "@/hooks/useCustomToast"
 import { extractError } from "@/lib/errors"
@@ -45,8 +46,18 @@ export const Route = createFileRoute("/_layout/instances")({
 // no REST read endpoint for them, so the UI does not show log streams.
 // (provider.logs is still Reserved in docs/ws-protocol.md §4.)
 
+// sha256 of canonical JSON {"type":"object"} — the admin's permissive
+// bootstrap schema (Phase 12 transition). An instance reporting this fp
+// never proved a real schema; it is not "waiting" on anything.
+const PERMISSIVE_SCHEMA_FP =
+  "a2c799262a3ce3c19ef5cdd983bf3d12b43ab3c426227091b909dcb7054738c0"
+
 function InstancesPage() {
   const { data: instances = [], isLoading } = useInstances()
+  const { data: providerTypes = [] } = useProviderTypes()
+  const committedByType = new Map(
+    providerTypes.map((t) => [t.name, t.schema_fingerprint]),
+  )
   const [cacheTarget, setCacheTarget] = useState<ProviderInstance | null>(null)
   const [pruneTarget, setPruneTarget] = useState<ProviderInstance | null>(null)
 
@@ -102,7 +113,37 @@ function InstancesPage() {
                   </TableCell>
                   <TableCell className="font-medium">{i.alias}</TableCell>
                   <TableCell>
-                    <StatusBadge status={i.instance_status} />
+                    <div className="flex flex-wrap items-center gap-1">
+                      <StatusBadge status={i.instance_status} />
+                      {(() => {
+                        const committed = i.provider_type
+                          ? committedByType.get(i.provider_type)
+                          : undefined
+                        if (
+                          committed &&
+                          committed !== PERMISSIVE_SCHEMA_FP &&
+                          i.reported_schema_fingerprint !== committed
+                        ) {
+                          return (
+                            <Link
+                              to="/provider-types"
+                              search={{ type: i.provider_type ?? "" }}
+                              title={`Reported schema ${
+                                i.reported_schema_fingerprint
+                                  ? `${i.reported_schema_fingerprint.slice(0, 8)}…`
+                                  : "none"
+                              } ≠ committed ${committed.slice(0, 8)}… — registration refused until consensus`}
+                            >
+                              <StatusBadge
+                                status="waiting_schema"
+                                className="border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                              />
+                            </Link>
+                          )
+                        }
+                        return null
+                      })()}
+                    </div>
                   </TableCell>
                   <TableCell>
                     <StatusBadge status={i.backend_status} />

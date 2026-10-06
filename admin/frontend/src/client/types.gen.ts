@@ -168,6 +168,16 @@ export type MachinePatch = {
  * RegistrationRequest
  *
  * Body sent by provider_lib.admin_client.AdminClient.register().
+ *
+ * ``schema`` (Phase 12) is the provider package's committed
+ * ``schema.json`` (JSON Schema 2020-12 for this type's
+ * ``backend_config``). The admin derives the fingerprint itself; the
+ * provider never sends it separately.
+ *
+ * TRANSITION (Phase 12): ``schema`` is optional until every provider
+ * package ships a real ``schema.json`` (Phase D) — an admin-first
+ * deploy must not 422 the currently-deployed providers that don't send
+ * it yet. See the schema-omitted path in ``register_provider``.
  */
 export type RegistrationRequest = {
     /**
@@ -182,6 +192,12 @@ export type RegistrationRequest = {
      * Provider Type
      */
     provider_type: string;
+    /**
+     * Schema
+     */
+    schema?: {
+        [key: string]: unknown;
+    } | null;
     /**
      * Version
      */
@@ -712,6 +728,224 @@ export type adminPruneStorageResponses = {
 };
 
 export type adminPruneStorageResponse = adminPruneStorageResponses[keyof adminPruneStorageResponses];
+
+export type adminListProviderTypesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/admin/api/provider-types';
+};
+
+export type adminListProviderTypesResponses = {
+    /**
+     * Response Admin-List Provider Types
+     *
+     * Successful Response
+     */
+    200: Array<{
+        [key: string]: unknown;
+    }>;
+};
+
+export type adminListProviderTypesResponse = adminListProviderTypesResponses[keyof adminListProviderTypesResponses];
+
+export type adminGetProviderTypeData = {
+    body?: never;
+    path: {
+        /**
+         * Name
+         */
+        name: string;
+    };
+    query?: never;
+    url: '/admin/api/provider-types/{name}';
+};
+
+export type adminGetProviderTypeErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminGetProviderTypeError = adminGetProviderTypeErrors[keyof adminGetProviderTypeErrors];
+
+export type adminGetProviderTypeResponses = {
+    /**
+     * Response Admin-Get Provider Type
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminGetProviderTypeResponse = adminGetProviderTypeResponses[keyof adminGetProviderTypeResponses];
+
+export type adminCommitPendingData = {
+    body?: never;
+    path: {
+        /**
+         * Name
+         */
+        name: string;
+    };
+    query?: never;
+    url: '/admin/api/provider-types/{name}/pending/commit';
+};
+
+export type adminCommitPendingErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminCommitPendingError = adminCommitPendingErrors[keyof adminCommitPendingErrors];
+
+export type adminCommitPendingResponses = {
+    /**
+     * Response Admin-Commit Pending
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminCommitPendingResponse = adminCommitPendingResponses[keyof adminCommitPendingResponses];
+
+export type adminDismissPendingData = {
+    body?: never;
+    path: {
+        /**
+         * Name
+         */
+        name: string;
+    };
+    query?: never;
+    url: '/admin/api/provider-types/{name}/pending/dismiss';
+};
+
+export type adminDismissPendingErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminDismissPendingError = adminDismissPendingErrors[keyof adminDismissPendingErrors];
+
+export type adminDismissPendingResponses = {
+    /**
+     * Response Admin-Dismiss Pending
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminDismissPendingResponse = adminDismissPendingResponses[keyof adminDismissPendingResponses];
+
+export type adminSearchModelsData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Search
+         *
+         * Search query
+         */
+        search: string;
+        /**
+         * Limit
+         *
+         * Max results
+         */
+        limit?: number;
+        /**
+         * Full
+         *
+         * Include full model info
+         */
+        full?: boolean;
+        /**
+         * Filter
+         *
+         * File-type filter: 'gguf' applies the legacy HF 'config=gguf' repo filter; 'all' is a general model search (halogen .hgn repos are not GGUF-configured and must stay discoverable).
+         */
+        filter?: 'all' | 'gguf';
+    };
+    url: '/admin/api/huggingface/search';
+};
+
+export type adminSearchModelsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminSearchModelsError = adminSearchModelsErrors[keyof adminSearchModelsErrors];
+
+export type adminSearchModelsResponses = {
+    /**
+     * Response Admin-Search Models
+     *
+     * Successful Response
+     */
+    200: Array<{
+        [key: string]: unknown;
+    }>;
+};
+
+export type adminSearchModelsResponse = adminSearchModelsResponses[keyof adminSearchModelsResponses];
+
+export type adminListRepoFilesData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Repo Id
+         *
+         * HuggingFace repository ID (e.g. 'unsloth/Qwen3-27B-GGUF')
+         */
+        repo_id: string;
+        /**
+         * Include All
+         *
+         * Include unclassified/irrelevant files (default: recognized kinds only)
+         */
+        include_all?: boolean;
+    };
+    url: '/admin/api/huggingface/files';
+};
+
+export type adminListRepoFilesErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminListRepoFilesError = adminListRepoFilesErrors[keyof adminListRepoFilesErrors];
+
+export type adminListRepoFilesResponses = {
+    /**
+     * Response Admin-List Repo Files
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminListRepoFilesResponse = adminListRepoFilesResponses[keyof adminListRepoFilesResponses];
 
 export type adminListResponsesData = {
     body?: never;

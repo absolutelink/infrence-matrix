@@ -1,4 +1,5 @@
 import {
+  Boxes,
   Cpu,
   LayoutDashboard,
   MessagesSquare,
@@ -22,6 +23,7 @@ const baseItems: Item[] = [
   { icon: LayoutDashboard, title: "Dashboard", path: "/" },
   { icon: Server, title: "Machines", path: "/machines" },
   { icon: Package, title: "Definitions", path: "/definitions" },
+  { icon: Boxes, title: "Provider Types", path: "/provider-types" },
   { icon: Cpu, title: "Instances", path: "/instances" },
   { icon: MessagesSquare, title: "Responses / Usage", path: "/responses" },
   { icon: Play, title: "Playground", path: "/playground" },

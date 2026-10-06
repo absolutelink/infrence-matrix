@@ -2,7 +2,7 @@
 
 import type { Client, Options as Options2, TDataShape } from './client';
 import { client } from './client.gen';
-import type { adminAdminHealthData, adminAdminHealthResponses, adminClearCacheData, adminClearCacheErrors, adminClearCacheResponses, adminCreateDefinitionData, adminCreateDefinitionErrors, adminCreateDefinitionResponses, adminCreateMachineData, adminCreateMachineErrors, adminCreateMachineResponses, adminDeleteDefinitionData, adminDeleteDefinitionErrors, adminDeleteDefinitionResponses, adminDeleteMachineData, adminDeleteMachineErrors, adminDeleteMachineResponses, adminGetDefinitionData, adminGetDefinitionErrors, adminGetDefinitionResponses, adminGetInstanceData, adminGetInstanceErrors, adminGetInstanceResponses, adminGetMachineData, adminGetMachineErrors, adminGetMachineResponses, adminListDefinitionsData, adminListDefinitionsResponses, adminListInstancesData, adminListInstancesResponses, adminListMachinesData, adminListMachinesResponses, adminListResponsesData, adminListResponsesErrors, adminListResponsesResponses, adminOverviewStatsData, adminOverviewStatsResponses, adminPatchDefinitionData, adminPatchDefinitionErrors, adminPatchDefinitionResponses, adminPatchMachineData, adminPatchMachineErrors, adminPatchMachineResponses, adminPruneStorageData, adminPruneStorageErrors, adminPruneStorageResponses, adminRegisterProviderData, adminRegisterProviderErrors, adminRegisterProviderResponses, adminUsageStatsData, adminUsageStatsErrors, adminUsageStatsResponses, chatCreateChatCompletionData, chatCreateChatCompletionResponses, modelsListModelsData, modelsListModelsResponses, responsesCreateResponseData, responsesCreateResponseResponses } from './types.gen';
+import type { adminAdminHealthData, adminAdminHealthResponses, adminClearCacheData, adminClearCacheErrors, adminClearCacheResponses, adminCommitPendingData, adminCommitPendingErrors, adminCommitPendingResponses, adminCreateDefinitionData, adminCreateDefinitionErrors, adminCreateDefinitionResponses, adminCreateMachineData, adminCreateMachineErrors, adminCreateMachineResponses, adminDeleteDefinitionData, adminDeleteDefinitionErrors, adminDeleteDefinitionResponses, adminDeleteMachineData, adminDeleteMachineErrors, adminDeleteMachineResponses, adminDismissPendingData, adminDismissPendingErrors, adminDismissPendingResponses, adminGetDefinitionData, adminGetDefinitionErrors, adminGetDefinitionResponses, adminGetInstanceData, adminGetInstanceErrors, adminGetInstanceResponses, adminGetMachineData, adminGetMachineErrors, adminGetMachineResponses, adminGetProviderTypeData, adminGetProviderTypeErrors, adminGetProviderTypeResponses, adminListDefinitionsData, adminListDefinitionsResponses, adminListInstancesData, adminListInstancesResponses, adminListMachinesData, adminListMachinesResponses, adminListProviderTypesData, adminListProviderTypesResponses, adminListRepoFilesData, adminListRepoFilesErrors, adminListRepoFilesResponses, adminListResponsesData, adminListResponsesErrors, adminListResponsesResponses, adminOverviewStatsData, adminOverviewStatsResponses, adminPatchDefinitionData, adminPatchDefinitionErrors, adminPatchDefinitionResponses, adminPatchMachineData, adminPatchMachineErrors, adminPatchMachineResponses, adminPruneStorageData, adminPruneStorageErrors, adminPruneStorageResponses, adminRegisterProviderData, adminRegisterProviderErrors, adminRegisterProviderResponses, adminSearchModelsData, adminSearchModelsErrors, adminSearchModelsResponses, adminUsageStatsData, adminUsageStatsErrors, adminUsageStatsResponses, chatCreateChatCompletionData, chatCreateChatCompletionResponses, modelsListModelsData, modelsListModelsResponses, responsesCreateResponseData, responsesCreateResponseResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -224,6 +224,99 @@ export class AdminService {
                 'Content-Type': 'application/json',
                 ...options.headers
             }
+        });
+    }
+    
+    /**
+     * List Provider Types
+     */
+    public static listProviderTypes<ThrowOnError extends boolean = true>(options?: Options<adminListProviderTypesData, ThrowOnError>) {
+        return (options?.client ?? client).get<adminListProviderTypesResponses, unknown, ThrowOnError>({
+            responseType: 'json',
+            url: '/admin/api/provider-types',
+            ...options
+        });
+    }
+    
+    /**
+     * Get Provider Type
+     *
+     * Full committed schema (for the UI form) + consensus state.
+     */
+    public static getProviderType<ThrowOnError extends boolean = true>(options: Options<adminGetProviderTypeData, ThrowOnError>) {
+        return (options.client ?? client).get<adminGetProviderTypeResponses, adminGetProviderTypeErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/admin/api/provider-types/{name}',
+            ...options
+        });
+    }
+    
+    /**
+     * Commit Pending
+     *
+     * Operator override: promote the pending schema to committed.
+     */
+    public static commitPending<ThrowOnError extends boolean = true>(options: Options<adminCommitPendingData, ThrowOnError>) {
+        return (options.client ?? client).post<adminCommitPendingResponses, adminCommitPendingErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/admin/api/provider-types/{name}/pending/commit',
+            ...options
+        });
+    }
+    
+    /**
+     * Dismiss Pending
+     *
+     * Operator override: drop the pending schema, back to active.
+     */
+    public static dismissPending<ThrowOnError extends boolean = true>(options: Options<adminDismissPendingData, ThrowOnError>) {
+        return (options.client ?? client).post<adminDismissPendingResponses, adminDismissPendingErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/admin/api/provider-types/{name}/pending/dismiss',
+            ...options
+        });
+    }
+    
+    /**
+     * Search Models
+     *
+     * Search HuggingFace model repos for the ``hf-file`` picker.
+     *
+     * General search by default; ``filter=gguf`` re-adds the legacy
+     * ``config=gguf`` filter.
+     */
+    public static searchModels<ThrowOnError extends boolean = true>(options: Options<adminSearchModelsData, ThrowOnError>) {
+        return (options.client ?? client).get<adminSearchModelsResponses, adminSearchModelsErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/admin/api/huggingface/search',
+            ...options
+        });
+    }
+    
+    /**
+     * List Repo Files
+     *
+     * List a repo's selectable artifact files with sizes and kinds.
+     *
+     * Recognized kinds: ``gguf``, ``hgn`` (halogen checkpoints),
+     * ``hnpw`` (NPU weights), ``tokenizer`` (tokenizer dirs/files).
+     * Every file entry carries the full key set so the picker never
+     * special-cases presence: ``rfilename: str``, ``size: int | null``
+     * (null = unknown, distinct from a real 0), ``kind: str``,
+     * ``quantization: str | null``, ``model_type: str | null`` and
+     * ``is_aux: bool`` — the last three are meaningful only for weight
+     * kinds (gguf/hgn/hnpw) and null/false elsewhere.
+     *
+     * The tree-endpoint size fallback is best-effort: if it fails (missing
+     * ``main`` branch, rate limit, timeout) the successfully fetched
+     * sibling listing still returns 200 with ``size: null`` for the
+     * unknown entries.
+     */
+    public static listRepoFiles<ThrowOnError extends boolean = true>(options: Options<adminListRepoFilesData, ThrowOnError>) {
+        return (options.client ?? client).get<adminListRepoFilesResponses, adminListRepoFilesErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/admin/api/huggingface/files',
+            ...options
         });
     }
     

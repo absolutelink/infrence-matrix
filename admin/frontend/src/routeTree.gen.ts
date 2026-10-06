@@ -15,6 +15,7 @@ import { Route as LayoutDefinitionsRouteImport } from './routes/_layout/definiti
 import { Route as LayoutInstancesRouteImport } from './routes/_layout/instances'
 import { Route as LayoutMachinesRouteImport } from './routes/_layout/machines'
 import { Route as LayoutPlaygroundRouteImport } from './routes/_layout/playground'
+import { Route as LayoutProviderTypesRouteImport } from './routes/_layout/provider-types'
 import { Route as LayoutResponsesRouteImport } from './routes/_layout/responses'
 import { Route as LayoutSettingsRouteImport } from './routes/_layout/settings'
 
@@ -47,6 +48,11 @@ const LayoutPlaygroundRoute = LayoutPlaygroundRouteImport.update({
   path: '/playground',
   getParentRoute: () => LayoutRoute,
 } as any)
+const LayoutProviderTypesRoute = LayoutProviderTypesRouteImport.update({
+  id: '/provider-types',
+  path: '/provider-types',
+  getParentRoute: () => LayoutRoute,
+} as any)
 const LayoutResponsesRoute = LayoutResponsesRouteImport.update({
   id: '/responses',
   path: '/responses',
@@ -64,6 +70,7 @@ export interface FileRoutesByFullPath {
   '/instances': typeof LayoutInstancesRoute
   '/machines': typeof LayoutMachinesRoute
   '/playground': typeof LayoutPlaygroundRoute
+  '/provider-types': typeof LayoutProviderTypesRoute
   '/responses': typeof LayoutResponsesRoute
   '/settings': typeof LayoutSettingsRoute
 }
@@ -72,6 +79,7 @@ export interface FileRoutesByTo {
   '/instances': typeof LayoutInstancesRoute
   '/machines': typeof LayoutMachinesRoute
   '/playground': typeof LayoutPlaygroundRoute
+  '/provider-types': typeof LayoutProviderTypesRoute
   '/responses': typeof LayoutResponsesRoute
   '/settings': typeof LayoutSettingsRoute
   '/': typeof LayoutIndexRoute
@@ -83,6 +91,7 @@ export interface FileRoutesById {
   '/_layout/instances': typeof LayoutInstancesRoute
   '/_layout/machines': typeof LayoutMachinesRoute
   '/_layout/playground': typeof LayoutPlaygroundRoute
+  '/_layout/provider-types': typeof LayoutProviderTypesRoute
   '/_layout/responses': typeof LayoutResponsesRoute
   '/_layout/settings': typeof LayoutSettingsRoute
   '/_layout/': typeof LayoutIndexRoute
@@ -95,6 +104,7 @@ export interface FileRouteTypes {
     | '/instances'
     | '/machines'
     | '/playground'
+    | '/provider-types'
     | '/responses'
     | '/settings'
   fileRoutesByTo: FileRoutesByTo
@@ -103,6 +113,7 @@ export interface FileRouteTypes {
     | '/instances'
     | '/machines'
     | '/playground'
+    | '/provider-types'
     | '/responses'
     | '/settings'
     | '/'
@@ -113,6 +124,7 @@ export interface FileRouteTypes {
     | '/_layout/instances'
     | '/_layout/machines'
     | '/_layout/playground'
+    | '/_layout/provider-types'
     | '/_layout/responses'
     | '/_layout/settings'
     | '/_layout/'
@@ -166,6 +178,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LayoutPlaygroundRouteImport
       parentRoute: typeof LayoutRoute
     }
+    '/_layout/provider-types': {
+      id: '/_layout/provider-types'
+      path: '/provider-types'
+      fullPath: '/provider-types'
+      preLoaderRoute: typeof LayoutProviderTypesRouteImport
+      parentRoute: typeof LayoutRoute
+    }
     '/_layout/responses': {
       id: '/_layout/responses'
       path: '/responses'
@@ -188,6 +207,7 @@ interface LayoutRouteChildren {
   LayoutInstancesRoute: typeof LayoutInstancesRoute
   LayoutMachinesRoute: typeof LayoutMachinesRoute
   LayoutPlaygroundRoute: typeof LayoutPlaygroundRoute
+  LayoutProviderTypesRoute: typeof LayoutProviderTypesRoute
   LayoutResponsesRoute: typeof LayoutResponsesRoute
   LayoutSettingsRoute: typeof LayoutSettingsRoute
   LayoutIndexRoute: typeof LayoutIndexRoute
@@ -198,6 +218,7 @@ const LayoutRouteChildren: LayoutRouteChildren = {
   LayoutInstancesRoute: LayoutInstancesRoute,
   LayoutMachinesRoute: LayoutMachinesRoute,
   LayoutPlaygroundRoute: LayoutPlaygroundRoute,
+  LayoutProviderTypesRoute: LayoutProviderTypesRoute,
   LayoutResponsesRoute: LayoutResponsesRoute,
   LayoutSettingsRoute: LayoutSettingsRoute,
   LayoutIndexRoute: LayoutIndexRoute,

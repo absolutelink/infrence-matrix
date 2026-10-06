@@ -6,6 +6,8 @@ import type {
   OverviewStats,
   ProviderDefinition,
   ProviderInstance,
+  ProviderTypeDetail,
+  ProviderTypeSummary,
   ResponsesList,
   UsageStats,
 } from "@/types/admin"
@@ -20,6 +22,10 @@ export const usageKeys = {
   withLimit: (limit: number) => ["stats", "usage", limit] as const,
 }
 export const overviewKeys = { all: ["stats", "overview"] as const }
+export const providerTypeKeys = {
+  all: ["provider-types"] as const,
+  detail: (name: string) => ["provider-types", name] as const,
+}
 
 // The generated SDK types the admin dict responses as loose JSON maps;
 // the hand-written shapes in @/types/admin mirror the backend dicts.
@@ -85,6 +91,30 @@ export function useOverview(refetchInterval = 4000) {
     queryKey: overviewKeys.all,
     queryFn: async () =>
       cast<OverviewStats>((await AdminService.overviewStats()).data),
+    refetchInterval,
+  })
+}
+
+export function useProviderTypes(refetchInterval = 10000) {
+  return useQuery({
+    queryKey: providerTypeKeys.all,
+    queryFn: async () =>
+      cast<ProviderTypeSummary[]>(
+        (await AdminService.listProviderTypes()).data,
+      ),
+    refetchInterval,
+  })
+}
+
+export function useProviderType(name: string | null, refetchInterval = 10000) {
+  return useQuery({
+    queryKey: providerTypeKeys.detail(name ?? ""),
+    queryFn: async () =>
+      cast<ProviderTypeDetail>(
+        (await AdminService.getProviderType({ path: { name: name as string } }))
+          .data,
+      ),
+    enabled: name !== null && name !== "",
     refetchInterval,
   })
 }

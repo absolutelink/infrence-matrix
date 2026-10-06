@@ -2,15 +2,9 @@
 // the Phase 9/10 endpoints as loose JSON maps; these mirror
 // admin/backend/app/api/admin/{machines,definitions,instances,responses}.py).
 
-export const PROVIDER_TYPES = [
-  "llama-cpp",
-  "halogen",
-  "halogen-flash",
-  "gufo",
-  "mock",
-] as const
-
-export type ProviderType = (typeof PROVIDER_TYPES)[number]
+// Phase 12: provider types come from the admin registry
+// (AdminService.listProviderTypes) — no hardcoded list.
+export type ProviderType = string
 
 export interface GpuInfo {
   uuid?: string
@@ -98,6 +92,7 @@ export interface ProviderInstance {
   last_seen: string | null
   last_request_at: string | null
   config_fingerprint: string | null
+  reported_schema_fingerprint?: string | null
   assigned_gpus: string[]
   error_message: string | null
   created_at: string
@@ -173,4 +168,36 @@ export interface StorageActionResult {
   deleted?: string[]
   bytes_freed?: number
   kept?: string[]
+}
+
+// Phase 12: provider type registry (mirrors
+// admin/backend/app/api/admin/provider_types.py dicts).
+export interface ProviderTypeConsensus {
+  status: string
+  committed_fingerprint: string
+  universe: string[]
+  universe_count: number
+  on_committed: number
+  pending_fingerprint: string | null
+  voters: string[]
+  voter_count: number
+  waiting_on: string[]
+}
+
+export interface ProviderTypeSummary {
+  name: string
+  status: string
+  schema_fingerprint: string
+  consensus: ProviderTypeConsensus
+}
+
+export interface ProviderTypeDetail {
+  name: string
+  status: string
+  schema: Record<string, unknown>
+  schema_fingerprint: string
+  pending_schema: Record<string, unknown> | null
+  consensus: ProviderTypeConsensus
+  created_at: string
+  updated_at: string | null
 }

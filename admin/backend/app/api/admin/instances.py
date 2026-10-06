@@ -70,6 +70,9 @@ def instance_dict(inst: ProviderInstance) -> dict[str, Any]:
         "last_seen": iso_utc(inst.last_seen),
         "last_request_at": iso_utc(inst.last_request_at),
         "config_fingerprint": inst.config_fingerprint,
+        # Phase 12 E6: drives the waiting_schema badge (the instance's
+        # last-reported schema fingerprint vs the type's committed one).
+        "reported_schema_fingerprint": inst.reported_schema_fingerprint,
         "assigned_gpus": inst.assigned_gpus,
         "error_message": inst.error_message,
         "created_at": iso_utc(inst.created_at),

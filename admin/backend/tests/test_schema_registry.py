@@ -957,3 +957,24 @@ def test_patch_retype_validates_existing_config(
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["backend_config"] == {"only_key": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# L1 (Phase 12 E review): the frontend hardcodes the permissive-schema
+# fingerprint literal in admin/frontend/src/routes/_layout/instances.tsx
+# (PERMISSIVE_SCHEMA_FP) to avoid badging bootstrap-schema instances as
+# waiting_schema. Pin the backend value to that exact literal so a change
+# here fails loudly and the frontend constant gets updated in lockstep.
+# ---------------------------------------------------------------------------
+
+FRONTEND_PERMISSIVE_FP = (
+    "a2c799262a3ce3c19ef5cdd983bf3d12b43ab3c426227091b909dcb7054738c0"
+)
+
+
+def test_permissive_fingerprint_pinned_to_frontend_constant() -> None:
+    from app.api.admin.providers import PERMISSIVE_FINGERPRINT, PERMISSIVE_SCHEMA
+
+    assert PERMISSIVE_SCHEMA == {"type": "object"}
+    assert PERMISSIVE_FINGERPRINT == canonical_json_sha256(PERMISSIVE_SCHEMA)
+    assert PERMISSIVE_FINGERPRINT == FRONTEND_PERMISSIVE_FP
