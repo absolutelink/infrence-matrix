@@ -47,6 +47,17 @@ VALUE_FLAGS: dict[str, str] = {
 }
 
 # Config key -> flag (bool-only) or (true_flag, false_flag) tuple.
+#
+# NOTE on the tuple shapes: modern llama.cpp defaults these features ON and
+# only documents the `--no-…` opt-out (e.g. `--warmup, --no-warmup`). The
+# positive twin is accepted by this build, but the negative form is what
+# actually changes behavior; the map below keeps both to stay compatible
+# with either build.
+#
+# REMOVED flags (verified against the deployed llama-server --help):
+#   --mmap / --no-mmap  — mmap is no longer a flag; loading modes live in
+#     `--load-mode` (auto|mmap|mlock|none). `no_mmap` is therefore
+#     ignored (mmap stays auto). Use options.load_mode for explicit control.
 BOOLEAN_FLAGS: dict[str, Any] = {
     "swa_full": "--swa-full",
     "kv_offload": ("--kv-offload", "--no-kv-offload"),
@@ -56,9 +67,10 @@ BOOLEAN_FLAGS: dict[str, Any] = {
     "warmup": ("--warmup", "--no-warmup"),
     "context_shift": ("--context-shift", "--no-context-shift"),
     "kv_unified": "--kv-unified",
-    "no_mmap": ("--no-mmap", "--mmap"),
     "no_cache_idle_slots": ("--no-cache-idle-slots", "--cache-idle-slots"),
-    "strict_mtp_qwen": "--spec-mtp-strict-qwen",
+    # NOTE: `strict_mtp_qwen` (legacy --spec-mtp-strict-qwen) is absent in
+    # this build — silently ignored; use spec_type/spec args instead.
+    # NOTE: `no_mmap` ignored (see above); explicit control via `load_mode`.
 }
 
 
@@ -88,13 +100,16 @@ def build_llama_command(
     """Build the llama-server argv from a backend_config dict."""
     args: dict[str, Any] = dict(cfg.get("args") or {})
 
-    # Strict Qwen MTP relies on a single sequence; never let a stale
-    # parallel setting make llama-server reject the model.
-    if args.get("strict_mtp_qwen"):
-        args["parallel"] = 1
-
     # `ctx` and `context_size` are accepted synonyms.
     ctx_size = args.get("ctx", args.get("context_size", 4096))
+
+    # Explicit loading mode (auto|mmap|mlock|none); replaces the removed
+    # --mmap/--no-mmap flags. auto is the server default.
+    load_mode = args.get("load_mode")
+    if load_mode is not None and load_mode != "auto":
+        cmd_load_mode = ["--load-mode", str(load_mode)]
+    else:
+        cmd_load_mode = []
 
     cmd: list[str] = [
         binary,
@@ -144,5 +159,8 @@ def build_llama_command(
 
     if draft_path:
         cmd.extend(["-md", str(draft_path)])
+
+    if cmd_load_mode:
+        cmd.extend(cmd_load_mode)
 
     return cmd

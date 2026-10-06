@@ -132,7 +132,6 @@ def test_boolean_flag_tuples() -> None:
                 "cont_batching": True,
                 "warmup": True,
                 "context_shift": True,
-                "no_mmap": True,
                 "no_cache_idle_slots": True,
             }
         },
@@ -147,7 +146,6 @@ def test_boolean_flag_tuples() -> None:
                 "cont_batching": False,
                 "warmup": False,
                 "context_shift": False,
-                "no_mmap": False,
                 "no_cache_idle_slots": False,
             }
         },
@@ -161,7 +159,10 @@ def test_boolean_flag_tuples() -> None:
     assert "--cont-batching" in on and "--no-cont-batching" in off
     assert "--warmup" in on and "--no-warmup" in off
     assert "--context-shift" in on and "--no-context-shift" in off
-    assert "--no-mmap" in on and "--mmap" in off
+    # `no_mmap` is REMOVED in modern llama.cpp (loading modes live in
+    # --load-mode); no form of it may ever be emitted.
+    assert "--no-mmap" not in on and "--mmap" not in on
+    assert "--no-mmap" not in off and "--mmap" not in off
     assert "--no-cache-idle-slots" in on and "--cache-idle-slots" in off
 
 
@@ -254,14 +255,41 @@ def test_mtp_zero_or_none_no_spec_flags() -> None:
         assert "--spec-draft-n-max" not in cmd
 
 
-def test_strict_mtp_qwen_forces_parallel_one() -> None:
+def test_load_mode_explicit_value() -> None:
+    """`--mmap` was removed in modern llama.cpp; loading modes live in
+    `--load-mode` (auto|mmap|mlock|none). Explicit non-auto values emit the
+    flag; auto/absent emits nothing (server default)."""
     cmd = build_llama_command(
-        {"args": {"strict_mtp_qwen": True, "parallel": 4}},
+        {"args": {"load_mode": "mlock"}}, model_path="/m/x.gguf", port=1
+    )
+    assert "--load-mode" in cmd
+    assert cmd[cmd.index("--load-mode") + 1] == "mlock"
+    # auto or absent: no flag (server default is auto).
+    assert "--load-mode" not in build_llama_command(
+        {"args": {"load_mode": "auto"}}, model_path="/m/x.gguf", port=1
+    )
+    assert "--load-mode" not in build_llama_command({}, model_path="/m/x.gguf", port=1)
+
+
+def test_removed_flags_never_emitted() -> None:
+    """Regression guard for flags this deployed llama-server no longer has:
+    --mmap/--no-mmap (→ --load-mode) and --spec-mtp-strict-qwen."""
+    cmd = build_llama_command(
+        {
+            "args": {
+                "no_mmap": True,
+                "strict_mtp_qwen": True,
+                "mtp_draft_max": 4,
+            }
+        },
         model_path="/m/x.gguf",
         port=1,
     )
-    assert "--spec-mtp-strict-qwen" in cmd
-    assert cmd[cmd.index("--parallel") + 1] == "1"
+    for flag in ("--mmap", "--no-mmap", "--spec-mtp-strict-qwen"):
+        assert flag not in cmd
+    # mtp still selects its spec mode; strict_mtp_qwen no longer coerces
+    # parallel (the flag it existed for is gone).
+    assert "--spec-type" in cmd
 
 
 def test_jinja_default_true() -> None:

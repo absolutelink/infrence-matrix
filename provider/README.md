@@ -249,14 +249,14 @@ the mock's admin-driven boot pattern.
 | `batch_size` (default 512) | `--batch-size` |
 | (always) | `--metrics` |
 | `threads`, `threads_batch`, `ubatch_size`, `keep`, `predict`, `cache_type_k/v`, `cache_reuse`, `ctx_checkpoints`, `checkpoint_every`→`--checkpoint-min-step`, `cache_ram`, `slot_save_path`, `device`, `split_mode`, `tensor_split`, `main_gpu`, `fit`, `fit_target`, `fit_ctx`, `temperature`, `top_k`, `top_p`, `min_p`, `repeat_penalty`, `presence_penalty`, `frequency_penalty`, `seed`, `parallel`, `reasoning`, `reasoning_budget`, `spec_draft_p_min` | `--<flag> <value>` when present and not None |
-| `swa_full`/`kv_unified`/`strict_mtp_qwen`→`--spec-mtp-strict-qwen` | emitted when truthy |
-| `kv_offload`, `cache_prompt`, `cont_batching`, `warmup`, `context_shift`, `no_mmap`, `no_cache_idle_slots` | `--x` / `--no-x` by boolean. NOTE: `--cache-prompt` is a valid modern flag; the OBSOLETE `--prompt-cache` is NEVER emitted. |
+| `swa_full`/`kv_unified` | emitted when truthy |
+| `kv_offload`, `cache_prompt`, `cont_batching`, `warmup`, `context_shift`, `no_cache_idle_slots` | `--x` / `--no-x` by boolean. NOTE: `--cache-prompt` is a valid modern flag; the OBSOLETE `--prompt-cache` is NEVER emitted. |
+| `load_mode` (auto|mmap|mlock|none) | `--load-mode <m>` when present and not `auto`. `no_mmap` and `strict_mtp_qwen` are REMOVED in modern llama.cpp (`--mmap`/`--no-mmap`/`--spec-mtp-strict-qwen` no longer exist) and are silently ignored |
 | `flash_attn` (bool or "on"/"off") | `--flash-attn on|off`; skipped when None |
 | `draft` artifact present | `--spec-type draft-dflash` + `-md <path>` |
 | else `mtp_draft_max > 0` | `--spec-type draft-mtp --spec-draft-n-max N` |
 | `jinja` (default true) | `--jinja` |
 | `mmproj` artifact | `--mmproj <path>` |
-| `strict_mtp_qwen: true` | forces `--parallel 1` |
 
 Spawn env: `LD_LIBRARY_PATH` defaults to the binary's directory
 (`env.setdefault`) — Vulkan/containers may not provide it.
