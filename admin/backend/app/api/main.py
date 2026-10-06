@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.admin.definitions import router as admin_definitions_router
 from app.api.admin.health import router as admin_health_router
+from app.api.admin.huggingface import router as admin_huggingface_router
 from app.api.admin.instances import router as admin_instances_router
 from app.api.admin.machines import router as admin_machines_router
 from app.api.admin.provider_types import router as admin_provider_types_router
@@ -24,6 +25,8 @@ api_router.include_router(admin_definitions_router)
 api_router.include_router(admin_instances_router)
 # Phase 12: ProviderType registry reads + schema-consensus overrides.
 api_router.include_router(admin_provider_types_router)
+# Phase 12: HF proxy for the hf-file picker widget (trusted LAN, read-only).
+api_router.include_router(admin_huggingface_router)
 # Phase 10 UI reads: response log, usage stats, dashboard overview.
 api_router.include_router(admin_responses_router)
 # Public OpenAI-compatible inference API lives at /v1 (NOT under /admin/api).

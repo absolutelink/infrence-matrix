@@ -26,6 +26,7 @@ dev = [
     "pytest-asyncio<1.0.0,>=0.21.0",
     "ruff<1.0.0,>=0.2.2",
     "coverage<8.0.0,>=7.4.3",
+    "respx>=0.21",
 ]
 
 [build-system]
