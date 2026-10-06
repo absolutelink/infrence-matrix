@@ -25,8 +25,10 @@ def _driver(tmp_path: Any, binary: str, artifacts: dict[str, str]):
     return HalogenBackend(
         settings,
         {
-            "model": {"path": artifacts["checkpoint"]},
-            "tokenizer": {"path": artifacts["tokenizer"]},
+            "artifacts": {
+                "model": {"path": artifacts["checkpoint"]},
+                "tokenizer": {"path": artifacts["tokenizer"]},
+            }
         },
     )
 

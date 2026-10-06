@@ -17,9 +17,11 @@ Provider-specific behaviors ported here:
   the terminal usage's ``completion_tokens_details`` so the admin's
   `persist_turn` records real rates in `TokenUsageSample`.
 - **Aux spec files by path.** mmproj / dflash_model / dspark_model /
-  mtp_model in ``backend_config.options`` may be artifact descriptors;
-  they are resolved through `provider_lib.downloader.ensure_artifact`
-  before spawn and rewritten to concrete local paths.
+  mtp_model live in ``backend_config.artifacts`` (Phase 12; the legacy
+  ``options.*`` positions are still accepted) as artifact descriptors;
+  they are resolved through
+  `provider_lib.downloader.ensure_artifact` before spawn and rewritten
+  to concrete local paths in the flattened options.
 """
 
 import asyncio
@@ -38,8 +40,9 @@ import httpx
 from provider_lib.backend import BackendDriver
 from provider_lib.config import ProviderSettings
 from provider_lib.downloader import ensure_artifact
+from provider_lib.schema import load_schema, validate_backend_config
 
-from provider_gufo.command import build_command, effective_capacity
+from provider_gufo.command import build_command, effective_capacity, flatten_args
 from provider_gufo.log_ring import CursorLogRing
 from provider_gufo.rates import inject_rates, parse_rate_gauges
 
@@ -53,8 +56,23 @@ _HEALTH_POLL_INTERVAL = 0.25
 _STDERR_TAIL_LINES = 5
 _METRICS_TIMEOUT = 5.0
 
-# backend_config.options keys that reference auxiliary GGUF/spec files.
+# The gufo committed backend_config schema (Phase 12): the sectioned
+# shape the admin registers, validates against, and renders in the UI.
+# Shared with main.py (single load → registration + driver validation).
+SCHEMA: dict[str, Any] = load_schema("provider_gufo")
+
+# backend_config.artifacts keys that reference auxiliary GGUF/spec files
+# (also accepted under the legacy `options.*` positions).
 AUX_KEYS = ("mmproj", "dflash_model", "dspark_model", "mtp_model")
+
+
+def _read_backend_port(cfg: dict[str, Any], settings: ProviderSettings) -> int:
+    """Resolve the gufo listen port: `server.backend_port` (Phase 12),
+    the legacy top-level `backend_port`, or PROVIDER_PORT + 1."""
+    port = (cfg.get("server") or {}).get("backend_port")
+    if port is None:
+        port = cfg.get("backend_port")
+    return int(port or (settings.PROVIDER_PORT + 1))
 
 
 class GufoBackend(BackendDriver):
@@ -73,9 +91,7 @@ class GufoBackend(BackendDriver):
         self._progress_cb = progress_cb
         self._log_cb = log_cb
         self._binary = settings.GUFO_SERVER_PATH
-        self.backend_port = int(
-            self._config.get("backend_port") or (settings.PROVIDER_PORT + 1)
-        )
+        self.backend_port = _read_backend_port(self._config, settings)
         self._proc: subprocess.Popen[str] | None = None
         self._log_ring = CursorLogRing(_LOG_BUFFER_LINES)
         self._log_readers: list[asyncio.Task[None]] = []
@@ -83,14 +99,35 @@ class GufoBackend(BackendDriver):
         # Phase 9: local paths resolved during the last start, used by
         # storage.prune_unused as the "referenced artifact set".
         self.resolved_artifacts: list[str] = []
+        # True per-instance identity for the `--cache-disk` subdirectory.
+        # Set by apply_registration() from the registration response;
+        # until then the driver falls back to MACHINE_UID (pre-registration
+        # boots, e.g. tests). Registration always precedes backend.start
+        # in the real flow, so the directory is genuinely per-instance.
+        self.instance_id: str | None = None
+
+    def set_instance_id(self, instance_id: str) -> None:
+        """Record the admin-issued instance id (called at registration)."""
+        self.instance_id = instance_id
 
     def apply_config(self, backend_config: dict[str, Any]) -> None:
-        """Adopt a (possibly updated) backend_config before start."""
+        """Adopt a (possibly updated) sectioned backend_config before start.
+
+        Schema violations are logged as warnings, not raised: the
+        authoritative gates are the admin's registration schema check and
+        definition CRUD validation (docs/ws-protocol.md §2).
+        """
         self._config = backend_config or {}
-        self.backend_port = int(
-            self._config.get("backend_port") or (self._settings.PROVIDER_PORT + 1)
-        )
+        for err in validate_backend_config(SCHEMA, self._config):
+            logger.warning("backend_config schema violation: %s", err)
+        self.backend_port = _read_backend_port(self._config, self._settings)
+        # Config changed: previously resolved artifacts are stale.
         self.resolved_artifacts = []
+
+    def _options(self) -> dict[str, Any]:
+        """Flat semantic options for argv building (Phase 12 sections +
+        legacy `cfg["options"]`; see command.flatten_args)."""
+        return flatten_args(self._config)
 
     @property
     def base_url(self) -> str:
@@ -102,14 +139,38 @@ class GufoBackend(BackendDriver):
 
     @property
     def effective_capacity(self) -> int:
-        """Gufo concurrency = preallocated GPU sessions (options.sessions)."""
-        return effective_capacity(self._config.get("options") or {})
+        """Gufo concurrency = preallocated GPU sessions (flattened sessions)."""
+        return effective_capacity(self._options())
 
     # ------------------------------------------------------------------
     # Artifact resolution
     # ------------------------------------------------------------------
+    def _artifact_descriptor(self, name: str) -> Any:
+        """Read an artifact descriptor from the `artifacts` section
+        (Phase 12), falling back to the legacy positions: top-level for
+        `model`, `options.<name>` for the aux spec files."""
+        artifacts = self._config.get("artifacts")
+        if isinstance(artifacts, dict) and artifacts.get(name) is not None:
+            return artifacts[name]
+        if name == "model":
+            return self._config.get(name)
+        return (self._config.get("options") or {}).get(name)
+
+    async def _resolve_artifact(self, descriptor: Any, kind: str) -> str:
+        # The hfFile schema allows an optional `revision`; only a
+        # non-empty string pins the HF revision (empty/absent = None).
+        revision = descriptor.get("revision") if isinstance(descriptor, dict) else None
+        if not isinstance(revision, str) or not revision.strip():
+            revision = None
+        return await ensure_artifact(
+            descriptor,
+            models_dir=self._settings.MODELS_DIR,
+            progress_cb=self._progress_cb,
+            revision=revision,
+        )
+
     async def _resolve_main_model(self) -> str:
-        model = self._config.get("model")
+        model = self._artifact_descriptor("model")
         if not model:
             raise RuntimeError("backend_config missing 'model' artifact")
         if isinstance(model, str):
@@ -117,28 +178,29 @@ class GufoBackend(BackendDriver):
             if not p.is_file():
                 raise RuntimeError(f"local model file not found: {model}")
             return str(p)
-        return await ensure_artifact(
-            model,
-            models_dir=self._settings.MODELS_DIR,
-            progress_cb=self._progress_cb,
-        )
+        if isinstance(model, dict) and model.get("path"):
+            p = Path(str(model["path"]))
+            if not p.is_file():
+                raise RuntimeError(f"local model file not found: {p}")
+            return str(p)
+        return await self._resolve_artifact(model, "model")
 
     async def _resolve_aux(self) -> dict[str, Any]:
-        """Resolve aux descriptors in options to concrete paths.
+        """Resolve aux descriptors to concrete paths in the flat options.
 
         A string value is passed through untouched (pre-placed file); a
         dict value is treated as an artifact descriptor and downloaded /
         resolved via the lib downloader, then replaced by its local path.
+        Descriptors are read from `artifacts` (Phase 12) with the legacy
+        `options.*` positions as fallback.
         """
-        options = dict(self._config.get("options") or {})
+        options = self._options()
         for key in AUX_KEYS:
-            value = options.get(key)
+            value = self._artifact_descriptor(key)
             if isinstance(value, dict):
-                options[key] = await ensure_artifact(
-                    value,
-                    models_dir=self._settings.MODELS_DIR,
-                    progress_cb=self._progress_cb,
-                )
+                options[key] = await self._resolve_artifact(value, key)
+            elif value is not None:
+                options[key] = value
         return options
 
     # ------------------------------------------------------------------
@@ -161,7 +223,9 @@ class GufoBackend(BackendDriver):
             port=self.backend_port,
             binary=self._binary,
             cache_dir=self._settings.CACHE_DIR,
-            instance_id=self._settings.MACHINE_UID,
+            # Real registered instance id when available (set by
+            # apply_registration); MACHINE_UID only pre-registration.
+            instance_id=self.instance_id or self._settings.MACHINE_UID,
         )
         logger.info("starting gufo: %s", " ".join(cmd))
         try:

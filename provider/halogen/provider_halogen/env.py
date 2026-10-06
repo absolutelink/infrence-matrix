@@ -2,12 +2,20 @@
 
 Unlike llama.cpp/gufo (argv-configured), the halogen backend is
 configured almost entirely through `HALOGEN_*` environment variables.
-`backend_config` holds the semantic config (model artifacts + options);
-this module maps it to the env dict for the subprocess.
+Since Phase 12 the `backend_config` is a **sectioned** object (see
+`provider_halogen/schema.json`); `flatten_options()` assembles the flat
+semantic-options dict that `ENV_MAP` / `build_env` consume, so the env
+mapping itself is unchanged. The legacy flat `cfg["options"]` blob is
+still merged (section values win on key conflicts) for hand-rolled
+configs. None-skip semantics hold: absent or None values are never
+emitted; the engine keeps its own default.
 
-The fixed wiring (ports, bind, checkpoint, tokenizer) is always emitted;
-each semantic option is emitted only when present and not None (None-
-skip: the engine keeps its own default).
+Port rule: halogen exposes an API port and a private engine port. When
+not pinned they default to `PROVIDER_PORT + 1` / `PROVIDER_PORT + 2`
+from the container env. Resolution is ATOMIC (Phase 12 D3 lesson): the
+pair is honored only when BOTH ports come from the same source, so a
+half-migrated config can never mix a `networking` api_port with a
+legacy top-level engine_port.
 """
 
 from typing import Any
@@ -17,8 +25,10 @@ FIXED_ENV: dict[str, str] = {
     "HALOGEN_BIND": "127.0.0.1",
 }
 
-# backend_config.options key -> HALOGEN_* env var (value flags).
-# Every entry is optional; None / absent is never emitted.
+# backend_config semantic-option key -> HALOGEN_* env var (value flags).
+# Every entry is optional; None / absent is never emitted. Keys arrive
+# via `flatten_options()` (Phase 12 sections) or the legacy flat
+# `cfg["options"]` blob.
 ENV_MAP: dict[str, str] = {
     "drafter": "HALOGEN_DRAFTER",
     "cache_align": "HALOGEN_CACHE_ALIGN",
@@ -34,7 +44,67 @@ ENV_MAP: dict[str, str] = {
     "sse_keepalive_s": "HALOGEN_SSE_KEEPALIVE_S",
 }
 
+# backend_config sections whose leaf keys flatten into the semantic
+# `options` dict consumed by ENV_MAP / build_env (Phase 12). `artifacts`
+# is excluded: the driver resolves those descriptors to local paths and
+# passes them to build_env explicitly. `networking` ports ride along
+# harmlessly — ENV_MAP has no key for them; the driver reads ports via
+# resolve_ports().
+CONFIG_SECTIONS: tuple[str, ...] = (
+    "cache",
+    "concurrency",
+    "quantization",
+    "speculative",
+    "server",
+    "networking",
+)
+
 DEFAULT_KV_SLOTS = 1
+
+
+def flatten_options(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Assemble the flat semantic-options dict from a sectioned config.
+
+    Mirrors llama-cpp's `flatten_args()`: section leaves are merged in
+    `CONFIG_SECTIONS` order; the legacy flat `cfg["options"]`
+    (pre-Phase-12 shape) is merged first so section values take
+    precedence on key conflicts.
+    """
+    flat: dict[str, Any] = dict(cfg.get("options") or {})
+    for section in CONFIG_SECTIONS:
+        values = cfg.get(section)
+        if isinstance(values, dict):
+            flat.update(values)
+    return flat
+
+
+def resolve_ports(cfg: dict[str, Any], provider_port: int) -> tuple[int, int]:
+    """Resolve the (api_port, engine_port) pair for this instance.
+
+    Each source is ATOMIC — a pair is honored only when both ports come
+    from the same source, so a half-migrated config can never mix a
+    `networking` api_port with a legacy top-level engine_port.
+    Resolution order:
+
+    1. `networking` section with BOTH `api_port` and `engine_port`.
+    2. Legacy top-level `api_port` (or its `backend_port` alias) AND
+       `engine_port` (both present).
+    3. The default pair derived from the container's PROVIDER_PORT
+       (api = PROVIDER_PORT + 1, engine = PROVIDER_PORT + 2).
+    """
+    networking = cfg.get("networking")
+    if isinstance(networking, dict):
+        api = networking.get("api_port")
+        engine = networking.get("engine_port")
+        if api is not None and engine is not None:
+            return int(api), int(engine)
+    api = cfg.get("api_port")
+    if api is None:
+        api = cfg.get("backend_port")
+    engine = cfg.get("engine_port")
+    if api is not None and engine is not None:
+        return int(api), int(engine)
+    return provider_port + 1, provider_port + 2
 
 
 def build_env(
@@ -50,7 +120,9 @@ def build_env(
 
     Returns the full env dict (copy of ``base_env`` or os.environ with
     the halogen variables layered on). The caller never passes halogen
-    config via argv — only the entrypoint word ``all``.
+    config via argv — only the entrypoint word ``all``. ``options`` is
+    the flat semantic dict — pass ``flatten_options(cfg)`` for a
+    Phase 12 sectioned config (or a legacy ``cfg["options"]`` blob).
     """
     import os
 
@@ -73,7 +145,7 @@ def effective_capacity(options: dict[str, Any]) -> int:
     opts = options or {}
     try:
         return max(int(opts.get("kv_slots", DEFAULT_KV_SLOTS)), 1)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):  # fmt: skip
         return DEFAULT_KV_SLOTS
 
 

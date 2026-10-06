@@ -32,8 +32,10 @@ def _backend(
 ) -> HalogenBackend:
     settings = make_settings(tmp_path, binary)
     cfg: dict[str, Any] = {
-        "model": {"path": artifacts["checkpoint"]},
-        "tokenizer": {"path": artifacts["tokenizer"]},
+        "artifacts": {
+            "model": {"path": artifacts["checkpoint"]},
+            "tokenizer": {"path": artifacts["tokenizer"]},
+        }
     }
     cfg.update(cfg_extra)
     return HalogenBackend(settings, cfg)
@@ -74,7 +76,9 @@ async def test_env_mapping_through_real_spawn(
         tmp_path,
         fake_halogen_binary,
         local_artifacts,
-        options={"kv_slots": 4, "drafter": "mtp", "cache_mb": 2048},
+        concurrency={"kv_slots": 4},
+        speculative={"drafter": "mtp"},
+        cache={"cache_mb": 2048},
     )
     try:
         await driver.start()
@@ -97,8 +101,7 @@ async def test_explicit_ports_from_config(
         tmp_path,
         fake_halogen_binary,
         local_artifacts,
-        api_port=9401,
-        engine_port=9402,
+        networking={"api_port": 9401, "engine_port": 9402},
     )
     try:
         await driver.start()
@@ -202,6 +205,6 @@ async def test_early_exit_includes_stderr_tail(
 
 def test_effective_capacity(tmp_path, fake_halogen_binary, local_artifacts) -> None:
     driver = _backend(
-        tmp_path, fake_halogen_binary, local_artifacts, options={"kv_slots": 6}
+        tmp_path, fake_halogen_binary, local_artifacts, concurrency={"kv_slots": 6}
     )
     assert driver.effective_capacity == 6

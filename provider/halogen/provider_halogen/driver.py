@@ -11,13 +11,16 @@ Halogen specifics:
   the API port; the engine port only appears in HALOGEN_ENGINE.
 - **Env-configured.** Almost all configuration flows through HALOGEN_*
   env vars (see `provider_halogen.env`); argv is just the entrypoint
-  word `all`.
+  word `all`. Phase 12 sections flatten into the semantic options dict
+  via `env.flatten_options()`.
 - **Capacity = kv_slots.** The lifecycle capacity comes from the
   registration response (`provider_definition.capacity`); the engine's
   effective KV-slot capacity is reported in the `backend.start` ack.
-- **Artifacts.** `backend_config.model` is the `.hgn` checkpoint and
-  `backend_config.tokenizer` the tokenizer directory; both resolve
-  through the lib downloader (or a plain local `{"path": ...}`).
+- **Artifacts.** `backend_config.artifacts.model` is the `.hgn`
+  checkpoint and `artifacts.tokenizer` the tokenizer directory; both
+  resolve through the lib downloader (or a plain local `{"path": ...}`).
+  The legacy top-level `model` / `tokenizer` keys are accepted as
+  fallback.
 """
 
 import asyncio
@@ -37,8 +40,15 @@ import httpx
 from provider_lib.backend import BackendDriver
 from provider_lib.config import ProviderSettings
 from provider_lib.downloader import ensure_artifact
+from provider_lib.schema import load_schema, validate_backend_config
 
-from provider_halogen.env import build_argv, build_env, effective_capacity
+from provider_halogen.env import (
+    build_argv,
+    build_env,
+    effective_capacity,
+    flatten_options,
+    resolve_ports,
+)
 from provider_halogen.log_ring import CursorLogRing
 
 logger = logging.getLogger("provider.halogen")
@@ -49,6 +59,11 @@ LogCallback = Callable[[str, str], Awaitable[None]]
 _LOG_BUFFER_LINES = 2000
 _HEALTH_POLL_INTERVAL = 0.25
 _STDERR_TAIL_LINES = 5
+
+# The halogen committed backend_config schema (Phase 12): the sectioned
+# shape the admin registers, validates against, and renders in the UI.
+# Shared with main.py (single load → registration + driver validation).
+SCHEMA: dict[str, Any] = load_schema("provider_halogen")
 
 
 class HalogenBackend(BackendDriver):
@@ -79,17 +94,28 @@ class HalogenBackend(BackendDriver):
         self.resolved_artifacts: list[str] = []
 
     def _resolve_ports(self) -> tuple[int, int]:
-        cfg = self._config
-        base = self._settings.PROVIDER_PORT
-        api_port = int(cfg.get("api_port") or cfg.get("backend_port") or (base + 1))
-        engine_port = int(cfg.get("engine_port") or (base + 2))
-        return api_port, engine_port
+        # Phase 12: `networking.{api_port,engine_port}`, atomic with the
+        # legacy top-level keys (see env.resolve_ports).
+        return resolve_ports(self._config, self._settings.PROVIDER_PORT)
 
     def apply_config(self, backend_config: dict[str, Any]) -> None:
-        """Adopt a (possibly updated) backend_config before start."""
+        """Adopt a (possibly updated) sectioned backend_config before start.
+
+        Schema violations are logged as warnings, not raised: the
+        authoritative gates are the admin's registration schema check and
+        definition CRUD validation (docs/ws-protocol.md §2).
+        """
         self._config = backend_config or {}
+        for err in validate_backend_config(SCHEMA, self._config):
+            logger.warning("backend_config schema violation: %s", err)
         self._ports = self._resolve_ports()
+        # Config changed: previously resolved artifacts are stale.
         self.resolved_artifacts = []
+
+    def _options(self) -> dict[str, Any]:
+        """Flat semantic options for env building (Phase 12 sections +
+        legacy `cfg["options"]`; see env.flatten_options)."""
+        return flatten_options(self._config)
 
     @property
     def api_port(self) -> int:
@@ -114,19 +140,28 @@ class HalogenBackend(BackendDriver):
 
     @property
     def effective_capacity(self) -> int:
-        """Halogen concurrency = HALOGEN_KV_SLOTS (options.kv_slots)."""
-        return effective_capacity(self._config.get("options") or {})
+        """Halogen concurrency = HALOGEN_KV_SLOTS (flattened kv_slots)."""
+        return effective_capacity(self._options())
 
     # ------------------------------------------------------------------
     # Artifact resolution
     # ------------------------------------------------------------------
+    def _artifact_descriptor(self, name: str) -> Any:
+        """Read an artifact descriptor from the `artifacts` section
+        (Phase 12), falling back to the legacy top-level key."""
+        artifacts = self._config.get("artifacts")
+        if isinstance(artifacts, dict) and artifacts.get(name) is not None:
+            return artifacts[name]
+        return self._config.get(name)
+
     async def _resolve_artifact(self, descriptor: Any, kind: str) -> str:
         """Resolve a halogen artifact to a local path.
 
         The tokenizer is a DIRECTORY artifact, so `{"path": ...}` is
         checked with exists() (file or dir) here instead of the lib's
         file-only local path; HF repo descriptors still go through
-        `ensure_artifact`.
+        `ensure_artifact` (with the descriptor's optional `revision`
+        pinned, mirroring the llama-cpp driver).
         """
         if descriptor is None:
             raise RuntimeError(f"backend_config missing '{kind}' artifact")
@@ -140,16 +175,23 @@ class HalogenBackend(BackendDriver):
             if not p.exists():
                 raise RuntimeError(f"local {kind} path not found: {p}")
             return str(p)
+        # Only a non-empty string pins the HF revision (empty/absent = None).
+        revision = descriptor.get("revision") if isinstance(descriptor, dict) else None
+        if not isinstance(revision, str) or not revision.strip():
+            revision = None
         return await ensure_artifact(
             descriptor,
             models_dir=self._settings.MODELS_DIR,
             progress_cb=self._progress_cb,
+            revision=revision,
         )
 
     async def _resolve_artifacts(self) -> tuple[str, str]:
-        checkpoint = await self._resolve_artifact(self._config.get("model"), "model")
+        checkpoint = await self._resolve_artifact(
+            self._artifact_descriptor("model"), "model"
+        )
         tokenizer = await self._resolve_artifact(
-            self._config.get("tokenizer"), "tokenizer"
+            self._artifact_descriptor("tokenizer"), "tokenizer"
         )
         return checkpoint, tokenizer
 
@@ -168,7 +210,7 @@ class HalogenBackend(BackendDriver):
         self.resolved_artifacts = [checkpoint_path, tokenizer_path]
         api_port, engine_port = self._ports
         env = build_env(
-            self._config.get("options") or {},
+            self._options(),
             api_port=api_port,
             engine_port=engine_port,
             checkpoint_path=checkpoint_path,

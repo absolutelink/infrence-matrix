@@ -48,7 +48,7 @@ _COUNT_KEYS = (
 def _int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):  # fmt: skip
         return default
 
 
@@ -142,7 +142,7 @@ def calculate_usage(
         if value is not None:
             try:
                 rates[key] = float(value)
-            except TypeError, ValueError:
+            except (TypeError, ValueError):  # fmt: skip
                 pass
     if rates:
         usage["completion_tokens_details"] = rates

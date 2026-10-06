@@ -47,7 +47,7 @@ def _query_nvidia_smi(query: str) -> str | None:
             timeout=5,
             check=False,
         )
-    except OSError, subprocess.SubprocessError:
+    except (OSError, subprocess.SubprocessError):  # fmt: skip
         return None
     if result.returncode == 0:
         return result.stdout.strip()
@@ -77,7 +77,7 @@ def _parse_nvidia_output(output: str) -> list[dict[str, Any]]:
                     "temperature": float(parts[6]),
                 }
             )
-        except ValueError, IndexError:
+        except (ValueError, IndexError):  # fmt: skip
             continue
     return gpus
 
@@ -85,7 +85,7 @@ def _parse_nvidia_output(output: str) -> list[dict[str, Any]]:
 def _read_int(path: Path) -> int | None:
     try:
         return int(path.read_text().strip())
-    except OSError, ValueError:
+    except (OSError, ValueError):  # fmt: skip
         return None
 
 

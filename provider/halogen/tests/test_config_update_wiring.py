@@ -132,8 +132,10 @@ async def test_config_update_applies_new_model_and_clears_cache(
     BACKEND_CONFIG.clear()
     BACKEND_CONFIG.update(
         {
-            "model": {"path": local_artifacts["checkpoint"]},
-            "tokenizer": {"path": local_artifacts["tokenizer"]},
+            "artifacts": {
+                "model": {"path": local_artifacts["checkpoint"]},
+                "tokenizer": {"path": local_artifacts["tokenizer"]},
+            }
         }
     )
     settings = make_settings(tmp_path, fake_halogen_binary, ADMIN_BASE_URL=fake_admin)
@@ -154,9 +156,11 @@ async def test_config_update_applies_new_model_and_clears_cache(
         (old / "slot.bin").write_bytes(b"x" * 40)
 
         new_cfg = {
-            "model": {"path": local_artifacts["checkpoint"]},
-            "tokenizer": {"path": local_artifacts["tokenizer"]},
-            "options": {"kv_slots": 3},
+            "artifacts": {
+                "model": {"path": local_artifacts["checkpoint"]},
+                "tokenizer": {"path": local_artifacts["tokenizer"]},
+            },
+            "concurrency": {"kv_slots": 3},
         }
         await client._dispatch(
             Frame(

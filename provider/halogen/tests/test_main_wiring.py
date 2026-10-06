@@ -120,9 +120,11 @@ async def test_admin_driven_boot_and_v1_streaming(
     BACKEND_CONFIG.clear()
     BACKEND_CONFIG.update(
         {
-            "model": {"path": local_artifacts["checkpoint"]},
-            "tokenizer": {"path": local_artifacts["tokenizer"]},
-            "options": {"kv_slots": 2},
+            "artifacts": {
+                "model": {"path": local_artifacts["checkpoint"]},
+                "tokenizer": {"path": local_artifacts["tokenizer"]},
+            },
+            "concurrency": {"kv_slots": 2},
         }
     )
     settings = make_settings(tmp_path, fake_halogen_binary, ADMIN_BASE_URL=fake_admin)
@@ -191,9 +193,11 @@ def test_apply_registration_adopts_capacity_and_config(
         provider_definition = {
             "capacity": 3,
             "backend_config": {
-                "model": {"path": local_artifacts["checkpoint"]},
-                "tokenizer": {"path": local_artifacts["tokenizer"]},
-                "options": {"kv_slots": 3},
+                "artifacts": {
+                    "model": {"path": local_artifacts["checkpoint"]},
+                    "tokenizer": {"path": local_artifacts["tokenizer"]},
+                },
+                "concurrency": {"kv_slots": 3},
             },
         }
 

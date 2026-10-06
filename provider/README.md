@@ -515,34 +515,36 @@ driver passes events through unmodified except for rate enrichment.
 
 ```json
 {
-  "model":  {"source": "hf", "repo": "...", "file": "model.gguf"},
-  "backend_port": 8082,
-  "options": {
-    "context": 131072,
-    "served_model_name": "my-alias",
-    "mmproj":       {"source": "hf", "repo": "...", "file": "mmproj.gguf"},
-    "dflash_model": {"source": "hf", "repo": "...", "file": "draft.gguf"},
-    "dspark_model": "...", "mtp_model": "...",
-    "cache_disk": true, "cache_disk_bytes": 1073741824,
-    "sessions": 4,
-    "temperature": 0.7, "top_k": 40, "top_p": 0.9,
-    "think": "on", "reasoning_effort": "high",
-    "speculative": "dflash2", "draft_policy": "adaptive",
-    "api_key": "...", "verbose": true, "log_progress": false
-  }
+  "artifacts": {
+    "model":  {"source": "hf", "repo": "...", "file": "model.gguf"},
+    "mmproj": {"source": "hf", "repo": "...", "file": "mmproj.gguf"},
+    "dflash_model": {"path": "/models/draft.gguf"},
+    "dspark_model": null, "mtp_model": null
+  },
+  "context": {"context": 131072, "served_model_name": "my-alias"},
+  "disk_cache": {"cache_disk": true, "cache_disk_bytes": 1073741824},
+  "speculative": {"speculative": "dflash2", "draft_policy": "adaptive",
+                   "draft_tokens": 4, "min_draft_tokens": 1},
+  "sampling": {"temperature": 0.7, "top_k": 40, "top_p": 0.9},
+  "reasoning": {"think": "on", "reasoning_effort": "high"},
+  "limits": {"prefill_chunk": 2048, "max_pending": 64},
+  "server": {"sessions": 4, "backend_port": 8082, "api_key": "...",
+              "verbose": true, "log_progress": false}
 }
 ```
 
-- `model` accepts the same descriptor shapes as llama-cpp
+- `artifacts.model` accepts the same descriptor shapes as llama-cpp
   (`{"path": ...}` or HF `{"source","repo","file"}`), resolved via
   `provider_lib.downloader.ensure_artifact` (repo layout + FLAT
   `MODELS_DIR/<file>` candidates).
 - Aux spec files (**mmproj / dflash_model / dspark_model / mtp_model**)
-  may be *artifact descriptors* in `options`; the driver resolves each
-  through the downloader and rewrites the option to the concrete local
-  path before spawn (legacy "aux by path" semantics). Plain strings pass
-  through untouched.
-- `backend_port` optional; default `PROVIDER_PORT + 1`. Health:
+  live in `artifacts` since Phase 12 (the legacy `options.*` positions
+  are still accepted as fallback); the driver resolves each descriptor
+  through the downloader and rewrites the flattened option to the
+  concrete local path before spawn (legacy "aux by path" semantics).
+  Plain strings pass through untouched.
+- `server.backend_port` optional; default `PROVIDER_PORT + 1` (the
+  legacy top-level `backend_port` is still honored). Health:
   `GET /health` on that port. Binary from env `GUFO_SERVER_PATH`
   (default `gufo`).
 - The subprocess runs in its own session (`start_new_session=True`);
@@ -550,22 +552,27 @@ driver passes events through unmodified except for rate enrichment.
 
 ### Command mapping (command.py)
 
+`flatten_args()` merges the section leaves (all sections except
+`artifacts`) over the legacy flat `cfg["options"]` into one options
+dict; the flag maps below are unchanged.
+
 Base argv: `gufo serve llm --host 127.0.0.1 --port <backend_port>
---model <resolved model path>`, then per-key from `options`:
+--model <resolved model path>`, then per-key from the flattened
+options:
 
 | Option | CLI | Notes |
 | --- | --- | --- |
 | `context` | `--context <v>` | |
 | `served_model_name` | `--served-model-name <v>` | gufo otherwise advertises the GGUF filename |
-| `mmproj` | `--mmproj <path>` | descriptor resolved first |
-| sampling (`max_tokens temperature top_k top_p min_p min_keep seed repeat_penalty repeat_last_n frequency_penalty presence_penalty`) | `--<flag> <v>` | each only when present and not None |
-| reasoning (`think reasoning_effort preserve_thinking`) | `--<flag> <v>` | tri-state/enum values passed as strings |
-| speculative (`speculative dflash_model dspark_model mtp_model draft_policy draft_tokens min_draft_tokens`) | `--<flag> <v>` | aux descriptors resolved to paths |
-| limits (`prefill_chunk max_pending max_pending_per_client request_timeout_ms max_output_bytes max_buffered_output_bytes max_buffered_output_total`) | `--<flag> <v>` | |
-| `cache_disk_bytes` / `cache_disk_staging_bytes` | `--<flag> <v>` | |
-| `cache_disk: true` | `--cache-disk <CACHE_DIR>/<instance_id>` | directory created on demand; anything else omits the flag |
-| server (`sessions max_connections max_request_bytes api_key`) | `--<flag> <v>` | `sessions` = GPU concurrency |
-| `verbose` / `log_progress` | `--verbose` / `--log-progress` | **bool-only**: emitted only when `true`; false/None omitted so gufo keeps its default |
+| `mmproj` | `--mmproj <path>` | `artifacts.mmproj` descriptor resolved first |
+| sampling (`max_tokens temperature top_k top_p min_p min_keep seed repeat_penalty repeat_last_n frequency_penalty presence_penalty`) | `--<flag> <v>` | from `sampling.*`; each only when present and not None |
+| reasoning (`think reasoning_effort preserve_thinking`) | `--<flag> <v>` | from `reasoning.*`; tri-state/enum values passed as strings |
+| speculative (`speculative draft_policy draft_tokens min_draft_tokens`) + aux (`dflash_model dspark_model mtp_model`) | `--<flag> <v>` | knobs from `speculative.*`; aux descriptors from `artifacts.*` resolved to local paths |
+| limits (`prefill_chunk max_pending max_pending_per_client request_timeout_ms max_output_bytes max_buffered_output_bytes max_buffered_output_total`) | `--<flag> <v>` | from `limits.*` |
+| `cache_disk_bytes` / `cache_disk_staging_bytes` | `--<flag> <v>` | from `disk_cache.*` |
+| `disk_cache.cache_disk: true` | `--cache-disk <CACHE_DIR>/<instance_id>` | directory created on demand; anything else omits the flag |
+| server (`sessions max_connections max_request_bytes api_key`) | `--<flag> <v>` | from `server.*`; `sessions` = GPU concurrency, `api_key` is `x-secret` |
+| `server.verbose` / `server.log_progress` | `--verbose` / `--log-progress` | **bool-only**: emitted only when `true`; false/None omitted so gufo keeps its default |
 
 **Per-request `model` forwarding:** unlike llama-cpp (single-model
 server), the driver forwards the request body's `model` field to the
@@ -582,10 +589,11 @@ into the usage's `completion_tokens_details` as `prompt_per_second` /
 lifetime averages are the fallback; scrape failures are silent — rates
 are telemetry, never a request failure).
 
-**Effective capacity:** `options.sessions` (default 1) is the engine's
-GPU-session concurrency, reported in the `backend.start` ack's
-`detail.effective_capacity`. The lifecycle capacity itself comes from
-`provider_definition.capacity` (admin-side scheduling contract).
+**Effective capacity:** the flattened `sessions` (from `server.sessions`,
+default 1) is the engine's GPU-session concurrency, reported in the
+`backend.start` ack's `detail.effective_capacity`. The lifecycle
+capacity itself comes from `provider_definition.capacity` (admin-side
+scheduling contract).
 
 ## halogen provider (provider/halogen)
 
@@ -605,30 +613,31 @@ OpenAI-compatible **API port** (all HTTP traffic) and a private
 
 ```json
 {
-  "model":     {"source": "hf", "repo": "peonist-ai/halogen-qwen3.8-27b", "file": "qwen3.8-27b-p1w4d-d2.hgn"},
-  "tokenizer": {"source": "hf", "repo": "peonist-ai/halogen-qwen3.8-27b", "file": "tokenizer"},
-  "api_port": 8082,
-  "engine_port": 8083,
-  "options": {
-    "kv_slots": 4,
-    "drafter": "mtp",
-    "cache_mb": 2048,
-    "cache_reserve_mb": 256,
-    "slot_ctx": 4096,
-    "cache_align": 16,
-    "max_tokens_cap": 8192,
-    "queue_timeout": 300,
-    "w4a4": 1, "w4a4_excl": "attn",
-    "keepalive_timeout": 60, "sse_keepalive_s": 15
-  }
+  "artifacts": {
+    "model":     {"source": "hf", "repo": "peonist-ai/halogen-qwen3.8-27b", "file": "qwen3.8-27b-p1w4d-d2.hgn"},
+    "tokenizer": {"path": "/models/tokenizer"}
+  },
+  "cache": {"cache_mb": 2048, "cache_reserve_mb": 256, "cache_align": 16},
+  "concurrency": {"kv_slots": 4, "slot_ctx": 4096, "queue_timeout": 300},
+  "quantization": {"w4a4": 1, "w4a4_excl": "attn"},
+  "speculative": {"drafter": "mtp"},
+  "server": {"max_tokens_cap": 8192, "keepalive_timeout": 60, "sse_keepalive_s": 15},
+  "networking": {"api_port": 8082, "engine_port": 8083}
 }
 ```
 
-- `model` = the `.hgn` **checkpoint**, `tokenizer` = the tokenizer
-  **directory**. Both accept `{"path": ...}` (file *or* directory, no
-  download) or HF descriptors resolved via the lib downloader.
-- Ports: `api_port` defaults to `PROVIDER_PORT + 1`, `engine_port` to
-  `PROVIDER_PORT + 2`. Health = `GET /health` on the **API port**.
+- `artifacts.model` = the `.hgn` **checkpoint**, `artifacts.tokenizer`
+  = the tokenizer **directory**. Both accept `{"path": ...}` (file *or*
+  directory, no download) or HF descriptors resolved via the lib
+  downloader (file-only — unpack a HF tokenizer directory locally and
+  reference it by path). The legacy top-level `model` / `tokenizer`
+  keys are still honored as fallback.
+- Ports (`networking.api_port` / `networking.engine_port`): resolution
+  is **ATOMIC** — the pinned pair is honored only when BOTH come from
+  the same source (the `networking` section, or the legacy top-level
+  keys); a half-pinned config falls back entirely to the default pair
+  `PROVIDER_PORT + 1` / `PROVIDER_PORT + 2`. Health = `GET /health` on
+  the **API port**.
 - Binary/entrypoint from env `HALOGEN_SERVER_PATH` (default
   `halogen-server`); spawned as
   `stdbuf -oL -eL <entrypoint> all` with stderr merged into stdout
@@ -636,38 +645,44 @@ OpenAI-compatible **API port** (all HTTP traffic) and a private
 
 ### Env mapping (env.py)
 
+`flatten_options()` merges the section leaves (all sections except
+`artifacts` and the fixed-wiring `networking` ports) over the legacy
+flat `cfg["options"]` into one semantic dict; the mapping below is
+unchanged.
+
 Fixed (always set):
 
 | Env | Value |
 | --- | --- |
-| `HALOGEN_API_PORT` | `api_port` |
-| `HALOGEN_PORT` | `engine_port` |
+| `HALOGEN_API_PORT` | `networking.api_port` (resolved pair) |
+| `HALOGEN_PORT` | `networking.engine_port` (resolved pair) |
 | `HALOGEN_BIND` | `127.0.0.1` |
 | `HALOGEN_ENGINE` | `127.0.0.1:<engine_port>` |
-| `HALOGEN_CHECKPOINT` | resolved checkpoint path |
-| `HALOGEN_TOKENIZER` | resolved tokenizer path |
+| `HALOGEN_CHECKPOINT` | resolved `artifacts.model` path |
+| `HALOGEN_TOKENIZER` | resolved `artifacts.tokenizer` path |
 
-From `options` (each emitted **only when present and not None**,
-stringified):
+From the flattened options (each emitted **only when present and not
+None**, stringified):
 
-| Option | Env |
+| Section.key | Env |
 | --- | --- |
-| `drafter` | `HALOGEN_DRAFTER` |
-| `cache_align` | `HALOGEN_CACHE_ALIGN` |
-| `kv_slots` | `HALOGEN_KV_SLOTS` |
-| `slot_ctx` | `HALOGEN_SLOT_CTX` |
-| `cache_mb` | `HALOGEN_CACHE_MB` |
-| `cache_reserve_mb` | `HALOGEN_CACHE_RESERVE_MB` |
-| `max_tokens_cap` | `HALOGEN_MAX_TOKENS_CAP` |
-| `queue_timeout` | `HALOGEN_QUEUE_TIMEOUT` |
-| `w4a4` | `HALOGEN_W4A4` |
-| `w4a4_excl` | `HALOGEN_W4A4_EXCL` |
-| `keepalive_timeout` | `HALOGEN_KEEPALIVE_TIMEOUT` |
-| `sse_keepalive_s` | `HALOGEN_SSE_KEEPALIVE_S` |
+| `speculative.drafter` | `HALOGEN_DRAFTER` |
+| `cache.cache_align` | `HALOGEN_CACHE_ALIGN` |
+| `concurrency.kv_slots` | `HALOGEN_KV_SLOTS` |
+| `concurrency.slot_ctx` | `HALOGEN_SLOT_CTX` |
+| `cache.cache_mb` | `HALOGEN_CACHE_MB` |
+| `cache.cache_reserve_mb` | `HALOGEN_CACHE_RESERVE_MB` |
+| `server.max_tokens_cap` | `HALOGEN_MAX_TOKENS_CAP` |
+| `concurrency.queue_timeout` | `HALOGEN_QUEUE_TIMEOUT` |
+| `quantization.w4a4` | `HALOGEN_W4A4` |
+| `quantization.w4a4_excl` | `HALOGEN_W4A4_EXCL` |
+| `server.keepalive_timeout` | `HALOGEN_KEEPALIVE_TIMEOUT` |
+| `server.sse_keepalive_s` | `HALOGEN_SSE_KEEPALIVE_S` |
 
-**Capacity:** the engine's request slots = `options.kv_slots` (default
-1), reported as `detail.effective_capacity` in the `backend.start` ack
-(plus `api_port`/`engine_port`). The lifecycle capacity comes from
+**Capacity:** the engine's request slots = the flattened `kv_slots`
+(from `concurrency.kv_slots`, default 1), reported as
+`detail.effective_capacity` in the `backend.start` ack (plus
+`api_port`/`engine_port`). The lifecycle capacity comes from
 `provider_definition.capacity`.
 
 **Streaming:** the driver proxies SSE from the API port's
@@ -989,7 +1004,8 @@ were configured with, so:
   update = deleting the old fingerprint's dir (and the shared root).
 - `cache.clear` deletes **only** the prompt-cache root
   (`CACHE_DIR/prompt_cache`) plus the provider's `extra_cache_dirs`
-  (gufo: `CACHE_DIR/<MACHINE_UID>` per-instance `--cache-disk` dir;
+  (gufo: `CACHE_DIR/<instance_id>` per-instance `--cache-disk` dir —
+  the real registered instance id, MACHINE_UID only pre-registration;
   halogen-flash: `CACHE_DIR/halogen-flash` engine disk cache).
   `MODELS_DIR` and `CACHE_DIR/provider_config.json` are never touched.
   The ack carries `{"deleted": [...], "bytes_freed": N}` and supports

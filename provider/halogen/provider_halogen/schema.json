@@ -1,0 +1,298 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "halogen backend_config",
+  "description": "Sectioned backend_config for the halogen provider (Phase 12). x-flag names the exact HALOGEN_* env var; env.py + driver.py remain the executable mapping. Halogen is env-configured (argv is only the entrypoint word `all`). None-skip semantics hold: a null or absent value is never exported and the engine keeps its own default.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "artifacts": {
+      "type": "object",
+      "title": "Model files",
+      "description": "Checkpoint and tokenizer artifacts resolved by the driver before spawn (local path or HuggingFace descriptor). Resolved paths are exported as HALOGEN_CHECKPOINT / HALOGEN_TOKENIZER.",
+      "x-order": 1,
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "$ref": "#/$defs/hfFile",
+          "title": "Checkpoint",
+          "description": "Primary .hgn checkpoint (hf-file descriptor or local path). Resolved path exported as HALOGEN_CHECKPOINT.",
+          "x-flag": "HALOGEN_CHECKPOINT",
+          "x-order": 1
+        },
+        "tokenizer": {
+          "$ref": "#/$defs/hfFile",
+          "title": "Tokenizer",
+          "description": "Tokenizer artifact. The engine expects a tokenizer DIRECTORY: use {path} pointing at a local directory (exists() accepts file or dir). A {source:hf,repo,file} descriptor must name a SINGLE downloadable file (the downloader is file-only; it cannot fetch a directory tree) — unpack the tokenizer folder locally and reference it by path. Resolved path exported as HALOGEN_TOKENIZER.",
+          "x-flag": "HALOGEN_TOKENIZER",
+          "x-order": 2
+        }
+      },
+      "required": [
+        "model"
+      ]
+    },
+    "cache": {
+      "type": "object",
+      "title": "Cache Sizing",
+      "description": "Engine cache pool sizing (MiB) and alignment granularity.",
+      "x-order": 2,
+      "additionalProperties": false,
+      "properties": {
+        "cache_mb": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "Cache size (MiB)",
+          "description": "Total engine cache pool size in MiB. null/absent = engine default.",
+          "x-flag": "HALOGEN_CACHE_MB",
+          "x-order": 1
+        },
+        "cache_reserve_mb": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "Cache reserve (MiB)",
+          "description": "Cache headroom kept free of admission. null/absent = engine default.",
+          "x-flag": "HALOGEN_CACHE_RESERVE_MB",
+          "x-order": 2
+        },
+        "cache_align": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 1,
+          "title": "Cache alignment",
+          "description": "Cache granularity/alignment unit. null/absent = engine default.",
+          "x-flag": "HALOGEN_CACHE_ALIGN",
+          "x-order": 3
+        }
+      }
+    },
+    "concurrency": {
+      "type": "object",
+      "title": "Concurrency & Slots",
+      "description": "KV-slot request concurrency and queueing policy.",
+      "x-order": 3,
+      "additionalProperties": false,
+      "properties": {
+        "kv_slots": {
+          "type": "integer",
+          "default": 1,
+          "minimum": 1,
+          "maximum": 64,
+          "title": "KV slots",
+          "description": "KV cache slots = engine request concurrency. The driver reports this as effective_capacity.",
+          "x-flag": "HALOGEN_KV_SLOTS",
+          "x-numeric-effect": "bitwise",
+          "x-order": 1
+        },
+        "slot_ctx": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 1,
+          "title": "Slot context",
+          "description": "Context length per KV slot. null/absent = engine default.",
+          "x-flag": "HALOGEN_SLOT_CTX",
+          "x-order": 2
+        },
+        "queue_timeout": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "Queue timeout (s)",
+          "description": "Max time (seconds) a request waits for a free KV slot before failing. null/absent = engine default.",
+          "x-flag": "HALOGEN_QUEUE_TIMEOUT",
+          "x-order": 3
+        }
+      }
+    },
+    "quantization": {
+      "type": "object",
+      "title": "Quantization",
+      "description": "W4A4 kernel selection. Changes output numerics (lower-precision matmuls).",
+      "x-order": 4,
+      "additionalProperties": false,
+      "properties": {
+        "w4a4": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "enum": [
+            0,
+            1,
+            null
+          ],
+          "title": "W4A4 kernels",
+          "description": "Enable W4A4 quantized compute (0 = off, 1 = on). Changes output numerics.",
+          "x-flag": "HALOGEN_W4A4",
+          "x-numeric-effect": "numeric",
+          "x-order": 1
+        },
+        "w4a4_excl": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "title": "W4A4 exclusions",
+          "description": "Layers excluded from W4A4 quantization (e.g. 'attn'). null/absent = engine default.",
+          "x-flag": "HALOGEN_W4A4_EXCL",
+          "x-numeric-effect": "numeric",
+          "x-order": 2
+        }
+      }
+    },
+    "speculative": {
+      "type": "object",
+      "title": "Speculative Decoding",
+      "description": "Drafter selection. Drafts only proposals; accepted tokens are still verified by the target model, so outputs stay bitwise-identical.",
+      "x-order": 5,
+      "additionalProperties": false,
+      "properties": {
+        "drafter": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "title": "Drafter",
+          "description": "Speculative decoding drafter (e.g. 'mtp'). Proposals only — verification keeps outputs bitwise-identical. null/absent = engine default.",
+          "x-flag": "HALOGEN_DRAFTER",
+          "x-numeric-effect": "bitwise",
+          "x-order": 1
+        }
+      }
+    },
+    "server": {
+      "type": "object",
+      "title": "Server / Request Policy",
+      "description": "HTTP/SSE keepalive and request-length policy knobs.",
+      "x-order": 6,
+      "additionalProperties": false,
+      "properties": {
+        "max_tokens_cap": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 1,
+          "title": "Max tokens cap",
+          "description": "Hard ceiling on requested max_tokens (policy cap, not sampling). null/absent = engine default.",
+          "x-flag": "HALOGEN_MAX_TOKENS_CAP",
+          "x-order": 1
+        },
+        "keepalive_timeout": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "Keepalive timeout (s)",
+          "description": "HTTP keep-alive timeout in seconds. null/absent = engine default.",
+          "x-flag": "HALOGEN_KEEPALIVE_TIMEOUT",
+          "x-order": 2
+        },
+        "sse_keepalive_s": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "SSE keepalive (s)",
+          "description": "Keep-alive ping interval for SSE streams in seconds. null/absent = engine default.",
+          "x-flag": "HALOGEN_SSE_KEEPALIVE_S",
+          "x-order": 3
+        }
+      }
+    },
+    "networking": {
+      "type": "object",
+      "title": "Networking / Ports",
+      "description": "The (api, engine) port pair. Resolution is ATOMIC (Phase 12 D3 lesson): the pair is honored only when BOTH ports come from the same source (this section, or the legacy top-level keys); a lone half is ignored and the full default pair derived from the container's PROVIDER_PORT is used instead (api = PROVIDER_PORT+1, engine = PROVIDER_PORT+2).",
+      "x-order": 7,
+      "additionalProperties": false,
+      "properties": {
+        "api_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "title": "API port",
+          "description": "Halogen API listen port (all /v1 traffic + health, exported as HALOGEN_API_PORT). Must be pinned together with engine_port; alone it is ignored in favor of the default pair (no schema default).",
+          "x-flag": "HALOGEN_API_PORT",
+          "x-order": 1
+        },
+        "engine_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "title": "Engine port",
+          "description": "Private engine port (exported as HALOGEN_PORT and referenced via HALOGEN_ENGINE). Must be pinned together with api_port; alone it is ignored in favor of the default pair (no schema default).",
+          "x-flag": "HALOGEN_PORT",
+          "x-order": 2
+        }
+      }
+    }
+  },
+  "$defs": {
+    "hfFile": {
+      "title": "HuggingFace file",
+      "oneOf": [
+        {
+          "type": "object",
+          "x-widget": "hf-file",
+          "properties": {
+            "source": {
+              "const": "hf"
+            },
+            "repo": {
+              "type": "string"
+            },
+            "file": {
+              "type": "string"
+            },
+            "revision": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "repo",
+            "file"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

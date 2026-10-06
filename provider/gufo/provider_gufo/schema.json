@@ -1,0 +1,594 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gufo backend_config",
+  "description": "Sectioned backend_config for the gufo provider (Phase 12). x-flag names the exact `gufo serve llm` CLI flag; command.py remains the executable mapping. None-skip semantics hold: a null or absent value is never emitted and gufo keeps its own default. bool-only flags (verbose / log_progress) emit only when true. Aux spec files (mmproj / dflash_model / dspark_model / mtp_model) live in `artifacts` and are resolved by the driver to local paths before spawn.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "artifacts": {
+      "type": "object",
+      "title": "Model files",
+      "description": "Main model and auxiliary spec/vision files resolved through provider_lib.downloader before spawn; each resolved path is rewritten into the corresponding CLI flag value.",
+      "x-order": 1,
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "$ref": "#/$defs/hfFile",
+          "title": "Main model",
+          "description": "Primary GGUF model file (hf-file descriptor or local path). Passed as `--model <resolved path>`.",
+          "x-flag": "--model",
+          "x-order": 1
+        },
+        "mmproj": {
+          "$ref": "#/$defs/hfFile",
+          "title": "Vision projector",
+          "description": "mmproj file for multimodal models; descriptor resolved to a local path and passed as `--mmproj`.",
+          "x-flag": "--mmproj",
+          "x-order": 2
+        },
+        "dflash_model": {
+          "$ref": "#/$defs/hfFile",
+          "title": "DFLASH draft model",
+          "description": "Draft model for dflash speculative decoding; descriptor resolved to a local path and passed as `--dflash-model`.",
+          "x-flag": "--dflash-model",
+          "x-order": 3
+        },
+        "dspark_model": {
+          "$ref": "#/$defs/hfFile",
+          "title": "DSPARK draft model",
+          "description": "Draft model for dspark speculative decoding; descriptor resolved to a local path and passed as `--dspark-model`.",
+          "x-flag": "--dspark-model",
+          "x-order": 4
+        },
+        "mtp_model": {
+          "$ref": "#/$defs/hfFile",
+          "title": "MTP model",
+          "description": "Multi-token-prediction model; descriptor resolved to a local path and passed as `--mtp-model`.",
+          "x-flag": "--mtp-model",
+          "x-order": 5
+        }
+      },
+      "required": [
+        "model"
+      ]
+    },
+    "context": {
+      "type": "object",
+      "title": "Context & Serving Name",
+      "x-order": 2,
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 1,
+          "title": "Context size",
+          "description": "Prompt context window in tokens. null/absent = gufo default.",
+          "x-flag": "--context",
+          "x-order": 1
+        },
+        "served_model_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "minLength": 1,
+          "title": "Served model name",
+          "description": "Model name advertised on /v1/models (gufo otherwise advertises the GGUF filename). null/absent = derived.",
+          "x-flag": "--served-model-name",
+          "x-order": 2
+        }
+      }
+    },
+    "disk_cache": {
+      "type": "object",
+      "title": "Disk Cache",
+      "x-order": 3,
+      "additionalProperties": false,
+      "properties": {
+        "cache_disk": {
+          "type": "boolean",
+          "default": false,
+          "title": "Disk cache enabled",
+          "description": "When true, a per-instance directory <CACHE_DIR>/<instance_id> is created and passed via `--cache-disk`. instance_id is the REAL admin-issued registration id (the driver falls back to MACHINE_UID only if the backend starts before registration), so two gufo definitions on one machine never share a disk-cache directory. Anything other than true omits the flag.",
+          "x-flag": "--cache-disk",
+          "x-order": 1
+        },
+        "cache_disk_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "Disk cache size (bytes)",
+          "description": "On-disk cache size cap in bytes. null/absent = gufo default.",
+          "x-flag": "--cache-disk-bytes",
+          "x-order": 2
+        },
+        "cache_disk_staging_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "Disk cache staging (bytes)",
+          "description": "Staging buffer budget for disk cache writes in bytes. null/absent = gufo default.",
+          "x-flag": "--cache-disk-staging-bytes",
+          "x-order": 3
+        }
+      }
+    },
+    "speculative": {
+      "type": "object",
+      "title": "Speculative Decoding",
+      "description": "Draft proposals only; accepted tokens are verified by the target model, so outputs stay bitwise-identical. The draft model files themselves are artifacts (dflash_model / dspark_model / mtp_model).",
+      "x-order": 4,
+      "additionalProperties": false,
+      "properties": {
+        "speculative": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "title": "Speculative mode",
+          "description": "Speculative decoding mode selector (e.g. 'dflash2'). null/absent = gufo default.",
+          "x-flag": "--speculative",
+          "x-numeric-effect": "bitwise",
+          "x-order": 1
+        },
+        "draft_policy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "title": "Draft policy",
+          "description": "Draft selection policy (e.g. 'adaptive'). null/absent = gufo default.",
+          "x-flag": "--draft-policy",
+          "x-numeric-effect": "bitwise",
+          "x-order": 2
+        },
+        "draft_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "Draft tokens",
+          "description": "Tokens drafted per step. null/absent = gufo default.",
+          "x-flag": "--draft-tokens",
+          "x-numeric-effect": "bitwise",
+          "x-order": 3
+        },
+        "min_draft_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "Min draft tokens",
+          "description": "Minimum tokens to attempt per draft step. null/absent = gufo default.",
+          "x-flag": "--min-draft-tokens",
+          "x-numeric-effect": "bitwise",
+          "x-order": 4
+        }
+      }
+    },
+    "sampling": {
+      "type": "object",
+      "title": "Sampling Defaults",
+      "description": "Server-side default sampling parameters (requests may override). These change output numerics.",
+      "x-order": 5,
+      "additionalProperties": false,
+      "properties": {
+        "temperature": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "Temperature",
+          "description": "Default sampling temperature. null/absent = gufo default.",
+          "x-flag": "--temperature",
+          "x-numeric-effect": "numeric",
+          "x-order": 1
+        },
+        "top_k": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "Top-k",
+          "description": "Top-k sampling cutoff. null/absent = gufo default.",
+          "x-flag": "--top-k",
+          "x-numeric-effect": "numeric",
+          "x-order": 2
+        },
+        "top_p": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "Top-p",
+          "description": "Nucleus sampling probability. null/absent = gufo default.",
+          "x-flag": "--top-p",
+          "x-numeric-effect": "numeric",
+          "x-order": 3
+        },
+        "min_p": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "Min-p",
+          "description": "Minimum probability cutoff relative to the top token. null/absent = gufo default.",
+          "x-flag": "--min-p",
+          "x-numeric-effect": "numeric",
+          "x-order": 4
+        },
+        "min_keep": {
+          "type": [
+            "integer",
+          "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "Min keep",
+          "description": "Minimum tokens kept by truncating samplers. null/absent = gufo default.",
+          "x-flag": "--min-keep",
+          "x-numeric-effect": "numeric",
+          "x-order": 5
+        },
+        "seed": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "title": "Seed",
+          "description": "Default RNG seed. null/absent = gufo default.",
+          "x-flag": "--seed",
+          "x-numeric-effect": "numeric",
+          "x-order": 6
+        },
+        "repeat_penalty": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "Repeat penalty",
+          "description": "Repetition penalty scale (1.0 = disabled). null/absent = gufo default.",
+          "x-flag": "--repeat-penalty",
+          "x-numeric-effect": "numeric",
+          "x-order": 7
+        },
+        "repeat_last_n": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "Repeat last n",
+          "description": "Look-back window for the repetition penalty. null/absent = gufo default.",
+          "x-flag": "--repeat-last-n",
+          "x-numeric-effect": "numeric",
+          "x-order": 8
+        },
+        "frequency_penalty": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": null,
+          "title": "Frequency penalty",
+          "description": "Frequency penalty scale. null/absent = gufo default.",
+          "x-flag": "--frequency-penalty",
+          "x-numeric-effect": "numeric",
+          "x-order": 9
+        },
+        "presence_penalty": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": null,
+          "title": "Presence penalty",
+          "description": "Presence penalty scale. null/absent = gufo default.",
+          "x-flag": "--presence-penalty",
+          "x-numeric-effect": "numeric",
+          "x-order": 10
+        },
+        "max_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 1,
+          "title": "Max tokens",
+          "description": "Default generation length cap. null/absent = gufo default.",
+          "x-flag": "--max-tokens",
+          "x-order": 11
+        }
+      }
+    },
+    "reasoning": {
+      "type": "object",
+      "title": "Reasoning / Thinking",
+      "description": "Server-side reasoning defaults. Changes emitted content.",
+      "x-order": 6,
+      "additionalProperties": false,
+      "properties": {
+        "think": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "title": "Think",
+          "description": "Tri-state thinking switch passed verbatim (e.g. 'on' / 'off' / 'auto'). null/absent = gufo default.",
+          "x-flag": "--think",
+          "x-numeric-effect": "numeric",
+          "x-order": 1
+        },
+        "reasoning_effort": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "title": "Reasoning effort",
+          "description": "Named effort level for reasoning models (e.g. 'high'). null/absent = gufo default.",
+          "x-flag": "--reasoning-effort",
+          "x-numeric-effect": "numeric",
+          "x-order": 2
+        },
+        "preserve_thinking": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "title": "Preserve thinking",
+          "description": "Keep reasoning content across turns (value passed verbatim). null/absent = gufo default.",
+          "x-flag": "--preserve-thinking",
+          "x-numeric-effect": "numeric",
+          "x-order": 3
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "title": "Scheduling & Protection Limits",
+      "description": "Server-protection and scheduling limits (policy only; no output numerics effect).",
+      "x-order": 7,
+      "additionalProperties": false,
+      "properties": {
+        "prefill_chunk": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 1,
+          "title": "Prefill chunk",
+          "description": "Tokens per prefill chunk. null/absent = gufo default.",
+          "x-flag": "--prefill-chunk",
+          "x-order": 1
+        },
+        "max_pending": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "Max pending requests",
+          "description": "Global pending-request queue cap. null/absent = gufo default.",
+          "x-flag": "--max-pending",
+          "x-order": 2
+        },
+        "max_pending_per_client": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "Max pending per client",
+          "description": "Per-client pending-request cap. null/absent = gufo default.",
+          "x-flag": "--max-pending-per-client",
+          "x-order": 3
+        },
+        "request_timeout_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "Request timeout (ms)",
+          "description": "Server-side request timeout in milliseconds. null/absent = gufo default.",
+          "x-flag": "--request-timeout-ms",
+          "x-order": 4
+        },
+        "max_output_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "Max output bytes",
+          "description": "Cap on per-request output size in bytes. null/absent = gufo default.",
+          "x-flag": "--max-output-bytes",
+          "x-order": 5
+        },
+        "max_buffered_output_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "Max buffered output bytes",
+          "description": "Per-stream buffered output cap in bytes. null/absent = gufo default.",
+          "x-flag": "--max-buffered-output-bytes",
+          "x-order": 6
+        },
+        "max_buffered_output_total": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "Max buffered output total (bytes)",
+          "description": "Global buffered output cap in bytes. null/absent = gufo default.",
+          "x-flag": "--max-buffered-output-total",
+          "x-order": 7
+        }
+      }
+    },
+    "server": {
+      "type": "object",
+      "title": "Server / Concurrency",
+      "x-order": 8,
+      "additionalProperties": false,
+      "properties": {
+        "sessions": {
+          "type": "integer",
+          "default": 1,
+          "minimum": 1,
+          "title": "GPU sessions",
+          "description": "Preallocated GPU sessions = engine request concurrency. The driver reports this as effective_capacity.",
+          "x-flag": "--sessions",
+          "x-order": 1
+        },
+        "max_connections": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "Max connections",
+          "description": "Inbound connection cap. null/absent = gufo default.",
+          "x-flag": "--max-connections",
+          "x-order": 2
+        },
+        "max_request_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "title": "Max request bytes",
+          "description": "Inbound request size cap in bytes. null/absent = gufo default.",
+          "x-flag": "--max-request-bytes",
+          "x-order": 3
+        },
+        "backend_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "title": "Backend port",
+          "description": "gufo listen port. Relocated here from the old top-level 'backend_port'; when absent the driver uses PROVIDER_PORT + 1 from the container env (no schema default).",
+          "x-flag": "--port",
+          "x-order": 4
+        },
+        "api_key": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "title": "API key",
+          "description": "Shared secret required on inbound gufo requests. null/absent = no auth.",
+          "x-flag": "--api-key",
+          "x-secret": true,
+          "x-order": 5
+        },
+        "verbose": {
+          "type": "boolean",
+          "default": false,
+          "title": "Verbose logging",
+          "description": "Bool-only flag: `--verbose` is emitted only when true; false/None omitted so gufo keeps its default.",
+          "x-flag": "--verbose",
+          "x-order": 6
+        },
+        "log_progress": {
+          "type": "boolean",
+          "default": false,
+          "title": "Log progress",
+          "description": "Bool-only flag: `--log-progress` is emitted only when true; false/None omitted so gufo keeps its default.",
+          "x-flag": "--log-progress",
+          "x-order": 7
+        }
+      }
+    }
+  },
+  "$defs": {
+    "hfFile": {
+      "title": "HuggingFace file",
+      "oneOf": [
+        {
+          "type": "object",
+          "x-widget": "hf-file",
+          "properties": {
+            "source": {
+              "const": "hf"
+            },
+            "repo": {
+              "type": "string"
+            },
+            "file": {
+              "type": "string"
+            },
+            "revision": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "repo",
+            "file"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

@@ -124,7 +124,7 @@ async def test_admin_driven_boot_and_v1_streaming(
     fake_admin, tmp_path, fake_gufo_binary, local_model_file
 ) -> None:
     BACKEND_CONFIG.clear()
-    BACKEND_CONFIG.update({"model": {"path": local_model_file}, "options": {}})
+    BACKEND_CONFIG.update({"artifacts": {"model": {"path": local_model_file}}})
     settings = make_settings(tmp_path, fake_gufo_binary, ADMIN_BASE_URL=fake_admin)
     client = AdminClient(settings)
     lifecycle = make_lifecycle(client, BACKEND_CONFIG)
@@ -190,11 +190,18 @@ def test_apply_registration_adopts_capacity_and_config(
     lifecycle = make_lifecycle(client, {})
 
     class _R:
+        instance_id = "cafe-instance-uuid"
         provider_definition = {
             "capacity": 5,
-            "backend_config": {"model": {"path": "x"}, "options": {"sessions": 5}},
+            "backend_config": {
+                "artifacts": {"model": {"path": "x"}},
+                "server": {"sessions": 5},
+            },
         }
 
     apply_registration(lifecycle, _R())  # type: ignore[arg-type]
     assert lifecycle.capacity == 5
     assert lifecycle.driver.effective_capacity == 5
+    # M2: the real registered instance id reaches the driver (keys the
+    # --cache-disk subdirectory).
+    assert lifecycle.driver.instance_id == "cafe-instance-uuid"

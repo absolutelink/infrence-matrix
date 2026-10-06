@@ -25,7 +25,7 @@ from provider_lib.config_update import ConfigState, install_config_handlers
 from provider_lib.metrics import MachineMetricsEmitter, collect_machine_snapshot
 from provider_lib.wire import Frame, InstanceStatusValue
 
-from provider_halogen.driver import HalogenBackend
+from provider_halogen.driver import SCHEMA, HalogenBackend
 
 logger = logging.getLogger("provider.halogen.main")
 
@@ -189,6 +189,10 @@ async def register_provider(
         version=VERSION,
         port=settings.PROVIDER_PORT,
         hardware=hardware,
+        # Single shared load (provider_halogen.driver.SCHEMA) so the
+        # schema registered with the admin and the schema the driver
+        # validates against are provably the same object.
+        schema=SCHEMA,
     )
     backend_config = result.provider_definition.get("backend_config") or {}
     if lifecycle is None:

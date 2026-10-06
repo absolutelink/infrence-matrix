@@ -35,7 +35,7 @@ from provider_lib.config_update import ConfigState, install_config_handlers
 from provider_lib.metrics import MachineMetricsEmitter, collect_machine_snapshot
 from provider_lib.wire import Frame, InstanceStatusValue
 
-from provider_gufo.driver import GufoBackend
+from provider_gufo.driver import SCHEMA, GufoBackend
 
 logger = logging.getLogger("provider.gufo.main")
 
@@ -148,11 +148,19 @@ def install_command_handlers(
         lifecycle,
         config_state or ConfigState(),
         client.settings,
-        # gufo's per-instance disk cache (--cache-disk <CACHE_DIR>/<uid>)
-        # is the provider's prompt cache; cleared alongside the shared
-        # prompt_cache root. Model files (MODELS_DIR) are never touched.
-        extra_cache_dirs=[
-            client.settings.CACHE_DIR / client.settings.MACHINE_UID,
+        # gufo's per-instance disk cache (--cache-disk <CACHE_DIR>
+        # /<instance_id>) is the provider's prompt cache; cleared
+        # alongside the shared prompt_cache root. Resolved lazily so the
+        # REAL registered instance id is used once registration has
+        # happened (the driver falls back to MACHINE_UID pre-registration,
+        # which is also what this list mirrors before the id is known).
+        # Model files (MODELS_DIR) are never touched.
+        extra_cache_dirs=lambda: [
+            client.settings.CACHE_DIR
+            / (
+                getattr(lifecycle.driver, "instance_id", None)
+                or client.settings.MACHINE_UID
+            ),
         ],
     )
 
@@ -167,8 +175,13 @@ def apply_registration(
     capacity = definition.get("capacity")
     if isinstance(capacity, int) and capacity >= 1:
         lifecycle.capacity = capacity
-    backend_config = definition.get("backend_config")
     driver = lifecycle.driver
+    if isinstance(driver, GufoBackend):
+        # Phase 12 (M2): the real admin-issued instance id keys the
+        # --cache-disk subdirectory so two gufo definitions on one
+        # machine never share an engine disk cache.
+        driver.set_instance_id(result.instance_id)
+    backend_config = definition.get("backend_config")
     if isinstance(backend_config, dict) and isinstance(driver, GufoBackend):
         driver.apply_config(backend_config)
     if config_state is not None:
@@ -207,6 +220,10 @@ async def register_provider(
         version=VERSION,
         port=settings.PROVIDER_PORT,
         hardware=hardware,
+        # Single shared load (provider_gufo.driver.SCHEMA) so the
+        # schema registered with the admin and the schema the driver
+        # validates against are provably the same object.
+        schema=SCHEMA,
     )
     backend_config = result.provider_definition.get("backend_config") or {}
     if lifecycle is None:

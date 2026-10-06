@@ -30,7 +30,7 @@ def _wait_for(predicate, timeout: float = 5.0) -> None:
 
 def _backend(tmp_path: Any, binary: str, model: str, **cfg_extra: Any) -> GufoBackend:
     settings = make_settings(tmp_path, binary)
-    cfg: dict[str, Any] = {"model": {"path": model}}
+    cfg: dict[str, Any] = {"artifacts": {"model": {"path": model}}}
     cfg.update(cfg_extra)
     return GufoBackend(settings, cfg)
 
@@ -163,7 +163,7 @@ async def test_aux_descriptor_resolved_to_local_path(
         tmp_path,
         fake_gufo_binary,
         local_model_file,
-        options={"mmproj": {"path": str(aux)}},
+        artifacts={"model": {"path": local_model_file}, "mmproj": {"path": str(aux)}},
     )
     try:
         await driver.start()  # would raise if resolution failed
@@ -176,6 +176,6 @@ async def test_effective_capacity_from_config(
     tmp_path, fake_gufo_binary, local_model_file
 ) -> None:
     driver = _backend(
-        tmp_path, fake_gufo_binary, local_model_file, options={"sessions": 4}
+        tmp_path, fake_gufo_binary, local_model_file, server={"sessions": 4}
     )
     assert driver.effective_capacity == 4

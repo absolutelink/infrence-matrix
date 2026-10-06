@@ -226,7 +226,7 @@ def effective_capacity(options: dict[str, Any]) -> int:
     opts = options or {}
     try:
         return max(int(opts.get("kv_slots", DEFAULT_KV_SLOTS)), 1)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):  # fmt: skip
         return DEFAULT_KV_SLOTS
 
 
