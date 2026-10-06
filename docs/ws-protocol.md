@@ -63,6 +63,7 @@ Called by the provider container at startup, before dialing the WebSocket.
   "machine_uid": "gpu-box-1",
   "registration_token": "<token from the ProviderDefinition>",
   "provider_type": "mock",
+  "schema": { },
   "version": "dev",
   "port": 8081,
   "hardware": {
@@ -77,6 +78,12 @@ Called by the provider container at startup, before dialing the WebSocket.
 }
 ```
 
+`schema` is the provider package's committed `schema.json` (JSON Schema
+2020-12 describing this type's `backend_config`). The admin derives
+`schema_fingerprint = sha256(canonical_json(schema))` itself (same
+canonicalization as `config_fingerprint`); the agent does not send the
+fingerprint separately.
+
 ### Validation rules (admin side, in order)
 
 1. `registration_token` must match an existing `ProviderDefinition`
@@ -88,6 +95,42 @@ Called by the provider container at startup, before dialing the WebSocket.
    → otherwise **404**.
 5. **Version gate**: `version` must exactly equal the admin's
    `settings.VERSION` → otherwise **409** (lockstep deploy on the LAN).
+6. **Schema gate (Phase 12)** — see the consensus section below.
+   A `schema` that fails to parse as a JSON Schema (2020-12) → **422**.
+
+### Schema consensus (Phase 12)
+
+The admin keeps a `ProviderType` row per type holding the **committed**
+schema + fingerprint and (optionally) a **pending** schema + fingerprint
++ voter list. On a registration that passes rules 1–5:
+
+| Case | Admin action | Result |
+| --- | --- | --- |
+| Type not registered | Create `ProviderType` with `schema` as committed; `status=active`. | Registration proceeds normally (200). |
+| `sha256(schema)` == committed fingerprint | No change. | Registration proceeds normally (200). |
+| `sha256(schema)` != committed, **no pending staged** | Stage `pending_schema`/`pending_fingerprint`, `pending_voters=[this instance]`, `status=consensus_pending`. | **409 `schema_pending`** — registration refused; the agent stays in `waiting_schema` and retries. |
+| `sha256(schema)` == pending fingerprint | Add this instance to `pending_voters`. If voters now cover **every `ProviderInstance` row of this type** → commit: `committed = pending`, clear pending, `status=active`. | **409 `schema_pending`** while incomplete (voter count in detail); **200** once the last outstanding voter registers (the commit happens on that call). |
+| `sha256(schema)` != committed and != a staged pending | Record `reported_schema_fingerprint`; do not overwrite pending. | **409 `schema_conflict`**. |
+
+Notes:
+
+- The **voter universe** is every `ProviderInstance` row whose
+  `provider_definition.provider_type == this type`, regardless of
+  connection state. A decommissioned machine's row must be deleted or
+  the operator must force-commit.
+- The instance's `reported_schema_fingerprint` is written on **every**
+  registration attempt (success or 409) so the UI can show who is on
+  what schema.
+- **Force-commit** (`POST /admin/api/provider-types/{name}/pending/commit`)
+  promotes the pending schema to committed immediately. It affects
+  **future registrations and new/edited definitions only** — connected
+  old-schema instances keep running until they upgrade and re-register.
+  **Dismiss** drops the pending state back to `active`.
+- A definition's `backend_config` is validated against the type's
+  **committed** schema on create/PATCH (admin API, not the WS); a
+  committed schema change therefore does not retroactively invalidate a
+  running config — the prestart migration check reports offending rows
+  (report-only) and they surface as a UI banner.
 
 ### Effects
 
@@ -135,7 +178,25 @@ The client derives the WS URL from `ADMIN_BASE_URL` (scheme swap
 `admin_ws_url` to override that. Either way the client appends
 `?instance_id=<uuid>` to the WS URL.
 
-Errors are plain FastAPI `{"detail": "..."}` bodies.
+Errors are plain FastAPI `{"detail": "..."}` bodies, **except** the
+Phase 12 schema-gate 409s, whose `detail` is structured:
+
+```json
+{
+  "detail": {
+    "error": "schema_pending",
+    "provider_type": "llama-cpp",
+    "committed_fingerprint": "<sha256 hex>",
+    "pending_fingerprint": "<sha256 hex>",
+    "voted": ["<instance_id>", "..."],
+    "waiting_on": ["<instance_id>", "..."]
+  }
+}
+```
+
+(`error` is `schema_conflict` in the conflicting-pending case, with the
+same fields.) The agent logs `waiting_schema` from this and keeps
+retrying via the normal backoff.
 
 ---
 
@@ -235,10 +296,10 @@ Events do **not** require an ack; the admin persists/acts on them.
 | `backend.status` | `{"backend_status": "..." (or "status"), "error_message": "..."}` | Live | Updates `ProviderInstance.backend_status` (+ optional error), `last_seen=now`. |
 | `metrics.machine` | machine-level snapshot (vram/gpu_usage/os_ram/cpu/storage) for assigned resources only | Live | Persisted to Redis `im:metrics:machine:{machine_uid}`; refreshes the ownership lease. Emitted by `MachineMetricsEmitter` while owned. |
 | `download.progress` | `{filename, progress_percent, bytes_downloaded, total_bytes, speed_mbps, phase}` | Live | Emitted by `provider_lib.downloader` (throttled). |
-| `backend.logs` | `{stream, line}` (cursor/ring in llama-cpp) | Live | Surfaced to the admin UI. |
+| `backend.logs` | `{"lines": [{"ts": iso, "stream": "stdout"\|"stderr", "text": "..."}], "dropped": int}` | **Live (Phase 13)** | Captured backend subprocess stdout/stderr. Provider tees the spawn pipes into a bounded ring (~5k lines); flushes throttled batches (~1s / max 100 lines per frame) while connected; `dropped` is the cumulative lost-line counter since connect. Admin appends to Redis `im:logs:backend:{instance_id}` (capped ~2000, TTL 1h). Catch-up after reconnect via `backend.logs.get`. |
 | `metrics.inference` | available/max slots, token speed, prompt-processing speed, in-flight | Reserved (defined in `FrameKind`, not yet emitted; the admin does not handle it yet) | Always-on per-instance telemetry; lands with Phase 7/8. |
 | `backend.boot_requested` | `{}` | Reserved | Observability only; boot is admin-driven (scheduler sends `backend.start`). |
-| `provider.logs` | provider-instance-level log lines | Reserved | Lands with the UI/logging phase. |
+| `provider.logs` | `{"lines": [{"ts": iso, "stream": "stdout", "text": "..."}], "dropped": int}` | **Live (Phase 13)** | The provider process's own logger output, captured via a ring-buffer handler and flushed with the same throttle as `backend.logs`. Admin stores in Redis `im:logs:provider:{instance_id}`. |
 | `backend.metadata` | model metadata scraped from the backend | Reserved | Not used: discovered metadata travels in the `provider.config.update` **ack detail** (`model_metadata`) and is persisted by the admin there (Phase 9). |
 
 `instance_status` ∈ `registering|initializing|running|unhealthy|error|disconnected`
@@ -272,6 +333,7 @@ timeout)` sends the command and awaits the matching ack (default 30s).
 | `metrics.category.start` | category name | Reserved | Enable a `METRICS_CATEGORIES` category. |
 | `cache.clear` | `{"dry_run": bool = false, "force": bool = false}` | **Live (Phase 9)** | **Prompt-cache files only** — never model files. Deletes `CACHE_DIR/prompt_cache` plus the provider's engine cache dirs (`extra_cache_dirs`: gufo `CACHE_DIR/<MACHINE_UID>`, halogen-flash `CACHE_DIR/halogen-flash`). **Refused while the backend is `in_use`** (NAK `{"ok": false, "error": "backend_in_use", "detail": {"step": "drain", ...}}`) unless `force: true` — clearing engine caches under live streams can cause I/O errors; `dry_run` never touches files and is always allowed. Ack detail: `{"dry_run", "deleted": [...], "bytes_freed": N}`. Admin surface: `POST /admin/api/instances/{id}/cache/clear` (body `{dry_run?, force?}`). |
 | `storage.prune_unused` | `{"dry_run": bool = false}` | **Live (Phase 9)** | Delete `MODELS_DIR` files not referenced by the driver's current `resolved_artifacts` set (main/mmproj/draft/tokenizer/NPU pins; a referenced directory protects its subtree). **Refuses** (NAK `no_resolved_artifacts`) when the driver has not resolved its set yet — never deletes blind. Ack detail: `{"dry_run", "deleted": [...], "bytes_freed": N, "kept": [...]}`. Admin surface: `POST /admin/api/instances/{id}/storage/prune`. |
+| `backend.logs.get` | `{"kind": "backend"\|"provider"\|"all", "since": <ring seq or null>}` | **Live (Phase 13)** | Ask the provider for its current ring buffer (catch-up after an admin restart / long disconnect; the Redis tail may be older than the ring). Ack detail: `{"lines": [...], "dropped": int, "seq": int}` — `since` resumes at the ring sequence; omitting it returns the whole buffer. |
 
 The provider lifecycle, `BackendDriver` interface, slot admission, and the
 release-on-upstream-close invariant are documented in `provider/README.md`.
@@ -293,3 +355,5 @@ release-on-upstream-close invariant are documented in `provider/README.md`.
 | `im:ws:epoch:{instance_id}` | Monotonic connection epoch (counter). | Permanent (never deleted). |
 | `im:ws:owner:{instance_id}` | Connection token of the currently accepted socket. | Deleted on disconnect or when superseded. |
 | `im:ws:presence:{instance_id}` | Liveness marker (timestamp). | 60s TTL, refreshed by traffic; absence ⇒ sweep marks disconnected. |
+| `im:logs:backend:{instance_id}` | Backend log tail (Phase 13; JSON lines, newest left via LPUSH+LTRIM). | ~2000-line cap, 1h TTL. |
+| `im:logs:provider:{instance_id}` | Provider log tail (Phase 13; same shape). | ~2000-line cap, 1h TTL. |

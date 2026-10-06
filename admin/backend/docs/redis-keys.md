@@ -130,6 +130,35 @@ For a single-worker admin (current), `ws:owner` is trivially the one node;
 it exists so a future multi-worker admin can route/verify without a schema
 change.
 
+## Logs (Phase 13)
+
+Backend/provider log tails are **Redis-only** — ephemeral ops telemetry,
+never persisted to Postgres. Newest lines are pushed to the left so
+`LRANGE 0 N` reads the tail.
+
+| Key | Type | TTL | Purpose |
+|-----|------|-----|---------|
+| `im:logs:backend:{instance_id}` | List (JSON-line entries) | 1h | Captured backend subprocess stdout/stderr. Each entry: `{"ts", "stream": "stdout"\|"stderr", "text"}`. Appended in batches from `backend.logs` events via LPUSH + LTRIM to a ~2000-line cap. Served by `GET /admin/api/instances/{id}/logs?kind=backend&since=&limit=`. |
+| `im:logs:provider:{instance_id}` | List (JSON-line entries) | 1h | The provider process's own logger output (same entry shape), from `provider.logs` events. Same cap/TTL. |
+
+- **Cursor**: `since` in the read endpoint is the list index (or a
+  monotonic seq embedded in the entry); the UI polls with the last seen
+  cursor to tail. If the provider's ring is ahead of Redis (admin
+  restart / long gap), the admin can send `backend.logs.get` to catch up.
+- **Flush**: On Redis flush the tail is empty until the next provider
+  flush; the provider ring buffer (and `backend.logs.get`) is the catch-up
+  source. Logs are best-effort and never block the request path.
+
+## Schema consensus state (Phase 12)
+
+**Not in Redis.** The pending schema, its fingerprint, and the voter list
+live on the `provider_types` Postgres row (`pending_schema`,
+`pending_fingerprint`, `pending_voters`, `status`) because the admin is a
+single writer and the consensus state must survive a Redis flush. Per-
+instance `reported_schema_fingerprint` is likewise a Postgres column.
+Registration-time consensus evaluation reads/writes that row directly
+(see `docs/ws-protocol.md` §2).
+
 ## Notes
 
 - **Rebuild**: If Redis is flushed, running inference degrades until

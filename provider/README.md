@@ -46,10 +46,112 @@ normalization), override just that.
    the driver, wrap in `BackendLifecycle`, install WS command handlers,
    register + connect, serve `create_provider_app(...)`.
 4. Set `PROVIDER_TYPE` for the package; the admin cross-checks it against
-   the registration token's definition.
-5. Add a `Dockerfile` and tests.
-6. Do **not** re-implement lifecycle/slot/WS semantics — they come from
-   the lib.
+    the registration token's definition.
+5. **Ship `provider_<type>/schema.json`** (Phase 12) — a JSON Schema
+    (2020-12) describing this type's `backend_config`. See "Authoring
+    schema.json" below. `provider_lib` loads it and sends it in the
+    registration body; the first registration of a type creates the
+    admin's `ProviderType` registry entry.
+6. Add a `Dockerfile` and tests.
+7. Do **not** re-implement lifecycle/slot/WS semantics — they come from
+    the lib.
+
+## Authoring schema.json (Phase 12)
+
+Each provider package ships `provider_<type>/schema.json`: a standard
+**JSON Schema 2020-12** describing the shape of that type's
+`backend_config`. It has three consumers, all read-only except the
+driver:
+
+- **Admin validation** — `ProviderDefinition.backend_config` is
+  validated against the **committed** schema on create/PATCH (422 with
+  per-field errors).
+- **Admin UI** — the definition form is rendered from the schema:
+  collapseable sections + custom widgets (below).
+- **The driver** — still receives the plain dict in `apply_config()` /
+  `start()`. The schema never generates code; `command.py` / `env.py`
+  remain the mapping.
+
+The schema is a **consensus contract**: the fingerprint of the committed
+schema gates registrations (see `docs/ws-protocol.md` §2). Changing it
+requires every known instance of the type to re-register with the new
+file, or an operator force-commit.
+
+### Sections (collapseable groups)
+
+Group fields into top-level objects; the UI renders each as a
+collapseable section. Use `title` for the label and `x-order` for
+ordering. Recommended canonical sections: `artifacts`, `context` /
+`rope`, `kv_cache` / `disk_cache`, `gpu`, `speculative` (MTP),
+`sampling`, `reasoning`, `vision`, `server`, `security`, `logging` —
+adapt to the backend. Example:
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "artifacts": {
+      "type": "object", "title": "Model files", "x-order": 1,
+      "properties": {
+        "model":  {"$ref": "#/$defs/hfFile", "title": "Main model", "x-order": 1},
+        "mmproj": {"$ref": "#/$defs/hfFile", "title": "Vision projector", "x-order": 2},
+        "draft":  {"$ref": "#/$defs/hfFile", "title": "Draft model", "x-order": 3}
+      },
+      "required": ["model"]
+    },
+    "speculative": {
+      "type": "object", "title": "MTP / Speculative decoding", "x-order": 5,
+      "properties": {
+        "spec_draft_n_max": {"type": "integer", "default": 3, "minimum": 1, "maximum": 8,
+                             "title": "Draft tokens", "x-flag": "--spec-draft-n-max"}
+      }
+    }
+  },
+  "$defs": {
+    "hfFile": {
+      "title": "HuggingFace file",
+      "oneOf": [
+        {"type": "object", "x-widget": "hf-file",
+         "properties": {
+           "source": {"const": "hf"},
+           "repo":   {"type": "string"},
+           "file":   {"type": "string"},
+           "revision": {"type": "string"}
+         },
+         "required": ["source", "repo", "file"],
+         "additionalProperties": false},
+        {"type": "object",
+         "properties": {"path": {"type": "string"}},
+         "required": ["path"], "additionalProperties": false}
+      ]
+    }
+  }
+}
+```
+
+### Custom keywords (all optional, `x-` prefixed)
+
+| Keyword | Meaning |
+| --- | --- |
+| `x-flag` | The exact upstream CLI flag / env var this maps to (e.g. `"--ngl"`, `"HALOGEN_KV_SLOTS"`). Rendered as a UI tooltip; keeps `command.py`/`env.py` reviewable against the schema. |
+| `x-widget` | UI widget override. **`"hf-file"`** = HuggingFace file picker (search → repo → file list with sizes, or a local path) producing the `{"source":"hf","repo","file"}` / `{"path":...}` descriptor that `provider_lib.downloader.ensure_artifact` resolves. |
+| `x-numeric-effect` | `"bitwise"` (output byte-identical; speed/policy only) or `"numeric"` (output can change). From the halogen FLAGS.md convention; the UI warns on numeric fields. |
+| `x-secret` | `true` = write-only field (e.g. `api_key`): masked in UI reads, never logged. |
+| `x-supported` | `false` = documented but not wired by this driver version; shown disabled in the UI. Used for the full upstream flag list where `command.py`/`env.py` doesn't map everything yet. |
+
+### Rules
+
+- Give **every** field a `default`, `description`, and range/enum where
+  applicable — the form is only as good as its metadata.
+- Put only fields the driver actually consumes (or `x-supported: false`
+  documents) in the schema; don't invent ad-hoc keys beyond it.
+- Obsolete upstream flags (`--prompt-cache`, removed `--draft*` aliases,
+  deprecated `--defrag-thold`) must **not** appear in the schema.
+- Backend binary paths (`LLAMA_SERVER_PATH`, etc.) stay in the container
+  env — never schema fields.
+- Test that the schema parses, validates the example configs in this
+  README, and has a stable fingerprint.
 
 ## BackendDriver (provider_lib/backend.py)
 
@@ -215,6 +317,12 @@ the mock's admin-driven boot pattern.
 
 ### backend_config schema
 
+> **Canonical (Phase 12):** the authoritative schema is the shipped
+> `provider_llama_cpp/schema.json` (loaded by `provider_lib.schema` and
+> sent at registration). The example below is the starting point for it —
+> keep both in sync. See "Authoring schema.json" above for section /
+> `x-flag` / `x-widget` conventions.
+
 ```json
 {
   "model":  {"source": "hf", "repo": "ggml-org/models", "file": "gemma/ggml-model.gguf"},
@@ -331,6 +439,11 @@ serve several model names) and speaks **native OpenResponses** — the
 driver passes events through unmodified except for rate enrichment.
 
 ### backend_config schema
+> **Canonical (Phase 12):** the authoritative schema is the shipped
+> `schema.json` for this provider package (loaded by `provider_lib.schema`,
+> sent at registration). The example below is its starting point — keep both
+> in sync. See "Authoring schema.json" above for conventions.
+
 
 ```json
 {
@@ -416,6 +529,11 @@ OpenAI-compatible **API port** (all HTTP traffic) and a private
 **engine port** (referenced only via `HALOGEN_ENGINE`).
 
 ### backend_config schema
+> **Canonical (Phase 12):** the authoritative schema is the shipped
+> `schema.json` for this provider package (loaded by `provider_lib.schema`,
+> sent at registration). The example below is its starting point — keep both
+> in sync. See "Authoring schema.json" above for conventions.
+
 
 ```json
 {
@@ -503,6 +621,11 @@ halogen-flash process. Key differences from plain halogen:
 - **NPU small-model pinning** (Ryzen AI), gated by a host probe.
 
 ### backend_config schema
+> **Canonical (Phase 12):** the authoritative schema is the shipped
+> `schema.json` for this provider package (loaded by `provider_lib.schema`,
+> sent at registration). The example below is its starting point — keep both
+> in sync. See "Authoring schema.json" above for conventions.
+
 
 ```json
 {

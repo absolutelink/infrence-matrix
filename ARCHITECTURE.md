@@ -148,9 +148,13 @@ duplicates the frame shape from `provider_lib.wire` (keep them in sync;
 | `/admin/api/health` | admin | none | Health check (used by compose healthcheck) |
 | `/admin/api/providers/register` | admin | registration token | Provider registration (§5) |
 | `/admin/api/machines*` | admin | none (trusted LAN) | Machine CRUD (Phase 9; delete refused while instances attached) |
-| `/admin/api/definitions*` | admin | none (trusted LAN) | ProviderDefinition CRUD (Phase 9; `backend_config`/`capacity` PATCH pushes `provider.config.update` to connected instances; explicit null on required fields → 422; `provider_type` change refused 409 while instances attached) |
+| `/admin/api/definitions*` | admin | none (trusted LAN) | ProviderDefinition CRUD (Phase 9; `backend_config`/`capacity` PATCH pushes `provider.config.update` to connected instances; explicit null on required fields → 422; `provider_type` change refused 409 while instances attached; Phase 12: `backend_config` validated against the committed JSON Schema of its `ProviderType` → 422 with per-field errors) |
+| `/admin/api/provider-types` `/admin/api/provider-types/{name}` | admin | none (trusted LAN) | ProviderType registry reads (Phase 12; UI renders the backend-config form from the committed schema) |
+| `/admin/api/provider-types/{name}/pending/commit` `.../pending/dismiss` | admin | none (trusted LAN) | Operator override of the schema-consensus state (Phase 12) |
+| `/admin/api/huggingface/search` `/admin/api/huggingface/files` | admin | none (trusted LAN) | HF proxy for the `hf-file` picker widget (Phase 12; ported from legacy `huggingface.py` routes) |
 | `/admin/api/instances/{id}/cache/clear` `/admin/api/instances/{id}/storage/prune` | admin | none (trusted LAN) | Instance storage actions (Phase 9) |
 | `/admin/api/instances` `/admin/api/instances/{id}` | admin | none (trusted LAN) | Provider-instance reads for the UI (Phase 10) |
+| `/admin/api/instances/{id}/logs` | admin | none (trusted LAN) | Backend/provider log tail (Phase 13; Redis-backed, `kind`/`since`/`limit` cursor) |
 | `/admin/api/responses` `/admin/api/stats/usage` `/admin/api/stats/overview` | admin | none (trusted LAN) | Response log + usage/dashboard reads (Phase 10; overview reads the scheduler Redis mirror, observability only) |
 | `/v1/*` | admin | none (trusted LAN) | Public OpenAI-compatible inference |
 | `/provider/ws` | admin | bearer (instance secret) | Provider instances dial in (§5) |
@@ -166,9 +170,11 @@ The provider instance serves its own OpenAI-compatible HTTP API on
 
 All tables are created by **one squashed Alembic initial migration**
 (`admin/backend/alembic/versions/0140d6ad9f48_initial_squashed_schema.py`),
-applied by `scripts/prestart.sh` and by CI. The provider instance itself
-has **no database** — it derives everything from env + the registration
-response, mirrored here by the admin.
+applied by `scripts/prestart.sh` and by CI; Phase 12 adds the
+`provider_types` table (plus the two instance columns) in a follow-up
+migration. The provider instance itself has **no database** — it derives
+everything from env + the registration response, mirrored here by the
+admin.
 
 ### Machine
 A host that provider instances run on. **Created in the admin UI before
@@ -185,14 +191,47 @@ any provider registers against its `uid`.**
 A provider registering with an unknown `MACHINE_UID` is **rejected (404)**.
 UIDs must not be reused across physical hosts (see Known Limitations).
 
+### ProviderType
+A registered provider **type** (Phase 12), created by the first
+registration of that type. Owns the JSON Schema (2020-12) that describes
+the type's `backend_config`; every `ProviderDefinition.provider_type`
+must reference a registered type.
+
+| Field | Notes |
+| --- | --- |
+| `name` | Type id (`llama-cpp`, `halogen`, `halogen-flash`, `gufo`, `mock`, …). Unique. |
+| `schema` | Committed JSON Schema (2020-12) for this type's `backend_config`. Drives admin validation on write **and** the UI form render. |
+| `schema_fingerprint` | SHA-256 of canonical `schema` (same canonicalization as `config_fingerprint`). |
+| `pending_schema` / `pending_fingerprint` | Staged schema awaiting consensus (null when none). |
+| `pending_voters` | JSON list of instance ids that have registered presenting `pending_fingerprint`. |
+| `status` | `active` \| `consensus_pending` \| `conflict`. |
+
+**Schema consensus** (all known instances of the type must agree):
+registration with the committed fingerprint proceeds normally. A
+different fingerprint stages it as pending and the registration is
+**refused 409 `schema_pending`** — the agent keeps retrying (waiting
+for all agents to update). Repeat registrations with the pending
+fingerprint add voters; when voters cover **every `ProviderInstance`
+row of that type**, the pending schema is committed. A third distinct
+fingerprint while pending → 409 `schema_conflict`. Operator override:
+force-commit (e.g. a permanently dead machine can never vote) or
+dismiss. Force-commit applies to **future registrations and new/edited
+definitions only** — connected old-schema instances are not force-
+converged. Full algorithm in `docs/ws-protocol.md` §2.
+
+The `PROVIDER_TYPES` constant is gone; the registry is the source of
+truth. The static `schema.json` lives in each provider package
+(`provider/<type>/provider_<type>/schema.json`) and is shipped by the
+agent at registration — the admin never holds provider code.
+
 ### ProviderDefinition
 A client-facing model: how to boot a backend and how to schedule it.
 
 | Field | Notes |
 | --- | --- |
 | `alias` | Public model name clients use in `/v1/models` and the `model` field. Unique. |
-| `provider_type` | One of `llama-cpp`, `halogen`, `halogen-flash`, `gufo`, `mock`. |
-| `backend_config` | JSON handed to the provider to start its backend: model artifacts (main GGUF + mmproj + draft, each with source), engine args, engine options. Schema documented in `provider/README.md`. |
+| `provider_type` | Must reference a registered `ProviderType` (Phase 12). Known types after rollout: `llama-cpp`, `halogen`, `halogen-flash`, `gufo`, `mock` — but the registry, not a constant, is the source of truth. |
+| `backend_config` | JSON handed to the provider to start its backend: model artifacts (main GGUF + mmproj + draft, each with source), engine args, engine options. **Validated against the committed JSON Schema of its `ProviderType` on create/PATCH (Phase 12)**; the UI form is rendered from that schema (collapseable sections, `hf-file` artifact widget). |
 | `vram_required_bytes` | Scheduler admission hint. |
 | `idle_timeout_seconds` | Admin-driven idle stop (reaper — Phase 6 TODO). |
 | `capacity` | Concurrent backend slots (≥1). |
@@ -215,6 +254,7 @@ of the same definition.
 | `epoch` | Connection epoch: bumped on every accepted socket; stale-epoch frames ignored (fencing). |
 | `last_seen` / `last_request_at` | Liveness + idle tracking. |
 | `config_fingerprint` | SHA-256 of the applied `backend_config`; drives auto cache-clear and the Phase 9 `provider.config.update` push (admin PATCH + reconnect self-heal). |
+| `reported_schema_fingerprint` | Schema fingerprint the instance presented at its last registration attempt (Phase 12; drives the `waiting_schema` badge and the pending voter roster). |
 | `assigned_gpus` | Instance-reported GPU UUIDs this backend is bound to; VRAM accounting + metrics dedup. |
 
 ### ResponseRecord
@@ -265,15 +305,19 @@ environment, never from `backend_config`.
 ### Sequence
 ```
 Provider                          Admin
-   │ POST /admin/api/providers/register
-   │  {machine_uid, registration_token, provider_type,
-   │   version, port, hardware, metrics_categories}
-   │ ──────────────────────────────▶
-   │  validations (403/404/409):
-   │    registration_token → ProviderDefinition exists
-   │    definition.provider_type == container's provider_type
-   │    version == admin settings.VERSION   (HARD FAIL)
-   │    machine_uid exists
+    │ POST /admin/api/providers/register
+    │  {machine_uid, registration_token, provider_type, schema,
+    │   version, port, hardware, metrics_categories}
+    │ ──────────────────────────────▶
+    │  validations (401/403/404/409):
+    │    registration_token → ProviderDefinition exists
+    │    provider_type registered in ProviderType   (Phase 12;
+    │      unknown type → created from this schema, committed)
+    │    schema consensus gate                      (Phase 12;
+    │      mismatch → 409 schema_pending/schema_conflict)
+    │    definition.provider_type == container's provider_type
+    │    version == admin settings.VERSION   (HARD FAIL)
+    │    machine_uid exists
    │  effects:
    │    merge hardware into Machine, upsert ProviderInstance
    │    issue per-instance secret → Redis im:ws:secret:{id}
@@ -290,6 +334,13 @@ Provider                          Admin
 
 - **Version hard fail:** provider versions must match the admin exactly
   (409). Admin and provider images are deployed together (§10).
+- **Schema gate (Phase 12):** each agent ships a `schema.json` and sends
+  it with the registration body. A fingerprint mismatch against the
+  committed schema is refused **409 `schema_pending`** — the agent stays
+  in a *waiting for consensus* state (visible in the UI as
+  `waiting_schema` on the instance) and keeps retrying via the normal
+  backoff until every known instance of the type has presented the new
+  schema (or the operator force-commits).
 - **Socket lifecycle:** if the WS dies, the admin marks the instance
   `disconnected` immediately (live path) and via the presence sweep
   (safety net for missed disconnects / admin restarts). The provider
@@ -317,7 +368,8 @@ Provider → admin: `provider.status`, `backend.status`,
 Admin → provider: `provider.hello`, `backend.start`, `backend.stop`,
 `backend.restart`, `provider.initialize`, `provider.config.update`,
 `metrics.assign`, `metrics.unassign`, `metrics.category.start`,
-`cache.clear`, `storage.prune_unused`, `pong`.
+`cache.clear`, `storage.prune_unused`, `backend.logs.get` (Phase 13),
+`pong`.
 
 `backend.start` acks only after the provider's lifecycle reaches
 `running`, so a successful return means the provider's `/v1` is live.
@@ -595,6 +647,18 @@ When it lands it is always-on per instance and never deduped.
 `cpu`, `storage` (cache + model dirs). Collectors in
 `provider_lib/metrics.py` (NVML / rocm-sysfs / psutil).
 
+### Log streams (Phase 13)
+`backend.logs` / `provider.logs` (reserved in §5's catalog until Phase
+13) carry captured lines from the backend subprocess (stdout/stderr,
+tagged per stream) and from the provider's own logger. The provider
+buffers in a bounded ring (~5k lines), flushes throttled batches
+(~1s / 100 lines per frame) while connected, and answers
+`backend.logs.get` with the current buffer + `dropped` counter for
+catch-up after a reconnect. The admin stores **Redis-only** capped
+lists (`im:logs:backend:{instance_id}`, ~2000 lines / TTL 1h) —
+logs are ephemeral ops telemetry, never persisted to Postgres — and
+serves them to the UI via `GET /admin/api/instances/{id}/logs`.
+
 ---
 
 ## 9. Redis Key Layout
@@ -618,6 +682,12 @@ a fresh provider registration. All keys namespaced `im:`. Full table in
 | `im:sched:active:{alias}` | Set | — | Admitted request ids (cardinality ≤ capacity) |
 | `im:sched:lock:{alias}` | String | 5s (SET NX PX) | Admission lock contract |
 | `im:vram:used:{machine_uid}` | Hash | 60s | `{instance_id}` → bytes held **per booted instance** (§6); refreshed on boot/stop, TTL kept alive by the reaper |
+| `im:logs:backend:{instance_id}` | List | 1h | Backend stdout/stderr tail (Phase 13; capped ~2000 lines, newest left) |
+| `im:logs:provider:{instance_id}` | List | 1h | Provider's own log tail (Phase 13; same cap) |
+
+Schema-consensus state (pending schema, fingerprint, voters) lives in the
+`provider_types` Postgres row — not Redis — because the admin is a
+single writer and the state must survive a Redis flush (§9 preamble).
 
 ---
 
@@ -685,6 +755,12 @@ operation:
    — no cross-definition artifact dedup.
 6. `MACHINE_UID` misuse (same UID on two physical hosts) poisons VRAM
    admission; there is no host-fingerprint check.
+7. **Schema consensus (Phase 12)** requires every known
+   `ProviderInstance` row of a type to present the new schema before it
+   commits. A machine that is permanently gone (row never deleted) blocks
+   consensus forever unless the operator **force-commits** the pending
+   schema. Stale instance rows should be deleted when hardware is
+   decommissioned.
 7. Scheduler VRAM eviction is implemented (§6): idle different-alias
    backends are stopped LRU-first to make room. Remaining nuance:
    eviction is per-machine (no cross-machine rebalancing) and victims are

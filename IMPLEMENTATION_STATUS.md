@@ -1,10 +1,7 @@
 # Inference Matrix — Implementation Status
 
 **Overhaul branch:** `litellm-architecture-overhaul`
-**Last updated:** 2026-10-06 (halogen-flash legacy-parity fixes: embedded app settings reuse, zero-preserving usage normalization, and terminal timing-rate forwarding; Phase 10 complete: admin UI rework —
-Machines/Definitions/Instances/Responses/Dashboard/Playground/Settings
-on the regenerated SDK + new admin read endpoints; old agent-era UI
-removed; `generate-frontend-sdk` pre-commit hook re-enabled)
+**Last updated:** 2026-10-06 (Phase 12 started: schema-driven backend config — `ProviderType` registry + JSON Schema consensus + HF picker + rjsf form; docs/ARCHITECTURE/WS-protocol/provider README/redis-keys/AGENTS updated first. Phase 13 (log views) scoped. Prior: halogen-flash legacy-parity fixes; Phase 10 admin UI rework complete.)
 
 This file tracks the litellm-based architecture overhaul (see
 [ARCHITECTURE.md](ARCHITECTURE.md)). Each phase lists its features with
@@ -27,6 +24,8 @@ starting a feature, read the linked protocol/doc first.
 | 9 | `provider.config.update` / fingerprint / cache-clear flow | ✅ Complete |
 | 10 | Admin UI rework | ✅ Complete |
 | 11 | Docs consolidation + full E2E validation | ✅ Complete |
+| 12 | Schema-driven backend config: `ProviderType` registry + JSON Schema consensus + HF picker + rjsf form | 🟡 In progress |
+| 13 | Server + backend log capture, Redis tails, UI log views | ⬜ Pending |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
 
@@ -781,6 +780,106 @@ doc consolidation, and the final full test + conformance gate.
   tool-calling + image-input); the 2 failures are the accepted
   `/responses/compact` scope decision. Run log:
   `docs/integration-testing.md`.
+
+---
+
+---
+
+## Phase 12 — Schema-driven backend config 🟡
+
+**In progress.** Moves `backend_config` from a free-form JSON blob (with
+a hand-maintained doc) to a **JSON Schema (2020-12)** owned by each
+provider package and registered in the admin under a new `ProviderType`
+table. The schema is the single source of truth for admin validation,
+the UI form render, and the HuggingFace file picker. Docs updated first
+(this section, `ARCHITECTURE.md` §4/§5, `docs/ws-protocol.md` §2/§4,
+`provider/README.md`, `admin/backend/docs/redis-keys.md`, `AGENTS.md`).
+
+**Decisions locked:**
+- Format: standard JSON Schema 2020-12.
+- Bootstrap: first registration of an unknown type creates the
+  `ProviderType` row (committed immediately).
+- Consensus: a new schema must be presented by **all known
+  `ProviderInstance` rows of the type** before it commits.
+- While pending: registration **refused 409 `schema_pending`**; agent
+  enters `waiting_schema` and retries via normal backoff.
+- Force-commit (operator override) affects **future registrations +
+  new/edited definitions only** — no forced fleet convergence.
+- Existing `backend_config` rows that don't validate: **report-only**
+  prestart migration check (UI banner), never auto-mutated.
+- Raw-JSON editor toggle **kept** alongside the schema-driven form.
+- UI renderer: `@rjsf/core` + `@rjsf/validator-ajv8`, custom theme.
+
+### Sub-tasks
+
+- [x] **A. Docs** — this section + ARCHITECTURE/WS-protocol/provider README/redis-keys/AGENTS.
+- [ ] **B. Admin registry** — `ProviderType` table + Alembic migration
+      (`provider_types`, plus `ProviderInstance.reported_schema_fingerprint`);
+      `providers.py` accepts `schema` + consensus gate (409
+      `schema_pending`/`schema_conflict`, structured detail);
+      `definitions.py` validates `backend_config` with
+      `jsonschema.Draft202012Validator` on create/PATCH (422 per-field);
+      `/admin/api/provider-types*` endpoints (list/get/commit/dismiss);
+      prestart report-only migration check. Remove `PROVIDER_TYPES`
+      constant. Tests: consensus matrix, bootstrap, validation, overrides.
+- [ ] **C. HF proxy** — `admin/backend/app/api/admin/huggingface.py`
+      ported from legacy `huggingface.py` (search + files with sizes +
+      `cardData.gguf` quantization; generalized beyond GGUF-only to
+      `.hgn`/tokenizer dirs). Tests with mocked HF API.
+- [ ] **D. Provider schemas** — `provider_lib/schema.py` (load bundled
+      `schema.json` via importlib.resources, fingerprint, send in
+      register); `admin_client.py` surfaces `schema_pending`/`conflict`
+      as `waiting_schema`; ship `schema.json` for llama-cpp (from the
+      upstream server README flag list), halogen-flash (from HALOGEN_*
+      FLAGS.md — full list, unwired flags `x-supported: false`),
+      halogen, gufo, mock. Enum-drift guard test (parse `llama-server
+      --help`).
+- [ ] **E. Frontend** — rjsf + custom theme; collapseable-section
+      `ObjectFieldTemplate`; `HfFileWidget` (picker dialog over C's
+      endpoints, `x-widget: hf-file`); `definitions.tsx` form replaces
+      the textarea (raw-JSON toggle kept); Provider Types page (schema
+      viewer + consensus banner + commit/dismiss); `waiting_schema`
+      badge on Instances. `scripts/generate-client.sh`.
+
+**Gotchas:** `flash_attn` is now `on|off|auto` (upstream default `auto`)
+— AGENTS.md corrected. Do NOT import provider packages from the admin or
+vice versa (the schema files are data, not code). The `x-flag` /
+`x-widget` / `x-numeric-effect` / `x-secret` / `x-supported` keywords
+are additive UI/validation hints; the driver still maps real flags in
+`command.py`/`env.py`.
+
+---
+
+## Phase 13 — Server + backend log views ⬜
+
+**Pending.** Fills in the `backend.logs` / `provider.logs` frame kinds
+(previously reserved) with a Redis-backed tail and UI log views.
+
+**Decisions locked:**
+- Storage: **Redis-only** (`im:logs:backend:{id}`, `im:logs:provider:{id}`),
+  ~2000-line cap, 1h TTL. Never Postgres.
+- Provider ring buffer ~5k lines; flush throttle ~1s / 100 lines per
+  frame; `dropped` cumulative counter.
+- `backend.logs.get` command for catch-up after admin restart /
+  long disconnect (Redis tail may lag the provider ring).
+
+### Sub-tasks
+
+- [ ] **Provider capture** — tee backend subprocess stdout/stderr into a
+      bounded ring in `BackendLifecycle`/driver spawn path (halogen/
+      halogen-flash already merge stderr→stdout; reuse). `AdminClient`
+      flushes `backend.logs` batches while connected; a logging handler
+      flushes the provider's own output as `provider.logs`.
+      `backend.logs.get` handler replies with ring + seq + dropped.
+- [ ] **Admin storage + read** — consume `backend.logs`/`provider.logs`
+      events → LPUSH+LTRIM Redis lists; `GET
+      /admin/api/instances/{id}/logs?kind=backend|provider&since=&limit=`.
+- [ ] **UI logs view** — per-instance logs page/dialog: Backend/Provider
+      tabs, live tail (poll `since` ~2s), auto-scroll + pause-on-scroll-
+      up, stream filter (stdout/stderr), search/highlight, download-tail.
+- [ ] **Tests** — ring bounds + drop counting, flush throttle, Redis
+      cap/cursor, endpoint tests. Keep both `wire.py` FrameKind mirrors
+      in sync (constants already exist).
 
 ---
 
