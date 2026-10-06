@@ -133,9 +133,10 @@ async def test_config_update_applies_new_model_and_clears_cache(
     BACKEND_CONFIG.clear()
     BACKEND_CONFIG.update(
         {
-            "model": {"path": local_artifacts["checkpoint"]},
-            "tokenizer": {"path": local_artifacts["tokenizer"]},
-            "options": {},
+            "artifacts": {
+                "model": {"path": local_artifacts["checkpoint"]},
+                "tokenizer": {"path": local_artifacts["tokenizer"]},
+            },
         }
     )
     settings = make_settings(tmp_path, fake_flash_binary, ADMIN_BASE_URL=fake_admin)
@@ -156,9 +157,11 @@ async def test_config_update_applies_new_model_and_clears_cache(
         (old / "slot.bin").write_bytes(b"x" * 40)
 
         new_cfg = {
-            "model": {"path": local_artifacts["checkpoint"]},
-            "tokenizer": {"path": local_artifacts["tokenizer"]},
-            "options": {"kv_slots": 2},
+            "artifacts": {
+                "model": {"path": local_artifacts["checkpoint"]},
+                "tokenizer": {"path": local_artifacts["tokenizer"]},
+            },
+            "context": {"kv_slots": 2},
         }
         await client._dispatch(
             Frame(
@@ -223,7 +226,7 @@ async def test_npu_predownload_wired_into_start(tmp_path, monkeypatch) -> None:
 
     driver = HalogenFlashBackend(
         settings,
-        {"options": {"npu_models": ["qwen3.5-2b"]}},
+        {"npu": {"npu_models": ["qwen3.5-2b"]}},
         npu_probe=lambda: {"available": True, "reasons": []},
     )
     prepared = await driver._prepare_npu_models(["qwen3.5-2b"])
@@ -240,7 +243,7 @@ async def test_npu_predownload_wired_into_start(tmp_path, monkeypatch) -> None:
     # No gated models (probe unavailable) -> nothing prepared.
     driver2 = HalogenFlashBackend(
         settings,
-        {"options": {"npu_models": ["qwen3.5-2b"]}},
+        {"npu": {"npu_models": ["qwen3.5-2b"]}},
         npu_probe=lambda: {"available": False, "reasons": ["no device"]},
     )
     assert await driver2._npu_models_for_env() is None
@@ -282,9 +285,11 @@ async def test_start_predownloads_npu_pins_before_spawn(tmp_path, monkeypatch) -
     driver = flash_driver.HalogenFlashBackend(
         settings,
         {
-            "model": {"path": str(ckpt)},
-            "tokenizer": {"path": str(tok)},
-            "options": {"npu_models": ["qwen3.5-2b"]},
+            "artifacts": {
+                "model": {"path": str(ckpt)},
+                "tokenizer": {"path": str(tok)},
+            },
+            "npu": {"npu_models": ["qwen3.5-2b"]},
         },
         npu_probe=lambda: {"available": True, "reasons": []},
     )
@@ -298,10 +303,10 @@ async def test_start_predownloads_npu_pins_before_spawn(tmp_path, monkeypatch) -
     calls["fail"] = True
     import os
 
-    from provider_halogen_flash.env import build_env
+    from provider_halogen_flash.env import build_env, flatten_options
 
     env = build_env(
-        {"npu_models": ["qwen3.5-2b"]},
+        flatten_options({"npu": {"npu_models": ["qwen3.5-2b"]}}),
         api_port=9000,
         engine_port=9001,
         checkpoint_path=str(ckpt),

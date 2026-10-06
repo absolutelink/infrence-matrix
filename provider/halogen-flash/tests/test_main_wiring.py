@@ -121,9 +121,11 @@ async def test_admin_driven_boot_and_normalized_stream(
     BACKEND_CONFIG.clear()
     BACKEND_CONFIG.update(
         {
-            "model": {"path": local_artifacts["checkpoint"]},
-            "tokenizer": {"path": local_artifacts["tokenizer"]},
-            "options": {"kv_slots": 2},
+            "artifacts": {
+                "model": {"path": local_artifacts["checkpoint"]},
+                "tokenizer": {"path": local_artifacts["tokenizer"]},
+            },
+            "context": {"kv_slots": 2},
         }
     )
     settings = make_settings(tmp_path, fake_flash_binary, ADMIN_BASE_URL=fake_admin)
@@ -197,7 +199,7 @@ def test_apply_registration_adopts_capacity(tmp_path, fake_flash_binary) -> None
     class _R:
         provider_definition = {
             "capacity": 7,
-            "backend_config": {"options": {"kv_slots": 7}},
+            "backend_config": {"context": {"kv_slots": 7}},
         }
 
     apply_registration(lifecycle, _R())  # type: ignore[arg-type]

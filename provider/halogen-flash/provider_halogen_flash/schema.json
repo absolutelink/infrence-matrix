@@ -1,0 +1,881 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "halogen-flash backend_config",
+  "description": "Sectioned backend_config for the halogen-flash provider (Phase 12). x-flag names the exact HALOGEN_* env var; env.py + driver.py remain the executable mapping. Upstream flags the driver does not wire yet carry x-supported: false (documented, disabled in the UI). The (api, engine) port pair is hashed into the engine's on-disk prompt-cache fingerprint and must stay stable across restarts (see env.derive_static_ports).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "artifacts": {
+      "type": "object",
+      "title": "Model files",
+      "description": "Checkpoint, tokenizer, MTP head, and vision tower artifacts resolved by the driver before spawn (local path or HuggingFace descriptor).",
+      "x-order": 1,
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "$ref": "#/$defs/hfFile",
+          "title": "Checkpoint",
+          "description": "Primary .hgn checkpoint (hf-file descriptor or local path). Resolved path exported as HALOGEN_CHECKPOINT.",
+          "x-flag": "HALOGEN_CHECKPOINT",
+          "x-order": 1
+        },
+        "tokenizer": {
+          "$ref": "#/$defs/hfFile",
+          "title": "Tokenizer",
+          "description": "Tokenizer artifact. The engine expects a tokenizer DIRECTORY: use {path} pointing at a local directory (exists() accepts file or dir). A {source:hf,repo,file} descriptor must name a SINGLE downloadable file (the downloader is file-only; it cannot fetch a directory tree) — unpack the tokenizer folder locally and reference it by path. Resolved path exported as HALOGEN_TOKENIZER.",
+          "x-flag": "HALOGEN_TOKENIZER",
+          "x-order": 2
+        },
+        "mtp_head": {
+          "$ref": "#/$defs/hfFile",
+          "title": "MTP head",
+          "description": "Multi-token-prediction head weights for speculative decoding. Resolved path exported as HALOGEN_MTP_HEAD.",
+          "x-flag": "HALOGEN_MTP_HEAD",
+          "x-order": 3
+        },
+        "vision_tower": {
+          "title": "Vision tower",
+          "description": "Vision tower artifact: hf-file descriptor / local path, or true to auto-look beside the checkpoint, or false to disable. Exported as HALOGEN_VISION_TOWER (resolved path, or 1/0 for booleans).",
+          "x-flag": "HALOGEN_VISION_TOWER",
+          "x-order": 4,
+          "oneOf": [
+            {
+              "$ref": "#/$defs/hfFile"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string",
+              "minLength": 1
+            }
+          ]
+        }
+      },
+      "required": [
+        "model"
+      ]
+    },
+    "context": {
+      "type": "object",
+      "title": "Context & Concurrency",
+      "x-order": 2,
+      "additionalProperties": false,
+      "properties": {
+        "ctx": {
+          "type": "integer",
+          "default": 8192,
+          "minimum": 1,
+          "maximum": 1048576,
+          "title": "Context size",
+          "description": "Prompt context window in tokens.",
+          "x-flag": "HALOGEN_CTX"
+        },
+        "max_tok": {
+          "type": "integer",
+          "default": 16384,
+          "minimum": 1,
+          "maximum": 1048576,
+          "title": "Max tokens",
+          "description": "Hard cap on total tokens (prompt + generation) handled per request.",
+          "x-flag": "HALOGEN_MAX_TOK"
+        },
+        "rope_yarn": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 64,
+          "title": "YaRN RoPE scaling",
+          "description": "YaRN rope scaling factor applied at load (0 = use the checkpoint's own setting).",
+          "x-flag": "HALOGEN_ROPE_YARN"
+        },
+        "admit_chunk": {
+          "type": "integer",
+          "default": 4096,
+          "minimum": 1,
+          "title": "Admission chunk",
+          "description": "Tokens admitted to the KV pool per admission step.",
+          "x-flag": "HALOGEN_ADMIT_CHUNK"
+        },
+        "admit_ticks": {
+          "type": "integer",
+          "default": 8,
+          "minimum": 1,
+          "title": "Admission ticks",
+          "description": "Scheduler ticks per admission chunk (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_ADMIT_TICKS",
+          "x-supported": false
+        },
+        "indexer_budget": {
+          "type": "integer",
+          "default": 64,
+          "minimum": 0,
+          "title": "Indexer budget (MiB)",
+          "description": "Attention indexer memory budget; changing it alters retrieval numerics.",
+          "x-flag": "HALOGEN_INDEXER_BUDGET",
+          "x-numeric-effect": "numeric"
+        },
+        "kv_slots": {
+          "type": "integer",
+          "default": 1,
+          "minimum": 1,
+          "maximum": 64,
+          "title": "KV slots",
+          "description": "KV cache slots = engine request concurrency. The driver reports this as effective_capacity.",
+          "x-flag": "HALOGEN_KV_SLOTS"
+        },
+        "kv_pool_positions": {
+          "type": "integer",
+          "default": 524288,
+          "minimum": 0,
+          "title": "KV pool positions",
+          "description": "Total pooled KV positions shared across slots.",
+          "x-flag": "HALOGEN_KV_POOL_POSITIONS"
+        },
+        "kv_pool_fit": {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ],
+          "default": 1,
+          "title": "KV pool fit",
+          "description": "Fit the KV pool to available memory (0 = off, 1 = on).",
+          "x-flag": "HALOGEN_KV_POOL_FIT"
+        },
+        "host_reserve_gib": {
+          "type": "number",
+          "default": 20,
+          "minimum": 0,
+          "title": "Host reserve (GiB)",
+          "description": "Host RAM kept free of the KV / cache pools.",
+          "x-flag": "HALOGEN_HOST_RESERVE_GIB"
+        }
+      }
+    },
+    "disk_cache": {
+      "type": "object",
+      "title": "Disk / Prompt Caching",
+      "x-order": 3,
+      "additionalProperties": false,
+      "properties": {
+        "cache_dir_enabled": {
+          "type": "boolean",
+          "default": true,
+          "title": "Disk cache enabled",
+          "description": "Gates HALOGEN_CACHE_DIR: persist the prompt cache under <CACHE_DIR>/halogen-flash. The dir is exported (and created) only when true.",
+          "x-flag": "HALOGEN_CACHE_DIR"
+        },
+        "cache_disk_gib": {
+          "type": "integer",
+          "default": 64,
+          "minimum": 0,
+          "title": "Disk cache size (GiB)",
+          "description": "On-disk prompt cache size cap.",
+          "x-flag": "HALOGEN_CACHE_DISK_GIB"
+        },
+        "cache_prune_old": {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ],
+          "default": 1,
+          "title": "Prune old entries",
+          "description": "Prune stale cache entries at startup (0 = off, 1 = on).",
+          "x-flag": "HALOGEN_CACHE_PRUNE_OLD"
+        },
+        "prompt_cache": {
+          "type": "integer",
+          "enum": [
+            0,
+            1,
+            2
+          ],
+          "default": 2,
+          "title": "Prompt cache mode",
+          "description": "0 = off, 1 = memory only, 2 = disk-backed. Mode 2 changes cached numerics across restarts.",
+          "x-flag": "HALOGEN_PROMPT_CACHE",
+          "x-numeric-effect": "numeric"
+        },
+        "cache_inplace": {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ],
+          "default": 1,
+          "title": "In-place cache updates",
+          "description": "Update cache entries in place instead of copy-on-write.",
+          "x-flag": "HALOGEN_CACHE_INPLACE"
+        },
+        "cache_entries": {
+          "type": "integer",
+          "default": 1024,
+          "minimum": 0,
+          "title": "Cache entries",
+          "description": "Maximum number of cached prompt entries.",
+          "x-flag": "HALOGEN_CACHE_ENTRIES"
+        },
+        "cache_branches": {
+          "type": "integer",
+          "default": 4,
+          "minimum": 0,
+          "title": "Cache branches",
+          "description": "Maximum cached branch points per entry.",
+          "x-flag": "HALOGEN_CACHE_BRANCHES"
+        },
+        "cache_snap3": {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ],
+          "default": 1,
+          "title": "Snap-3 checkpointing",
+          "description": "Snap-3 checkpoint layout for cache entries (0 = off, 1 = on).",
+          "x-flag": "HALOGEN_CACHE_SNAP3"
+        },
+        "cache_full": {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ],
+          "default": 0,
+          "title": "Cache full turns",
+          "description": "Cache full conversation turns, not just shared prefixes.",
+          "x-flag": "HALOGEN_CACHE_FULL"
+        },
+        "cache_file": {
+          "type": "string",
+          "default": "",
+          "title": "Cache file",
+          "description": "Explicit cache file path (upstream flag; not yet wired by this provider — the cache lives in HALOGEN_CACHE_DIR).",
+          "x-flag": "HALOGEN_CACHE_FILE",
+          "x-supported": false
+        },
+        "prefill_chunk": {
+          "type": "integer",
+          "default": 8192,
+          "minimum": 1,
+          "title": "Prefill chunk",
+          "description": "Tokens per prefill chunk when warming the prompt cache.",
+          "x-flag": "HALOGEN_PREFILL_CHUNK"
+        }
+      }
+    },
+    "speculative": {
+      "type": "object",
+      "title": "MTP / Speculative",
+      "x-order": 4,
+      "additionalProperties": false,
+      "properties": {
+        "mtp_depth": {
+          "type": "integer",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 8,
+          "title": "MTP depth",
+          "description": "Multi-token-prediction depth per step (0 = disabled).",
+          "x-flag": "HALOGEN_MTP_DEPTH"
+        },
+        "drafter_default": {
+          "type": "string",
+          "default": "mtp",
+          "title": "Default drafter",
+          "description": "Default drafter engine for speculative decoding (e.g. 'mtp', 'ngram', 'none').",
+          "x-flag": "HALOGEN_DRAFTER_DEFAULT"
+        },
+        "pld": {
+          "type": "string",
+          "pattern": "^[0-9]+,[0-9]+$",
+          "default": "",
+          "title": "PLD (N,K)",
+          "description": "Prompt-lookup decoding parameters as 'N,K' (N = candidate length, K = min match).",
+          "x-flag": "HALOGEN_PLD"
+        },
+        "spec_adapt": {
+          "type": "string",
+          "pattern": "^[0-9]+(\\.[0-9]+)?,[0-9]+(\\.[0-9]+)?,[0-9]+(\\.[0-9]+)?$",
+          "default": "",
+          "title": "Spec adapt (W,floor,R)",
+          "description": "Adaptive speculation parameters as 'W,floor,R' (window, accept floor, retry rate).",
+          "x-flag": "HALOGEN_SPEC_ADAPT"
+        },
+        "grammar": {
+          "type": "string",
+          "default": "",
+          "title": "Grammar",
+          "description": "Default constrained-decoding grammar for structured output.",
+          "x-flag": "HALOGEN_GRAMMAR"
+        }
+      }
+    },
+    "sampling": {
+      "type": "object",
+      "title": "Sampling",
+      "x-order": 5,
+      "additionalProperties": false,
+      "properties": {
+        "temperature": {
+          "type": "number",
+          "default": 0.7,
+          "minimum": 0,
+          "maximum": 2,
+          "title": "Temperature",
+          "description": "Default sampling temperature (server-side default for requests that omit it).",
+          "x-flag": "HALOGEN_TEMPERATURE",
+          "x-numeric-effect": "numeric"
+        },
+        "top_p": {
+          "type": "number",
+          "default": 0.8,
+          "minimum": 0,
+          "maximum": 1,
+          "title": "Top-p",
+          "description": "Nucleus sampling probability.",
+          "x-flag": "HALOGEN_TOP_P",
+          "x-numeric-effect": "numeric"
+        },
+        "top_k": {
+          "type": "integer",
+          "default": 20,
+          "minimum": 0,
+          "title": "Top-k",
+          "description": "Top-k sampling cutoff (0 = disabled).",
+          "x-flag": "HALOGEN_TOP_K",
+          "x-numeric-effect": "numeric"
+        },
+        "min_p": {
+          "type": "number",
+          "default": 0.0,
+          "minimum": 0,
+          "maximum": 1,
+          "title": "Min-p",
+          "description": "Minimum probability cutoff relative to the top token.",
+          "x-flag": "HALOGEN_MIN_P",
+          "x-numeric-effect": "numeric"
+        },
+        "presence_penalty": {
+          "type": "number",
+          "default": 0,
+          "minimum": -2,
+          "maximum": 2,
+          "title": "Presence penalty",
+          "description": "Presence penalty scale.",
+          "x-flag": "HALOGEN_PRESENCE_PENALTY",
+          "x-numeric-effect": "numeric"
+        },
+        "frequency_penalty": {
+          "type": "number",
+          "default": 0,
+          "minimum": -2,
+          "maximum": 2,
+          "title": "Frequency penalty",
+          "description": "Frequency penalty scale.",
+          "x-flag": "HALOGEN_FREQUENCY_PENALTY",
+          "x-numeric-effect": "numeric"
+        },
+        "repetition_penalty": {
+          "type": "number",
+          "default": 1.0,
+          "minimum": 0,
+          "title": "Repetition penalty",
+          "description": "Repetition penalty scale (1.0 = disabled; upstream flag, not yet wired by this provider).",
+          "x-flag": "HALOGEN_REPETITION_PENALTY",
+          "x-numeric-effect": "numeric",
+          "x-supported": false
+        },
+        "max_tokens_cap": {
+          "type": "integer",
+          "default": 8192,
+          "minimum": 1,
+          "title": "Max tokens cap",
+          "description": "Hard ceiling on requested max_tokens.",
+          "x-flag": "HALOGEN_MAX_TOKENS_CAP"
+        },
+        "max_tokens_default": {
+          "type": "integer",
+          "default": 1024,
+          "minimum": 1,
+          "title": "Max tokens default",
+          "description": "max_tokens applied when the request omits it.",
+          "x-flag": "HALOGEN_MAX_TOKENS_DEFAULT"
+        }
+      }
+    },
+    "reasoning": {
+      "type": "object",
+      "title": "Reasoning / Thinking",
+      "x-order": 6,
+      "additionalProperties": false,
+      "properties": {
+        "reasoning_effort": {
+          "type": "string",
+          "enum": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default": "medium",
+          "title": "Reasoning effort",
+          "description": "Named effort level for reasoning models.",
+          "x-flag": "HALOGEN_REASONING_EFFORT",
+          "x-numeric-effect": "numeric"
+        },
+        "enable_thinking": {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ],
+          "default": 1,
+          "title": "Enable thinking",
+          "description": "Turn chain-of-thought emission on/off (0 = off, 1 = on).",
+          "x-flag": "HALOGEN_ENABLE_THINKING"
+        },
+        "max_thinking_tokens": {
+          "type": "integer",
+          "default": 16384,
+          "minimum": 0,
+          "title": "Max thinking tokens",
+          "description": "Budget cap for reasoning content.",
+          "x-flag": "HALOGEN_MAX_THINKING_TOKENS"
+        },
+        "thinking_answer_room": {
+          "type": "integer",
+          "default": 4096,
+          "minimum": 0,
+          "title": "Thinking answer room",
+          "description": "Tokens reserved for the answer after the thinking budget.",
+          "x-flag": "HALOGEN_THINKING_ANSWER_ROOM"
+        },
+        "thinking_budget_message": {
+          "type": "string",
+          "default": "",
+          "title": "Thinking budget message",
+          "description": "Message emitted when the thinking budget is exhausted (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_THINKING_BUDGET_MESSAGE",
+          "x-supported": false
+        },
+        "eos_guard": {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ],
+          "default": 1,
+          "title": "EOS guard",
+          "description": "Guard against premature EOS during reasoning (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_EOS_GUARD",
+          "x-supported": false
+        },
+        "template_unchecked": {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ],
+          "default": 0,
+          "title": "Template unchecked",
+          "description": "Skip chat-template validation on input (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_TEMPLATE_UNCHECKED",
+          "x-supported": false
+        }
+      }
+    },
+    "composable": {
+      "type": "object",
+      "title": "Composable Context (preview)",
+      "x-order": 7,
+      "additionalProperties": false,
+      "properties": {
+        "composable_context": {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ],
+          "default": 0,
+          "title": "Composable context",
+          "description": "Enable the composable-context preview (0 = off, 1 = on). Changes context assembly numerics.",
+          "x-flag": "HALOGEN_COMPOSABLE_CONTEXT",
+          "x-numeric-effect": "numeric"
+        },
+        "composable_context_floor": {
+          "type": "integer",
+          "default": 4096,
+          "minimum": 0,
+          "title": "Composable floor",
+          "description": "Minimum resident tokens when composable context is enabled.",
+          "x-flag": "HALOGEN_COMPOSABLE_CONTEXT_FLOOR"
+        },
+        "composable_context_bytes": {
+          "type": "integer",
+          "default": 268435456,
+          "minimum": 0,
+          "title": "Composable bytes",
+          "description": "Byte budget for composable context segments.",
+          "x-flag": "HALOGEN_COMPOSABLE_CONTEXT_BYTES"
+        }
+      }
+    },
+    "vision": {
+      "type": "object",
+      "title": "Vision",
+      "x-order": 8,
+      "additionalProperties": false,
+      "properties": {
+        "vision_max_pixels": {
+          "type": "integer",
+          "default": 1048576,
+          "minimum": 0,
+          "title": "Vision max pixels",
+          "description": "Maximum image pixels fed to the vision tower (larger images are downscaled).",
+          "x-flag": "HALOGEN_VISION_MAX_PIXELS"
+        }
+      }
+    },
+    "npu": {
+      "type": "object",
+      "title": "NPU Small Models",
+      "x-order": 9,
+      "additionalProperties": false,
+      "properties": {
+        "npu_models": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "default": [],
+          "title": "NPU model ids",
+          "description": "Bare upstream NPU model ids (e.g. 'qwen3-embedding-0.6b') or local paths — NOT hf-file descriptors. Emitted as HALOGEN_NPU_MODELS (comma-joined) only when the host NPU probe passes; the pinned files are pre-downloaded into MODELS_DIR/npu/<id>/ at start.",
+          "x-flag": "HALOGEN_NPU_MODELS"
+        },
+        "npu_with_gpu": {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ],
+          "default": 1,
+          "title": "NPU with GPU",
+          "description": "Allow NPU small models alongside a GPU-loaded main model (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_NPU_WITH_GPU",
+          "x-supported": false
+        },
+        "npu_verify": {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ],
+          "default": 1,
+          "title": "NPU verify",
+          "description": "Verify NPU outputs against the CPU path (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_NPU_VERIFY",
+          "x-supported": false
+        },
+        "npu_emb_batch": {
+          "type": "integer",
+          "default": 8,
+          "minimum": 1,
+          "title": "NPU embedding batch",
+          "description": "Embedding batch size on the NPU (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_NPU_EMB_BATCH",
+          "x-supported": false
+        },
+        "npu_queue": {
+          "type": "integer",
+          "default": 2,
+          "minimum": 1,
+          "title": "NPU queue depth",
+          "description": "NPU submission queue depth (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_NPU_QUEUE",
+          "x-supported": false
+        }
+      }
+    },
+    "networking": {
+      "type": "object",
+      "title": "Networking / Ports",
+      "x-order": 10,
+      "additionalProperties": false,
+      "properties": {
+        "api_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "title": "API port",
+          "description": "Flash API listen port (all HTTP traffic). Part of the disk-cache fingerprint pair: when absent, both ports are derived deterministically from MACHINE_UID in the 8200-8289 static range (no schema default).",
+          "x-flag": "HALOGEN_API_PORT"
+        },
+        "engine_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "title": "Engine port",
+          "description": "Private engine port (referenced via HALOGEN_ENGINE). Must be pinned together with api_port for fingerprint stability (no schema default).",
+          "x-flag": "HALOGEN_PORT"
+        },
+        "bind": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "title": "Bind address",
+          "description": "Listen bind address. The provider hardcodes 127.0.0.1; this config field is not yet wired.",
+          "x-flag": "HALOGEN_BIND",
+          "x-supported": false
+        },
+        "keepalive_timeout": {
+          "type": "integer",
+          "default": 60,
+          "minimum": 0,
+          "title": "Keepalive timeout (s)",
+          "description": "HTTP keep-alive timeout.",
+          "x-flag": "HALOGEN_KEEPALIVE_TIMEOUT"
+        },
+        "sse_keepalive_s": {
+          "type": "integer",
+          "default": 15,
+          "minimum": 0,
+          "title": "SSE keepalive (s)",
+          "description": "Keep-alive ping interval for SSE streams.",
+          "x-flag": "HALOGEN_SSE_KEEPALIVE_S"
+        },
+        "queue_timeout": {
+          "type": "integer",
+          "default": 300,
+          "minimum": 0,
+          "title": "Queue timeout (s)",
+          "description": "Max time a request waits for a free KV slot before failing.",
+          "x-flag": "HALOGEN_QUEUE_TIMEOUT"
+        }
+      }
+    },
+    "troubleshooting": {
+      "type": "object",
+      "title": "Troubleshooting / Engine Internals",
+      "x-order": 11,
+      "additionalProperties": false,
+      "properties": {
+        "verbose": {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ],
+          "default": 0,
+          "title": "Verbose logging",
+          "description": "Verbose engine logging (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_VERBOSE",
+          "x-supported": false
+        },
+        "startup_progress": {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ],
+          "default": 1,
+          "title": "Startup progress",
+          "description": "Print load-progress lines at startup (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_STARTUP_PROGRESS",
+          "x-supported": false
+        },
+        "engine_watchdog_s": {
+          "type": "integer",
+          "default": 120,
+          "minimum": 0,
+          "title": "Engine watchdog (s)",
+          "description": "Engine hang watchdog timeout (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_ENGINE_WATCHDOG_S",
+          "x-supported": false
+        },
+        "engine_watchdog_defer_s": {
+          "type": "integer",
+          "default": 300,
+          "minimum": 0,
+          "title": "Watchdog defer (s)",
+          "description": "Grace period before the watchdog arms (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_ENGINE_WATCHDOG_DEFER_S",
+          "x-supported": false
+        },
+        "engine_wait_s": {
+          "type": "integer",
+          "default": 60,
+          "minimum": 0,
+          "title": "Engine wait (s)",
+          "description": "Max wait for the engine to come up (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_ENGINE_WAIT_S",
+          "x-supported": false
+        },
+        "flash_pin_trunk": {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ],
+          "default": 1,
+          "title": "Pin trunk",
+          "description": "Pin the cache trunk in memory (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_FLASH_PIN_TRUNK",
+          "x-supported": false
+        },
+        "frag_warn_blocks": {
+          "type": "integer",
+          "default": 128,
+          "minimum": 0,
+          "title": "Fragmentation warn blocks",
+          "description": "Block count above which fragmentation is logged (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_FRAG_WARN_BLOCKS",
+          "x-supported": false
+        },
+        "frag_warn_stalls": {
+          "type": "integer",
+          "default": 4,
+          "minimum": 0,
+          "title": "Fragmentation warn stalls",
+          "description": "Stall count above which fragmentation is logged (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_FRAG_WARN_STALLS",
+          "x-supported": false
+        },
+        "dmalloc_log": {
+          "type": "string",
+          "default": "",
+          "title": "Debug malloc log",
+          "description": "Debug allocator log path (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_DMALLOC_LOG",
+          "x-supported": false
+        },
+        "prefill_cancel": {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ],
+          "default": 1,
+          "title": "Prefill cancel",
+          "description": "Allow cancelling in-flight prefill (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_PREFILL_CANCEL",
+          "x-supported": false
+        },
+        "prefill_keep_trunk": {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ],
+          "default": 1,
+          "title": "Prefill keep trunk",
+          "description": "Keep the cache trunk after a cancelled prefill (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_PREFILL_KEEP_TRUNK",
+          "x-supported": false
+        },
+        "ngram_gather_threads": {
+          "type": "integer",
+          "default": 2,
+          "minimum": 0,
+          "title": "Ngram gather threads",
+          "description": "Threads gathering ngram-draft candidates (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_NGRAM_GATHER_THREADS",
+          "x-supported": false
+        },
+        "matmul_tuning_file": {
+          "type": "string",
+          "default": "",
+          "title": "Matmul tuning file",
+          "description": "Persistent matmul autotuning cache path (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_MATMUL_TUNING_FILE",
+          "x-supported": false
+        },
+        "gguf_cache": {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ],
+          "default": 1,
+          "title": "GGUF cache",
+          "description": "Cache converted GGUF tensors (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_GGUF_CACHE",
+          "x-supported": false
+        },
+        "gguf_threads": {
+          "type": "integer",
+          "default": 4,
+          "minimum": 0,
+          "title": "GGUF threads",
+          "description": "Threads converting GGUF tensors (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_GGUF_THREADS",
+          "x-supported": false
+        },
+        "ck_overlay": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "title": "Checkpoint overlay",
+          "description": "Checkpoint overlay level; changes output numerics (upstream flag; not yet wired by this provider).",
+          "x-flag": "HALOGEN_CK_OVERLAY",
+          "x-numeric-effect": "numeric",
+          "x-supported": false
+        },
+        "download": {
+          "type": "string",
+          "default": "",
+          "title": "Auto-download repo",
+          "description": "Repo id the engine may auto-download artifacts from (upstream flag; not yet wired by this provider — downloads happen in the driver via artifacts).",
+          "x-flag": "HALOGEN_DOWNLOAD",
+          "x-supported": false
+        }
+      }
+    }
+  },
+  "$defs": {
+    "hfFile": {
+      "title": "HuggingFace file",
+      "oneOf": [
+        {
+          "type": "object",
+          "x-widget": "hf-file",
+          "properties": {
+            "source": {
+              "const": "hf"
+            },
+            "repo": {
+              "type": "string"
+            },
+            "file": {
+              "type": "string"
+            },
+            "revision": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "repo",
+            "file"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

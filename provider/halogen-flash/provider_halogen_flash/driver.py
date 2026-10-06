@@ -19,10 +19,11 @@ Halogen Flash specifics:
   fingerprint; `resolve_ports()` pins a stable (api, engine) pair per
   machine (explicit in backend_config, else derived from MACHINE_UID in
   the dedicated 8200–8289 range).
-- **NPU small-model pinning.** `options.npu_models` (upstream ids) is
-  exported as HALOGEN_NPU_MODELS only when the host NPU probe passes;
-  without an NPU the env is omitted gracefully (the ids are dropped
-  with a log line, never an error).
+- **NPU small-model pinning.** `npu.npu_models` (upstream ids; Phase 12
+  section, legacy `options.npu_models` still accepted via
+  `env.flatten_options`) is exported as HALOGEN_NPU_MODELS only when
+  the host NPU probe passes; without an NPU the env is omitted
+  gracefully (the ids are dropped with a log line, never an error).
 """
 
 import asyncio
@@ -43,11 +44,13 @@ import httpx
 from provider_lib.backend import BackendDriver
 from provider_lib.config import ProviderSettings
 from provider_lib.downloader import ensure_artifact
+from provider_lib.schema import load_schema, validate_backend_config
 
 from provider_halogen_flash.env import (
     build_argv,
     build_env,
     effective_capacity,
+    flatten_options,
     resolve_ports,
 )
 from provider_halogen_flash.log_ring import CursorLogRing
@@ -68,6 +71,12 @@ _HEALTH_POLL_INTERVAL = 0.25
 _STDERR_TAIL_LINES = 5
 
 _TERMINAL_TYPES = ("response.completed", "response.incomplete")
+
+# The halogen-flash committed backend_config schema (Phase 12): the
+# sectioned shape the admin registers, validates against, and renders in
+# the UI. Shared with main.py (single load → registration + driver
+# validation).
+SCHEMA: dict[str, Any] = load_schema("provider_halogen_flash")
 
 
 class HalogenFlashBackend(BackendDriver):
@@ -98,10 +107,23 @@ class HalogenFlashBackend(BackendDriver):
         self.resolved_artifacts: list[str] = []
 
     def apply_config(self, backend_config: dict[str, Any]) -> None:
-        """Adopt a (possibly updated) backend_config before start."""
+        """Adopt a (possibly updated) sectioned backend_config before start.
+
+        Schema violations are logged as warnings, not raised: the
+        authoritative gates are the admin's registration schema check and
+        definition CRUD validation (docs/ws-protocol.md §2).
+        """
         self._config = backend_config or {}
+        for err in validate_backend_config(SCHEMA, self._config):
+            logger.warning("backend_config schema violation: %s", err)
         self._ports = resolve_ports(self._config, self._settings.MACHINE_UID)
+        # Config changed: previously resolved artifacts are stale.
         self.resolved_artifacts = []
+
+    def _options(self) -> dict[str, Any]:
+        """Flat semantic options for env building (Phase 12 sections +
+        legacy `cfg["options"]`; see env.flatten_options)."""
+        return flatten_options(self._config)
 
     @property
     def api_port(self) -> int:
@@ -125,7 +147,7 @@ class HalogenFlashBackend(BackendDriver):
 
     @property
     def effective_capacity(self) -> int:
-        return effective_capacity(self._config.get("options") or {})
+        return effective_capacity(self._options())
 
     # ------------------------------------------------------------------
     # NPU gating
@@ -138,7 +160,7 @@ class HalogenFlashBackend(BackendDriver):
         without an NPU. The probe does blocking I/O (device checks,
         subprocess) so it runs in a worker thread.
         """
-        opts = self._config.get("options") or {}
+        opts = self._options()
         requested = opts.get("npu_models")
         if not requested:
             return None
@@ -224,13 +246,22 @@ class HalogenFlashBackend(BackendDriver):
     # ------------------------------------------------------------------
     # Artifact resolution
     # ------------------------------------------------------------------
+    def _artifact_descriptor(self, name: str) -> Any:
+        """Read an artifact descriptor from the `artifacts` section
+        (Phase 12), falling back to the legacy top-level key."""
+        artifacts = self._config.get("artifacts")
+        if isinstance(artifacts, dict) and artifacts.get(name) is not None:
+            return artifacts[name]
+        return self._config.get(name)
+
     async def _resolve_artifact(self, descriptor: Any, kind: str) -> str:
         """Resolve a halogen-flash artifact to a local path.
 
         The tokenizer is a DIRECTORY artifact, so `{"path": ...}` is
         checked with exists() (file or dir) here instead of the lib's
         file-only local path; HF repo descriptors still go through
-        `ensure_artifact`.
+        `ensure_artifact` (with the descriptor's optional `revision`
+        pinned, mirroring the llama-cpp driver).
         """
         if descriptor is None:
             raise RuntimeError(f"backend_config missing '{kind}' artifact")
@@ -244,10 +275,15 @@ class HalogenFlashBackend(BackendDriver):
             if not p.exists():
                 raise RuntimeError(f"local {kind} path not found: {p}")
             return str(p)
+        # Only a non-empty string pins the HF revision (empty/absent = None).
+        revision = descriptor.get("revision") if isinstance(descriptor, dict) else None
+        if not isinstance(revision, str) or not revision.strip():
+            revision = None
         return await ensure_artifact(
             descriptor,
             models_dir=self._settings.MODELS_DIR,
             progress_cb=self._progress_cb,
+            revision=revision,
         )
 
     # ------------------------------------------------------------------
@@ -261,11 +297,37 @@ class HalogenFlashBackend(BackendDriver):
         # would otherwise surface as a confusing stdbuf exit; check first.
         if not shutil.which(self._binary) and not Path(self._binary).exists():
             raise RuntimeError(f"halogen-flash entrypoint not found: {self._binary}")
-        checkpoint = await self._resolve_artifact(self._config.get("model"), "model")
+        checkpoint = await self._resolve_artifact(
+            self._artifact_descriptor("model"), "model"
+        )
         tokenizer = await self._resolve_artifact(
-            self._config.get("tokenizer"), "tokenizer"
+            self._artifact_descriptor("tokenizer"), "tokenizer"
         )
         self.resolved_artifacts = [checkpoint, tokenizer]
+        # Flat semantic options (Phase 12 sections + legacy options blob).
+        # artifacts.vision_tower / artifacts.mtp_head are env-mapped
+        # (HALOGEN_VISION_TOWER / HALOGEN_MTP_HEAD): descriptors and
+        # local paths resolve to their local path here; `true` means
+        # "look beside the checkpoint" (emit 1); `false` is an explicit
+        # off-switch for the vision tower (emit 0). An absent value emits
+        # nothing (engine default).
+        options = self._options()
+        for name in ("vision_tower", "mtp_head"):
+            descriptor = self._artifact_descriptor(name)
+            if descriptor is None:
+                continue
+            if descriptor is False:
+                # Only vision_tower may be a boolean per schema; `false`
+                # exports the explicit disable (HALOGEN_VISION_TOWER=0).
+                if name == "vision_tower":
+                    options[name] = 0
+                continue
+            if descriptor is True:
+                options[name] = 1
+            else:
+                local = await self._resolve_artifact(descriptor, name)
+                options[name] = local
+                self.resolved_artifacts.append(local)
         api_port, engine_port = self._ports
         cache_dir = Path(self._settings.CACHE_DIR) / "halogen-flash"
         npu_models = await self._npu_models_for_env()
@@ -279,7 +341,7 @@ class HalogenFlashBackend(BackendDriver):
             else:
                 npu_models = None
         env = build_env(
-            self._config.get("options") or {},
+            options,
             api_port=api_port,
             engine_port=engine_port,
             checkpoint_path=checkpoint,

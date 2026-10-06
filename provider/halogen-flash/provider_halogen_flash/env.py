@@ -2,10 +2,14 @@
 legacy agent.
 
 Halogen Flash is configured almost entirely through `HALOGEN_*`
-environment variables (43 semantic options plus the fixed wiring).
-`backend_config.options` holds the semantic config; this module maps it
-to the env dict for the subprocess with None-skip semantics (absent or
-None values are never emitted; the engine keeps its own default).
+environment variables. Since Phase 12 the `backend_config` is a
+**sectioned** object (see `provider_halogen_flash/schema.json`);
+`flatten_options()` assembles the flat semantic-options dict that
+`ENV_MAP` / `build_env` consume, so the env mapping itself is unchanged.
+The legacy flat `cfg["options"]` blob is still merged (section values win
+on key conflicts) for hand-rolled configs. None-skip semantics hold:
+absent or None values are never emitted; the engine keeps its own
+default.
 
 Static-port rule: the Flash engine hashes its server variables — ports
 included — into its on-disk prompt-cache fingerprint. Random per-start
@@ -23,8 +27,11 @@ import os
 from pathlib import Path
 from typing import Any
 
-# backend_config.options key -> HALOGEN_* env var. Every entry is
-# optional; None / absent is never emitted.
+# backend_config semantic-option key -> HALOGEN_* env var. Every entry is
+# optional; None / absent is never emitted. Keys arrive via
+# `flatten_options()` (Phase 12 sections) or the legacy flat
+# `cfg["options"]` blob; `vision_tower` / `mtp_head` are the driver-
+# resolved values of the same-named `artifacts` entries.
 ENV_MAP: dict[str, str] = {
     # KV cache & admission
     "kv_slots": "HALOGEN_KV_SLOTS",
@@ -78,7 +85,45 @@ ENV_MAP: dict[str, str] = {
     "grammar": "HALOGEN_GRAMMAR",
     "vision_tower": "HALOGEN_VISION_TOWER",
     "vision_max_pixels": "HALOGEN_VISION_MAX_PIXELS",
+    # MTP head (driver-resolved from artifacts.mtp_head)
+    "mtp_head": "HALOGEN_MTP_HEAD",
 }
+
+# backend_config sections whose leaf keys flatten into the semantic
+# `options` dict consumed by ENV_MAP / build_env (Phase 12). `artifacts`
+# is excluded: the driver resolves those descriptors to local paths and
+# injects the resolved `vision_tower` / `mtp_head` values itself.
+# `networking` ports (`api_port` / `engine_port`) ride along harmlessly —
+# ENV_MAP has no key for them; the driver reads ports via resolve_ports().
+CONFIG_SECTIONS: tuple[str, ...] = (
+    "context",
+    "disk_cache",
+    "speculative",
+    "sampling",
+    "reasoning",
+    "composable",
+    "vision",
+    "npu",
+    "networking",
+    "troubleshooting",
+)
+
+
+def flatten_options(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Assemble the flat semantic-options dict from a sectioned config.
+
+    Mirrors llama-cpp's `flatten_args()`: section leaves are merged in
+    `CONFIG_SECTIONS` order; the legacy flat `cfg["options"]`
+    (pre-Phase-12 shape) is merged first so section values take
+    precedence on key conflicts.
+    """
+    flat: dict[str, Any] = dict(cfg.get("options") or {})
+    for section in CONFIG_SECTIONS:
+        values = cfg.get(section)
+        if isinstance(values, dict):
+            flat.update(values)
+    return flat
+
 
 # Static port range dedicated to Flash servers (api + engine pair). Kept
 # clear of the ephemeral llama-server range so fingerprints stay stable
@@ -111,11 +156,24 @@ def derive_static_ports(machine_uid: str) -> tuple[int, int]:
 def resolve_ports(cfg: dict[str, Any], machine_uid: str) -> tuple[int, int]:
     """Resolve the pinned (api, engine) pair for this instance.
 
-    Priority: explicit `api_port`/`engine_port` in backend_config; else
-    the deterministic static pair derived from MACHINE_UID. (The
-    instance's own PROVIDER_PORT is its admin-facing surface and never
-    participates in the engine's fingerprint pair.)
+    Each source is ATOMIC — a pair is honored only when both ports come
+    from the same source, so a half-migrated config can never mix a
+    `networking` api_port with a legacy top-level engine_port and
+    silently re-point the disk-cache fingerprint. Resolution order:
+
+    1. `networking` section with BOTH `api_port` and `engine_port`.
+    2. Legacy top-level `api_port` and `engine_port` (both present).
+    3. The full deterministic static pair derived from MACHINE_UID.
+
+    (The instance's own PROVIDER_PORT is its admin-facing surface and
+    never participates in the engine's fingerprint pair.)
     """
+    networking = cfg.get("networking")
+    if isinstance(networking, dict):
+        api = networking.get("api_port")
+        engine = networking.get("engine_port")
+        if api is not None and engine is not None:
+            return int(api), int(engine)
     api = cfg.get("api_port")
     engine = cfg.get("engine_port")
     if api is not None and engine is not None:
@@ -134,13 +192,15 @@ def build_env(
     npu_models: list[str] | None = None,
     base_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    """Map a halogen-flash backend_config into the subprocess environment.
+    """Map halogen-flash semantic options into the subprocess environment.
 
-    `cache_dir` is the per-instance disk-cache directory: it is exported
-    as HALOGEN_CACHE_DIR only when `options.cache_dir_enabled` is true
-    (legacy semantics). `npu_models` (already NPU-probe-gated by the
-    caller) joins with commas so the engine reads a bare id list, not a
-    Python repr.
+    `options` is the flat semantic dict — pass `flatten_options(cfg)`
+    for a Phase 12 sectioned config (or a legacy `cfg["options"]`
+    blob). `cache_dir` is the per-instance disk-cache directory: it is
+    exported as HALOGEN_CACHE_DIR only when `options.cache_dir_enabled`
+    is true (legacy semantics). `npu_models` (already NPU-probe-gated
+    by the caller) joins with commas so the engine reads a bare id list,
+    not a Python repr.
     """
     env = dict(base_env if base_env is not None else os.environ)
     env["HALOGEN_API_PORT"] = str(api_port)

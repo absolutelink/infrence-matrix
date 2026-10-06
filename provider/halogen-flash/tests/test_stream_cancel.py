@@ -25,8 +25,10 @@ def _driver(tmp_path: Any, binary: str, artifacts: dict[str, str]):
     return HalogenFlashBackend(
         settings,
         {
-            "model": {"path": artifacts["checkpoint"]},
-            "tokenizer": {"path": artifacts["tokenizer"]},
+            "artifacts": {
+                "model": {"path": artifacts["checkpoint"]},
+                "tokenizer": {"path": artifacts["tokenizer"]},
+            },
         },
         npu_probe=lambda: NPU_UNAVAILABLE,
     )

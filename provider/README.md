@@ -690,88 +690,137 @@ halogen-flash process. Key differences from plain halogen:
 
 ### backend_config schema
 > **Canonical (Phase 12):** the authoritative schema is the shipped
-> `schema.json` for this provider package (loaded by `provider_lib.schema`,
-> sent at registration). The example below is its starting point — keep both
-> in sync. See "Authoring schema.json" above for conventions.
-
+> `provider_halogen_flash/schema.json` (loaded by `provider_lib.schema`,
+> sent at registration). **D3 restructure:** the config is now a
+> sectioned object — the old flat `model`/`tokenizer`/`api_port`/
+> `engine_port` + `options` blob is replaced by named collapseable
+> sections. The driver still accepts the legacy flat shape as a fallback
+> (sections win on key conflicts) via `env.flatten_options()`.
 
 ```json
 {
-  "model":     {"source": "hf", "repo": "peonist-ai/halogen-qwen3.8-flash-next", "file": "qwen38-flash-next-w4b.hgn"},
-  "tokenizer": {"source": "hf", "repo": "peonist-ai/halogen-qwen3.8-flash-next", "file": "tokenizer"},
-  "api_port": 8200,
-  "engine_port": 8201,
-  "options": {
+  "artifacts": {
+    "model":     {"source": "hf", "repo": "peonist-ai/halogen-qwen3.8-flash-next", "file": "qwen38-flash-next-w4b.hgn"},
+    "tokenizer": {"source": "hf", "repo": "peonist-ai/halogen-qwen3.8-flash-next", "file": "tokenizer"},
+    "mtp_head":  {"path": "/models/mtp-head.hgn"},
+    "vision_tower": true
+  },
+  "context": {
+    "ctx": 131072, "max_tok": 16384, "rope_yarn": 4,
+    "admit_chunk": 4096, "indexer_budget": 64,
     "kv_slots": 8, "kv_pool_positions": 524288, "kv_pool_fit": 1,
-    "host_reserve_gib": 20, "ctx": 131072, "max_tok": 16384,
-    "rope_yarn": 4, "admit_chunk": 4096, "indexer_budget": 64,
+    "host_reserve_gib": 20
+  },
+  "disk_cache": {
     "cache_dir_enabled": true, "cache_disk_gib": 64, "cache_prune_old": 1,
-    "prompt_cache": 2, "cache_inplace": 1, "prefill_chunk": 8192,
-    "npu_models": ["qwen3-embedding-0.6b", "qwen3.5-2b"],
-    "vision_tower": 1, "vision_max_pixels": 1048576
-  }
+    "prompt_cache": 2, "cache_inplace": 1, "prefill_chunk": 8192
+  },
+  "speculative": {"mtp_depth": 2, "drafter_default": "mtp", "pld": "64,8", "spec_adapt": "4,0.5,2"},
+  "sampling": {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "max_tokens_cap": 8192},
+  "reasoning": {"reasoning_effort": "high", "enable_thinking": 1, "max_thinking_tokens": 16384},
+  "composable": {"composable_context": 1},
+  "vision": {"vision_max_pixels": 1048576},
+  "npu": {"npu_models": ["qwen3-embedding-0.6b", "qwen3.5-2b"]},
+  "networking": {"api_port": 8200, "engine_port": 8201},
+  "troubleshooting": {}
 }
 ```
+
+Sections (schema `x-order`): `artifacts` (1) · `context` "Context &
+Concurrency" (2) · `disk_cache` "Disk / Prompt Caching" (3) ·
+`speculative` "MTP / Speculative" (4) · `sampling` (5) · `reasoning`
+(6) · `composable` "Composable Context (preview)" (7) · `vision` (8) ·
+`npu` (9) · `networking` (10) · `troubleshooting` (11).
+
+- `artifacts.model` = the `.hgn` **checkpoint** (required within the
+  section), `artifacts.tokenizer` = the tokenizer **directory**. The
+  engine needs a directory, and `ensure_artifact` downloads single files
+  only — so a tokenizer HF descriptor must name a SINGLE file, while a
+  tokenizer *directory* is referenced with `{"path": "<local dir>"}`
+  (the driver's exists() special-case accepts file or dir). All accept
+  `{"path": ...}` or HF descriptors (with optional `revision`, passed
+  through to `ensure_artifact`).
+- `artifacts.vision_tower` / `artifacts.mtp_head` resolve to local
+  paths and are exported as `HALOGEN_VISION_TOWER` / `HALOGEN_MTP_HEAD`;
+  `vision_tower: true` means "look beside the checkpoint" (emits `1`),
+  `vision_tower: false` is an explicit off-switch (emits `0`); absent
+  emits nothing (engine default).
+- `npu.npu_models` is a **string array** of bare upstream ids/paths
+  (not descriptors), joined to a comma list at export.
+- Fields from the upstream FLAGS.md that this driver does not wire yet
+  are present in the schema with `x-supported: false` (shown disabled in
+  the UI): `context.admit_ticks`, `disk_cache.cache_file`,
+  `sampling.repetition_penalty`, `reasoning.thinking_budget_message` /
+  `eos_guard` / `template_unchecked`, `npu.npu_with_gpu` / `npu_verify`
+  / `npu_emb_batch` / `npu_queue`, `networking.bind`, and the whole
+  `troubleshooting` section (verbose, startup_progress,
+  engine_watchdog_s/defer_s, engine_wait_s, flash_pin_trunk,
+  frag_warn_blocks/stalls, dmalloc_log, prefill_cancel,
+  prefill_keep_trunk, ngram_gather_threads, matmul_tuning_file,
+  gguf_cache, gguf_threads, ck_overlay, download).
 
 ### Env mapping (env.py)
 
 Fixed wiring is identical to halogen (`HALOGEN_API_PORT`,
 `HALOGEN_PORT`, `HALOGEN_BIND`, `HALOGEN_ENGINE`, `HALOGEN_CHECKPOINT`,
-`HALOGEN_TOKENIZER`). The 43 semantic `options` → env mappings (each
-emitted only when present and not None):
+`HALOGEN_TOKENIZER`). The section leaves are flattened into the same
+semantic option names by `flatten_options()` (legacy flat
+`cfg["options"]` merged first, sections win), and `ENV_MAP` maps them to
+`HALOGEN_*` env vars (each emitted only when present and not None):
 
-| Option | Env | Group |
-| --- | --- | --- |
-| `kv_slots` | `HALOGEN_KV_SLOTS` | KV cache & admission |
-| `kv_pool_positions` | `HALOGEN_KV_POOL_POSITIONS` | |
-| `kv_pool_fit` | `HALOGEN_KV_POOL_FIT` | |
-| `host_reserve_gib` | `HALOGEN_HOST_RESERVE_GIB` | |
-| `ctx` | `HALOGEN_CTX` | context / length |
-| `max_tok` | `HALOGEN_MAX_TOK` | |
-| `rope_yarn` | `HALOGEN_ROPE_YARN` | |
-| `admit_chunk` | `HALOGEN_ADMIT_CHUNK` | |
-| `indexer_budget` | `HALOGEN_INDEXER_BUDGET` | |
-| `max_tokens_cap` | `HALOGEN_MAX_TOKENS_CAP` | |
-| `max_tokens_default` | `HALOGEN_MAX_TOKENS_DEFAULT` | |
-| `queue_timeout` | `HALOGEN_QUEUE_TIMEOUT` | timeouts / keepalive |
-| `keepalive_timeout` | `HALOGEN_KEEPALIVE_TIMEOUT` | |
-| `sse_keepalive_s` | `HALOGEN_SSE_KEEPALIVE_S` | |
-| `temperature` | `HALOGEN_TEMPERATURE` | sampling defaults |
-| `top_p` | `HALOGEN_TOP_P` | |
-| `top_k` | `HALOGEN_TOP_K` | |
-| `min_p` | `HALOGEN_MIN_P` | |
-| `presence_penalty` | `HALOGEN_PRESENCE_PENALTY` | |
-| `frequency_penalty` | `HALOGEN_FREQUENCY_PENALTY` | |
-| `reasoning_effort` | `HALOGEN_REASONING_EFFORT` | reasoning |
-| `enable_thinking` | `HALOGEN_ENABLE_THINKING` | |
-| `max_thinking_tokens` | `HALOGEN_MAX_THINKING_TOKENS` | |
-| `thinking_answer_room` | `HALOGEN_THINKING_ANSWER_ROOM` | |
-| `drafter_default` | `HALOGEN_DRAFTER_DEFAULT` | speculative decoding |
-| `mtp_depth` | `HALOGEN_MTP_DEPTH` | |
-| `pld` | `HALOGEN_PLD` | |
-| `spec_adapt` | `HALOGEN_SPEC_ADAPT` | |
-| `prompt_cache` | `HALOGEN_PROMPT_CACHE` | prompt cache |
-| `cache_inplace` | `HALOGEN_CACHE_INPLACE` | |
-| `prefill_chunk` | `HALOGEN_PREFILL_CHUNK` | |
-| `cache_entries` | `HALOGEN_CACHE_ENTRIES` | |
-| `cache_branches` | `HALOGEN_CACHE_BRANCHES` | |
-| `cache_snap3` | `HALOGEN_CACHE_SNAP3` | |
-| `cache_full` | `HALOGEN_CACHE_FULL` | |
-| `cache_disk_gib` | `HALOGEN_CACHE_DISK_GIB` | |
-| `cache_prune_old` | `HALOGEN_CACHE_PRUNE_OLD` | |
-| `composable_context` | `HALOGEN_COMPOSABLE_CONTEXT` | composable context |
-| `composable_context_floor` | `HALOGEN_COMPOSABLE_CONTEXT_FLOOR` | |
-| `composable_context_bytes` | `HALOGEN_COMPOSABLE_CONTEXT_BYTES` | |
-| `grammar` | `HALOGEN_GRAMMAR` | structured output |
-| `vision_tower` | `HALOGEN_VISION_TOWER` | vision |
-| `vision_max_pixels` | `HALOGEN_VISION_MAX_PIXELS` | |
+| Option (section.field) | Env |
+| --- | --- |
+| `context.kv_slots` | `HALOGEN_KV_SLOTS` |
+| `context.kv_pool_positions` | `HALOGEN_KV_POOL_POSITIONS` |
+| `context.kv_pool_fit` | `HALOGEN_KV_POOL_FIT` |
+| `context.host_reserve_gib` | `HALOGEN_HOST_RESERVE_GIB` |
+| `context.ctx` | `HALOGEN_CTX` |
+| `context.max_tok` | `HALOGEN_MAX_TOK` |
+| `context.rope_yarn` | `HALOGEN_ROPE_YARN` |
+| `context.admit_chunk` | `HALOGEN_ADMIT_CHUNK` |
+| `context.indexer_budget` | `HALOGEN_INDEXER_BUDGET` |
+| `sampling.max_tokens_cap` | `HALOGEN_MAX_TOKENS_CAP` |
+| `sampling.max_tokens_default` | `HALOGEN_MAX_TOKENS_DEFAULT` |
+| `networking.keepalive_timeout` | `HALOGEN_KEEPALIVE_TIMEOUT` |
+| `networking.sse_keepalive_s` | `HALOGEN_SSE_KEEPALIVE_S` |
+| `networking.queue_timeout` | `HALOGEN_QUEUE_TIMEOUT` |
+| `sampling.temperature` | `HALOGEN_TEMPERATURE` |
+| `sampling.top_p` | `HALOGEN_TOP_P` |
+| `sampling.top_k` | `HALOGEN_TOP_K` |
+| `sampling.min_p` | `HALOGEN_MIN_P` |
+| `sampling.presence_penalty` | `HALOGEN_PRESENCE_PENALTY` |
+| `sampling.frequency_penalty` | `HALOGEN_FREQUENCY_PENALTY` |
+| `reasoning.reasoning_effort` | `HALOGEN_REASONING_EFFORT` |
+| `reasoning.enable_thinking` | `HALOGEN_ENABLE_THINKING` |
+| `reasoning.max_thinking_tokens` | `HALOGEN_MAX_THINKING_TOKENS` |
+| `reasoning.thinking_answer_room` | `HALOGEN_THINKING_ANSWER_ROOM` |
+| `speculative.drafter_default` | `HALOGEN_DRAFTER_DEFAULT` |
+| `speculative.mtp_depth` | `HALOGEN_MTP_DEPTH` |
+| `speculative.pld` | `HALOGEN_PLD` |
+| `speculative.spec_adapt` | `HALOGEN_SPEC_ADAPT` |
+| `speculative.grammar` | `HALOGEN_GRAMMAR` |
+| `disk_cache.prompt_cache` | `HALOGEN_PROMPT_CACHE` |
+| `disk_cache.cache_inplace` | `HALOGEN_CACHE_INPLACE` |
+| `disk_cache.prefill_chunk` | `HALOGEN_PREFILL_CHUNK` |
+| `disk_cache.cache_entries` | `HALOGEN_CACHE_ENTRIES` |
+| `disk_cache.cache_branches` | `HALOGEN_CACHE_BRANCHES` |
+| `disk_cache.cache_snap3` | `HALOGEN_CACHE_SNAP3` |
+| `disk_cache.cache_full` | `HALOGEN_CACHE_FULL` |
+| `disk_cache.cache_disk_gib` | `HALOGEN_CACHE_DISK_GIB` |
+| `disk_cache.cache_prune_old` | `HALOGEN_CACHE_PRUNE_OLD` |
+| `composable.composable_context` | `HALOGEN_COMPOSABLE_CONTEXT` |
+| `composable.composable_context_floor` | `HALOGEN_COMPOSABLE_CONTEXT_FLOOR` |
+| `composable.composable_context_bytes` | `HALOGEN_COMPOSABLE_CONTEXT_BYTES` |
+| `vision.vision_max_pixels` | `HALOGEN_VISION_MAX_PIXELS` |
+| `artifacts.vision_tower` (resolved) | `HALOGEN_VISION_TOWER` |
+| `artifacts.mtp_head` (resolved) | `HALOGEN_MTP_HEAD` |
 
 Plus two conditional vars:
 
 | Condition | Env |
 | --- | --- |
-| `options.cache_dir_enabled` is `true` | `HALOGEN_CACHE_DIR = <CACHE_DIR>/halogen-flash` (created on start) |
-| `options.npu_models` non-empty **and** the NPU probe passes | `HALOGEN_NPU_MODELS = <id>,<id>` (bare comma list, never a Python repr) |
+| `disk_cache.cache_dir_enabled` is `true` | `HALOGEN_CACHE_DIR = <CACHE_DIR>/halogen-flash` (created on start) |
+| `npu.npu_models` non-empty **and** the NPU probe passes | `HALOGEN_NPU_MODELS = <id>,<id>` (bare comma list, never a Python repr) |
 
 Binary from env `HALOGEN_FLASH_SERVER_PATH` (default
 `halogen-flash-server`); same `stdbuf -oL -eL <entrypoint> all` spawn
@@ -784,9 +833,10 @@ into its on-disk prompt-cache fingerprint. Random per-start ports would
 invalidate the disk cache on every boot, so the `(api, engine)` pair is
 **pinned**:
 
-1. Explicit `api_port` + `engine_port` in `backend_config` win (the
-   admin persists the pair in the definition — Phase 9's fingerprint
-   flow may re-derive it).
+1. Explicit `networking.api_port` + `networking.engine_port` in
+   `backend_config` win (legacy top-level `api_port`/`engine_port` are
+   still honored as a fallback; the admin persists the pair in the
+   definition — Phase 9's fingerprint flow may re-derive it).
 2. Otherwise `derive_static_ports(MACHINE_UID)` hashes the machine uid
    (SHA-256) into the dedicated static range **8200–8289**
    (`FLASH_PORT_START`/`FLASH_PORT_END`, 45 adjacent pairs), giving the

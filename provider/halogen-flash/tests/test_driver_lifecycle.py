@@ -38,8 +38,10 @@ def _backend(
     npu_probe = kw.pop("npu_probe", lambda: NPU_UNAVAILABLE)
     settings = make_settings(tmp_path, binary, **(settings_kw or {}))
     cfg: dict[str, Any] = {
-        "model": {"path": artifacts["checkpoint"]},
-        "tokenizer": {"path": artifacts["tokenizer"]},
+        "artifacts": {
+            "model": {"path": artifacts["checkpoint"]},
+            "tokenizer": {"path": artifacts["tokenizer"]},
+        },
     }
     cfg.update(kw)
     return HalogenFlashBackend(settings, cfg, npu_probe=npu_probe)
@@ -118,8 +120,7 @@ async def test_explicit_ports_override_derivation(
         tmp_path,
         fake_flash_binary,
         local_artifacts,
-        api_port=8250,
-        engine_port=8251,
+        networking={"api_port": 8250, "engine_port": 8251},
     )
     try:
         await driver.start()
@@ -165,7 +166,7 @@ async def test_npu_env_set_when_probe_available(
         local_artifacts,
         settings_kw=_npu_settings(tmp_path),
         npu_probe=lambda: NPU_AVAILABLE,
-        options={"npu_models": ["qwen3-embedding-0.6b", "qwen3.5-2b"]},
+        npu={"npu_models": ["qwen3-embedding-0.6b", "qwen3.5-2b"]},
     )
     try:
         await driver.start()
@@ -188,7 +189,7 @@ async def test_npu_env_omitted_when_no_npu(
         fake_flash_binary,
         local_artifacts,
         npu_probe=lambda: NPU_UNAVAILABLE,
-        options={"npu_models": ["qwen3-embedding-0.6b"]},
+        npu={"npu_models": ["qwen3-embedding-0.6b"]},
     )
     try:
         await driver.start()
@@ -209,7 +210,7 @@ async def test_npu_probe_crash_degrades_gracefully(
         fake_flash_binary,
         local_artifacts,
         npu_probe=boom,
-        options={"npu_models": ["qwen3.5-2b"]},
+        npu={"npu_models": ["qwen3.5-2b"]},
     )
     try:
         await driver.start()
@@ -225,7 +226,7 @@ async def test_cache_dir_env_when_enabled(
         tmp_path,
         fake_flash_binary,
         local_artifacts,
-        options={"cache_dir_enabled": True},
+        disk_cache={"cache_dir_enabled": True},
     )
     try:
         await driver.start()

@@ -35,6 +35,7 @@ USER root
 COPY --from=provider-build /usr/local/bin/python3.14 /usr/local/bin/python3.14
 COPY --from=provider-build /usr/local/lib/python3.14 /usr/local/lib/python3.14
 COPY --from=provider-build /usr/local/lib/libpython3.14.so* /usr/local/lib/
+COPY --from=provider-build /app/provider /app/provider
 COPY --from=provider-build /app/.venv /agent/.venv
 
 RUN mkdir -p /models /cache
