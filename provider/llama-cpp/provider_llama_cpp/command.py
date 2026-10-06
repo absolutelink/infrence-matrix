@@ -1,8 +1,15 @@
 """llama-server command construction, ported from the legacy agent.
 
-Maps a `backend_config` dict (see provider/README.md) to the argv list
-for a `llama.cpp llama-server` invocation. The binary path comes from
+Maps a sectioned `backend_config` dict (see provider/README.md and
+`provider_llama_cpp/schema.json`, Phase 12) to the argv list for a
+`llama.cpp llama-server` invocation. The binary path comes from
 `ProviderSettings.LLAMA_SERVER_PATH` (env), never from backend_config.
+
+The flag maps below consume a FLAT args dict. `flatten_args()` produces
+it from the sectioned config (every section except `artifacts`, which
+the driver resolves separately); for backward compatibility the legacy
+flat `cfg["args"]` dict is merged in as well, with section values
+winning on key conflicts.
 
 Note on cache flags: `--prompt-cache` is OBSOLETE and must never be
 emitted. `--cache-prompt` / `--no-cache-prompt` is a DIFFERENT, valid
@@ -10,6 +17,47 @@ modern flag and is ported as-is.
 """
 
 from typing import Any
+
+# backend_config sections whose leaf keys map to CLI flags. `artifacts`
+# is excluded (resolved by the driver, not passed to llama-server).
+CONFIG_SECTIONS: tuple[str, ...] = (
+    "context",
+    "kv_cache",
+    "loading",
+    "gpu",
+    "speculative",
+    "sampling",
+    "reasoning",
+    "vision",
+    "server",
+    "endpoints",
+    "logging",
+)
+
+
+def flatten_args(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Flatten the sectioned backend_config into a single args dict.
+
+    Section leaves are merged in `CONFIG_SECTIONS` order; the legacy flat
+    `cfg["args"]` (pre-Phase-12 shape) is merged first so section values
+    take precedence. The legacy top-level `checkpoint_every` /
+    `context_size` synonyms ride along via the `kv_cache` / `context`
+    sections or `cfg["args"]` (both accepted downstream).
+    """
+    flat: dict[str, Any] = dict(cfg.get("args") or {})
+    for section in CONFIG_SECTIONS:
+        values = cfg.get(section)
+        if isinstance(values, dict):
+            flat.update(values)
+    # Canonical key wins when both it and its legacy synonym are present
+    # with a usable (non-None) value, so a single CLI flag is emitted;
+    # a None canonical falls back to the synonym.
+    if flat.get("checkpoint_min_step") is not None:
+        flat.pop("checkpoint_every", None)
+    if flat.get("cache_idle_slots") is not None:
+        flat.pop("no_cache_idle_slots", None)
+    return flat
+
 
 # Config key -> CLI flag for options that take a value.
 VALUE_FLAGS: dict[str, str] = {
@@ -22,6 +70,8 @@ VALUE_FLAGS: dict[str, str] = {
     "cache_type_v": "--cache-type-v",
     "cache_reuse": "--cache-reuse",
     "ctx_checkpoints": "--ctx-checkpoints",
+    "checkpoint_min_step": "--checkpoint-min-step",
+    # Legacy synonym of checkpoint_min_step (pre-Phase-12 key name).
     "checkpoint_every": "--checkpoint-min-step",
     "cache_ram": "--cache-ram",
     "slot_save_path": "--slot-save-path",
@@ -67,6 +117,9 @@ BOOLEAN_FLAGS: dict[str, Any] = {
     "warmup": ("--warmup", "--no-warmup"),
     "context_shift": ("--context-shift", "--no-context-shift"),
     "kv_unified": "--kv-unified",
+    # Canonical positive form (Phase 12 schema).
+    "cache_idle_slots": ("--cache-idle-slots", "--no-cache-idle-slots"),
+    # Legacy inverted synonym of cache_idle_slots (pre-Phase-12 key name).
     "no_cache_idle_slots": ("--no-cache-idle-slots", "--cache-idle-slots"),
     # NOTE: `strict_mtp_qwen` (legacy --spec-mtp-strict-qwen) is absent in
     # this build — silently ignored; use spec_type/spec args instead.
@@ -75,12 +128,18 @@ BOOLEAN_FLAGS: dict[str, Any] = {
 
 
 def _flash_attn_value(value: Any) -> str | None:
-    """Normalize the flash_attn config value to 'on'/'off'; None = skip."""
+    """Normalize the flash_attn config value to 'on'/'off'/'auto'; None = skip.
+
+    Tri-state since Phase 12 (upstream default is 'auto'); booleans and
+    truthy strings still map to 'on'/'off' for legacy configs.
+    """
     if value is None:
         return None
     if isinstance(value, bool):
         return "on" if value else "off"
     text = str(value).strip().lower()
+    if text == "auto":
+        return "auto"
     if text in {"on", "true", "1", "yes"}:
         return "on"
     if text in {"off", "false", "0", "no"}:
@@ -97,10 +156,15 @@ def build_llama_command(
     mmproj_path: str | None = None,
     draft_path: str | None = None,
 ) -> list[str]:
-    """Build the llama-server argv from a backend_config dict."""
-    args: dict[str, Any] = dict(cfg.get("args") or {})
+    """Build the llama-server argv from a sectioned backend_config dict.
 
-    # `ctx` and `context_size` are accepted synonyms.
+    Values are read from the flattened sections (see `flatten_args`);
+    `model_path` / `mmproj_path` / `draft_path` are the driver-resolved
+    local paths of the `artifacts` section descriptors.
+    """
+    args: dict[str, Any] = flatten_args(cfg)
+
+    # `ctx` and `context_size` are accepted synonyms (canonical: ctx).
     ctx_size = args.get("ctx", args.get("context_size", 4096))
 
     # Explicit loading mode (auto|mmap|mlock|none); replaces the removed
@@ -118,11 +182,13 @@ def build_llama_command(
         "--port",
         str(port),
         "--n-gpu-layers",
-        str(args.get("gpu_layers", 35)),
+        # Upstream default is 'auto' (fit to VRAM), not a fixed count.
+        str(args.get("gpu_layers", "auto")),
         "--ctx-size",
         str(ctx_size),
         "--batch-size",
-        str(args.get("batch_size", 512)),
+        # Aligned with the schema default (upstream llama.cpp default).
+        str(args.get("batch_size", 2048)),
         "--metrics",
     ]
 
@@ -143,13 +209,21 @@ def build_llama_command(
     if flash is not None:
         cmd.extend(["--flash-attn", flash])
 
-    # Speculative decoding: an explicit draft model wins over MTP.
+    # Speculative decoding: an explicit draft artifact wins over MTP.
+    # The MTP path is selected by the legacy `mtp_draft_max > 0` or an
+    # explicit `spec_type: "draft-mtp"`; n-max comes from mtp_draft_max
+    # when set, else `spec_draft_n_max`. Other spec_type modes are not
+    # yet wired and are ignored here (see schema x-supported notes).
     mtp_draft_max = args.get("mtp_draft_max")
     has_mtp = mtp_draft_max is not None and int(mtp_draft_max) > 0
-    if draft_path or has_mtp:
-        cmd.extend(["--spec-type", "draft-dflash" if draft_path else "draft-mtp"])
-        if has_mtp and not draft_path:
-            cmd.extend(["--spec-draft-n-max", str(int(mtp_draft_max))])
+    explicit_mtp = str(args.get("spec_type") or "") == "draft-mtp"
+    if draft_path:
+        cmd.extend(["--spec-type", "draft-dflash"])
+    elif has_mtp or explicit_mtp:
+        cmd.extend(["--spec-type", "draft-mtp"])
+        n_max = mtp_draft_max if has_mtp else args.get("spec_draft_n_max")
+        if n_max:
+            cmd.extend(["--spec-draft-n-max", str(int(n_max))])
 
     if args.get("jinja", True):
         cmd.append("--jinja")

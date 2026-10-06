@@ -1,0 +1,1615 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "llama.cpp backend_config",
+  "description": "Sectioned backend_config for the llama-cpp provider (Phase 12). x-flag names the llama-server CLI flag; command.py remains the executable mapping. Fields not yet passed to llama-server carry x-supported: false (documented, disabled in the UI).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "artifacts": {
+      "type": "object",
+      "title": "Model files",
+      "description": "GGUF artifacts resolved by provider_lib.downloader.ensure_artifact before the server spawns.",
+      "x-order": 1,
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "$ref": "#/$defs/hfFile",
+          "title": "Main model",
+          "description": "Primary GGUF model file (hf-file descriptor or local path).",
+          "x-order": 1
+        },
+        "mmproj": {
+          "$ref": "#/$defs/hfFile",
+          "title": "Vision projector",
+          "description": "mmproj GGUF for multimodal models; omit for text-only.",
+          "x-order": 2
+        },
+        "draft": {
+          "$ref": "#/$defs/hfFile",
+          "title": "Draft model",
+          "description": "Draft GGUF for speculative decoding (--spec-type draft-dflash).",
+          "x-order": 3
+        }
+      },
+      "required": [
+        "model"
+      ]
+    },
+    "context": {
+      "type": "object",
+      "title": "Context & RoPE",
+      "x-order": 2,
+      "additionalProperties": false,
+      "properties": {
+        "ctx": {
+          "type": "integer",
+          "default": 4096,
+          "minimum": 1,
+          "maximum": 1048576,
+          "title": "Context size",
+          "description": "Prompt context window in tokens. Canonical; the legacy top-level synonym 'context_size' is still accepted by the driver.",
+          "x-flag": "--ctx-size"
+        },
+        "predict": {
+          "type": "integer",
+          "default": -1,
+          "minimum": -1,
+          "maximum": 1048576,
+          "title": "Max predicted tokens",
+          "description": "-1 = unlimited.",
+          "x-flag": "--predict"
+        },
+        "keep": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "title": "Keep tokens",
+          "description": "Number of initial tokens to always keep in context.",
+          "x-flag": "--keep"
+        },
+        "rope_scaling": {
+          "type": "string",
+          "enum": [
+            "none",
+            "linear",
+            "yarn"
+          ],
+          "default": "none",
+          "title": "RoPE scaling",
+          "description": "RoPE scaling type.",
+          "x-flag": "--rope-scaling",
+          "x-supported": false
+        },
+        "rope_scale": {
+          "type": "number",
+          "default": 1.0,
+          "exclusiveMinimum": 0,
+          "title": "RoPE scale",
+          "description": "Linear RoPE scaling factor.",
+          "x-flag": "--rope-scale",
+          "x-supported": false
+        },
+        "rope_freq_base": {
+          "type": "number",
+          "default": 10000.0,
+          "exclusiveMinimum": 0,
+          "title": "RoPE frequency base",
+          "description": "Overrides the value taken from the model.",
+          "x-flag": "--rope-freq-base",
+          "x-supported": false
+        },
+        "rope_freq_scale": {
+          "type": "number",
+          "default": 1.0,
+          "minimum": 0,
+          "maximum": 1,
+          "title": "RoPE frequency scale",
+          "description": "Overrides the value taken from the model.",
+          "x-flag": "--rope-freq-scale",
+          "x-supported": false
+        },
+        "yarn_orig_ctx": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "title": "YaRN original context",
+          "description": "Original context length for YaRN scaling (0 = use ctx).",
+          "x-flag": "--yarn-orig-ctx",
+          "x-supported": false
+        },
+        "yarn_ext_factor": {
+          "type": "number",
+          "default": 1.0,
+          "title": "YaRN ext factor",
+          "description": "YaRN extrapolation mix factor (-1 = compute from scaling).",
+          "x-flag": "--yarn-ext-factor",
+          "x-supported": false
+        },
+        "yarn_attn_factor": {
+          "type": "number",
+          "default": 1.0,
+          "title": "YaRN attn factor",
+          "description": "YaRN scale sqrt(t) for attention logits.",
+          "x-flag": "--yarn-attn-factor",
+          "x-supported": false
+        },
+        "yarn_beta_slow": {
+          "type": "number",
+          "default": 1.0,
+          "title": "YaRN beta slow",
+          "description": "YaRN tangent scale factor for low frequencies.",
+          "x-flag": "--yarn-beta-slow",
+          "x-supported": false
+        },
+        "yarn_beta_fast": {
+          "type": "number",
+          "default": 1.0,
+          "title": "YaRN beta fast",
+          "description": "YaRN tangent scale factor for high frequencies.",
+          "x-flag": "--yarn-beta-fast",
+          "x-supported": false
+        }
+      }
+    },
+    "kv_cache": {
+      "type": "object",
+      "title": "KV / Prompt Caching",
+      "x-order": 3,
+      "additionalProperties": false,
+      "properties": {
+        "cache_prompt": {
+          "type": "boolean",
+          "default": true,
+          "title": "Cache prompt",
+          "description": "Keep the prompt in the KV cache (--cache-prompt / --no-cache-prompt). NOT the obsolete --prompt-cache.",
+          "x-flag": "--cache-prompt"
+        },
+        "cache_reuse": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 16,
+          "title": "Cache reuse depth",
+          "description": "Reuse KV cache for prompts differing in the last N tokens.",
+          "x-flag": "--cache-reuse",
+          "x-numeric-effect": "numeric"
+        },
+        "cache_type_k": {
+          "type": "string",
+          "enum": [
+            "f32",
+            "f16",
+            "bf16",
+            "q8_0",
+            "q4_0",
+            "q4_1",
+            "iq4_nl",
+            "q5_0",
+            "q5_1"
+          ],
+          "default": "f16",
+          "title": "K cache quantization",
+          "description": "Data type for the K (key) KV cache.",
+          "x-flag": "--cache-type-k",
+          "x-numeric-effect": "numeric"
+        },
+        "cache_type_v": {
+          "type": "string",
+          "enum": [
+            "f32",
+            "f16",
+            "bf16",
+            "q8_0",
+            "q4_0",
+            "q4_1",
+            "iq4_nl",
+            "q5_0",
+            "q5_1"
+          ],
+          "default": "f16",
+          "title": "V cache quantization",
+          "description": "Data type for the V (value) KV cache.",
+          "x-flag": "--cache-type-v",
+          "x-numeric-effect": "numeric"
+        },
+        "kv_offload": {
+          "type": "boolean",
+          "default": true,
+          "title": "KV offload",
+          "description": "Offload the KV cache to CPU / RAM.",
+          "x-flag": "--kv-offload"
+        },
+        "kv_unified": {
+          "type": "boolean",
+          "title": "Unified KV cache",
+          "description": "Single KV cache shared across slots.",
+          "x-flag": "--kv-unified",
+          "default": false
+        },
+        "kv_unified_per_slot": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "title": "Unified KV per slot",
+          "description": "Per-slot budget for the unified cache.",
+          "x-flag": "--kv-unified-per-slot",
+          "x-supported": false
+        },
+        "ctx_checkpoints": {
+          "type": "integer",
+          "default": 32,
+          "minimum": 0,
+          "title": "Context checkpoints",
+          "description": "Number of context checkpoints kept for fast seek.",
+          "x-flag": "--ctx-checkpoints"
+        },
+        "checkpoint_min_step": {
+          "type": "integer",
+          "default": 8192,
+          "minimum": 0,
+          "title": "Checkpoint min step",
+          "description": "Minimum token step between KV checkpoints. Canonical name for the legacy 'checkpoint_every' key (still accepted by the driver).",
+          "x-flag": "--checkpoint-min-step"
+        },
+        "cache_ram": {
+          "type": "integer",
+          "default": 8192,
+          "minimum": 0,
+          "title": "RAM cache (MiB)",
+          "description": "Max MiB of offline KV cache kept in RAM.",
+          "x-flag": "--cache-ram"
+        },
+        "cache_idle_slots": {
+          "type": "boolean",
+          "default": true,
+          "title": "Cache idle slots",
+          "description": "Keep idle slots' KV cache in RAM (--cache-idle-slots / --no-cache-idle-slots). Canonical name for the legacy inverted 'no_cache_idle_slots' key (still accepted by the driver).",
+          "x-flag": "--cache-idle-slots"
+        },
+        "slot_save_path": {
+          "type": "string",
+          "title": "Slot save path",
+          "description": "Directory for saving/restoring slot state.",
+          "x-flag": "--slot-save-path",
+          "default": ""
+        },
+        "swa_full": {
+          "type": "boolean",
+          "title": "SWA full cache",
+          "description": "Use full-size (not SWA-trimmed) KV cache for sliding-window attention models.",
+          "x-flag": "--swa-full",
+          "x-numeric-effect": "numeric",
+          "default": false
+        }
+      }
+    },
+    "loading": {
+      "type": "object",
+      "title": "Disk / Loading",
+      "x-order": 4,
+      "additionalProperties": false,
+      "properties": {
+        "load_mode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "none",
+            "mmap",
+            "mlock",
+            "mmap+mlock",
+            "dio"
+          ],
+          "default": "auto",
+          "title": "Load mode",
+          "description": "Model loading mode; 'auto' leaves the server default (replaces the removed --mmap/--no-mmap flags).",
+          "x-flag": "--load-mode"
+        },
+        "lazy_mode": {
+          "type": "string",
+          "enum": [
+            "on",
+            "auto",
+            "off"
+          ],
+          "default": "auto",
+          "title": "Lazy load",
+          "description": "Load tensors lazily on first use.",
+          "x-flag": "--lazy-mode",
+          "x-supported": false
+        },
+        "repack": {
+          "type": "boolean",
+          "default": true,
+          "title": "Repack tensors",
+          "description": "Repack tensor layout during load when beneficial.",
+          "x-flag": "--repack",
+          "x-supported": false
+        },
+        "no_host": {
+          "type": "boolean",
+          "default": false,
+          "title": "No host tensors",
+          "description": "Fail instead of keeping tensors on the host when VRAM is short.",
+          "x-flag": "--no-host",
+          "x-supported": false
+        },
+        "check_tensors": {
+          "type": "boolean",
+          "default": false,
+          "title": "Check tensors",
+          "description": "Validate tensor data while loading (slower).",
+          "x-flag": "--check-tensors",
+          "x-supported": false
+        }
+      }
+    },
+    "gpu": {
+      "type": "object",
+      "title": "GPU / Offload",
+      "x-order": 5,
+      "additionalProperties": false,
+      "properties": {
+        "gpu_layers": {
+          "default": "auto",
+          "title": "GPU layers",
+          "description": "Layers to store in VRAM. Upstream default is 'auto' (fit as many as possible), not a fixed count.",
+          "x-flag": "--n-gpu-layers",
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1024
+            },
+            {
+              "type": "string",
+              "enum": [
+                "auto",
+                "all"
+              ]
+            }
+          ]
+        },
+        "device": {
+          "type": "string",
+          "title": "Device",
+          "description": "Compute device(s), e.g. 'CUDA0' or a comma list.",
+          "x-flag": "--device",
+          "default": ""
+        },
+        "split_mode": {
+          "type": "string",
+          "enum": [
+            "none",
+            "layer",
+            "row",
+            "tensor"
+          ],
+          "default": "layer",
+          "title": "Split mode",
+          "description": "How to split the model across multiple GPUs.",
+          "x-flag": "--split-mode",
+          "x-supported": false
+        },
+        "tensor_split": {
+          "type": "string",
+          "pattern": "^[0-9]+([.][0-9]+)?([,][0-9]+([.][0-9]+)?)*$",
+          "title": "Tensor split",
+          "description": "Per-GPU split ratios, e.g. '1,2,1'.",
+          "x-flag": "--tensor-split",
+          "default": ""
+        },
+        "main_gpu": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "title": "Main GPU",
+          "description": "Device index used for compute not offloaded.",
+          "x-flag": "--main-gpu"
+        },
+        "fit": {
+          "type": "string",
+          "enum": [
+            "on",
+            "off"
+          ],
+          "default": "on",
+          "title": "Memory fit",
+          "description": "Automatically fit the model to available VRAM.",
+          "x-flag": "--fit"
+        },
+        "fit_target": {
+          "type": "string",
+          "title": "Fit target",
+          "description": "Target free-memory margins per device (MiB list).",
+          "x-flag": "--fit-target",
+          "default": ""
+        },
+        "fit_ctx": {
+          "type": "integer",
+          "default": 4096,
+          "minimum": 1,
+          "title": "Fit context",
+          "description": "Context size assumed when fitting the KV cache to VRAM.",
+          "x-flag": "--fit-ctx"
+        },
+        "override_tensor": {
+          "type": "string",
+          "title": "Override tensor",
+          "description": "Force specific tensors on/off device (advanced syntax).",
+          "x-flag": "--override-tensor",
+          "x-supported": false,
+          "default": ""
+        },
+        "cpu_moe": {
+          "type": "boolean",
+          "title": "CPU MoE experts",
+          "description": "Run MoE expert weights on CPU.",
+          "x-flag": "--cpu-moe",
+          "x-supported": false,
+          "default": false
+        },
+        "n_cpu_moe": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "title": "N CPU MoE layers",
+          "description": "Number of leading MoE layers to keep on CPU.",
+          "x-flag": "--n-cpu-moe",
+          "x-supported": false
+        },
+        "n_cpu_ffn": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "title": "N CPU FFN layers",
+          "description": "Number of leading FFN layers to keep on CPU.",
+          "x-flag": "--n-cpu-ffn",
+          "x-supported": false
+        },
+        "op_offload": {
+          "type": "boolean",
+          "default": true,
+          "title": "Op offload",
+          "description": "Offload individual ops to CPU when VRAM is tight.",
+          "x-flag": "--op-offload",
+          "x-supported": false
+        }
+      }
+    },
+    "speculative": {
+      "type": "object",
+      "title": "MTP / Speculative decoding",
+      "x-order": 6,
+      "additionalProperties": false,
+      "properties": {
+        "spec_type": {
+          "type": "string",
+          "enum": [
+            "none",
+            "draft-simple",
+            "draft-eagle3",
+            "draft-mtp",
+            "draft-dflash",
+            "draft-dspark",
+            "ngram-simple",
+            "ngram-map-k",
+            "ngram-map-k4v",
+            "ngram-mod",
+            "ngram-cache"
+          ],
+          "default": "none",
+          "title": "Speculative type",
+          "description": "Speculative decoding mode. The driver honors 'draft-mtp' explicitly (n-max from mtp_draft_max or spec_draft_n_max); a draft artifact still forces 'draft-dflash'. Other modes are not yet wired (x-supported: false semantics: documented only).",
+          "x-flag": "--spec-type"
+        },
+        "spec_draft_n_max": {
+          "type": "integer",
+          "default": 3,
+          "minimum": 0,
+          "maximum": 32,
+          "title": "Draft tokens max",
+          "description": "Max speculated tokens per step. Used with the draft-mtp path when mtp_draft_max is absent.",
+          "x-flag": "--spec-draft-n-max"
+        },
+        "spec_draft_n_min": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 32,
+          "title": "Draft tokens min",
+          "description": "Min speculated tokens per step.",
+          "x-flag": "--spec-draft-n-min",
+          "x-supported": false
+        },
+        "mtp_draft_max": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 32,
+          "title": "MTP draft max (legacy alias)",
+          "description": "Legacy alias: >0 enables --spec-type draft-mtp with this n-max. Superseded by spec_type + spec_draft_n_max; still honored by the driver.",
+          "x-flag": "--spec-draft-n-max"
+        },
+        "spec_draft_p_split": {
+          "type": "number",
+          "default": 0.1,
+          "minimum": 0,
+          "maximum": 1,
+          "title": "Draft split probability",
+          "description": "Probability threshold controlling draft tree branching.",
+          "x-flag": "--spec-draft-p-split",
+          "x-supported": false
+        },
+        "spec_draft_p_min": {
+          "type": "number",
+          "default": 0.0,
+          "minimum": 0,
+          "maximum": 1,
+          "title": "Draft min probability",
+          "description": "Minimum token probability to continue drafting.",
+          "x-flag": "--spec-draft-p-min"
+        },
+        "spec_draft_ngl": {
+          "default": "auto",
+          "title": "Draft GPU layers",
+          "description": "Layers of the draft model to offload to GPU.",
+          "x-flag": "--spec-draft-ngl",
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1024
+            },
+            {
+              "type": "string",
+              "enum": [
+                "auto",
+                "all"
+              ]
+            }
+          ],
+          "x-supported": false
+        },
+        "spec_draft_device": {
+          "type": "string",
+          "title": "Draft device",
+          "description": "Compute device for the draft model.",
+          "x-flag": "--spec-draft-device",
+          "x-supported": false,
+          "default": ""
+        },
+        "spec_draft_cache_type_k": {
+          "type": "string",
+          "enum": [
+            "f32",
+            "f16",
+            "bf16",
+            "q8_0",
+            "q4_0",
+            "q4_1",
+            "iq4_nl",
+            "q5_0",
+            "q5_1"
+          ],
+          "default": "f16",
+          "title": "Draft K cache type",
+          "description": "Quantization of the draft model's K cache.",
+          "x-flag": "--spec-draft-cache-type-k",
+          "x-supported": false
+        },
+        "spec_draft_cache_type_v": {
+          "type": "string",
+          "enum": [
+            "f32",
+            "f16",
+            "bf16",
+            "q8_0",
+            "q4_0",
+            "q4_1",
+            "iq4_nl",
+            "q5_0",
+            "q5_1"
+          ],
+          "default": "f16",
+          "title": "Draft V cache type",
+          "description": "Quantization of the draft model's V cache.",
+          "x-flag": "--spec-draft-cache-type-v",
+          "x-supported": false
+        },
+        "spec_draft_backend_sampling": {
+          "type": "boolean",
+          "default": true,
+          "title": "Draft backend sampling",
+          "description": "Sample draft tokens on the backend device.",
+          "x-flag": "--spec-draft-backend-sampling",
+          "x-supported": false
+        },
+        "spec_ngram_mod_n_min": {
+          "type": "integer",
+          "default": 48,
+          "minimum": 1,
+          "title": "ngram-mod n min",
+          "description": "ngram-mod minimum n-gram length.",
+          "x-flag": "--spec-ngram-mod-n-min",
+          "x-supported": false
+        },
+        "spec_ngram_mod_n_max": {
+          "type": "integer",
+          "default": 64,
+          "minimum": 1,
+          "title": "ngram-mod n max",
+          "description": "ngram-mod maximum n-gram length.",
+          "x-flag": "--spec-ngram-mod-n-max",
+          "x-supported": false
+        },
+        "spec_ngram_mod_n_match": {
+          "type": "integer",
+          "default": 24,
+          "minimum": 1,
+          "title": "ngram-mod n match",
+          "description": "ngram-mod match threshold.",
+          "x-flag": "--spec-ngram-mod-n-match",
+          "x-supported": false
+        },
+        "spec_ngram_simple_size_n": {
+          "type": "integer",
+          "default": 12,
+          "minimum": 1,
+          "title": "ngram-simple size n",
+          "description": "ngram-simple draft window n.",
+          "x-flag": "--spec-ngram-simple-size-n",
+          "x-supported": false
+        },
+        "spec_ngram_simple_size_m": {
+          "type": "integer",
+          "default": 48,
+          "minimum": 1,
+          "title": "ngram-simple size m",
+          "description": "ngram-simple draft window m.",
+          "x-flag": "--spec-ngram-simple-size-m",
+          "x-supported": false
+        },
+        "spec_ngram_simple_min_hits": {
+          "type": "integer",
+          "default": 1,
+          "minimum": 1,
+          "title": "ngram-simple min hits",
+          "description": "ngram-simple minimum matches to draft.",
+          "x-flag": "--spec-ngram-simple-min-hits",
+          "x-supported": false
+        },
+        "spec_ngram_map_k_size_n": {
+          "type": "integer",
+          "default": 12,
+          "minimum": 1,
+          "title": "ngram-map-k size n",
+          "description": "ngram-map-k draft window n.",
+          "x-flag": "--spec-ngram-map-k-size-n",
+          "x-supported": false
+        },
+        "spec_ngram_map_k_size_m": {
+          "type": "integer",
+          "default": 48,
+          "minimum": 1,
+          "title": "ngram-map-k size m",
+          "description": "ngram-map-k draft window m.",
+          "x-flag": "--spec-ngram-map-k-size-m",
+          "x-supported": false
+        },
+        "spec_ngram_map_k_min_hits": {
+          "type": "integer",
+          "default": 1,
+          "minimum": 1,
+          "title": "ngram-map-k min hits",
+          "description": "ngram-map-k minimum matches to draft.",
+          "x-flag": "--spec-ngram-map-k-min-hits",
+          "x-supported": false
+        },
+        "spec_ngram_map_k4v_size_n": {
+          "type": "integer",
+          "default": 12,
+          "minimum": 1,
+          "title": "ngram-map-k4v size n",
+          "description": "ngram-map-k4v draft window n.",
+          "x-flag": "--spec-ngram-map-k4v-size-n",
+          "x-supported": false
+        },
+        "spec_ngram_map_k4v_size_m": {
+          "type": "integer",
+          "default": 48,
+          "minimum": 1,
+          "title": "ngram-map-k4v size m",
+          "description": "ngram-map-k4v draft window m.",
+          "x-flag": "--spec-ngram-map-k4v-size-m",
+          "x-supported": false
+        },
+        "spec_ngram_map_k4v_min_hits": {
+          "type": "integer",
+          "default": 1,
+          "minimum": 1,
+          "title": "ngram-map-k4v min hits",
+          "description": "ngram-map-k4v minimum matches to draft.",
+          "x-flag": "--spec-ngram-map-k4v-min-hits",
+          "x-supported": false
+        }
+      }
+    },
+    "sampling": {
+      "type": "object",
+      "title": "Sampling",
+      "x-order": 7,
+      "additionalProperties": false,
+      "properties": {
+        "samplers": {
+          "type": "string",
+          "title": "Sampler chain",
+          "description": "Ordered ';'-separated sampler sequence, e.g. 'top_k;top_p;min_p;temperature'.",
+          "x-flag": "--samplers",
+          "x-supported": false,
+          "default": ""
+        },
+        "seed": {
+          "type": "integer",
+          "default": -1,
+          "minimum": -1,
+          "title": "Seed",
+          "description": "RNG seed; -1 = random.",
+          "x-flag": "--seed",
+          "x-numeric-effect": "numeric"
+        },
+        "temperature": {
+          "type": "number",
+          "default": 0.8,
+          "minimum": 0,
+          "maximum": 2,
+          "title": "Temperature",
+          "description": "Sampling temperature.",
+          "x-flag": "--temperature",
+          "x-numeric-effect": "numeric"
+        },
+        "top_k": {
+          "type": "integer",
+          "default": 40,
+          "minimum": 0,
+          "title": "Top-k",
+          "description": "Top-k sampling cutoff (0 = disabled).",
+          "x-flag": "--top-k",
+          "x-numeric-effect": "numeric"
+        },
+        "top_p": {
+          "type": "number",
+          "default": 0.95,
+          "minimum": 0,
+          "maximum": 1,
+          "title": "Top-p",
+          "description": "Nucleus sampling probability.",
+          "x-flag": "--top-p",
+          "x-numeric-effect": "numeric"
+        },
+        "min_p": {
+          "type": "number",
+          "default": 0.05,
+          "minimum": 0,
+          "maximum": 1,
+          "title": "Min-p",
+          "description": "Minimum probability cutoff relative to the top token.",
+          "x-flag": "--min-p",
+          "x-numeric-effect": "numeric"
+        },
+        "top_n_sigma": {
+          "type": "number",
+          "default": -1,
+          "title": "Top-n sigma",
+          "description": "Std-deviation based cutoff (-1 = disabled).",
+          "x-flag": "--top-n-sigma",
+          "x-supported": false
+        },
+        "xtc_probability": {
+          "type": "number",
+          "default": 0.0,
+          "minimum": 0,
+          "maximum": 1,
+          "title": "XTC probability",
+          "description": "Probability of applying the XTC sampler.",
+          "x-flag": "--xtc-probability",
+          "x-supported": false
+        },
+        "xtc_threshold": {
+          "type": "number",
+          "default": 0.1,
+          "minimum": 0,
+          "maximum": 1,
+          "title": "XTC threshold",
+          "description": "XTC cutoff threshold.",
+          "x-flag": "--xtc-threshold",
+          "x-supported": false
+        },
+        "typical_p": {
+          "type": "number",
+          "default": 1.0,
+          "minimum": 0,
+          "maximum": 1,
+          "title": "Typical p",
+          "description": "Locally typical sampling threshold (1.0 = disabled).",
+          "x-flag": "--typical-p",
+          "x-supported": false
+        },
+        "repeat_last_n": {
+          "type": "integer",
+          "default": 64,
+          "minimum": 0,
+          "title": "Repeat last n",
+          "description": "Look-back window for the repetition penalty.",
+          "x-flag": "--repeat-last-n",
+          "x-supported": false
+        },
+        "repeat_penalty": {
+          "type": "number",
+          "default": 1.0,
+          "minimum": 0,
+          "title": "Repeat penalty",
+          "description": "Repetition penalty scale (1.0 = disabled).",
+          "x-flag": "--repeat-penalty",
+          "x-numeric-effect": "numeric"
+        },
+        "presence_penalty": {
+          "type": "number",
+          "default": 0,
+          "title": "Presence penalty",
+          "description": "Presence penalty scale.",
+          "x-flag": "--presence-penalty",
+          "x-numeric-effect": "numeric"
+        },
+        "frequency_penalty": {
+          "type": "number",
+          "default": 0,
+          "title": "Frequency penalty",
+          "description": "Frequency penalty scale.",
+          "x-flag": "--frequency-penalty",
+          "x-numeric-effect": "numeric"
+        },
+        "dry_multiplier": {
+          "type": "number",
+          "default": 0.0,
+          "title": "DRY multiplier",
+          "description": "DRY repetition penalty multiplier (0 = disabled).",
+          "x-flag": "--dry-multiplier",
+          "x-supported": false
+        },
+        "dry_base": {
+          "type": "number",
+          "default": 1.75,
+          "title": "DRY base",
+          "description": "DRY penalty base.",
+          "x-flag": "--dry-base",
+          "x-supported": false
+        },
+        "dry_allowed_length": {
+          "type": "integer",
+          "default": 2,
+          "minimum": 1,
+          "title": "DRY allowed length",
+          "description": "Longest repeated sequence DRY tolerates.",
+          "x-flag": "--dry-allowed-length",
+          "x-supported": false
+        },
+        "dry_penalty_last_n": {
+          "type": "integer",
+          "default": 64,
+          "minimum": 0,
+          "title": "DRY penalty last n",
+          "description": "DRY look-back window.",
+          "x-flag": "--dry-penalty-last-n",
+          "x-supported": false
+        },
+        "dry_sequence_breaker": {
+          "type": "string",
+          "title": "DRY sequence breaker",
+          "description": "String that breaks DRY sequence matching.",
+          "x-flag": "--dry-sequence-breaker",
+          "x-supported": false,
+          "default": ""
+        },
+        "adaptive_target": {
+          "type": "number",
+          "default": 0,
+          "title": "Adaptive target",
+          "description": "Target entropy for adaptive sampling (0 = disabled).",
+          "x-flag": "--adaptive-target",
+          "x-supported": false
+        },
+        "adaptive_decay": {
+          "type": "number",
+          "default": 0.9,
+          "minimum": 0,
+          "exclusiveMaximum": 0.99,
+          "title": "Adaptive decay",
+          "description": "Adaptive sampling decay.",
+          "x-flag": "--adaptive-decay",
+          "x-supported": false
+        },
+        "dynatemp_range": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "title": "Dynamic temp range",
+          "description": "Dynamic temperature range (0 = disabled).",
+          "x-flag": "--dynatemp-range",
+          "x-supported": false
+        },
+        "dynatemp_exp": {
+          "type": "number",
+          "default": 1.1,
+          "title": "Dynamic temp exponent",
+          "description": "Dynamic temperature exponent.",
+          "x-flag": "--dynatemp-exp",
+          "x-supported": false
+        },
+        "mirostat": {
+          "type": "integer",
+          "enum": [
+            0,
+            1,
+            2
+          ],
+          "default": 0,
+          "title": "Mirostat",
+          "description": "Mirostat mode (0 = disabled).",
+          "x-flag": "--mirostat",
+          "x-supported": false
+        },
+        "mirostat_lr": {
+          "type": "number",
+          "default": 0.1,
+          "title": "Mirostat learning rate",
+          "description": "Mirostat learning rate.",
+          "x-flag": "--mirostat-lr",
+          "x-supported": false
+        },
+        "mirostat_ent": {
+          "type": "number",
+          "default": 5.0,
+          "title": "Mirostat entropy",
+          "description": "Mirostat target entropy.",
+          "x-flag": "--mirostat-ent",
+          "x-supported": false
+        },
+        "logit_bias": {
+          "type": "string",
+          "title": "Logit bias",
+          "description": "Per-token logit bias list.",
+          "x-flag": "--logit-bias",
+          "x-supported": false,
+          "default": ""
+        },
+        "backend_sampling": {
+          "type": "boolean",
+          "title": "Backend sampling",
+          "description": "Run sampling on the inference backend device.",
+          "x-flag": "--backend-sampling",
+          "x-supported": false,
+          "default": false
+        }
+      }
+    },
+    "reasoning": {
+      "type": "object",
+      "title": "Reasoning / Chat Template",
+      "x-order": 8,
+      "additionalProperties": false,
+      "properties": {
+        "reasoning": {
+          "type": "string",
+          "enum": [
+            "on",
+            "off",
+            "auto"
+          ],
+          "default": "auto",
+          "title": "Reasoning",
+          "description": "Reasoning (chain-of-thought) parsing/emission. Passed verbatim to --reasoning.",
+          "x-flag": "--reasoning"
+        },
+        "reasoning_effort": {
+          "type": "string",
+          "enum": [
+            "default",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default": "default",
+          "title": "Reasoning effort",
+          "description": "Named effort level for reasoning models.",
+          "x-flag": "--reasoning-effort",
+          "x-supported": false
+        },
+        "reasoning_budget": {
+          "type": "integer",
+          "default": -1,
+          "minimum": -1,
+          "title": "Reasoning budget",
+          "description": "Max tokens for reasoning (-1 = unlimited).",
+          "x-flag": "--reasoning-budget"
+        },
+        "reasoning_budget_message": {
+          "type": "string",
+          "title": "Reasoning budget message",
+          "description": "Message emitted when the reasoning budget is exhausted.",
+          "x-flag": "--reasoning-budget-message",
+          "x-supported": false,
+          "default": ""
+        },
+        "reasoning_preserve": {
+          "type": "boolean",
+          "default": true,
+          "title": "Preserve reasoning",
+          "description": "Keep reasoning content in history across turns.",
+          "x-flag": "--reasoning-preserve",
+          "x-supported": false
+        },
+        "reasoning_format": {
+          "type": "string",
+          "enum": [
+            "none",
+            "deepseek",
+            "deepseek-legacy",
+            "auto"
+          ],
+          "default": "auto",
+          "title": "Reasoning format",
+          "description": "Reasoning tag format for models without a native template.",
+          "x-flag": "--reasoning-format",
+          "x-supported": false
+        },
+        "jinja": {
+          "type": "boolean",
+          "default": true,
+          "title": "Jinja template",
+          "description": "Use the embedded Jinja chat template.",
+          "x-flag": "--jinja"
+        },
+        "chat_template": {
+          "type": "string",
+          "title": "Chat template",
+          "description": "Inline chat template override.",
+          "x-flag": "--chat-template",
+          "x-supported": false,
+          "default": ""
+        },
+        "chat_template_file": {
+          "type": "string",
+          "title": "Chat template file",
+          "description": "Path to a chat template file.",
+          "x-flag": "--chat-template-file",
+          "x-supported": false,
+          "default": ""
+        },
+        "skip_chat_parsing": {
+          "type": "boolean",
+          "title": "Skip chat parsing",
+          "description": "Disable chat template application (raw prompts).",
+          "x-flag": "--skip-chat-parsing",
+          "x-supported": false,
+          "default": false
+        },
+        "prefill_assistant": {
+          "type": "boolean",
+          "default": true,
+          "title": "Prefill assistant",
+          "description": "Prefill the assistant turn header.",
+          "x-flag": "--prefill-assistant",
+          "x-supported": false
+        },
+        "special": {
+          "type": "boolean",
+          "title": "Special tokens",
+          "description": "Allow special tokens in input (dangerous).",
+          "x-flag": "--special",
+          "x-supported": false,
+          "default": false
+        },
+        "chat_template_kwargs": {
+          "type": "string",
+          "title": "Chat template kwargs",
+          "description": "JSON object of extra chat-template variables.",
+          "x-flag": "--chat-template-kwargs",
+          "x-supported": false,
+          "default": ""
+        }
+      }
+    },
+    "vision": {
+      "type": "object",
+      "title": "Vision (mmproj)",
+      "x-order": 9,
+      "additionalProperties": false,
+      "properties": {
+        "mmproj_offload": {
+          "type": "boolean",
+          "default": true,
+          "title": "mmproj offload",
+          "description": "Offload the vision projector to GPU.",
+          "x-flag": "--mmproj-offload",
+          "x-supported": false
+        },
+        "mmproj_device": {
+          "type": "string",
+          "title": "mmproj device",
+          "description": "Compute device for the vision projector.",
+          "x-flag": "--mmproj-device",
+          "x-supported": false,
+          "default": ""
+        },
+        "image_min_tokens": {
+          "type": "integer",
+          "default": 4,
+          "minimum": 1,
+          "title": "Image min tokens",
+          "description": "Minimum tokens per image tile.",
+          "x-flag": "--image-min-tokens",
+          "x-supported": false
+        },
+        "image_max_tokens": {
+          "type": "integer",
+          "default": 1024,
+          "minimum": 1,
+          "title": "Image max tokens",
+          "description": "Maximum tokens per image tile.",
+          "x-flag": "--image-max-tokens",
+          "x-supported": false
+        },
+        "mtmd_batch_max_tokens": {
+          "type": "integer",
+          "default": 1024,
+          "minimum": 1,
+          "title": "MTMD batch max tokens",
+          "description": "Max vision tokens batched per pass.",
+          "x-flag": "--mtmd-batch-max-tokens",
+          "x-supported": false
+        },
+        "video_fps": {
+          "type": "number",
+          "default": 4.0,
+          "exclusiveMinimum": 0,
+          "title": "Video FPS",
+          "description": "Frames per second sampled from video input.",
+          "x-flag": "--video-fps",
+          "x-supported": false
+        },
+        "video_timestamp_interval": {
+          "type": "integer",
+          "default": 5000,
+          "minimum": 0,
+          "title": "Video timestamp interval (ms)",
+          "description": "Interval between injected video timestamps.",
+          "x-flag": "--video-timestamp-interval",
+          "x-supported": false
+        },
+        "video_ffmpeg_dir": {
+          "type": "string",
+          "title": "FFmpeg dir",
+          "description": "Directory containing ffmpeg/ffprobe binaries.",
+          "x-flag": "--video-ffmpeg-dir",
+          "x-supported": false,
+          "default": ""
+        }
+      }
+    },
+    "server": {
+      "type": "object",
+      "title": "Server / Performance",
+      "x-order": 10,
+      "additionalProperties": false,
+      "properties": {
+        "backend_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "title": "Backend port",
+          "description": "llama-server listen port. Relocated here from the old top-level 'backend_port'; when absent the driver uses PROVIDER_PORT + 1 from the container env (no schema default).",
+          "x-flag": "--port"
+        },
+        "threads": {
+          "type": "integer",
+          "default": -1,
+          "minimum": -1,
+          "title": "CPU threads",
+          "description": "CPU threads for generation (-1 = auto).",
+          "x-flag": "--threads",
+          "x-numeric-effect": "bitwise"
+        },
+        "threads_batch": {
+          "type": "integer",
+          "default": -1,
+          "minimum": -1,
+          "title": "Batch threads",
+          "description": "CPU threads for prompt batch (-1 = same as threads).",
+          "x-flag": "--threads-batch",
+          "x-numeric-effect": "bitwise"
+        },
+        "batch_size": {
+          "type": "integer",
+          "default": 2048,
+          "minimum": 1,
+          "title": "Batch size",
+          "description": "Logical batch size for prompt processing.",
+          "x-flag": "--batch-size",
+          "x-numeric-effect": "bitwise"
+        },
+        "ubatch_size": {
+          "type": "integer",
+          "default": 512,
+          "minimum": 1,
+          "title": "Micro-batch size",
+          "description": "Micro-batch size (must be <= batch_size).",
+          "x-flag": "--ubatch-size",
+          "x-numeric-effect": "bitwise"
+        },
+        "parallel": {
+          "type": "integer",
+          "default": -1,
+          "minimum": -1,
+          "title": "Parallel slots",
+          "description": "Concurrent request slots (-1 = auto).",
+          "x-flag": "--parallel"
+        },
+        "cont_batching": {
+          "type": "boolean",
+          "default": true,
+          "title": "Continuous batching",
+          "description": "Continuous batching across slots.",
+          "x-flag": "--cont-batching"
+        },
+        "warmup": {
+          "type": "boolean",
+          "default": true,
+          "title": "Warmup",
+          "description": "Warm up the model at startup.",
+          "x-flag": "--warmup"
+        },
+        "context_shift": {
+          "type": "boolean",
+          "default": false,
+          "title": "Context shift",
+          "description": "Shift the context instead of erroring on overflow.",
+          "x-flag": "--context-shift"
+        },
+        "flash_attn": {
+          "type": "string",
+          "enum": [
+            "on",
+            "off",
+            "auto"
+          ],
+          "default": "auto",
+          "title": "Flash attention",
+          "description": "Tri-state flash attention (upstream default 'auto'). The driver normalizes booleans to on/off and passes 'auto' through.",
+          "x-flag": "--flash-attn",
+          "x-numeric-effect": "numeric"
+        },
+        "sleep_idle_seconds": {
+          "type": "integer",
+          "default": -1,
+          "minimum": -1,
+          "title": "Sleep idle seconds",
+          "description": "Backend sleep after idle (-1 = never). Matrix idle reaping is admin-driven, so this is usually left off.",
+          "x-flag": "--sleep-idle-seconds",
+          "x-supported": false
+        },
+        "slot_prompt_similarity": {
+          "type": "number",
+          "default": 0.1,
+          "minimum": 0,
+          "maximum": 1,
+          "title": "Slot prompt similarity",
+          "description": "Similarity threshold for routing a prompt to a warm slot.",
+          "x-flag": "--slot-prompt-similarity",
+          "x-supported": false
+        },
+        "cpu_mask": {
+          "type": "string",
+          "title": "CPU mask",
+          "description": "Hex CPU affinity mask.",
+          "x-flag": "--cpu-mask",
+          "x-supported": false,
+          "default": ""
+        },
+        "cpu_range": {
+          "type": "string",
+          "title": "CPU range",
+          "description": "CPU id range for threads.",
+          "x-flag": "--cpu-range",
+          "x-supported": false,
+          "default": ""
+        },
+        "cpu_strict": {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ],
+          "default": 0,
+          "title": "CPU strict",
+          "description": "Strictly enforce the CPU mask.",
+          "x-flag": "--cpu-strict",
+          "x-supported": false
+        },
+        "prio": {
+          "type": "integer",
+          "default": 0,
+          "title": "Priority",
+          "description": "Thread priority.",
+          "x-flag": "--prio",
+          "x-supported": false
+        },
+        "poll": {
+          "type": "integer",
+          "default": 99,
+          "minimum": 0,
+          "title": "Poll",
+          "description": "Busy-wait polling interval.",
+          "x-flag": "--poll",
+          "x-supported": false
+        },
+        "cpu_mask_batch": {
+          "type": "string",
+          "title": "CPU mask (batch)",
+          "description": "Hex CPU affinity mask for batch processing.",
+          "x-flag": "--cpu-mask-batch",
+          "x-supported": false,
+          "default": ""
+        },
+        "cpu_range_batch": {
+          "type": "string",
+          "title": "CPU range (batch)",
+          "description": "CPU id range for batch threads.",
+          "x-flag": "--cpu-range-batch",
+          "x-supported": false,
+          "default": ""
+        },
+        "cpu_strict_batch": {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ],
+          "default": 0,
+          "title": "CPU strict (batch)",
+          "description": "Strictly enforce the batch CPU mask.",
+          "x-flag": "--cpu-strict-batch",
+          "x-supported": false
+        },
+        "prio_batch": {
+          "type": "integer",
+          "default": 0,
+          "title": "Priority (batch)",
+          "description": "Batch thread priority.",
+          "x-flag": "--prio-batch",
+          "x-supported": false
+        },
+        "poll_batch": {
+          "type": "integer",
+          "default": 99,
+          "minimum": 0,
+          "title": "Poll (batch)",
+          "description": "Batch busy-wait polling interval.",
+          "x-flag": "--poll-batch",
+          "x-supported": false
+        },
+        "numa": {
+          "type": "string",
+          "enum": [
+            "distribute",
+            "isolate",
+            "numactl"
+          ],
+          "title": "NUMA",
+          "description": "NUMA balancing strategy.",
+          "x-flag": "--numa",
+          "x-supported": false,
+          "default": ""
+        }
+      }
+    },
+    "endpoints": {
+      "type": "object",
+      "title": "Endpoints / Security",
+      "x-order": 11,
+      "additionalProperties": false,
+      "properties": {
+        "host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "title": "Listen host",
+          "description": "llama-server bind address. The provider proxies it; loopback is the safe default on the LAN.",
+          "x-flag": "--host",
+          "x-supported": false
+        },
+        "timeout": {
+          "type": "integer",
+          "default": 3600,
+          "minimum": 0,
+          "title": "Request timeout (s)",
+          "description": "Server-side request timeout.",
+          "x-flag": "--timeout",
+          "x-supported": false
+        },
+        "sse_ping_interval": {
+          "type": "integer",
+          "default": 30,
+          "minimum": 0,
+          "title": "SSE ping interval (s)",
+          "description": "Keep-alive ping interval for SSE streams.",
+          "x-flag": "--sse-ping-interval",
+          "x-supported": false
+        },
+        "threads_http": {
+          "type": "integer",
+          "default": -1,
+          "minimum": -1,
+          "title": "HTTP threads",
+          "description": "Threads serving the HTTP layer (-1 = auto).",
+          "x-flag": "--threads-http",
+          "x-supported": false
+        },
+        "slots": {
+          "type": "boolean",
+          "default": true,
+          "title": "Slots endpoint",
+          "description": "Expose GET /slots diagnostics.",
+          "x-flag": "--slots",
+          "x-supported": false
+        },
+        "props": {
+          "type": "boolean",
+          "default": false,
+          "title": "Props endpoint",
+          "description": "Expose /props and allow runtime property updates.",
+          "x-flag": "--props",
+          "x-supported": false
+        },
+        "api_key": {
+          "type": "string",
+          "title": "API key",
+          "description": "Shared secret required on inbound llama-server requests.",
+          "x-flag": "--api-key",
+          "x-secret": true,
+          "x-supported": false,
+          "default": ""
+        },
+        "api_prefix": {
+          "type": "string",
+          "title": "API prefix",
+          "description": "Path prefix for the OpenAI-compatible endpoints.",
+          "x-flag": "--api-prefix",
+          "x-supported": false,
+          "default": ""
+        }
+      }
+    },
+    "logging": {
+      "type": "object",
+      "title": "Logging",
+      "x-order": 12,
+      "additionalProperties": false,
+      "properties": {
+        "verbose": {
+          "type": "boolean",
+          "default": false,
+          "title": "Verbose",
+          "description": "Enable verbose logging.",
+          "x-flag": "--verbose",
+          "x-supported": false
+        },
+        "verbosity": {
+          "type": "integer",
+          "enum": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "default": 3,
+          "title": "Verbosity level",
+          "description": "Numeric log verbosity.",
+          "x-flag": "--verbosity",
+          "x-supported": false
+        },
+        "log_disable": {
+          "type": "boolean",
+          "default": false,
+          "title": "Disable logging",
+          "description": "Silence all backend logging.",
+          "x-flag": "--log-disable",
+          "x-supported": false
+        },
+        "log_jsonl": {
+          "type": "boolean",
+          "default": false,
+          "title": "JSONL logs",
+          "description": "Emit log lines as JSON objects.",
+          "x-flag": "--log-jsonl",
+          "x-supported": false
+        },
+        "log_colors": {
+          "type": "string",
+          "enum": [
+            "on",
+            "off",
+            "auto"
+          ],
+          "default": "auto",
+          "title": "Log colors",
+          "description": "ANSI color output for logs.",
+          "x-flag": "--log-colors",
+          "x-supported": false
+        },
+        "log_prefix": {
+          "type": "boolean",
+          "default": true,
+          "title": "Log prefix",
+          "description": "Prefix log lines with level/tag.",
+          "x-flag": "--log-prefix",
+          "x-supported": false
+        },
+        "log_timestamps": {
+          "type": "boolean",
+          "default": true,
+          "title": "Log timestamps",
+          "description": "Include timestamps in log lines.",
+          "x-flag": "--log-timestamps",
+          "x-supported": false
+        }
+      }
+    }
+  },
+  "$defs": {
+    "hfFile": {
+      "title": "HuggingFace file",
+      "oneOf": [
+        {
+          "type": "object",
+          "x-widget": "hf-file",
+          "properties": {
+            "source": {
+              "const": "hf"
+            },
+            "repo": {
+              "type": "string"
+            },
+            "file": {
+              "type": "string"
+            },
+            "revision": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "repo",
+            "file"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

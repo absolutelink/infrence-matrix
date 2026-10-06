@@ -32,7 +32,8 @@ def _backend(
     tmp_path: Any, binary: str, model: str, **cfg_extra: Any
 ) -> LlamaCppBackend:
     settings = make_settings(tmp_path, binary)
-    cfg: dict[str, Any] = {"model": {"path": model}}
+    # Phase 12 sectioned shape: artifacts under `artifacts`.
+    cfg: dict[str, Any] = {"artifacts": {"model": {"path": model}}}
     cfg.update(cfg_extra)
     return LlamaCppBackend(settings, cfg)
 
@@ -131,7 +132,9 @@ async def test_missing_local_model_file_raises(tmp_path, fake_llama_binary) -> N
 
 async def test_nonexistent_binary_error_message(tmp_path, local_model_file) -> None:
     settings = make_settings(tmp_path, "/nonexistent/llama-server-binary")
-    driver = LlamaCppBackend(settings, {"model": {"path": local_model_file}})
+    driver = LlamaCppBackend(
+        settings, {"artifacts": {"model": {"path": local_model_file}}}
+    )
     with pytest.raises(RuntimeError, match="failed to spawn llama-server"):
         await driver.start()
 
@@ -141,7 +144,9 @@ async def test_early_exit_includes_stderr_tail(
 ) -> None:
     settings = make_settings(tmp_path, early_exit_binary)
     settings.SERVER_START_HEALTH_TIMEOUT = 5
-    driver = LlamaCppBackend(settings, {"model": {"path": local_model_file}})
+    driver = LlamaCppBackend(
+        settings, {"artifacts": {"model": {"path": local_model_file}}}
+    )
     with pytest.raises(RuntimeError) as exc_info:
         await driver.start()
     message = str(exc_info.value)
@@ -159,7 +164,7 @@ async def test_get_logs_ring(tmp_path, fake_llama_binary, local_model_file) -> N
 
     settings = make_settings(tmp_path, fake_llama_binary)
     driver = LlamaCppBackend(
-        settings, {"model": {"path": local_model_file}}, log_cb=log_cb
+        settings, {"artifacts": {"model": {"path": local_model_file}}}, log_cb=log_cb
     )
     try:
         await driver.start()

@@ -341,24 +341,58 @@ the mock's admin-driven boot pattern.
 
 ### backend_config schema
 
-> **Canonical (Phase 12):** the authoritative schema is the shipped
-> `provider_llama_cpp/schema.json` (loaded by `provider_lib.schema` and
-> sent at registration). The example below is the starting point for it —
-> keep both in sync. See "Authoring schema.json" above for section /
-> `x-flag` / `x-widget` conventions.
+The authoritative schema is the shipped
+`provider_llama_cpp/schema.json` (loaded by `provider_lib.schema`, sent
+at registration, and shared with the driver as
+`provider_llama_cpp.driver.SCHEMA`). Canonical example (sectioned,
+Phase 12):
 
 ```json
 {
-  "model":  {"source": "hf", "repo": "ggml-org/models", "file": "gemma/ggml-model.gguf"},
-  "mmproj": {"source": "hf", "repo": "...", "file": "..."},
-  "draft":  {"source": "hf", "repo": "...", "file": "..."},
-  "args":   {"ctx": 8192, "gpu_layers": 35, "flash_attn": "on", "parallel": 1,
-             "threads": 8, "batch_size": 512, "ubatch_size": 128,
-             "reasoning": true, "jinja": true, "mtp_draft_max": 4},
-  "backend_port": 9999
+  "artifacts": {
+    "model":  {"source": "hf", "repo": "ggml-org/models", "file": "gemma/ggml-model.gguf"},
+    "mmproj": {"source": "hf", "repo": "...", "file": "..."},
+    "draft":  {"source": "hf", "repo": "...", "file": "..."}
+  },
+  "context":  {"ctx": 8192, "predict": -1, "keep": 0},
+  "kv_cache": {"cache_prompt": true, "cache_reuse": 4, "cache_type_k": "q8_0",
+               "cache_type_v": "f16", "kv_offload": true, "ctx_checkpoints": 32,
+               "checkpoint_min_step": 8192, "cache_ram": 8192,
+               "cache_idle_slots": true},
+  "loading":  {"load_mode": "mmap"},
+  "gpu":      {"gpu_layers": "auto", "device": "CUDA0", "tensor_split": "1,1",
+               "main_gpu": 0, "fit": "on", "fit_ctx": 4096},
+  "speculative": {"spec_type": "draft-mtp", "spec_draft_n_max": 3,
+                  "spec_draft_p_min": 0.0},
+  "sampling": {"temperature": 0.8, "top_k": 40, "top_p": 0.95, "min_p": 0.05,
+               "seed": -1, "repeat_penalty": 1.0},
+  "reasoning": {"reasoning": "on", "reasoning_budget": -1, "jinja": true},
+  "vision":   {"image_max_tokens": 1024},
+  "server":   {"backend_port": 9999, "threads": -1, "batch_size": 2048,
+               "ubatch_size": 512, "parallel": 1, "cont_batching": true,
+               "warmup": true, "flash_attn": "auto"},
+  "endpoints": {"host": "127.0.0.1", "sse_ping_interval": 30},
+  "logging":  {"verbosity": 3}
 }
 ```
 
+- Twelve sections (`additionalProperties: false` at top level and in
+  every section): `artifacts`, `context`, `kv_cache`, `loading`, `gpu`,
+  `speculative`, `sampling`, `reasoning`, `vision`, `server`,
+  `endpoints`, `logging`. The old flat shape (`model`/`args`/
+  `backend_port` at top level) is rejected by the schema; the driver
+  still accepts it at runtime (see flatten note below) for a smooth
+  transition.
+- `gpu_layers` default is now `"auto"` (upstream), **not** the legacy
+  fixed `35`. `flash_attn` is tri-state `on|off|auto` (upstream default
+  `auto`).
+- `backend_port` relocated from top-level into `server` (a server knob).
+  No schema default: when absent the driver uses `PROVIDER_PORT + 1`
+  from the container env.
+- Canonical renames (legacy keys still accepted by the driver, canonical
+  wins when both present): `context_size`→`ctx`,
+  `checkpoint_every`→`checkpoint_min_step`,
+  `no_cache_idle_slots`→`cache_idle_slots` (positive polarity).
 - Artifacts also accept `{"path": "/local/file.gguf"}` (no download; the
   file must exist).
 - `model`/`mmproj`/`draft` are separate `ensure_artifact` calls
@@ -367,28 +401,38 @@ the mock's admin-driven boot pattern.
   `MODELS_DIR/<repo>`.
 - The `llama-server` binary path comes from env `LLAMA_SERVER_PATH`
   (default `llama-server`), never from backend_config.
-- `backend_port` optional; default `PROVIDER_PORT + 1`.
 - Health wait: env `SERVER_START_HEALTH_TIMEOUT` (default 120s).
 
 ### Command mapping (command.py)
 
-| Config (args.*) | CLI |
+`flatten_args(cfg)` merges every section except `artifacts` (plus the
+legacy flat `cfg["args"]`, sections winning) into the single args dict
+the `VALUE_FLAGS` / `BOOLEAN_FLAGS` maps consume — the flag tables below
+are unchanged in spirit, only the read path moved.
+
+| Config (section.field) | CLI |
 | --- | --- |
-| `model` (resolved) | `--model <path>` |
-| (backend_port) | `--port <p>` |
-| `gpu_layers` (default 35) | `--n-gpu-layers` |
-| `ctx` / `context_size` (default 4096) | `--ctx-size` |
-| `batch_size` (default 512) | `--batch-size` |
-| (always) | `--metrics` |
-| `threads`, `threads_batch`, `ubatch_size`, `keep`, `predict`, `cache_type_k/v`, `cache_reuse`, `ctx_checkpoints`, `checkpoint_every`→`--checkpoint-min-step`, `cache_ram`, `slot_save_path`, `device`, `split_mode`, `tensor_split`, `main_gpu`, `fit`, `fit_target`, `fit_ctx`, `temperature`, `top_k`, `top_p`, `min_p`, `repeat_penalty`, `presence_penalty`, `frequency_penalty`, `seed`, `parallel`, `reasoning`, `reasoning_budget`, `spec_draft_p_min` | `--<flag> <value>` when present and not None |
-| `swa_full`/`kv_unified` | emitted when truthy |
-| `kv_offload`, `cache_prompt`, `cont_batching`, `warmup`, `context_shift`, `no_cache_idle_slots` | `--x` / `--no-x` by boolean. NOTE: `--cache-prompt` is a valid modern flag; the OBSOLETE `--prompt-cache` is NEVER emitted. |
-| `load_mode` (auto|mmap|mlock|none) | `--load-mode <m>` when present and not `auto`. `no_mmap` and `strict_mtp_qwen` are REMOVED in modern llama.cpp (`--mmap`/`--no-mmap`/`--spec-mtp-strict-qwen` no longer exist) and are silently ignored |
-| `flash_attn` (bool or "on"/"off") | `--flash-attn on|off`; skipped when None |
-| `draft` artifact present | `--spec-type draft-dflash` + `-md <path>` |
-| else `mtp_draft_max > 0` | `--spec-type draft-mtp --spec-draft-n-max N` |
-| `jinja` (default true) | `--jinja` |
-| `mmproj` artifact | `--mmproj <path>` |
+| `artifacts.model` (resolved) | `--model <path>` |
+| `server.backend_port` (or env default) | `--port <p>` |
+| `gpu.gpu_layers` (default "auto"; int\|auto\|all) | `--n-gpu-layers` |
+| `context.ctx` / legacy `context_size` (default 4096) | `--ctx-size` |
+| `server.batch_size` (default 2048, matching the schema) | `--batch-size` |
+| (always) | `--metrics` (never schema'd) |
+| `server.threads`, `server.threads_batch`, `server.ubatch_size`, `context.keep`, `context.predict`, `kv_cache.cache_type_k/v`, `kv_cache.cache_reuse`, `kv_cache.ctx_checkpoints`, `kv_cache.checkpoint_min_step` (legacy `checkpoint_every`) →`--checkpoint-min-step`, `kv_cache.cache_ram`, `kv_cache.slot_save_path`, `gpu.device`, `gpu.split_mode`, `gpu.tensor_split`, `gpu.main_gpu`, `gpu.fit`, `gpu.fit_target`, `gpu.fit_ctx`, `sampling.temperature/top_k/top_p/min_p/repeat_penalty/presence_penalty/frequency_penalty/seed`, `server.parallel`, `reasoning.reasoning`, `reasoning.reasoning_budget`, `speculative.spec_draft_p_min` | `--<flag> <value>` when present and not None |
+| `kv_cache.swa_full` / `kv_cache.kv_unified` | emitted when truthy |
+| `kv_cache.kv_offload`, `kv_cache.cache_prompt`, `server.cont_batching`, `server.warmup`, `server.context_shift`, `kv_cache.cache_idle_slots` (legacy inverted `no_cache_idle_slots`) | `--x` / `--no-x` by boolean. NOTE: `--cache-prompt` is a valid modern flag; the OBSOLETE `--prompt-cache` is NEVER emitted. |
+| `loading.load_mode` (auto\|none\|mmap\|mlock\|mmap+mlock\|dio) | `--load-mode <m>` when present and not `auto`. `no_mmap` and `strict_mtp_qwen` are REMOVED in modern llama.cpp (`--mmap`/`--no-mmap`/`--spec-mtp-strict-qwen` no longer exist) and are silently ignored |
+| `server.flash_attn` (tri-state "on"/"off"/"auto"; bools normalized) | `--flash-attn on|off|auto`; skipped when None |
+| `artifacts.draft` present | `--spec-type draft-dflash` + `-md <path>` |
+| else `speculative.mtp_draft_max > 0` | `--spec-type draft-mtp --spec-draft-n-max N` |
+| else `speculative.spec_type == "draft-mtp"` | `--spec-type draft-mtp --spec-draft-n-max spec_draft_n_max` |
+| `reasoning.jinja` (default true) | `--jinja` |
+| `artifacts.mmproj` | `--mmproj <path>` |
+
+Schema fields marked `x-supported: false` (rope/yarn tuning, most
+sampling extras, vision knobs, affinity/NUMA, endpoints/security,
+logging) are documented upstream options the driver does not pass yet —
+they validate but produce no argv.
 
 Spawn env: `LD_LIBRARY_PATH` defaults to the binary's directory
 (`env.setdefault`) — Vulkan/containers may not provide it.

@@ -27,6 +27,7 @@ import httpx
 from provider_lib.backend import BackendDriver
 from provider_lib.config import ProviderSettings
 from provider_lib.downloader import ensure_artifact
+from provider_lib.schema import load_schema, validate_backend_config
 
 from provider_llama_cpp.command import build_llama_command
 from provider_llama_cpp.log_ring import CursorLogRing
@@ -39,6 +40,20 @@ LogCallback = Callable[[str, str], Awaitable[None]]
 _LOG_BUFFER_LINES = 2000
 _HEALTH_POLL_INTERVAL = 0.25
 _STDERR_TAIL_LINES = 5
+
+# The llama-cpp committed backend_config schema (Phase 12): the sectioned
+# shape the admin registers, validates against, and renders in the UI.
+# Shared with main.py (single load → registration + driver validation).
+SCHEMA: dict[str, Any] = load_schema("provider_llama_cpp")
+
+
+def _read_backend_port(cfg: dict[str, Any], settings: ProviderSettings) -> int:
+    """Resolve the llama-server port: `server.backend_port` (Phase 12),
+    the legacy top-level `backend_port`, or PROVIDER_PORT + 1."""
+    port = (cfg.get("server") or {}).get("backend_port")
+    if port is None:
+        port = cfg.get("backend_port")
+    return int(port or (settings.PROVIDER_PORT + 1))
 
 
 class LlamaCppBackend(BackendDriver):
@@ -57,9 +72,7 @@ class LlamaCppBackend(BackendDriver):
         self._progress_cb = progress_cb
         self._log_cb = log_cb
         self._binary = settings.LLAMA_SERVER_PATH
-        self.backend_port = int(
-            self._config.get("backend_port") or (settings.PROVIDER_PORT + 1)
-        )
+        self.backend_port = _read_backend_port(self._config, settings)
         self._proc: subprocess.Popen[str] | None = None
         self._log_ring = CursorLogRing(_LOG_BUFFER_LINES)
         self._log_readers: list[asyncio.Task[None]] = []
@@ -69,11 +82,17 @@ class LlamaCppBackend(BackendDriver):
         self.resolved_artifacts: list[str] = []
 
     def apply_config(self, backend_config: dict[str, Any]) -> None:
-        """Adopt a (possibly updated) backend_config before start."""
+        """Adopt a (possibly updated) sectioned backend_config before start.
+
+        Schema violations are logged as warnings, not raised: the
+        authoritative gates are the admin's registration schema check and
+        definition CRUD validation (docs/ws-protocol.md §2).
+        """
         self._config = backend_config or {}
-        self.backend_port = int(
-            self._config.get("backend_port") or (self._settings.PROVIDER_PORT + 1)
-        )
+        for err in validate_backend_config(SCHEMA, self._config):
+            logger.warning("backend_config schema violation: %s", err)
+        self.backend_port = _read_backend_port(self._config, self._settings)
+        # Config changed: previously resolved artifacts are stale.
         self.resolved_artifacts = []
 
     @property
@@ -92,19 +111,37 @@ class LlamaCppBackend(BackendDriver):
             return None
         if not isinstance(descriptor, dict):
             raise RuntimeError(f"{kind} artifact descriptor must be an object")
+        # The hfFile schema allows an optional `revision`; only a
+        # non-empty string pins the HF revision (empty/absent = None).
+        revision = descriptor.get("revision")
+        if not isinstance(revision, str) or not revision.strip():
+            revision = None
         return await ensure_artifact(
             descriptor,
             models_dir=self._settings.MODELS_DIR,
             progress_cb=self._progress_cb,
+            revision=revision,
         )
 
     async def _resolve_artifacts(self) -> tuple[str, str | None, str | None]:
-        model = self._config.get("model")
+        # Phase 12: artifact descriptors live under the `artifacts`
+        # section; the legacy top-level keys are accepted as fallback.
+        artifacts = self._config.get("artifacts")
+        if not isinstance(artifacts, dict):
+            artifacts = self._config
+
+        def descriptor(name: str) -> Any:
+            value = artifacts.get(name)
+            if value is None and artifacts is not self._config:
+                value = self._config.get(name)
+            return value
+
+        model = descriptor("model")
         if not model:
             raise RuntimeError("backend_config missing 'model' artifact")
         model_path = await self._ensure(model, "model")
-        mmproj_path = await self._ensure(self._config.get("mmproj"), "mmproj")
-        draft_path = await self._ensure(self._config.get("draft"), "draft")
+        mmproj_path = await self._ensure(descriptor("mmproj"), "mmproj")
+        draft_path = await self._ensure(descriptor("draft"), "draft")
         self.resolved_artifacts = [
             p for p in (model_path, mmproj_path, draft_path) if p
         ]

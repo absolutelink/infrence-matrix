@@ -32,7 +32,9 @@ def _wait_for(predicate, timeout: float = 5.0) -> None:
 
 def _driver(tmp_path: Any, fake_llama_binary: str, local_model_file: str):
     settings = make_settings(tmp_path, fake_llama_binary)
-    return LlamaCppBackend(settings, {"model": {"path": local_model_file}})
+    return LlamaCppBackend(
+        settings, {"artifacts": {"model": {"path": local_model_file}}}
+    )
 
 
 async def test_responses_stream_cancelled_on_early_aclose(

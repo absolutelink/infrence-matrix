@@ -130,7 +130,7 @@ async def test_config_update_applies_new_model_and_clears_cache(
     fake_admin, tmp_path, fake_llama_binary, local_model_file
 ) -> None:
     BACKEND_CONFIG.clear()
-    BACKEND_CONFIG.update({"model": {"path": local_model_file}})
+    BACKEND_CONFIG.update({"artifacts": {"model": {"path": local_model_file}}})
     settings = make_settings(tmp_path, fake_llama_binary, ADMIN_BASE_URL=fake_admin)
     client = AdminClient(settings)
     lifecycle = make_lifecycle(client, BACKEND_CONFIG)
@@ -148,7 +148,10 @@ async def test_config_update_applies_new_model_and_clears_cache(
         old.mkdir(parents=True, exist_ok=True)
         (old / "slot.bin").write_bytes(b"x" * 40)
 
-        new_cfg = {"model": {"path": local_model_file}, "args": {"ctx": 8192}}
+        new_cfg = {
+            "artifacts": {"model": {"path": local_model_file}},
+            "context": {"ctx": 8192},
+        }
         await client._dispatch(
             Frame(
                 type="provider.config.update",
