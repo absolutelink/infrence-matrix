@@ -238,6 +238,10 @@ jobs:
             BUILDKIT_INLINE_CACHE=1
 
   build-provider-llama-cpp-cuda12:
+    # Disabled: CUDA12 image builds keep failing in GHA; re-enable once
+    # stable. The image is still buildable manually — see the comment in
+    # provider/llama-cpp/Dockerfile.cuda12.
+    if: false
     needs: [test-admin, test-provider]
     runs-on: ubuntu-24.04
     permissions:
@@ -285,9 +289,10 @@ jobs:
             BUILDKIT_INLINE_CACHE=1
 
   # Per-provider-type images: ONLY llama-cpp is built in CI — Vulkan
-  # (ghcr.io/ggml-org/llama.cpp:full-vulkan) and CUDA 12
-  # (ghcr.io/ggml-org/llama.cpp:server-cuda12) both layer the provider
-  # package on the official bases, so there is no compile step. gufo /
+  # (ghcr.io/ggml-org/llama.cpp:full-vulkan) is built; CUDA 12
+  # (ghcr.io/ggml-org/llama.cpp:server-cuda12) builds layers the provider
+  # package on the official base the same way but its CI job is currently
+  # disabled (see build-provider-llama-cpp-cuda12). gufo /
   # halogen / halogen-flash gate on NPU/ROCm hardware and ship their
   # binaries out-of-band (see provider/<type>/Dockerfile); their CI builds
   # land with the real hardware types. The mock provider is built locally
