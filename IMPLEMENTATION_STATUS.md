@@ -1173,6 +1173,34 @@ immutable while instances are attached.
   `test_patch_push_slower_than_idle_tx_timeout_still_200` (route-side
   connections disposed mid-push; asserts 200 + ack-echoed fingerprint
   persisted).
+- **halogen-flash image was unbootable (found while re-deploying the
+  Flash instance on `lfh-ai-node-01`, 2026-10-07):** two stacked defects
+  in `provider/halogen-flash/Dockerfile`, neither visible in CI (which
+  builds the image but never runs it) and both fatal on the host — the
+  quadlet restart loop hit `start request repeated too quickly` in ~2s.
+  (1) `CMD` only: `peonist-ai/halogen-flash-server` ships
+  `ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]`, so the provider command
+  was passed to the **engine** as its mode word
+  (`halogen: halogen-flash-server 0.16.2, mode sh` → usage → exit 2).
+  llama-cpp's Dockerfile already overrides this; halogen-flash must too.
+  (2) The venv was built in a `python:3.14-slim` stage and copied to
+  `/agent/.venv` — but uv's venv is **not relocatable**
+  (`bin/python -> /usr/local/bin/python3`, and the editable `.pth` files
+  name build-stage paths). In the final image that symlink resolves to
+  the base's **3.12**, which cannot see `lib/python3.14/site-packages`
+  (`ModuleNotFoundError: provider_halogen_flash`), so even a corrected
+  entrypoint would have died on import. Fix: copy the standalone 3.14
+  interpreter + stdlib only, then `uv sync` **in the final image** at
+  `/app/.venv` (the legacy `recipes/halogen-flash` build did exactly
+  this), with `python3.14 -m uv` (uv installed into the copied 3.14
+  tree, never into the engine's interpreter). The base's global
+  python3.12 + ROCm site-packages are left untouched and PATH is not
+  prepended — `entrypoint.sh` resolves `python3` from PATH, so venv-first
+  PATH would break the engine. Also restored `HF_HUB_OFFLINE=0` (the
+  engine image sets `1`; the provider's `ensure_artifact` downloads then
+  fail). Verified locally by reproducing the restricted `COPY` set +
+  `uv sync --frozen --no-dev --package matrix-provider-halogen-flash`
+  (imports resolve, `.pth` paths correct).
 
 ### Accepted risks (per spec)
 
