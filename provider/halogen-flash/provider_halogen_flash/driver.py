@@ -294,13 +294,27 @@ class HalogenFlashBackend(BackendDriver):
         # would otherwise surface as a confusing stdbuf exit; check first.
         if not shutil.which(self._binary) and not Path(self._binary).exists():
             raise RuntimeError(f"halogen-flash entrypoint not found: {self._binary}")
-        checkpoint = await self._resolve_artifact(
-            self._artifact_descriptor("model"), "model"
+        # `artifacts.model` / `artifacts.tokenizer` are optional: left blank,
+        # nothing is resolved and the variables are not exported, so the
+        # image's own defaults win (v2/w4b head under MODELS_DIR, then the
+        # checkpoint's sidecar tokenizer). See env.build_env.
+        checkpoint_desc = self._artifact_descriptor("model")
+        tokenizer_desc = self._artifact_descriptor("tokenizer")
+        checkpoint = (
+            await self._resolve_artifact(checkpoint_desc, "model")
+            if checkpoint_desc is not None
+            else None
         )
-        tokenizer = await self._resolve_artifact(
-            self._artifact_descriptor("tokenizer"), "tokenizer"
+        tokenizer = (
+            await self._resolve_artifact(tokenizer_desc, "tokenizer")
+            if tokenizer_desc is not None
+            else None
         )
-        self.resolved_artifacts = [checkpoint, tokenizer]
+        if checkpoint is None:
+            logger.info("artifacts.model blank — using the image default checkpoint")
+        if tokenizer is None:
+            logger.info("artifacts.tokenizer blank — using the image default tokenizer")
+        self.resolved_artifacts = [p for p in (checkpoint, tokenizer) if p is not None]
         # Flat semantic options (Phase 12 sections + legacy options blob).
         # artifacts.vision_tower / artifacts.mtp_head are env-mapped
         # (HALOGEN_VISION_TOWER / HALOGEN_MTP_HEAD): descriptors and

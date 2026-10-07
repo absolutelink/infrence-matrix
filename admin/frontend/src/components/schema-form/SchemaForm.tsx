@@ -27,7 +27,9 @@ import {
   asRecord,
   buildUiSchema,
   collectSecretPaths,
+  describeHfDescriptor,
   getByDotPath,
+  isHfFileSchema,
   setByDotPath,
 } from "./keywords"
 import { HintFieldTemplate, SectionedObjectFieldTemplate } from "./templates"
@@ -73,6 +75,29 @@ export function restoreSecrets(
 }
 
 type Rec = Record<string, unknown>
+
+/** The subschema of an object property (`schema.properties[key]`), or
+ *  undefined when the walk is outside the schema (no `schema` passed, a
+ *  computed key, or an array/`$ref` hop we do not resolve). */
+function childSchema(
+  schema: RJSFSchema | undefined,
+  key: string,
+): RJSFSchema | undefined {
+  const props = asRecord(schema?.properties)
+  return props ? (asRecord(props[key]) as RJSFSchema | undefined) : undefined
+}
+
+/** True when a property is an hf-file descriptor, or a union that offers one
+ *  as a branch (halogen-flash `artifacts.vision_tower`). */
+function isDescriptorSchema(schema: RJSFSchema | undefined): boolean {
+  if (isHfFileSchema(schema)) return true
+  const rec = asRecord(schema)
+  for (const key of ["oneOf", "anyOf"] as const) {
+    const branches = rec?.[key]
+    if (Array.isArray(branches) && branches.some(isHfFileSchema)) return true
+  }
+  return false
+}
 
 /** Run rjsf's real default materialization (getDefaultFormState) over a
  *  config — exactly what the controlled <Form> produces as formData on
@@ -120,11 +145,24 @@ export function materializedDefaults(
  * default), the key is not written — semantically equivalent, since
  * provider/README.md requires schema defaults to mirror the upstream
  * engine defaults.
+ *
+ * Exception — hf-file descriptors (`schema` needed): `$defs/hfFile`'s HF
+ * branch marks `source` with `const: "hf"`, which `getDefaultFormState`
+ * materializes as `{"source":"hf"}`. Leaf-level pruning would then drop
+ * `source` from the operator's completed `{"source":"hf","repo","file"}`
+ * (it deep-equals the baseline leaf), shipping `{"repo","file"}` — a value
+ * matching NEITHER `oneOf` branch, rejected by the admin with
+ * "is not valid under any of the given schemas". A descriptor object is the
+ * picker's atomic value, so a *complete* one ships verbatim and an
+ * incomplete one ships nothing (the `initial` state stands). Non-object
+ * values of a descriptor-typed union (halogen-flash `vision_tower: true`)
+ * keep the normal leaf rules.
  */
 export function pruneUntouchedDefaults(
   initial: BackendConfig,
   populated: BackendConfig,
   current: BackendConfig,
+  schema?: RJSFSchema,
 ): BackendConfig {
   const out: Rec = { ...initial }
   const keys = new Set([...Object.keys(populated), ...Object.keys(current)])
@@ -133,11 +171,24 @@ export function pruneUntouchedDefaults(
     const cVal = current[key]
     const pObj = asRecord(pVal)
     const cObj = asRecord(cVal)
+    const child = childSchema(schema, key)
+    if (cObj && isDescriptorSchema(child)) {
+      // See the exception above: a descriptor is the picker's atomic value,
+      // so it ships whole — leaf pruning here would strip the branch `const`
+      // (`source: "hf"`) and produce a value no branch accepts.
+      const summary = describeHfDescriptor(cObj)
+      if (summary !== null && summary !== "") out[key] = cVal
+      // An object that is not a complete descriptor (only the materialized
+      // `source`, or an empty local path) is not a selection: `continue`
+      // keeps whatever `initial` had for this key.
+      continue
+    }
     if (pObj && cObj) {
       const merged = pruneUntouchedDefaults(
         asRecord(out[key]) ?? {},
         pObj,
         cObj,
+        child,
       )
       // An empty section after pruning means the operator cleared every
       // leaf in it — drop the node entirely (never ship `{"server": {}}`

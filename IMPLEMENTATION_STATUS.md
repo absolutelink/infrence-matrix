@@ -1201,6 +1201,40 @@ immutable while instances are attached.
   fail). Verified locally by reproducing the restricted `COPY` set +
   `uv sync --frozen --no-dev --package matrix-provider-halogen-flash`
   (imports resolve, `.pth` paths correct).
+- **HF artifact picker always failed validation (Phase 12 E regression,
+  found 2026-10-07 on both `llama-cpp` and `halogen-flash`):** the admin
+  rejected every picker selection with
+  `{'repo': ..., 'file': ...} is not valid under any of the given schemas`.
+  Cause was client-side, not the schema: `$defs/hfFile`'s HF branch marks
+  `source` with `const: "hf"`, rjsf materializes that const into formData,
+  and `pruneUntouchedDefaults` (the H2 "ship only operator-changed leaves"
+  rule) then compared the leaf, saw `current.source === populated.source`,
+  and dropped it — leaving a descriptor matching neither `oneOf` branch.
+  Fix: `pruneUntouchedDefaults` now takes the schema and treats a
+  descriptor node (`isHfFileSchema`, including a union branch that offers
+  `hfFile`) as the picker's **atomic value** — a complete descriptor ships
+  verbatim, an incomplete one ships nothing (so a half-materialized
+  `{"source":"hf"}` can never be saved), and scalar branches
+  (`vision_tower: true`) keep the old leaf rules. Probe-checked against the
+  shipped llama-cpp + halogen-flash schemas: fresh HF selection keeps
+  `source`, an untouched save of a stored descriptor stays byte-identical
+  (no fingerprint churn), local-path and clear cases behave, and the
+  pre-fix call still reproduces `{"repo","file"}`.
+- **halogen-flash artifacts are now optional (blank = image default):**
+  `artifacts.model` / `artifacts.tokenizer` no longer carry a `required`
+  entry; when blank the driver resolves nothing and `build_env` OMITS
+  `HALOGEN_CHECKPOINT` / `HALOGEN_TOKENIZER` entirely (never an empty
+  string — the image's `resolve_checkpoint` picks `qwen38-flash-next-v2.hgn`
+  under MODELS_DIR, falling back to `...-w4b.hgn`, and `need_tokenizer`
+  uses the checkpoint's sidecar `tokenizer/`). `resolved_artifacts` then
+  holds only what was resolved, so `storage.prune_unused` keeps refusing to
+  run with an empty reference set (the guard is load-bearing, not new).
+  Shipped schema fingerprint: `4157ffa0438b…53ba12bd` (pin in
+  `test_schema_sections.py`). Safe to change now because the fleet has no
+  committed `halogen-flash` ProviderType row yet (only `llama-cpp` is
+  registered); once Flash instances exist this is a consensus change.
+  `llama-cpp`, `gufo` and `halogen` still require `artifacts.model` — those
+  engines have no in-image checkpoint default.
 
 ### Accepted risks (per spec)
 

@@ -658,6 +658,7 @@ function DefinitionFormDialog({
               initialConfig,
               materializedDefaults(schema, initialConfig),
               configValue,
+              schema,
             )
           : configValue
         backendConfig = schema

@@ -810,9 +810,16 @@ Concurrency" (2) · `disk_cache` "Disk / Prompt Caching" (3) ·
 (6) · `composable` "Composable Context (preview)" (7) · `vision` (8) ·
 `npu` (9) · `networking` (10) · `troubleshooting` (11).
 
-- `artifacts.model` = the `.hgn` **checkpoint** (required within the
-  section), `artifacts.tokenizer` = the tokenizer **directory**. The
-  engine needs a directory, and `ensure_artifact` downloads single files
+- `artifacts.model` = the `.hgn` **checkpoint**, `artifacts.tokenizer` = the
+  tokenizer **directory** — both OPTIONAL: leaving the checkpoint blank
+  exports no `HALOGEN_CHECKPOINT` at all, so the image entrypoint picks its
+  own default head under `MODELS_DIR` (`resolve_checkpoint`:
+  `qwen38-flash-next-v2.hgn`, falling back to the legacy
+  `qwen38-flash-next-w4b.hgn` when only that is present); leaving the
+  tokenizer blank exports no `HALOGEN_TOKENIZER`, and `need_tokenizer` uses
+  the checkpoint's sidecar `tokenizer/` directory. Never substitute an
+  empty string — that defeats both fallbacks. The engine needs a directory,
+  and `ensure_artifact` downloads single files
   only — so a tokenizer HF descriptor must name a SINGLE file, while a
   tokenizer *directory* is referenced with `{"path": "<local dir>"}`
   (the driver's exists() special-case accepts file or dir). All accept
@@ -840,8 +847,11 @@ Concurrency" (2) · `disk_cache` "Disk / Prompt Caching" (3) ·
 ### Env mapping (env.py)
 
 Fixed wiring is identical to halogen (`HALOGEN_API_PORT`,
-`HALOGEN_PORT`, `HALOGEN_BIND`, `HALOGEN_ENGINE`, `HALOGEN_CHECKPOINT`,
-`HALOGEN_TOKENIZER`). The section leaves are flattened into the same
+`HALOGEN_PORT`, `HALOGEN_BIND`, `HALOGEN_ENGINE`), except that
+`HALOGEN_CHECKPOINT` / `HALOGEN_TOKENIZER` are exported **only when the
+matching `artifacts` entry is configured** — a blank artifact omits the
+variable so the image's own `resolve_checkpoint` / sidecar-tokenizer
+defaults apply. The section leaves are flattened into the same
 semantic option names by `flatten_options()` (legacy flat
 `cfg["options"]` merged first, sections win), and `ENV_MAP` maps them to
 `HALOGEN_*` env vars (each emitted only when present and not None):

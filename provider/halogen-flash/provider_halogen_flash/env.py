@@ -186,8 +186,8 @@ def build_env(
     *,
     api_port: int,
     engine_port: int,
-    checkpoint_path: str,
-    tokenizer_path: str,
+    checkpoint_path: str | None,
+    tokenizer_path: str | None,
     cache_dir: Path | None = None,
     npu_models: list[str] | None = None,
     base_env: dict[str, str] | None = None,
@@ -201,14 +201,24 @@ def build_env(
     is true (legacy semantics). `npu_models` (already NPU-probe-gated
     by the caller) joins with commas so the engine reads a bare id list,
     not a Python repr.
+
+    `checkpoint_path` / `tokenizer_path` are `None` when the operator left
+    `artifacts.model` / `artifacts.tokenizer` blank: the variable is then
+    OMITTED entirely so the image's own resolution wins — the entrypoint's
+    `resolve_checkpoint` picks the v2 (or legacy w4b) head under `/models`,
+    and `need_tokenizer` falls back to the checkpoint's sidecar
+    `tokenizer/` when the image default `/tokenizer` is not mounted.
+    Overriding either with an empty string would defeat that fallback.
     """
     env = dict(base_env if base_env is not None else os.environ)
     env["HALOGEN_API_PORT"] = str(api_port)
     env["HALOGEN_PORT"] = str(engine_port)
     env["HALOGEN_BIND"] = "127.0.0.1"
     env["HALOGEN_ENGINE"] = f"127.0.0.1:{engine_port}"
-    env["HALOGEN_CHECKPOINT"] = str(checkpoint_path)
-    env["HALOGEN_TOKENIZER"] = str(tokenizer_path)
+    if checkpoint_path is not None:
+        env["HALOGEN_CHECKPOINT"] = str(checkpoint_path)
+    if tokenizer_path is not None:
+        env["HALOGEN_TOKENIZER"] = str(tokenizer_path)
     opts = options or {}
     for key, variable in ENV_MAP.items():
         if opts.get(key) is not None:

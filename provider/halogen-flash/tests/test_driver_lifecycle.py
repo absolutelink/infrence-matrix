@@ -282,8 +282,21 @@ async def test_early_exit_includes_stderr_tail(
     assert "npu attach failed" in message
 
 
-async def test_missing_model_artifact_raises(tmp_path, fake_flash_binary) -> None:
+async def test_blank_artifacts_defer_to_image_defaults(
+    tmp_path, fake_flash_binary, state_dir
+) -> None:
+    """No `artifacts.model` / `artifacts.tokenizer`: nothing is resolved and
+    neither variable is exported, so the image picks its own checkpoint
+    (`resolve_checkpoint` under MODELS_DIR) and sidecar tokenizer
+    (`need_tokenizer`) instead of being pinned to a missing path."""
     settings = make_settings(tmp_path, fake_flash_binary)
     driver = HalogenFlashBackend(settings, {}, npu_probe=lambda: NPU_UNAVAILABLE)
-    with pytest.raises(Exception, match="missing 'model'"):
+    try:
         await driver.start()
+        recorded = json.loads((state_dir / "env.json").read_text())
+        assert "HALOGEN_CHECKPOINT" not in recorded
+        assert "HALOGEN_TOKENIZER" not in recorded
+        # Nothing resolved => storage.prune_unused refuses to run (by design).
+        assert driver.resolved_artifacts == []
+    finally:
+        await driver.aclose()

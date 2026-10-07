@@ -134,7 +134,7 @@ def test_schema_has_the_planned_sections() -> None:
 # schema.json, every known halogen-flash instance must re-register with
 # the new file (or the operator force-commits); update this pin
 # deliberately.
-SHIPPED_SCHEMA_FP = "7d2a8f49196153863c7e9bc3ab2cecc4bcbd22a8349849a3b86ecf681de20b81"
+SHIPPED_SCHEMA_FP = "4157ffa0438b2f807eb51620832ab799306fc87589531c928e890f6653ba12bd"
 
 
 def test_schema_fingerprint_is_stable() -> None:
@@ -149,16 +149,28 @@ def test_canonical_config_validates() -> None:
     assert validate_backend_config(SCHEMA, CANONICAL_CONFIG) == []
 
 
-def test_artifacts_required_model() -> None:
+def test_artifacts_are_all_optional() -> None:
+    """Blank artifacts mean "use the image/engine default": the driver omits
+    HALOGEN_CHECKPOINT / HALOGEN_TOKENIZER (see env.build_env), so no artifact
+    key is required — neither inside the section nor at the top level."""
     cfg = json.loads(json.dumps(CANONICAL_CONFIG))
     del cfg["artifacts"]["model"]
-    errors = validate_backend_config(SCHEMA, cfg)
-    assert any("model" in e for e in errors)
+    assert validate_backend_config(SCHEMA, cfg) == []
+    assert validate_backend_config(SCHEMA, {"artifacts": {}}) == []
+    assert (
+        validate_backend_config(SCHEMA, {"artifacts": {"tokenizer": {"path": "/tok"}}})
+        == []
+    )
+    # The section still closes itself: unknown keys are rejected.
+    assert (
+        validate_backend_config(SCHEMA, {"artifacts": {"checkpoint": {"path": "/c"}}})
+        != []
+    )
 
 
 def test_empty_config_validates() -> None:
-    # Every section is optional at the top level; only artifacts.model is
-    # required when the artifacts section is present.
+    # Every section is optional at the top level, and so is every artifact
+    # inside `artifacts` (a fully empty config boots the image defaults).
     assert validate_backend_config(SCHEMA, {}) == []
     assert validate_backend_config(SCHEMA, {"context": {"ctx": 128}}) == []
 

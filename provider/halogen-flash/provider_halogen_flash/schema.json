@@ -8,21 +8,21 @@
     "artifacts": {
       "type": "object",
       "title": "Model files",
-      "description": "Checkpoint, tokenizer, MTP head, and vision tower artifacts resolved by the driver before spawn (local path or HuggingFace descriptor).",
+      "description": "Checkpoint, tokenizer, MTP head, and vision tower artifacts resolved by the driver before spawn (local path or HuggingFace descriptor). Leave the checkpoint and tokenizer blank to use what the engine image ships/derives (nothing is exported for them).",
       "x-order": 1,
       "additionalProperties": false,
       "properties": {
         "model": {
           "$ref": "#/$defs/hfFile",
           "title": "Checkpoint",
-          "description": "Primary .hgn checkpoint (hf-file descriptor or local path). Resolved path exported as HALOGEN_CHECKPOINT.",
+          "description": "Primary .hgn checkpoint (hf-file descriptor or local path). Resolved path exported as HALOGEN_CHECKPOINT. When blank the variable is not exported and the image entrypoint picks its own default under MODELS_DIR (qwen38-flash-next-v2.hgn, or qwen38-flash-next-w4b.hgn when only that is present).",
           "x-flag": "HALOGEN_CHECKPOINT",
           "x-order": 1
         },
         "tokenizer": {
           "$ref": "#/$defs/hfFile",
           "title": "Tokenizer",
-          "description": "Tokenizer artifact. The engine expects a tokenizer DIRECTORY: use {path} pointing at a local directory (exists() accepts file or dir). A {source:hf,repo,file} descriptor must name a SINGLE downloadable file (the downloader is file-only; it cannot fetch a directory tree) — unpack the tokenizer folder locally and reference it by path. Resolved path exported as HALOGEN_TOKENIZER.",
+          "description": "Tokenizer artifact. The engine expects a tokenizer DIRECTORY: use {path} pointing at a local directory (exists() accepts file or dir). A {source:hf,repo,file} descriptor must name a SINGLE downloadable file (the downloader is file-only; it cannot fetch a directory tree) — unpack the tokenizer folder locally and reference it by path. Resolved path exported as HALOGEN_TOKENIZER. When blank the variable is not exported and the engine falls back to the checkpoint's sidecar tokenizer/ directory.",
           "x-flag": "HALOGEN_TOKENIZER",
           "x-order": 2
         },
@@ -51,10 +51,7 @@
             }
           ]
         }
-      },
-      "required": [
-        "model"
-      ]
+      }
     },
     "context": {
       "type": "object",

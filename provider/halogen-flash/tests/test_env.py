@@ -68,6 +68,37 @@ def test_fixed_wiring_always_set() -> None:
     assert env["HALOGEN_TOKENIZER"] == "/models/tokenizer"
 
 
+def test_blank_artifacts_omit_the_engine_paths() -> None:
+    """`None` = the operator left artifacts.model / .tokenizer blank: the
+    variable is not exported AT ALL so the image's own resolution wins
+    (`resolve_checkpoint` for the head, `need_tokenizer` for the sidecar
+    tokenizer). An empty string would defeat both fallbacks."""
+    env = build_env(
+        {},
+        api_port=8200,
+        engine_port=8201,
+        checkpoint_path=None,
+        tokenizer_path=None,
+        base_env={},
+    )
+    assert "HALOGEN_CHECKPOINT" not in env
+    assert "HALOGEN_TOKENIZER" not in env
+    # The rest of the fixed wiring is unaffected.
+    assert env["HALOGEN_API_PORT"] == "8200"
+    assert env["HALOGEN_BIND"] == "127.0.0.1"
+
+    half = build_env(
+        {},
+        api_port=1,
+        engine_port=2,
+        checkpoint_path="/models/flash.hgn",
+        tokenizer_path=None,
+        base_env={},
+    )
+    assert half["HALOGEN_CHECKPOINT"] == "/models/flash.hgn"
+    assert "HALOGEN_TOKENIZER" not in half
+
+
 def test_cache_dir_only_when_enabled(tmp_path) -> None:
     cache = tmp_path / "fcache"
     env = build_env(
