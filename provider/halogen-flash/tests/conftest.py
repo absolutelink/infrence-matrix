@@ -190,6 +190,8 @@ def make_settings(
         "PROVIDER_PORT": provider_port,
         "HALOGEN_FLASH_SERVER_PATH": binary,
         "SERVER_START_HEALTH_TIMEOUT": 15,
+        # Boot budget is a separate (huge) knob; keep tests bounded.
+        "ENGINE_BOOT_TIMEOUT": 15,
         "MACHINE_METRICS_INTERVAL": 0.05,
     }
     base.update(kw)

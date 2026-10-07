@@ -187,7 +187,7 @@ async def test_early_exit_includes_stderr_tail(
     tmp_path, early_exit_binary, local_artifacts
 ) -> None:
     settings = make_settings(tmp_path, early_exit_binary)
-    settings.SERVER_START_HEALTH_TIMEOUT = 5
+    settings.ENGINE_BOOT_TIMEOUT = 5
     driver = HalogenBackend(
         settings,
         {
@@ -208,3 +208,122 @@ def test_effective_capacity(tmp_path, fake_halogen_binary, local_artifacts) -> N
         tmp_path, fake_halogen_binary, local_artifacts, concurrency={"kv_slots": 6}
     )
     assert driver.effective_capacity == 6
+
+
+class _AliveProc:
+    """Stand-in for a live Popen: only the health probe can end the wait."""
+
+    def poll(self) -> None:
+        return None
+
+
+def _flaky_health(monkeypatch: pytest.MonkeyPatch, *, succeed_after: int) -> dict:
+    import httpx
+
+    calls = {"n": 0}
+
+    class _Resp:
+        status_code = 200
+
+    async def fake_get(self, url, **kwargs):  # noqa: ANN001, ARG001
+        calls["n"] += 1
+        if calls["n"] < succeed_after:
+            raise httpx.ConnectError("engine not listening yet")
+        return _Resp()
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    return calls
+
+
+def _assert_boot_budget_default() -> None:
+    """The shipped boot budget must dwarf llama.cpp's health timeout: these
+    engines download before the API port answers. (Test settings pin both to
+    15s, so compare the class defaults.)"""
+    from provider_lib.config import ProviderSettings
+
+    fields = ProviderSettings.model_fields
+    boot = fields["ENGINE_BOOT_TIMEOUT"].default
+    health = fields["SERVER_START_HEALTH_TIMEOUT"].default
+    assert boot == 3600 and health == 120 and boot > health
+
+
+async def test_long_boot_heartbeats_initializing(
+    tmp_path: object,
+    fake_halogen_binary: str,
+    local_artifacts: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The engine may fetch companions before the API port answers, so a
+    slow boot reports `initializing` (with its newest log line) instead of
+    sitting silent on `starting`."""
+    from provider_halogen import driver as driver_module
+
+    monkeypatch.setattr(driver_module, "_BOOT_HEARTBEAT_SECONDS", 0.0)
+    seen: list[tuple[str, str | None]] = []
+
+    async def cb(status: str, reason: str | None) -> None:
+        seen.append((status, reason))
+
+    settings = make_settings(tmp_path, fake_halogen_binary)  # type: ignore[arg-type]
+    driver = HalogenBackend(
+        settings,
+        {
+            "model": {"path": local_artifacts["checkpoint"]},
+            "tokenizer": {"path": local_artifacts["tokenizer"]},
+        },
+        status_cb=cb,
+    )
+    driver._proc = _AliveProc()  # type: ignore[assignment]
+    driver._log_ring.append("stdout", "fetching companion: qwen38-vision.hgn")
+    calls = _flaky_health(monkeypatch, succeed_after=3)
+
+    await driver._wait_for_health()
+
+    assert calls["n"] == 3
+    assert seen and {s for s, _ in seen} == {BackendStatusValue.INITIALIZING}
+    assert "qwen38-vision.hgn" in seen[0][1]
+
+
+async def test_boot_budget_is_engine_boot_timeout(
+    tmp_path: object, fake_halogen_binary: str, local_artifacts: dict
+) -> None:
+    """Not llama.cpp's 120s health knob: a big checkpoint plus index build
+    (or a download pass) needs the boot budget."""
+    settings = make_settings(tmp_path, fake_halogen_binary)  # type: ignore[arg-type]
+    _assert_boot_budget_default()
+    settings.ENGINE_BOOT_TIMEOUT = 0
+    driver = HalogenBackend(
+        settings,
+        {
+            "model": {"path": local_artifacts["checkpoint"]},
+            "tokenizer": {"path": local_artifacts["tokenizer"]},
+        },
+    )
+    driver._proc = _AliveProc()  # type: ignore[assignment]
+    with pytest.raises(TimeoutError, match="halogen failed to become healthy"):
+        await driver._wait_for_health()
+
+
+async def test_lifecycle_binds_the_driver_heartbeat_channel(
+    tmp_path: object, fake_halogen_binary: str, local_artifacts: dict
+) -> None:
+    """No main.py wiring needed: BackendLifecycle attaches `report` because
+    the driver declares `attach_status_callback`."""
+    emitted: list[tuple[str, str | None]] = []
+
+    async def cb(status: str, reason: str | None) -> None:
+        emitted.append((status, reason))
+
+    settings = make_settings(tmp_path, fake_halogen_binary)  # type: ignore[arg-type]
+    driver = HalogenBackend(
+        settings,
+        {
+            "model": {"path": local_artifacts["checkpoint"]},
+            "tokenizer": {"path": local_artifacts["tokenizer"]},
+        },
+    )
+    BackendLifecycle(driver, status_callback=cb)
+    assert driver._status_cb is not None
+    await driver._heartbeat(42.0)
+    assert emitted and emitted[0][0] == BackendStatusValue.INITIALIZING
+    assert "42s" in emitted[0][1]

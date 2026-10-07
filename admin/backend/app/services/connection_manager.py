@@ -32,6 +32,7 @@ from app.core.db import engine
 from app.core.redis import get_redis_from_app
 from app.models import (
     Machine,
+    ProviderDefinition,
     ProviderInstance,
     backend_config_is_authored,
 )
@@ -268,6 +269,14 @@ class ConnectionManager:
             )
             return
 
+        if frame.type == FrameKind.BACKEND_METADATA:
+            # Manual boot / provider.initialize published what the engine
+            # actually loaded. Same column and shape as the
+            # provider.config.update ack echo (`{"models": [...]}`), so both
+            # paths keep ProviderDefinition.model_metadata current.
+            self._persist_model_metadata(state.instance_id, frame.payload)
+            return
+
         if frame.type in (FrameKind.BACKEND_LOGS, FrameKind.PROVIDER_LOGS):
             # Phase 13: batched log tail ingest into Redis. Best-effort —
             # never let a malformed log frame break the WS read loop.
@@ -347,6 +356,41 @@ class ConnectionManager:
             session.commit()
             machine = session.get(Machine, inst.machine_id)
             return machine.uid if machine is not None else None
+
+    def _persist_model_metadata(self, instance_id: str, payload: dict) -> None:
+        """Store a `backend.metadata` event on the instance's definition.
+
+        `{"models": [...]}` — the same shape `provider.config.update` echoes
+        in its ack detail, and the same column. Unknown instance, empty list
+        or a malformed payload: ignored (an event must never break the read
+        loop). Two instances of one definition publishing disagreeing lists
+        is last-write-wins, matching the config-update path.
+        """
+        models = payload.get("models")
+        if not isinstance(models, list) or not models:
+            return
+        with Session(engine) as session:
+            inst = session.get(ProviderInstance, _to_uuid(instance_id))
+            if inst is None:
+                logger.warning(
+                    "backend.metadata for unknown instance %s; ignored", instance_id
+                )
+                return
+            definition = session.get(ProviderDefinition, inst.provider_definition_id)
+            if definition is None:
+                return
+            normalized = {"models": models}
+            if definition.model_metadata != normalized:
+                definition.model_metadata = normalized
+                definition.updated_at = datetime.now(UTC)
+                session.add(definition)
+                session.commit()
+                logger.info(
+                    "instance %s published %d model(s) for definition '%s'",
+                    instance_id,
+                    len(models),
+                    definition.alias,
+                )
 
     async def _prune_stopped_vram(
         self,

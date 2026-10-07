@@ -46,6 +46,7 @@ from provider_lib.config import ProviderSettings
 from provider_lib.downloader import ensure_artifact
 from provider_lib.log_ring import CursorLogRing
 from provider_lib.schema import load_schema, validate_backend_config
+from provider_lib.wire import BackendStatusValue
 
 from provider_halogen_flash.env import (
     DEFAULT_DOWNLOAD_REPO,
@@ -65,10 +66,18 @@ from provider_halogen_flash.usage import calculate_usage
 logger = logging.getLogger("provider.halogen_flash")
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
+# (backend_status, reason) — the BackendLifecycle.report channel, bound by
+# attach_status_callback. Used for long-init heartbeats only.
+StatusCallback = Callable[[str, str | None], Awaitable[None]]
 
 _LOG_BUFFER_LINES = 2000
 _HEALTH_POLL_INTERVAL = 0.25
 _STDERR_TAIL_LINES = 5
+# Seconds between `initializing` heartbeats while waiting for the API. The
+# engine's first-boot download pass can run for tens of minutes; a beat
+# every 15s keeps the admin's instance row live without flooding frames.
+_BOOT_HEARTBEAT_SECONDS = 15.0
+_HEARTBEAT_REASON_CHARS = 200
 
 _TERMINAL_TYPES = ("response.completed", "response.incomplete")
 
@@ -88,11 +97,13 @@ class HalogenFlashBackend(BackendDriver):
         backend_config: dict[str, Any],
         *,
         progress_cb: ProgressCallback | None = None,
+        status_cb: StatusCallback | None = None,
         npu_probe: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self._settings = settings
         self._config = backend_config or {}
         self._progress_cb = progress_cb
+        self._status_cb = status_cb
         self._binary = settings.HALOGEN_FLASH_SERVER_PATH
         self._npu_probe = npu_probe
         self._ports = resolve_ports(self._config, settings.MACHINE_UID)
@@ -103,6 +114,16 @@ class HalogenFlashBackend(BackendDriver):
         # Phase 9: local paths resolved during the last start (model,
         # tokenizer, prepared NPU pins), used by storage.prune_unused.
         self.resolved_artifacts: list[str] = []
+
+    def attach_status_callback(self, emit: StatusCallback) -> None:
+        """Bind the lifecycle's out-of-band status reporter.
+
+        Called by `BackendLifecycle.__init__` (it detects the hook). The
+        driver uses it ONLY for `initializing` heartbeats during a long
+        engine boot; state transitions remain the lifecycle's business, so
+        a heartbeat can never make a not-yet-serving backend look servable.
+        """
+        self._status_cb = emit
 
     def apply_config(self, backend_config: dict[str, Any]) -> None:
         """Adopt a (possibly updated) sectioned backend_config before start.
@@ -439,8 +460,24 @@ class HalogenFlashBackend(BackendDriver):
             raise
 
     async def _wait_for_health(self) -> None:
-        timeout = float(self._settings.SERVER_START_HEALTH_TIMEOUT)
+        """Wait out the engine's start: downloads first, then the API port.
+
+        The budget is `ENGINE_BOOT_TIMEOUT` (default 1h), not
+        `SERVER_START_HEALTH_TIMEOUT`: with `HALOGEN_DOWNLOAD` set, a cold
+        instance fetches the checkpoint AND its companions (overlay sidecar,
+        ngram table, vision tower, tokenizer — tens of GB) before
+        `flash_serve` ever binds the API port. Meanwhile every ~15s a
+        `backend.status initializing` heartbeat carries the engine's newest
+        log line, so the admin shows what is happening instead of a hang. A
+        process that dies is still detected immediately (exit code check).
+        """
+        timeout = float(self._settings.ENGINE_BOOT_TIMEOUT)
         deadline = time.monotonic() + timeout
+        started = time.monotonic()
+        # First beat only after the grace period: a warm boot (files
+        # present, engine up in seconds) must stay as quiet as it was
+        # before, while a download-bound boot reports on a cadence.
+        next_beat = started + _BOOT_HEARTBEAT_SECONDS
         while time.monotonic() < deadline:
             proc = self._proc
             if proc is None:
@@ -457,10 +494,38 @@ class HalogenFlashBackend(BackendDriver):
                     return
             except Exception:  # noqa: BLE001 - not up yet
                 pass
+            now = time.monotonic()
+            if self._status_cb is not None and now >= next_beat:
+                next_beat = now + _BOOT_HEARTBEAT_SECONDS
+                await self._heartbeat(now - started)
             await asyncio.sleep(_HEALTH_POLL_INTERVAL)
         raise TimeoutError(
             f"halogen-flash failed to become healthy within {timeout:.0f}s"
         )
+
+    async def _heartbeat(self, elapsed: float) -> None:
+        """Report `initializing` + the engine's newest line (best effort)."""
+        if self._status_cb is None:  # pragma: no cover - guarded by caller
+            return
+        reason = f"halogen-flash initializing ({elapsed:.0f}s elapsed)"
+        line = self._latest_log_line()
+        if line:
+            reason = f"{reason}: {line}"
+        try:
+            await self._status_cb(BackendStatusValue.INITIALIZING, reason)
+        except Exception:  # noqa: BLE001 - progress never breaks a boot
+            logger.debug("boot heartbeat failed", exc_info=True)
+
+    def _latest_log_line(self) -> str:
+        """Newest non-empty engine log line, truncated for a status reason."""
+        for entry in reversed(self._log_ring.tail(20)):
+            text = entry.text.strip()
+            if not text:
+                continue
+            if len(text) <= _HEARTBEAT_REASON_CHARS:
+                return text
+            return f"{text[: _HEARTBEAT_REASON_CHARS - 3]}..."
+        return ""
 
     def _early_exit_message(self, exit_code: int | None) -> str:
         lines = [e.text for e in self._log_ring.tail(100)]

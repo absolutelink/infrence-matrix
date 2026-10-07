@@ -172,6 +172,25 @@ export interface StorageActionResult {
   kept?: string[]
 }
 
+// Manual backend control (provider_lib.ops over the WS). Start/restart/
+// initialize ack "accepted" by default — the boot runs in the background
+// because a cold engine may download its weights first — so `accepted` and
+// `backend_status` describe the transition, not a finished boot.
+export interface BackendActionResult {
+  ok: boolean
+  instance_id: string
+  backend?: string
+  backend_status?: string
+  capacity?: number
+  accepted?: boolean
+  waited_for_running?: boolean
+  no_config?: boolean
+  api_port?: number
+  engine_port?: number
+  backend_port?: number
+  effective_capacity?: number
+}
+
 // Phase 13: log tails (mirrors admin/backend/app/services/log_store.read_logs).
 // ``entries`` arrive NEWEST FIRST from the API; the UI reverses them for
 // chronological (oldest-top → newest-bottom) display.

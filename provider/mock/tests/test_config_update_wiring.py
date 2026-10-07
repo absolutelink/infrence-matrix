@@ -45,6 +45,9 @@ def test_handlers_installed() -> None:
     for name in (
         "backend.start",
         "backend.stop",
+        # provider_lib.ops: restart + reinitialize must be installed here too
+        "backend.restart",
+        "provider.initialize",
         "provider.config.update",
         "cache.clear",
         "storage.prune_unused",

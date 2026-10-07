@@ -36,6 +36,17 @@ class ProviderSettings(BaseSettings):
     LLAMA_SERVER_PATH: str = "llama-server"
     SERVER_START_HEALTH_TIMEOUT: int = 120
 
+    # Boot budget for the halogen family. Their entrypoints may DOWNLOAD
+    # before the API answers /health — a cold halogen-flash boot pulls the
+    # checkpoint plus its companions (overlay sidecar, ngram table, vision
+    # tower, tokenizer) from HuggingFace, which is tens of gigabytes and can
+    # legitimately take an hour on a slow link. The health wait therefore
+    # gets its own, much larger knob; while it runs the driver heartbeats
+    # `backend.status initializing` so the admin shows progress instead of a
+    # silent hang. llama.cpp / gufo keep SERVER_START_HEALTH_TIMEOUT (local
+    # load only, no download pass).
+    ENGINE_BOOT_TIMEOUT: int = 3600
+
     # gufo backend (provider_gufo). Binary path from env, never backend_config.
     GUFO_SERVER_PATH: str = "gufo"
 

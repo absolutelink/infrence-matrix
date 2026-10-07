@@ -28,6 +28,7 @@ SECRET = "fake-flash-secret"
 CAPACITY = 2
 
 RECEIVED: list[Frame] = []
+REGISTRATIONS: list[dict] = []  # every /register POST the fake admin saw
 ADMIN_WS_URL_HOLDER: dict[str, str] = {}
 BACKEND_CONFIG: dict = {}
 
@@ -39,6 +40,7 @@ class _FakeAdminHTTP(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(length))
         assert body["provider_type"] == PROVIDER_TYPE
         assert body["version"] == VERSION
+        REGISTRATIONS.append(body)
         payload = json.dumps(
             {
                 "instance_id": INSTANCE_ID,
@@ -79,6 +81,7 @@ async def _fake_ws_admin(websocket):
 @pytest.fixture
 async def fake_admin():
     RECEIVED.clear()
+    REGISTRATIONS.clear()
     http = HTTPServer(("127.0.0.1", 0), _FakeAdminHTTP)
     http_thread = threading.Thread(target=http.serve_forever, daemon=True)
     http_thread.start()
@@ -180,6 +183,102 @@ async def test_admin_driven_boot_and_normalized_stream(
         await client._dispatch(stop_cmd)
         await _await_frames(lambda f: f.type == "ack" and f.reply_to == "cmd-stop-1")
         assert lifecycle.backend_status == BackendStatusValue.STOPPED
+    finally:
+        await client.disconnect()
+        await lifecycle.driver.aclose()
+
+
+async def test_operator_boot_acks_before_running_and_metadata_follows(
+    fake_admin, tmp_path, fake_flash_binary, local_artifacts
+) -> None:
+    """End-to-end over a real socket: `wait_for_running: false` must ack
+    immediately (the boot continues in the background) and the terminal
+    state must arrive as events, including `backend.metadata`."""
+    BACKEND_CONFIG.clear()
+    BACKEND_CONFIG.update(
+        {
+            "artifacts": {
+                "model": {"path": local_artifacts["checkpoint"]},
+                "tokenizer": {"path": local_artifacts["tokenizer"]},
+            }
+        }
+    )
+    settings = make_settings(tmp_path, fake_flash_binary, ADMIN_BASE_URL=fake_admin)
+    client = AdminClient(settings)
+    lifecycle = make_lifecycle(client, BACKEND_CONFIG)
+    try:
+        await register_and_connect(client, lifecycle)
+        cmd = Frame(
+            type="backend.start",
+            id="cmd-accept-1",
+            epoch=7,
+            payload={"wait_for_running": False},
+        )
+        await client._dispatch(cmd)
+        acks = await _await_frames(
+            lambda f: f.type == "ack" and f.reply_to == "cmd-accept-1"
+        )
+        assert acks[0].payload["ok"] is True
+        assert acks[0].payload["detail"]["accepted"] is True
+
+        # …then the boot lands as events, not in the ack.
+        await _await_frames(
+            lambda f: (
+                f.type == "backend.status"
+                and f.payload.get("backend_status") == BackendStatusValue.RUNNING
+            )
+        )
+        meta = await _await_frames(lambda f: f.type == "backend.metadata")
+        models = meta[0].payload["models"]
+        assert isinstance(models, list) and models
+    finally:
+        await client.disconnect()
+        await lifecycle.driver.aclose()
+
+
+async def test_initialize_re_registers_and_reprovisions(
+    fake_admin, tmp_path, fake_flash_binary, local_artifacts
+) -> None:
+    """provider.initialize = fresh registration handshake, then a real boot.
+
+    The fake admin counts the POSTs, so this pins the re-register step end
+    to end (a second `/register` with the same token/type), plus the reboot
+    and the metadata publish.
+    """
+    BACKEND_CONFIG.clear()
+    BACKEND_CONFIG.update(
+        {
+            "artifacts": {
+                "model": {"path": local_artifacts["checkpoint"]},
+                "tokenizer": {"path": local_artifacts["tokenizer"]},
+            }
+        }
+    )
+    settings = make_settings(tmp_path, fake_flash_binary, ADMIN_BASE_URL=fake_admin)
+    client = AdminClient(settings)
+    lifecycle = make_lifecycle(client, BACKEND_CONFIG)
+    try:
+        await register_and_connect(client, lifecycle)
+        assert len(REGISTRATIONS) == 1
+
+        cmd = Frame(type="provider.initialize", id="cmd-init-1", epoch=7, payload={})
+        await client._dispatch(cmd)
+        acks = await _await_frames(
+            lambda f: f.type == "ack" and f.reply_to == "cmd-init-1"
+        )
+        assert acks[0].payload["ok"] is True
+        assert acks[0].payload["detail"]["accepted"] is True
+        assert len(REGISTRATIONS) == 2, "initialize must re-register"
+        assert REGISTRATIONS[1]["registration_token"] == settings.PROVIDER_REGISTRATION_TOKEN
+
+        await _await_frames(
+            lambda f: (
+                f.type == "backend.status"
+                and f.payload.get("backend_status") == BackendStatusValue.RUNNING
+            )
+        )
+        await _await_frames(lambda f: f.type == "backend.metadata")
+        assert lifecycle.backend_status == BackendStatusValue.RUNNING
     finally:
         await client.disconnect()
         await lifecycle.driver.aclose()

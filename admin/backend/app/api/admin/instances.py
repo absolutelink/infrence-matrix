@@ -14,10 +14,26 @@ Actions over the provider WS:
 - ``POST /admin/api/instances/{id}/storage/prune`` — send
   ``storage.prune_unused`` (delete MODELS_DIR files not referenced by
   the driver's resolved artifact set; ``{"dry_run": true}` supported).
+- ``POST /admin/api/instances/{id}/backend/start|stop|restart`` and
+  ``/initialize`` — manual backend control (``provider_lib.ops``).
+  Start and restart default to **fire-and-forget** (202): the provider
+  acks "accepted" and the boot runs in the background, because a cold
+  halogen-flash boot downloads its checkpoint and companions first —
+  tens of GB, tens of minutes — and no HTTP request should sit open for
+  that. Watch ``backend_status`` on the instance (``initializing``
+  heartbeats + ``running``/``error`` land over the WS) and the log tail.
+  Pass ``{"wait_for_running": true}`` to block until the backend reports
+  running (bounded by ``BACKEND_BOOT_TIMEOUT_SECONDS``). ``stop`` always
+  awaits — it is quick. ``initialize`` re-registers (fresh instance secret +
+  definition config), then reboots and re-publishes model metadata.
 
-Both actions require the instance's WebSocket to be connected; otherwise
+Every action except ``stop`` refuses (409) while the definition has no
+authored ``backend_config`` — the same Phase 14 fence the provider applies
+to ``backend.start``; a shell must never boot on defaults.
+
+All actions require the instance's WebSocket to be connected; otherwise
 409. The provider's ack detail is returned verbatim (deleted paths,
-bytes freed, kept list).
+bytes freed, capacity, ports, accepted/backend_status).
 """
 
 import logging
@@ -30,9 +46,10 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.api.admin.serializers import iso_utc
+from app.core.config import settings
 from app.core.db import get_session
 from app.core.redis import get_redis
-from app.models import ProviderInstance
+from app.models import ProviderInstance, backend_config_is_authored
 from app.services import log_store
 from app.services.connection_manager import manager
 
@@ -51,6 +68,19 @@ class ActionBody(BaseModel):
     # cache.clear only: override the backend_in_use refusal (clearing
     # engine caches while requests are live may cause I/O errors).
     force: bool = False
+
+
+class BackendActionBody(BaseModel):
+    """`wait_for_running`: hold the ack until the backend reports running.
+
+    Default false (202-style): the provider starts the boot in the
+    background and the caller polls the instance. True mirrors the
+    scheduler's contract and is bounded by
+    ``settings.BACKEND_BOOT_TIMEOUT_SECONDS`` — long enough for a cold
+    engine-side download, but it does keep the request open that whole time.
+    """
+
+    wait_for_running: bool = False
 
 
 def instance_dict(inst: ProviderInstance) -> dict[str, Any]:
@@ -187,6 +217,149 @@ async def prune_storage(
         instance_id,
         detail.get("bytes_freed"),
         dry_run,
+    )
+    return {"ok": True, "instance_id": instance_id, **detail}
+
+
+def _require_bootable(inst: ProviderInstance) -> None:
+    """Phase 14 fence: refuse to boot a definition with no authored config.
+
+    Mirrors the provider's ``no_config`` NAK so the operator gets a clear
+    409 instead of a 502 from the far end. ``{}`` counts as authored (it is
+    a real, schema-valid config); only SQL NULL is a shell.
+    """
+    definition = inst.provider_definition
+    if definition is not None and not backend_config_is_authored(definition):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"definition '{definition.alias}' has no backend_config "
+                "(awaiting_config): author it before starting the backend"
+            ),
+        )
+
+
+@router.post("/{instance_id}/backend/start", status_code=202)
+async def start_backend(
+    instance_id: str,
+    body: BackendActionBody | None = None,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Boot this instance's backend by hand (no inference request needed).
+
+    202 by default: the provider acks "accepted" and boots in the
+    background, heartbeating ``backend.status`` (`initializing` while the
+    engine downloads/loads, then `running` or `error`). Poll
+    ``GET /admin/api/instances/{id}`` — or pass ``wait_for_running: true``
+    to block until it is up.
+    """
+    inst = _get_connected_instance(session, instance_id)
+    _require_bootable(inst)
+    wait = bool(body and body.wait_for_running)
+    detail = await _send_action(
+        str(inst.id),
+        "backend.start",
+        {"wait_for_running": wait},
+        timeout=(
+            settings.BACKEND_BOOT_TIMEOUT_SECONDS if wait else ACTION_TIMEOUT_SECONDS
+        ),
+    )
+    logger.info(
+        "manual backend.start on instance %s (wait_for_running=%s): %s",
+        instance_id,
+        wait,
+        detail.get("backend_status"),
+    )
+    return {"ok": True, "instance_id": instance_id, **detail}
+
+
+@router.post("/{instance_id}/backend/stop")
+async def stop_backend(
+    instance_id: str,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Unload the backend (always awaited — a stop is quick).
+
+    Refused (502 with ``retry_after``) while live requests hold slots: the
+    provider does not cancel in-flight streams. Unload during a long
+    download is fine and is the escape hatch for a boot that will not
+    finish.
+    """
+    inst = _get_connected_instance(session, instance_id)
+    detail = await _send_action(
+        str(inst.id),
+        "backend.stop",
+        {},
+        timeout=settings.BACKEND_STOP_TIMEOUT_SECONDS,
+    )
+    logger.info("manual backend.stop on instance %s: %s", instance_id, detail)
+    return {"ok": True, "instance_id": instance_id, **detail}
+
+
+@router.post("/{instance_id}/backend/restart", status_code=202)
+async def restart_backend(
+    instance_id: str,
+    body: BackendActionBody | None = None,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Stop then start the backend (config re-applied by the driver)."""
+    inst = _get_connected_instance(session, instance_id)
+    _require_bootable(inst)
+    wait = bool(body and body.wait_for_running)
+    detail = await _send_action(
+        str(inst.id),
+        "backend.restart",
+        {"wait_for_running": wait},
+        timeout=(
+            settings.BACKEND_BOOT_TIMEOUT_SECONDS if wait else ACTION_TIMEOUT_SECONDS
+        ),
+    )
+    logger.info(
+        "manual backend.restart on instance %s (wait_for_running=%s): %s",
+        instance_id,
+        wait,
+        detail.get("backend_status"),
+    )
+    return {"ok": True, "instance_id": instance_id, **detail}
+
+
+@router.post("/{instance_id}/initialize", status_code=202)
+async def initialize_instance(
+    instance_id: str,
+    body: BackendActionBody | None = None,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Re-run the whole init lifecycle: re-register, adopt, boot, re-scrape.
+
+    ``provider.initialize`` POSTs a fresh registration (re-checking the
+    version + schema gates, re-adopting capacity/`backend_config`, minting a
+    new instance secret for future reconnects and rewriting
+    ``provider_config.json``), then drain-stops, boots and publishes
+    ``backend.metadata`` from the running engine. The boot is asynchronous
+    (202): a cold halogen-flash instance downloads its checkpoint plus
+    companions before the API answers, which is far beyond an HTTP request's
+    patience. ``wait_for_running: true`` waits for the boot instead.
+
+    Allowed on a shell definition (unlike start/restart) — refreshing the
+    registration is exactly what an ``awaiting_config`` instance needs when
+    a config push never landed; the provider still refuses to boot it on
+    defaults and reports ``no_config`` in the ack.
+    """
+    inst = _get_connected_instance(session, instance_id)
+    wait = bool(body and body.wait_for_running)
+    detail = await _send_action(
+        str(inst.id),
+        "provider.initialize",
+        {"wait_for_running": wait},
+        timeout=(
+            settings.BACKEND_BOOT_TIMEOUT_SECONDS if wait else ACTION_TIMEOUT_SECONDS
+        ),
+    )
+    logger.info(
+        "provider.initialize on instance %s (wait_for_running=%s): %s",
+        instance_id,
+        wait,
+        detail.get("backend_status"),
     )
     return {"ok": True, "instance_id": instance_id, **detail}
 

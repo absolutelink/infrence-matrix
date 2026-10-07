@@ -34,6 +34,7 @@ from provider_lib.config import ProviderSettings
 from provider_lib.config_update import ConfigState, install_config_handlers
 from provider_lib.log_stream import LogStreamingBundle, install_log_streaming
 from provider_lib.metrics import MachineMetricsEmitter, collect_machine_snapshot
+from provider_lib.ops import install_backend_ops
 from provider_lib.wire import Frame, InstanceStatusValue
 
 from provider_gufo.driver import SCHEMA, GufoBackend
@@ -108,30 +109,30 @@ def install_command_handlers(
     config_state: ConfigState | None = None,
 ) -> None:
     """Register admin->provider command handlers on the client."""
+    resolved_state = config_state if config_state is not None else ConfigState()
 
-    async def on_backend_start(frame: Frame) -> dict[str, Any]:
-        # Phase 14: fence — a shell definition (no applied config) never
-        # starts a backend on defaults.
-        nak_fn = getattr(client, "no_config_nak", None)
-        if nak_fn is not None:
-            nak = await nak_fn(frame)
-            if nak is not None:
-                return nak
-        await lifecycle.start()
-        driver = lifecycle.driver
-        return {
-            "ok": True,
-            "detail": {
-                "backend": PROVIDER_TYPE,
-                "capacity": lifecycle.capacity,
-                "effective_capacity": getattr(driver, "effective_capacity", None),
-                "backend_port": getattr(driver, "backend_port", None),
-            },
-        }
+    async def re_register() -> dict[str, Any] | None:
+        """Re-run the registration handshake and adopt its response.
 
-    async def on_backend_stop(frame: Frame) -> dict[str, Any]:  # noqa: ARG001
-        await lifecycle.stop()
-        return {"ok": True, "detail": {"backend": PROVIDER_TYPE}}
+        Called by `provider.initialize` (provider_lib.ops): a fresh
+        `/register` re-checks the version + schema gates, re-adopts capacity
+        and `backend_config`, rewrites `CACHE_DIR/provider_config.json` and
+        mints a new instance secret for *future* reconnects. The live socket
+        is deliberately not recycled — it is already authenticated at the
+        current epoch and keeps carrying the status events the operator is
+        watching.
+        """
+        settings = client.settings
+        hardware = await build_hardware_report(settings)
+        result = await client.register(
+            provider_type=PROVIDER_TYPE,
+            version=VERSION,
+            port=settings.PROVIDER_PORT,
+            hardware=hardware,
+            schema=SCHEMA,
+        )
+        apply_registration(lifecycle, result, resolved_state)
+        return result.provider_definition
 
     async def on_metrics_assign(frame: Frame) -> dict[str, Any]:
         logger.info("metrics.assign received: %s", frame.payload)
@@ -143,14 +144,22 @@ def install_command_handlers(
         await emitter.stop()
         return {"ok": True, "detail": {"emitting": False}}
 
-    client.on_command("backend.start", on_backend_start)
-    client.on_command("backend.stop", on_backend_stop)
+    # backend.start / stop / restart + provider.initialize come from
+    # provider_lib.ops (shared across providers): an operator-driven boot
+    # runs in the background (`wait_for_running: false`) so a cold engine
+    # that has to download its weights never blocks the admin's HTTP
+    # request or the command ack window. The scheduler keeps sending
+    # `wait_for_running: true`, so its contract ("acked == /v1 is live")
+    # is unchanged.
+    install_backend_ops(
+        client, lifecycle, backend_name=PROVIDER_TYPE, re_register=re_register
+    )
     client.on_command("metrics.assign", on_metrics_assign)
     client.on_command("metrics.unassign", on_metrics_unassign)
     install_config_handlers(
         client,
         lifecycle,
-        config_state or ConfigState(),
+        resolved_state,
         client.settings,
         # gufo's per-instance disk cache (--cache-disk <CACHE_DIR>
         # /<instance_id>) is the provider's prompt cache; cleared

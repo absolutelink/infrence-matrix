@@ -122,7 +122,19 @@ def test_handlers_installed(tmp_path, fake_gufo_binary) -> None:
     client = AdminClient(settings)
     lifecycle = make_lifecycle(client, {})
     install_command_handlers(client, lifecycle, _NoopEmitter())  # type: ignore[arg-type]
-    for name in ("provider.config.update", "cache.clear", "storage.prune_unused"):
+    for name in (
+        # provider_lib.config_update (Phase 9)
+        "provider.config.update",
+        "cache.clear",
+        "storage.prune_unused",
+        # provider_lib.ops (manual control + reinitialize) — every provider
+        # must expose the same operator surface, or the admin's buttons
+        # silently 502 ("no handler") on this instance.
+        "backend.start",
+        "backend.stop",
+        "backend.restart",
+        "provider.initialize",
+    ):
         assert name in client._command_handlers
 
 

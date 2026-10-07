@@ -259,3 +259,59 @@ async def test_last_request_at_updates_per_acquire() -> None:
     async with lifecycle.slot():
         assert lifecycle.last_request_at is not None
         assert lifecycle.last_request_at >= first  # type: ignore[operator]
+
+
+class _HookDriver(FakeDriver):
+    """Driver that asks for the lifecycle's status emitter (halogen does)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.emit = None
+
+    def attach_status_callback(self, emit) -> None:
+        self.emit = emit
+
+
+async def test_report_emits_without_touching_the_state_machine() -> None:
+    """Long-init heartbeats ride `report`: the admin's instance row shows
+    `initializing` with the engine's progress, yet slot admission still
+    refuses because the state machine never moved — a heartbeat can never
+    make a not-yet-serving backend look servable."""
+    driver = _HookDriver()
+    seen: list[tuple[str, str | None]] = []
+
+    async def cb(status: str, reason: str | None) -> None:
+        seen.append((status, reason))
+
+    lifecycle = BackendLifecycle(driver, capacity=1, status_callback=cb)
+    await lifecycle.report(BackendStatusValue.INITIALIZING, "downloading 3/48 GiB")
+
+    assert seen == [("initializing", "downloading 3/48 GiB")]
+    assert lifecycle.backend_status == BackendStatusValue.STOPPED
+    with pytest.raises(BackendNotReady):
+        await lifecycle.acquire_slot()
+
+
+async def test_lifecycle_binds_a_driver_that_asks_for_the_emitter() -> None:
+    """`attach_status_callback` is opt-in by presence: a driver that declares
+    it receives the lifecycle's emitter at construction, so no provider
+    package has to wire it in main."""
+    seen: list[tuple[str, str | None]] = []
+
+    async def cb(status: str, reason: str | None) -> None:
+        seen.append((status, reason))
+
+    driver = _HookDriver()
+    BackendLifecycle(driver, capacity=1, status_callback=cb)
+    assert driver.emit is not None
+    await driver.emit("initializing", "engine loading")
+    assert seen == [("initializing", "engine loading")]
+
+
+async def test_drivers_without_the_hook_are_untouched() -> None:
+    """llama.cpp / gufo / mock never report progress: constructing their
+    lifecycle must not require anything beyond the BackendDriver protocol."""
+    lifecycle = BackendLifecycle(FakeDriver(), capacity=1, status_callback=None)
+    assert lifecycle.backend_status == BackendStatusValue.STOPPED
+    await lifecycle.start()
+    assert lifecycle.backend_status == BackendStatusValue.RUNNING

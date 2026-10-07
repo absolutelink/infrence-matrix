@@ -19,6 +19,24 @@ export type ActionBody = {
 };
 
 /**
+ * BackendActionBody
+ *
+ * `wait_for_running`: hold the ack until the backend reports running.
+ *
+ * Default false (202-style): the provider starts the boot in the
+ * background and the caller polls the instance. True mirrors the
+ * scheduler's contract and is bounded by
+ * ``settings.BACKEND_BOOT_TIMEOUT_SECONDS`` — long enough for a cold
+ * engine-side download, but it does keep the request open that whole time.
+ */
+export type BackendActionBody = {
+    /**
+     * Wait For Running
+     */
+    wait_for_running?: boolean;
+};
+
+/**
  * DefinitionCreate
  */
 export type DefinitionCreate = {
@@ -728,6 +746,151 @@ export type adminPruneStorageResponses = {
 };
 
 export type adminPruneStorageResponse = adminPruneStorageResponses[keyof adminPruneStorageResponses];
+
+export type adminStartBackendData = {
+    /**
+     * Body
+     */
+    body?: BackendActionBody | null;
+    path: {
+        /**
+         * Instance Id
+         */
+        instance_id: string;
+    };
+    query?: never;
+    url: '/admin/api/instances/{instance_id}/backend/start';
+};
+
+export type adminStartBackendErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminStartBackendError = adminStartBackendErrors[keyof adminStartBackendErrors];
+
+export type adminStartBackendResponses = {
+    /**
+     * Response Admin-Start Backend
+     *
+     * Successful Response
+     */
+    202: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminStartBackendResponse = adminStartBackendResponses[keyof adminStartBackendResponses];
+
+export type adminStopBackendData = {
+    body?: never;
+    path: {
+        /**
+         * Instance Id
+         */
+        instance_id: string;
+    };
+    query?: never;
+    url: '/admin/api/instances/{instance_id}/backend/stop';
+};
+
+export type adminStopBackendErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminStopBackendError = adminStopBackendErrors[keyof adminStopBackendErrors];
+
+export type adminStopBackendResponses = {
+    /**
+     * Response Admin-Stop Backend
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminStopBackendResponse = adminStopBackendResponses[keyof adminStopBackendResponses];
+
+export type adminRestartBackendData = {
+    /**
+     * Body
+     */
+    body?: BackendActionBody | null;
+    path: {
+        /**
+         * Instance Id
+         */
+        instance_id: string;
+    };
+    query?: never;
+    url: '/admin/api/instances/{instance_id}/backend/restart';
+};
+
+export type adminRestartBackendErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminRestartBackendError = adminRestartBackendErrors[keyof adminRestartBackendErrors];
+
+export type adminRestartBackendResponses = {
+    /**
+     * Response Admin-Restart Backend
+     *
+     * Successful Response
+     */
+    202: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminRestartBackendResponse = adminRestartBackendResponses[keyof adminRestartBackendResponses];
+
+export type adminInitializeInstanceData = {
+    /**
+     * Body
+     */
+    body?: BackendActionBody | null;
+    path: {
+        /**
+         * Instance Id
+         */
+        instance_id: string;
+    };
+    query?: never;
+    url: '/admin/api/instances/{instance_id}/initialize';
+};
+
+export type adminInitializeInstanceErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminInitializeInstanceError = adminInitializeInstanceErrors[keyof adminInitializeInstanceErrors];
+
+export type adminInitializeInstanceResponses = {
+    /**
+     * Response Admin-Initialize Instance
+     *
+     * Successful Response
+     */
+    202: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminInitializeInstanceResponse = adminInitializeInstanceResponses[keyof adminInitializeInstanceResponses];
 
 export type adminGetInstanceLogsData = {
     body?: never;

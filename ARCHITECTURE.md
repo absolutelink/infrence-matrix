@@ -146,13 +146,14 @@ duplicates the frame shape from `provider_lib.wire` (keep them in sync;
 | `/openapi.json` | admin | none | Full OpenAPI schema of the admin app |
 | `/admin/*` | admin (static SPA) | none | React UI, Vite `base: "/admin"` |
 | `/admin/api/health` | admin | none | Health check (used by compose healthcheck) |
-| `/admin/api/providers/register` | admin | registration token | Provider registration (§5) |
+| `/admin/api/providers/register` | admin | registration token | Provider registration (§5; refused **409 `port_conflict`** when another *connected* instance on the same machine already claims the reported port — the admin addresses instances as `machine address:instance port`, so a clash silently serves one alias from another provider's engine) |
 | `/admin/api/machines*` | admin | none (trusted LAN) | Machine CRUD (Phase 9; delete refused while instances attached) |
 | `/admin/api/definitions*` | admin | none (trusted LAN) | ProviderDefinition CRUD (Phase 9; `backend_config`/`capacity` PATCH pushes `provider.config.update` to connected instances; explicit null on required fields → 422; `provider_type` change refused 409 while instances attached; Phase 12: `backend_config` validated against the committed JSON Schema of its `ProviderType` → 422 with per-field errors; **Phase 14**: `provider_type`/`backend_config` may be omitted at create (a *shell* definition — typed at first registration, configured via PATCH afterwards) and can never return to null once set) |
 | `/admin/api/provider-types` `/admin/api/provider-types/{name}` | admin | none (trusted LAN) | ProviderType registry reads (Phase 12; UI renders the backend-config form from the committed schema) |
 | `/admin/api/provider-types/{name}/pending/commit` `.../pending/dismiss` | admin | none (trusted LAN) | Operator override of the schema-consensus state (Phase 12) |
 | `/admin/api/huggingface/search` `/admin/api/huggingface/files` | admin | none (trusted LAN) | HF proxy for the `hf-file` picker widget (Phase 12; ported from legacy `huggingface.py` routes) |
 | `/admin/api/instances/{id}/cache/clear` `/admin/api/instances/{id}/storage/prune` | admin | none (trusted LAN) | Instance storage actions (Phase 9) |
+| `/admin/api/instances/{id}/backend/start` `.../backend/stop` `.../backend/restart` `/admin/api/instances/{id}/initialize` | admin | none (trusted LAN) | Manual backend control over the provider WS (`provider_lib.ops`): start/restart/initialize answer **202 accepted** by default and the transition runs at the provider (body `{"wait_for_running": true}` waits instead, bounded by `BACKEND_BOOT_TIMEOUT_SECONDS`); start/restart refuse 409 on a shell definition, `initialize` does not; the provider's `backend_in_use` / `boot_in_progress` NAKs surface as 502 with `step` + `retry_after` |
 | `/admin/api/instances` `/admin/api/instances/{id}` | admin | none (trusted LAN) | Provider-instance reads for the UI (Phase 10) |
 | `/admin/api/instances/{id}/logs` | admin | none (trusted LAN) | Backend/provider log tail (Phase 13; Redis-backed, `kind`/`since`/`limit` cursor) |
 | `/admin/api/responses` `/admin/api/stats/usage` `/admin/api/stats/overview` | admin | none (trusted LAN) | Response log + usage/dashboard reads (Phase 10; overview reads the scheduler Redis mirror, observability only) |
@@ -390,13 +391,21 @@ Admin → provider: `provider.hello`, `backend.start`, `backend.stop`,
 `pong`.
 
 `backend.start` acks only after the provider's lifecycle reaches
-`running`, so a successful return means the provider's `/v1` is live.
-`backend.stop` stops the backend plainly (→ STOPPING → STOPPED):
-in-flight streams are not force-cancelled and there is no in_use refusal
-on this command — their producer tasks release their slots as the
-upstream closes (a client may see the stream end early). Real drain
-semantics live in `provider.config.update` (below), which refuses to
-stop while slots are held.
+`running` **when it asks to wait** (`wait_for_running: true`, the
+scheduler's default), so a successful return means the provider's `/v1` is
+live. Manual control sends `wait_for_running: false`: the provider accepts,
+boots in the background, heartbeats `backend.status initializing` (a cold
+halogen-flash boot downloads its checkpoint and companions inside that
+wait — tens of GB), and reports the terminal state as events.
+`backend.restart` is the same with a drain check first (refuses while slots
+are held), and `provider.initialize` re-runs the whole init lifecycle
+(re-register → adopt → reboot → publish `backend.metadata`) and always
+acks before the boot. `backend.stop` stops the backend plainly
+(→ STOPPING → STOPPED): in-flight streams are not force-cancelled and there
+is no in_use refusal on this command — their producer tasks release their
+slots as the upstream closes (a client may see the stream end early). Real
+drain semantics live in `provider.config.update` (below) and in
+`backend.restart`, which refuse to stop while slots are held.
 
 `provider.config.update` (Phase 9, live) carries the new
 `backend_config` + `config_fingerprint` + scheduling fields. The
@@ -428,6 +437,20 @@ authoritative queue is a per-alias waiter `deque` guarded by an
 and the `im:sched:lock` contract is honored around boot/admission
 mutations so a future cross-worker Redis-queue implementation can swap in
 behind the same `acquire`/`release` interface.
+
+### Boot budget
+
+Booting is bounded by `BACKEND_BOOT_TIMEOUT_SECONDS` (default 1h), not the
+30s command-ack default: `backend.start` from the scheduler sends
+`wait_for_running: true` and the provider's ack means `/v1` is live, which
+for a cold halogen-flash instance is behind an engine-side download of its
+checkpoint and companions. A waiting client still gives up at its own
+`queue_timeout` (→ 504) while the boot continues at the provider — the
+instance heartbeats `backend.status initializing`, the DB mirror follows,
+and the next request adopts the now-running backend (the `elif instance_id
+not in self._booted` adoption path). The idle reaper only ever targets
+`running`/`in_use`, so it never kills a downloading boot. Manual control
+avoids the wait entirely: the admin routes accept (202) and poll.
 
 ### VRAM ledger — per booted instance
 

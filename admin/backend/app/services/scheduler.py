@@ -70,6 +70,7 @@ from datetime import UTC, datetime
 import redis.asyncio as aioredis
 from sqlmodel import Session, col, select
 
+from app.core.config import settings
 from app.core.db import engine
 from app.models import (
     Machine,
@@ -419,11 +420,23 @@ class InferenceScheduler:
     async def _boot(self, instance_id: str) -> bool:
         """backend.start the instance; True when the provider acks ok.
 
-        The provider acks only after its backend lifecycle reaches
-        running, so a successful return means /v1 is live.
+        The provider acks only after its lifecycle reaches running, so a
+        successful return means /v1 is live. The ack window is the BOOT
+        budget, not the 30s command default: a cold halogen-flash boot
+        downloads its checkpoint and companions inside `backend.start`
+        (tens of GB), and abandoning that ack would mean abandoning a boot
+        the provider is still performing. A caller request still gives up
+        at its own `queue_timeout` — the boot continues (the provider
+        heartbeats `backend.status initializing` and the DB mirror follows),
+        and a later request adopts the now-running instance.
         """
         try:
-            reply = await manager.send_command(instance_id, "backend.start", {})
+            reply = await manager.send_command(
+                instance_id,
+                "backend.start",
+                {"wait_for_running": True},
+                timeout=settings.BACKEND_BOOT_TIMEOUT_SECONDS,
+            )
         except Exception as exc:  # noqa: BLE001 - any delivery failure means no boot
             logger.warning("backend.start failed for instance %s: %s", instance_id, exc)
             return False

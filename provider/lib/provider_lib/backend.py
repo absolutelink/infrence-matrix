@@ -153,6 +153,12 @@ class BackendLifecycle:
         self._in_flight = 0
         self._lock = asyncio.Lock()
         self.last_request_at: datetime | None = None
+        # Drivers that spend a long time between spawn and first healthy
+        # response (halogen / halogen-flash: engine-side downloads) can
+        # report progress without touching the state machine. See `report`.
+        attach = getattr(driver, "attach_status_callback", None)
+        if callable(attach):
+            attach(self.report)
 
     # ------------------------------------------------------------------
     # Introspection
@@ -176,6 +182,19 @@ class BackendLifecycle:
             await self._status_callback(status, reason)
         except Exception:  # noqa: BLE001
             logger.exception("backend.status callback failed (status=%s)", status)
+
+    async def report(self, status: str, reason: str | None = None) -> None:
+        """Emit a `backend.status` frame WITHOUT moving the state machine.
+
+        Drivers use this for long-init progress: a halogen-flash boot may
+        download its checkpoint and companions before the API answers
+        `/health`, and the operator deserves to see `initializing` (with the
+        engine's current line) rather than a silent `starting`. Slot
+        admission still reads `self._status`, which only `start()` /
+        `stop()` change — a report can never make a not-yet-serving backend
+        look servable.
+        """
+        await self._emit(status, reason)
 
     # ------------------------------------------------------------------
     # Lifecycle

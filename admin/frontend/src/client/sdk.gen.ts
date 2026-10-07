@@ -2,7 +2,7 @@
 
 import type { Client, Options as Options2, TDataShape } from './client';
 import { client } from './client.gen';
-import type { adminAdminHealthData, adminAdminHealthResponses, adminClearCacheData, adminClearCacheErrors, adminClearCacheResponses, adminCommitPendingData, adminCommitPendingErrors, adminCommitPendingResponses, adminCreateDefinitionData, adminCreateDefinitionErrors, adminCreateDefinitionResponses, adminCreateMachineData, adminCreateMachineErrors, adminCreateMachineResponses, adminDeleteDefinitionData, adminDeleteDefinitionErrors, adminDeleteDefinitionResponses, adminDeleteMachineData, adminDeleteMachineErrors, adminDeleteMachineResponses, adminDismissPendingData, adminDismissPendingErrors, adminDismissPendingResponses, adminGetDefinitionData, adminGetDefinitionErrors, adminGetDefinitionResponses, adminGetInstanceData, adminGetInstanceErrors, adminGetInstanceLogsData, adminGetInstanceLogsErrors, adminGetInstanceLogsResponses, adminGetInstanceResponses, adminGetMachineData, adminGetMachineErrors, adminGetMachineResponses, adminGetProviderTypeData, adminGetProviderTypeErrors, adminGetProviderTypeResponses, adminListDefinitionsData, adminListDefinitionsResponses, adminListInstancesData, adminListInstancesResponses, adminListMachinesData, adminListMachinesResponses, adminListProviderTypesData, adminListProviderTypesResponses, adminListRepoFilesData, adminListRepoFilesErrors, adminListRepoFilesResponses, adminListResponsesData, adminListResponsesErrors, adminListResponsesResponses, adminOverviewStatsData, adminOverviewStatsResponses, adminPatchDefinitionData, adminPatchDefinitionErrors, adminPatchDefinitionResponses, adminPatchMachineData, adminPatchMachineErrors, adminPatchMachineResponses, adminPruneStorageData, adminPruneStorageErrors, adminPruneStorageResponses, adminRegisterProviderData, adminRegisterProviderErrors, adminRegisterProviderResponses, adminSearchModelsData, adminSearchModelsErrors, adminSearchModelsResponses, adminUsageStatsData, adminUsageStatsErrors, adminUsageStatsResponses, chatCreateChatCompletionData, chatCreateChatCompletionResponses, modelsListModelsData, modelsListModelsResponses, responsesCreateResponseData, responsesCreateResponseResponses } from './types.gen';
+import type { adminAdminHealthData, adminAdminHealthResponses, adminClearCacheData, adminClearCacheErrors, adminClearCacheResponses, adminCommitPendingData, adminCommitPendingErrors, adminCommitPendingResponses, adminCreateDefinitionData, adminCreateDefinitionErrors, adminCreateDefinitionResponses, adminCreateMachineData, adminCreateMachineErrors, adminCreateMachineResponses, adminDeleteDefinitionData, adminDeleteDefinitionErrors, adminDeleteDefinitionResponses, adminDeleteMachineData, adminDeleteMachineErrors, adminDeleteMachineResponses, adminDismissPendingData, adminDismissPendingErrors, adminDismissPendingResponses, adminGetDefinitionData, adminGetDefinitionErrors, adminGetDefinitionResponses, adminGetInstanceData, adminGetInstanceErrors, adminGetInstanceLogsData, adminGetInstanceLogsErrors, adminGetInstanceLogsResponses, adminGetInstanceResponses, adminGetMachineData, adminGetMachineErrors, adminGetMachineResponses, adminGetProviderTypeData, adminGetProviderTypeErrors, adminGetProviderTypeResponses, adminInitializeInstanceData, adminInitializeInstanceErrors, adminInitializeInstanceResponses, adminListDefinitionsData, adminListDefinitionsResponses, adminListInstancesData, adminListInstancesResponses, adminListMachinesData, adminListMachinesResponses, adminListProviderTypesData, adminListProviderTypesResponses, adminListRepoFilesData, adminListRepoFilesErrors, adminListRepoFilesResponses, adminListResponsesData, adminListResponsesErrors, adminListResponsesResponses, adminOverviewStatsData, adminOverviewStatsResponses, adminPatchDefinitionData, adminPatchDefinitionErrors, adminPatchDefinitionResponses, adminPatchMachineData, adminPatchMachineErrors, adminPatchMachineResponses, adminPruneStorageData, adminPruneStorageErrors, adminPruneStorageResponses, adminRegisterProviderData, adminRegisterProviderErrors, adminRegisterProviderResponses, adminRestartBackendData, adminRestartBackendErrors, adminRestartBackendResponses, adminSearchModelsData, adminSearchModelsErrors, adminSearchModelsResponses, adminStartBackendData, adminStartBackendErrors, adminStartBackendResponses, adminStopBackendData, adminStopBackendErrors, adminStopBackendResponses, adminUsageStatsData, adminUsageStatsErrors, adminUsageStatsResponses, chatCreateChatCompletionData, chatCreateChatCompletionResponses, modelsListModelsData, modelsListModelsResponses, responsesCreateResponseData, responsesCreateResponseResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -219,6 +219,95 @@ export class AdminService {
         return (options.client ?? client).post<adminPruneStorageResponses, adminPruneStorageErrors, ThrowOnError>({
             responseType: 'json',
             url: '/admin/api/instances/{instance_id}/storage/prune',
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                ...options.headers
+            }
+        });
+    }
+    
+    /**
+     * Start Backend
+     *
+     * Boot this instance's backend by hand (no inference request needed).
+     *
+     * 202 by default: the provider acks "accepted" and boots in the
+     * background, heartbeating ``backend.status`` (`initializing` while the
+     * engine downloads/loads, then `running` or `error`). Poll
+     * ``GET /admin/api/instances/{id}`` — or pass ``wait_for_running: true``
+     * to block until it is up.
+     */
+    public static startBackend<ThrowOnError extends boolean = true>(options: Options<adminStartBackendData, ThrowOnError>) {
+        return (options.client ?? client).post<adminStartBackendResponses, adminStartBackendErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/admin/api/instances/{instance_id}/backend/start',
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                ...options.headers
+            }
+        });
+    }
+    
+    /**
+     * Stop Backend
+     *
+     * Unload the backend (always awaited — a stop is quick).
+     *
+     * Refused (502 with ``retry_after``) while live requests hold slots: the
+     * provider does not cancel in-flight streams. Unload during a long
+     * download is fine and is the escape hatch for a boot that will not
+     * finish.
+     */
+    public static stopBackend<ThrowOnError extends boolean = true>(options: Options<adminStopBackendData, ThrowOnError>) {
+        return (options.client ?? client).post<adminStopBackendResponses, adminStopBackendErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/admin/api/instances/{instance_id}/backend/stop',
+            ...options
+        });
+    }
+    
+    /**
+     * Restart Backend
+     *
+     * Stop then start the backend (config re-applied by the driver).
+     */
+    public static restartBackend<ThrowOnError extends boolean = true>(options: Options<adminRestartBackendData, ThrowOnError>) {
+        return (options.client ?? client).post<adminRestartBackendResponses, adminRestartBackendErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/admin/api/instances/{instance_id}/backend/restart',
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                ...options.headers
+            }
+        });
+    }
+    
+    /**
+     * Initialize Instance
+     *
+     * Re-run the whole init lifecycle: re-register, adopt, boot, re-scrape.
+     *
+     * ``provider.initialize`` POSTs a fresh registration (re-checking the
+     * version + schema gates, re-adopting capacity/`backend_config`, minting a
+     * new instance secret for future reconnects and rewriting
+     * ``provider_config.json``), then drain-stops, boots and publishes
+     * ``backend.metadata`` from the running engine. The boot is asynchronous
+     * (202): a cold halogen-flash instance downloads its checkpoint plus
+     * companions before the API answers, which is far beyond an HTTP request's
+     * patience. ``wait_for_running: true`` waits for the boot instead.
+     *
+     * Allowed on a shell definition (unlike start/restart) — refreshing the
+     * registration is exactly what an ``awaiting_config`` instance needs when
+     * a config push never landed; the provider still refuses to boot it on
+     * defaults and reports ``no_config`` in the ack.
+     */
+    public static initializeInstance<ThrowOnError extends boolean = true>(options: Options<adminInitializeInstanceData, ThrowOnError>) {
+        return (options.client ?? client).post<adminInitializeInstanceResponses, adminInitializeInstanceErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/admin/api/instances/{instance_id}/initialize',
             ...options,
             headers: {
                 'Content-Type': 'application/json',

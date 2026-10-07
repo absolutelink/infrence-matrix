@@ -242,6 +242,48 @@ def _gate_existing_type(
     )
 
 
+def _reject_port_clash(
+    session: Session, machine_id: object, definition_id: object, port: int
+) -> None:
+    """409 when another CONNECTED instance on this machine holds `port`.
+
+    See the call site: the admin addresses instances by
+    machine address + instance port, so a clash silently misroutes one
+    alias's traffic into another provider's engine.
+    """
+    peer = session.exec(
+        select(ProviderInstance, ProviderDefinition)
+        .join(
+            ProviderDefinition,
+            ProviderInstance.provider_definition_id == ProviderDefinition.id,
+        )
+        .where(
+            ProviderInstance.machine_id == machine_id,
+            ProviderInstance.port == port,
+            ProviderInstance.provider_definition_id != definition_id,
+            ProviderInstance.websocket_connected == True,  # noqa: E712
+        )
+    ).first()
+    if peer is None:
+        return
+    _, peer_definition = peer
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "error": "port_conflict",
+            "message": (
+                f"machine already has a connected instance of definition "
+                f"'{peer_definition.alias}' on port {port}; the admin could "
+                "not tell the two apart. Give this provider a distinct "
+                "PROVIDER_PORT and publish that same host port."
+            ),
+            "port": port,
+            "conflicting_definition": peer_definition.alias,
+            "conflicting_instance_id": str(peer[0].id),
+        },
+    )
+
+
 def _schema_gate(
     session: Session,
     provider_type: str,
@@ -400,6 +442,19 @@ async def register_provider(
                     f"'{body.provider_type}': {exc.message}"
                 ),
             ) from exc
+
+    # 5b. Port clash: two DIFFERENT instances on one machine may not claim
+    #     the same port. The admin dials litellm at
+    #     http://{machine address}:{instance.port}, so a collision is not a
+    #     cosmetic problem — the losing alias silently serves the other
+    #     provider's model (a real deployment routed halogen-flash traffic
+    #     to the llama.cpp container this way, and every /v1 request "worked"
+    #     against the wrong engine). Only a CONNECTED peer holds the port:
+    #     refusing on a stale row would make it impossible to bring a
+    #     replacement instance online, and the presence sweep clears those
+    #     within its TTL. Re-registering the same definition (the
+    #     provider.initialize path) is never a clash.
+    _reject_port_clash(session, machine.id, definition.id, body.port)
 
     # 6. Upsert the instance for (machine, definition). The instance id
     #    is assigned here (default_factory=uuid4, known pre-flush) so it

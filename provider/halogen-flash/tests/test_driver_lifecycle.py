@@ -408,3 +408,122 @@ async def test_models_root_checkpoint_does_not_protect_the_root(
         }
     finally:
         await driver.aclose()
+
+
+class _AliveProc:
+    """Stand-in for a live Popen: never exits, so only health can end the wait."""
+
+    def poll(self) -> None:
+        return None
+
+
+def _flaky_health(monkeypatch, *, succeed_after: int) -> dict[str, int]:
+    """Patch the /health probe to fail `succeed_after - 1` times, then 200."""
+    import httpx
+
+    calls = {"n": 0}
+
+    class _Resp:
+        status_code = 200
+
+    async def fake_get(self, url, **kwargs):  # noqa: ANN001, ARG001
+        calls["n"] += 1
+        if calls["n"] < succeed_after:
+            raise httpx.ConnectError("engine not listening yet")
+        return _Resp()
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    return calls
+
+
+def _assert_boot_budget_default() -> None:
+    """The shipped boot budget must dwarf llama.cpp's health timeout: these
+    engines download before the API port answers. (Test settings pin both to
+    15s, so compare the class defaults.)"""
+    from provider_lib.config import ProviderSettings
+
+    fields = ProviderSettings.model_fields
+    boot = fields["ENGINE_BOOT_TIMEOUT"].default
+    health = fields["SERVER_START_HEALTH_TIMEOUT"].default
+    assert boot == 3600 and health == 120 and boot > health
+
+
+async def test_long_boot_heartbeats_initializing_with_engine_line(
+    tmp_path, fake_flash_binary, monkeypatch
+) -> None:
+    """The engine downloads its checkpoint + companions BEFORE binding the
+    API port. The wait must report `initializing` (with the engine's newest
+    line) rather than sit silent, and the budget is ENGINE_BOOT_TIMEOUT —
+    not llama.cpp's 120s health timeout."""
+    from provider_halogen_flash import driver as driver_module
+
+    monkeypatch.setattr(driver_module, "_BOOT_HEARTBEAT_SECONDS", 0.0)
+    seen: list[tuple[str, str | None]] = []
+
+    async def cb(status: str, reason: str | None) -> None:
+        seen.append((status, reason))
+
+    settings = make_settings(tmp_path, fake_flash_binary)
+    driver = HalogenFlashBackend(settings, {}, status_cb=cb)
+    driver._proc = _AliveProc()  # type: ignore[assignment]
+    driver._log_ring.append("stderr", "Downloading 100% of 48.0 GiB tokenizer.json")
+    calls = _flaky_health(monkeypatch, succeed_after=3)
+
+    await driver._wait_for_health()
+
+    assert calls["n"] == 3
+    assert seen, "expected at least one initializing heartbeat"
+    assert {s for s, _ in seen} == {BackendStatusValue.INITIALIZING}
+    assert "tokenizer.json" in seen[0][1]
+
+
+async def test_warm_boot_emits_no_heartbeats(
+    tmp_path, fake_flash_binary, monkeypatch
+) -> None:
+    """Files already on disk: the boot must be as quiet as it was before the
+    heartbeat existed (the first beat only fires after the grace period)."""
+    seen: list[tuple[str, str | None]] = []
+
+    async def cb(status: str, reason: str | None) -> None:
+        seen.append((status, reason))
+
+    settings = make_settings(tmp_path, fake_flash_binary)
+    driver = HalogenFlashBackend(settings, {}, status_cb=cb)
+    driver._proc = _AliveProc()  # type: ignore[assignment]
+    _flaky_health(monkeypatch, succeed_after=1)
+
+    await driver._wait_for_health()
+    assert seen == []
+
+
+async def test_boot_budget_comes_from_engine_boot_timeout(
+    tmp_path, fake_flash_binary
+) -> None:
+    settings = make_settings(tmp_path, fake_flash_binary)
+    _assert_boot_budget_default()
+    settings.ENGINE_BOOT_TIMEOUT = 0
+    driver = HalogenFlashBackend(settings, {})
+    driver._proc = _AliveProc()  # type: ignore[assignment]
+    with pytest.raises(TimeoutError, match="halogen-flash failed to become healthy"):
+        await driver._wait_for_health()
+
+
+async def test_a_broken_status_callback_never_breaks_the_boot(
+    tmp_path, fake_flash_binary, monkeypatch
+) -> None:
+    """Progress is cosmetic: if the WS is gone mid-boot, the wait still has
+    to finish and the backend still has to come up."""
+    from provider_halogen_flash import driver as driver_module
+
+    monkeypatch.setattr(driver_module, "_BOOT_HEARTBEAT_SECONDS", 0.0)
+
+    async def cb(_status: str, _reason: str | None) -> None:
+        raise RuntimeError("websocket closed")
+
+    settings = make_settings(tmp_path, fake_flash_binary)
+    driver = HalogenFlashBackend(settings, {}, status_cb=cb)
+    driver._proc = _AliveProc()  # type: ignore[assignment]
+    driver._log_ring.append("stdout", "fetching qwen38-flash-next-v2.hgn")
+    _flaky_health(monkeypatch, succeed_after=2)
+
+    await driver._wait_for_health()  # must not raise

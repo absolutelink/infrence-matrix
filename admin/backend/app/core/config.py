@@ -78,6 +78,20 @@ class Settings(BaseSettings):
     CONFIG_UPDATE_RETRIES: int = 3
     CONFIG_UPDATE_RETRY_DELAY_SECONDS: float = 10.0
 
+    # --- Backend boot / manual backend control -------------------------
+    # `backend.start` with `wait_for_running: true` (the scheduler's boot
+    # path) awaits the provider's whole lifecycle: artifact resolution plus
+    # the engine's own start-time download pass — a cold halogen-flash boot
+    # pulls the checkpoint, its overlay sidecar / ngram table / vision tower
+    # and its tokenizer before the API port answers. The provider heartbeats
+    # `backend.status initializing` throughout, so this is a ceiling on
+    # waiting for a boot that is visibly progressing, not a probe timeout.
+    # A client request is still bounded by its own `queue_timeout`; the boot
+    # it triggered continues and a later request adopts the running instance.
+    BACKEND_BOOT_TIMEOUT_SECONDS: float = 3600.0
+    # `backend.stop` awaits SIGTERM + the engine's exit.
+    BACKEND_STOP_TIMEOUT_SECONDS: float = 120.0
+
     # CORS: the UI is served same-origin from this app; allow Vite dev server.
     CORS_ALLOW_ALL_ORIGINS: bool = True
 

@@ -1,6 +1,15 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { createFileRoute, Link } from "@tanstack/react-router"
-import { Eraser, HardDriveDownload, ScrollText } from "lucide-react"
+import {
+  Eraser,
+  HardDriveDownload,
+  MoreVertical,
+  Play,
+  RefreshCw,
+  RotateCw,
+  ScrollText,
+  Square,
+} from "lucide-react"
 import { useState } from "react"
 
 import { AdminService } from "@/client"
@@ -17,6 +26,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
 import {
@@ -35,7 +51,11 @@ import {
 } from "@/hooks/useAdminData"
 import useCustomToast from "@/hooks/useCustomToast"
 import { extractError } from "@/lib/errors"
-import type { ProviderInstance, StorageActionResult } from "@/types/admin"
+import type {
+  BackendActionResult,
+  ProviderInstance,
+  StorageActionResult,
+} from "@/types/admin"
 import { formatBytes } from "@/utils"
 
 export const Route = createFileRoute("/_layout/instances")({
@@ -49,6 +69,49 @@ export const Route = createFileRoute("/_layout/instances")({
 const PERMISSIVE_SCHEMA_FP =
   "a2c799262a3ce3c19ef5cdd983bf3d12b43ab3c426227091b909dcb7054738c0"
 
+// Backend transitions the operator can drive by hand (provider_lib.ops).
+// `stop` has no options; the other three may either accept (the boot runs
+// in the background — a cold halogen-flash instance downloads its
+// checkpoint and companions first, which is minutes-to-hours) or wait for
+// the engine to report running.
+type BackendActionKind = "start" | "stop" | "restart" | "initialize"
+
+interface BackendActionTarget {
+  kind: BackendActionKind
+  instance: ProviderInstance
+}
+
+const BACKEND_ACTIONS: Record<
+  BackendActionKind,
+  { label: string; title: string; waits: boolean; waitLabel: string }
+> = {
+  start: {
+    label: "Start backend",
+    title: "Boot the backend now (no inference request needed)",
+    waits: true,
+    waitLabel: "Wait until the engine reports running",
+  },
+  stop: {
+    label: "Stop backend",
+    title: "Unload the backend (refused while requests are live)",
+    waits: false,
+    waitLabel: "",
+  },
+  restart: {
+    label: "Restart backend",
+    title: "Stop and start again — reloads the model/config",
+    waits: true,
+    waitLabel: "Wait until the engine reports running",
+  },
+  initialize: {
+    label: "Reinitialize",
+    title:
+      "Re-register with the admin, adopt the definition config, reboot and re-read model metadata",
+    waits: true,
+    waitLabel: "Wait for the whole re-provision (may download for a long time)",
+  },
+}
+
 function InstancesPage() {
   const { data: instances = [], isLoading } = useInstances()
   const { data: providerTypes = [] } = useProviderTypes()
@@ -58,6 +121,8 @@ function InstancesPage() {
   const [cacheTarget, setCacheTarget] = useState<ProviderInstance | null>(null)
   const [pruneTarget, setPruneTarget] = useState<ProviderInstance | null>(null)
   const [logsTarget, setLogsTarget] = useState<ProviderInstance | null>(null)
+  const [backendTarget, setBackendTarget] =
+    useState<BackendActionTarget | null>(null)
 
   return (
     <div className="flex flex-col gap-6">
@@ -144,7 +209,12 @@ function InstancesPage() {
                     </div>
                   </TableCell>
                   <TableCell>
-                    <StatusBadge status={i.backend_status} />
+                    {/* error_message carries the reason of the last status
+                        transition (incl. an initializing heartbeat's engine
+                        line and a failed boot's message). */}
+                    <span title={i.error_message ?? undefined}>
+                      <StatusBadge status={i.backend_status} />
+                    </span>
                   </TableCell>
                   <TableCell>
                     <ConnectionBadge connected={i.websocket_connected} />
@@ -177,6 +247,12 @@ function InstancesPage() {
                       >
                         <ScrollText /> Logs
                       </Button>
+                      <BackendActionMenu
+                        instance={i}
+                        onPick={(kind) =>
+                          setBackendTarget({ kind, instance: i })
+                        }
+                      />
                       <Button
                         variant="outline"
                         size="sm"
@@ -221,6 +297,10 @@ function InstancesPage() {
         kind="prune"
         instance={pruneTarget}
         onClose={() => setPruneTarget(null)}
+      />
+      <BackendActionDialog
+        target={backendTarget}
+        onClose={() => setBackendTarget(null)}
       />
       <LogsSheet
         instance={logsTarget}
@@ -389,6 +469,227 @@ function StorageActionDialog({
               : dryRun
                 ? "Preview (dry run)"
                 : "Execute"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function BackendActionMenu({
+  instance,
+  onPick,
+}: {
+  instance: ProviderInstance
+  onPick: (kind: BackendActionKind) => void
+}) {
+  const offline = !instance.websocket_connected
+  // A shell definition (awaiting_config) has no authored backend_config:
+  // the admin refuses to boot it, but reinitializing is still the right
+  // move — that is how such an instance re-reads the admin's row.
+  const unconfigured = instance.instance_status === "awaiting_config"
+  return (
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={offline}
+          title={offline ? "Instance websocket is down" : "Backend controls"}
+        >
+          <MoreVertical /> Backend
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem
+          disabled={unconfigured}
+          title={
+            unconfigured
+              ? "Author the definition's backend config first"
+              : BACKEND_ACTIONS.start.title
+          }
+          onSelect={() => onPick("start")}
+        >
+          <Play /> Start
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onPick("stop")}>
+          <Square /> Stop
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          disabled={unconfigured}
+          title={
+            unconfigured
+              ? "Author the definition's backend config first"
+              : BACKEND_ACTIONS.restart.title
+          }
+          onSelect={() => onPick("restart")}
+        >
+          <RotateCw /> Restart
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={() => onPick("initialize")}>
+          <RefreshCw /> Reinitialize
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+function BackendActionDialog({
+  target,
+  onClose,
+}: {
+  target: BackendActionTarget | null
+  onClose: () => void
+}) {
+  const queryClient = useQueryClient()
+  const { showErrorToast, showSuccessToast } = useCustomToast()
+  const [wait, setWait] = useState(false)
+  const [result, setResult] = useState<BackendActionResult | null>(null)
+  const kind = target?.kind
+  const spec = kind ? BACKEND_ACTIONS[kind] : null
+
+  const mutation = useMutation({
+    mutationFn: async () => {
+      if (!target) return null
+      setResult(null)
+      const options = {
+        path: { instance_id: target.instance.id },
+        body: { wait_for_running: wait },
+      }
+      if (target.kind === "start") {
+        return await AdminService.startBackend(options)
+      }
+      if (target.kind === "stop") {
+        return await AdminService.stopBackend({
+          path: { instance_id: target.instance.id },
+        })
+      }
+      if (target.kind === "restart") {
+        return await AdminService.restartBackend(options)
+      }
+      return await AdminService.initializeInstance(options)
+    },
+    onSuccess: (resp) => {
+      const data = (resp?.data ?? null) as unknown as BackendActionResult
+      setResult(data)
+      queryClient.invalidateQueries({ queryKey: instanceKeys.all })
+      queryClient.invalidateQueries({ queryKey: definitionKeys.all })
+      if (data) {
+        showSuccessToast(
+          `${spec?.label}: backend ${data.backend_status ?? "unknown"}`,
+        )
+      }
+    },
+    onError: (err: Error) => showErrorToast(extractError(err)),
+  })
+
+  const reset = () => {
+    setResult(null)
+    setWait(false)
+    onClose()
+  }
+
+  const desc: Record<BackendActionKind, string> = {
+    start:
+      "Boots the instance's one backend without waiting for an inference request. By default the request returns as soon as the provider accepts: a cold boot downloads its checkpoint and companions first, which can take a long time — watch the Backend column, or open Logs for the engine's own progress.",
+    stop: "Unloads the backend and frees its memory. Refused while live requests hold slots — in-flight streams are never cancelled.",
+    restart:
+      "Stop then start. Refused while live requests hold slots. The driver re-applies the definition's config on the way back up.",
+    initialize:
+      "Re-runs the whole init lifecycle: a fresh registration with the admin (re-checks the version and schema gates, re-adopts capacity and backend_config, mints a new instance secret and rewrites the provider's cached config), then a reboot and a re-read of the model metadata. Use it after editing a definition by hand, or when an instance looks wedged on stale config.",
+  }
+
+  return (
+    <Dialog
+      open={target !== null}
+      onOpenChange={(o) => {
+        if (!o) reset()
+      }}
+    >
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{spec?.label}</DialogTitle>
+          <DialogDescription>
+            {kind ? desc[kind] : ""} Target:{" "}
+            <span className="font-mono">
+              {target?.instance.machine_uid} / {target?.instance.alias}
+            </span>
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3">
+          {spec?.waits && (
+            <div className="flex items-center justify-between rounded-lg border p-3">
+              <div>
+                <Label className="text-sm font-medium">{spec.waitLabel}</Label>
+                <p className="text-xs text-muted-foreground">
+                  Off = 202 accepted and the transition runs in the background.
+                  On = this request stays open until the engine is up (it can be
+                  very long).
+                </p>
+              </div>
+              <Switch checked={wait} onCheckedChange={setWait} />
+            </div>
+          )}
+
+          {result && (
+            <Alert>
+              <AlertTitle>
+                {result.accepted
+                  ? "Accepted — running in the background"
+                  : `Done — ${result.backend_status ?? "unknown"}`}
+              </AlertTitle>
+              <AlertDescription>
+                <p className="text-xs">
+                  Backend status:{" "}
+                  <Badge variant="outline">
+                    {result.backend_status ?? "—"}
+                  </Badge>
+                  {typeof result.capacity === "number" && (
+                    <>
+                      {" · capacity "}
+                      {result.capacity}
+                    </>
+                  )}
+                  {(result.api_port || result.backend_port) && (
+                    <>
+                      {" · ports "}
+                      {result.api_port ?? result.backend_port}
+                      {result.engine_port ? `/${result.engine_port}` : ""}
+                    </>
+                  )}
+                </p>
+                {result.accepted && (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    The Backend column refreshes on its own; a cold boot shows
+                    initializing while the engine downloads or loads, then
+                    running (or error).
+                  </p>
+                )}
+                {result.no_config && (
+                  <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
+                    The definition still has no backend_config, so nothing was
+                    booted — the registration was refreshed only. Author the
+                    config on the Definitions page.
+                  </p>
+                )}
+              </AlertDescription>
+            </Alert>
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={reset}>
+            Close
+          </Button>
+          <Button
+            type="button"
+            variant={kind === "stop" ? "destructive" : "secondary"}
+            disabled={mutation.isPending}
+            onClick={() => mutation.mutate()}
+          >
+            {mutation.isPending ? "Sending…" : spec?.label}
           </Button>
         </DialogFooter>
       </DialogContent>

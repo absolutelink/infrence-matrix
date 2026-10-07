@@ -30,6 +30,7 @@ driver and overrides only what its backend does differently.
 | Metrics collectors (`metrics.py`) | Any provider-specific metric quirks |
 | Config fingerprint (`config.py`) | **Overrides** — e.g. halogen-flash `calculate_usage` |
 | Phase 9 shared command handlers (`config_update.py`) | Wiring only — `install_config_handlers(client, lifecycle, state, settings, extra_cache_dirs=...)` |
+| Phase 15 operator lifecycle commands (`ops.py`) | Wiring only — `install_backend_ops(client, lifecycle, backend_name=..., re_register=...)` + a `re_register` closure |
 
 The goal: a new provider type is usually just a `BackendDriver` subclass
 plus a `main.py` that wires it into `BackendLifecycle` and
@@ -76,12 +77,14 @@ scheduler hints only. Your container then:
    `awaiting_config`.
 3. Until the operator authors a `backend_config` (definitions UI; the
    standard `provider.config.update` push applies it), no `backend.start`
-   arrives — and if one did (buggy admin), your `backend.start` handler
-   NAKs `{"ok": false, "error": "no_config",
-   "detail": {"step": "validate"}}` (ws-protocol §4)
-   because `ConfigState.applied_fingerprint` is `None`. Wire the fence:
-   `install_config_handlers` exposes `client.no_config_nak`; call it at
-   the top of `on_backend_start` (see any provider package's `main.py`).
+   arrives — and if one did (buggy admin), the handler NAKs
+   `{"ok": false, "error": "no_config", "detail": {"step": "validate"}}`
+   because `ConfigState.applied_fingerprint` is `None`. You get this for
+   free: `provider_lib.ops.install_backend_ops` reads
+   `client.no_config_nak` (installed by `install_config_handlers`) on
+   every `backend.start` / `backend.restart`, and `provider.initialize`
+   refreshes the registration without ever booting an unconfigured
+   definition (its ack carries `no_config: true`).
 
 Registration on a shell never fails for schema reasons your type can't
 help — adopt happens before the schema-consensus gate consumes the type,
@@ -1018,6 +1021,69 @@ install_config_handlers(
 `apply_registration(...)` seeds `state.applied_fingerprint` from the
 registration response's `provider_definition.config_fingerprint`, so
 the provider and the admin start with the same view.
+
+## Operator lifecycle commands (`provider_lib.ops`)
+
+`backend.start` / `backend.stop` / `backend.restart` /
+`provider.initialize` come from `install_backend_ops`, called once inside
+your package's `install_command_handlers`. It replaces any local
+start/stop handler: the ack detail is built generically from
+`lifecycle.capacity` plus whichever of `effective_capacity`, `api_port`,
+`engine_port`, `backend_port` your driver exposes, and the Phase 14
+`client.no_config_nak` fence is read live (so install order does not
+matter).
+
+```python
+from provider_lib.ops import install_backend_ops
+
+async def re_register() -> dict[str, Any] | None:
+    """Re-run the registration handshake and adopt its response."""
+    hardware = await build_hardware_report(client.settings)
+    result = await client.register(
+        provider_type=PROVIDER_TYPE, version=VERSION,
+        port=client.settings.PROVIDER_PORT, hardware=hardware, schema=SCHEMA,
+    )
+    apply_registration(lifecycle, result, resolved_state)
+    return result.provider_definition
+
+install_backend_ops(client, lifecycle, backend_name=PROVIDER_TYPE,
+                    re_register=re_register)
+```
+
+`re_register` is the only provider-specific part of `provider.initialize`
+(only your package knows its type/version/hardware/schema). It must POST
+`/admin/api/providers/register` and adopt the response; **do not**
+recycle the WebSocket — the live socket is already authenticated at the
+current epoch and is what carries the status events the operator watches,
+while the freshly minted secret is for future reconnects.
+
+Two contracts the shared handlers implement for you:
+
+- **`wait_for_running`** (`backend.start`, `backend.restart`,
+  `provider.initialize`). Default `true` = await the lifecycle and ack
+  only when `/v1` is live (what `InferenceScheduler._boot` relies on).
+  `false` = ack `{"accepted": true}` and boot in a background task; the
+  terminal state arrives as `provider.status` / `backend.status`, and a
+  successful boot also emits `backend.metadata` (`{"models": [...]}`,
+  scraped from `list_models()`; a scrape failure never fails the boot).
+  A waiting caller that arrives while a background boot is in flight
+  **joins** it instead of spawning a second one; a second accept-style
+  caller gets `boot_in_progress`. Stop-triggering commands refuse with
+  `backend_in_use` + `retry_after` while slots are held.
+- **Long-init heartbeats.** If your engine can spend minutes between spawn
+  and first healthy response (downloading weights, building an index),
+  declare `attach_status_callback(self, emit)` on the driver:
+  `BackendLifecycle` binds its out-of-band `report()` to it at
+  construction, no `main.py` wiring needed. Call
+  `await self._status_cb(BackendStatusValue.INITIALIZING, reason)` every
+  ~15s inside your health wait (`reason` = the engine's newest log line
+  works well). `report` never moves the state machine, so a heartbeat
+  cannot make a not-yet-serving backend look servable — slots keep
+  refusing until the real `RUNNING` transition. Use the
+  `ENGINE_BOOT_TIMEOUT` setting (default 3600s) for that wait, not
+  `SERVER_START_HEALTH_TIMEOUT` (120s, llama.cpp/gufo's local-load budget);
+  a process that dies is still detected immediately from its exit code.
+  See `provider/halogen*/…/driver.py` for the reference implementation.
 
 ### `provider.config.update` flow
 

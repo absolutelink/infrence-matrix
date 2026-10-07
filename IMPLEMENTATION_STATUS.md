@@ -27,6 +27,7 @@ starting a feature, read the linked protocol/doc first.
 | 12 | Schema-driven backend config: `ProviderType` registry + JSON Schema consensus + HF picker + rjsf form | ✅ Complete |
 | 13 | Server + backend log capture, Redis tails, UI log views | ✅ Complete |
 | 14 | Shell definitions: deferred typing + `awaiting_config` pre-state | ✅ Complete |
+| 15 | Manual backend control + `provider.initialize` + download-bound boot budget | ✅ Complete |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
 
@@ -1309,6 +1310,108 @@ provider_type/backend_config on DefinitionCreate/DefinitionPatch).
 3. **Null vs `{}` distinction is a footgun for future contributors.**
    Locked decision above; `backend_config_is_authored()` helper +
    `NullableJSON` column type centralize it; doc notes in models.py.
+
+---
+
+## Phase 15 — Manual backend control + reinitialize ✅
+
+Operators can now drive a backend without sending a request, and a boot
+that spends an hour downloading weights no longer breaks the protocol.
+
+**Why the shape.** `backend.start` acked only after the lifecycle reached
+running — correct for the scheduler ("acked == /v1 is live"), impossible
+for a halogen-flash cold boot: with `HALOGEN_DOWNLOAD` the engine's own
+entrypoint pulls the checkpoint plus its overlay sidecar, ngram table,
+vision tower and tokenizer (tens of GB) before `/health` ever answers, far
+beyond the 30 s command-ack window, the 120 s llama.cpp-era health budget,
+and any HTTP request's patience.
+
+- **`provider_lib/ops.py` (new)** — one installer for every provider:
+  `install_backend_ops(client, lifecycle, backend_name=..., re_register=...)`
+  registers `backend.start` / `backend.stop` / `backend.restart` /
+  `provider.initialize` (both previously "Reserved" in the wire doc) and
+  deletes the per-package start/stop handlers. Ack detail is built
+  generically from `capacity` + whichever of `effective_capacity`,
+  `api_port`, `engine_port`, `backend_port` the driver exposes; the Phase 14
+  `client.no_config_nak` fence is read per command (install order-free).
+- **`wait_for_running`** on start/restart/initialize. Default `true` keeps
+  the scheduler's contract unchanged. `false` (what the UI sends) acks
+  `{"accepted": true, "backend_status": ...}` and boots in a background
+  task; terminal state arrives via `provider.status`, and a successful boot
+  also emits `backend.metadata` (`{"models": [...]}` from `list_models()`;
+  a scrape failure never fails the boot, and the admin ignores an empty
+  list). A waiting caller arriving during an in-flight boot **joins** it
+  (`asyncio.shield`, never a second spawn); a second accept-style caller
+  NAKs `boot_in_progress`; stop-triggering ops NAK `backend_in_use` +
+  `retry_after` while slots are held.
+- **`provider.initialize`** = re-register (POST `/register`: re-checks the
+  version + schema gates, re-adopts capacity/`backend_config`/fingerprint,
+  mints a fresh instance secret, rewrites `CACHE_DIR/provider_config.json`)
+  → drain check → background stop → start → metadata. Only
+  `re_register` is provider-supplied (it knows type/version/hardware/schema).
+  The live socket is deliberately NOT recycled: it is already authenticated
+  at the current epoch and carries the events the operator is watching.
+  A shell definition refreshes but never boots (ack carries
+  `no_config: true`) — this is the escape hatch for an instance stuck in
+  `awaiting_config` after a config edit that never pushed.
+- **Long-init heartbeats.** `BackendLifecycle.report(status, reason)` emits
+  `backend.status` without touching the state machine (so a heartbeat can
+  never make a non-serving backend look servable — slots keep refusing
+  until the real `RUNNING`), and `BackendLifecycle.__init__` binds it to any
+  driver declaring `attach_status_callback`. halogen + halogen-flash
+  heartbeat every 15 s while waiting for `/health`, with the engine's newest
+  log line as the reason (first beat after the grace period, so a warm boot
+  stays as quiet as before; a broken callback can never break a boot).
+- **Boot budgets** (`provider_lib/config.py`): new `ENGINE_BOOT_TIMEOUT`
+  (env-tunable, default **3600 s**) for the halogen family's health wait;
+  `SERVER_START_HEALTH_TIMEOUT` (120 s) stays for llama.cpp/gufo local
+  loads. Admin mirror: `BACKEND_BOOT_TIMEOUT_SECONDS` (3600 s) for a waiting
+  `backend.start` (the scheduler's `_boot` now sends it explicitly) and
+  `BACKEND_STOP_TIMEOUT_SECONDS` (120 s).
+- **Admin routes** (`app/api/admin/instances.py`, client regenerated):
+  `POST /admin/api/instances/{id}/backend/start|stop|backend/restart` and
+  `.../initialize`. Start/restart refuse 409 on a shell (mirroring the
+  provider fence locally so the operator gets a readable message);
+  `initialize` and `stop` do not. 202 by default; `{"wait_for_running":
+  true}` blocks instead. Provider NAKs surface as 502 with `error`/`step`/
+  `retry_after` (existing `_send_action` mapping).
+- **`backend.metadata` ingest** (`connection_manager`): stores
+  `{"models": [...]}` on the definition — the same column and shape as the
+  `provider.config.update` ack echo — so manual boots keep the roster fresh.
+- **Scheduler interaction**: the idle reaper only targets
+  `running`/`in_use`, so it never kills a downloading boot; a client request
+  still gives up at its own `queue_timeout` (504) while the boot continues,
+  and the next request adopts the now-running instance through the existing
+  "running per the DB but this process never booted it" ledger path.
+- **UI** (`routes/_layout/instances.tsx`): a per-row **Backend** menu
+  (Start / Stop / Restart / Reinitialize; Start+Restart disabled with an
+  explanation while the definition is `awaiting_config`, the whole menu
+  while the WS is down) and a confirm dialog carrying the
+  `wait_for_running` switch + an ack result (accepted vs final status,
+  capacity, ports, `no_config` hint). The existing 4 s instance poll shows
+  the `initializing → running` progression; the log tail shows the engine's
+  own download output.
+- **Registration port-clash guard** (`app/api/admin/providers.py`):
+  409 `port_conflict` when a *different* **connected** instance on the same
+  machine already claims the reported port. The admin addresses instances as
+  `machine address:instance port`, so a clash silently serves one alias from
+  another provider's engine — found live while debugging this phase
+  (halogen-flash registered 8081 on a box whose llama.cpp container owns
+  host 8081, so its traffic reached the wrong backend). Re-registering the
+  same definition (the initialize path) is never a clash, and disconnected
+  rows do not hold a port (the presence sweep clears them), so a replacement
+  instance can always come online.
+
+Tests: `provider/lib/tests/test_backend_ops.py` (16: ack shapes, join vs
+duplicate spawn, fences, drain, initialize order + failures, metadata),
+`provider/lib/tests/test_lifecycle.py` (report/attach), halogen +
+halogen-flash driver heartbeat/budget tests, `tests/test_main_wiring.py`
+(accept-style boot + initialize over a **real** socket, counting
+registration POSTs), per-provider `test_handlers_installed` (all four
+commands), `admin/backend/tests/test_instance_actions.py` (14: routes,
+payloads, timeouts, fences, NAK mapping, metadata ingest, port clash).
+Admin 290 · lib 128 · halogen-flash 153 · halogen 70 · gufo 67 ·
+llama-cpp 61 · mock 23 pass; ruff + biome + tsc + vite build clean.
 
 ---
 
