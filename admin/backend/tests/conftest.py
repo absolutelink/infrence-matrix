@@ -36,6 +36,13 @@ os.environ["REDIS_URL"] = os.environ["TEST_REDIS_URL"]
 # exercised directly where needed.
 os.environ["INSTANCE_SWEEP_ENABLED"] = "false"
 
+# Phase 16 slice 4: keep connect-time proactive warm-up out of the shared WS
+# integration tests (they drive the raw socket and assert on its frame
+# sequence). The warm-up logic is exercised directly against the scheduler in
+# tests/test_scheduler.py, and the connect trigger is covered by a focused
+# test that flips this back on.
+os.environ["SCHEDULER_WARMUP_ON_CONNECT"] = "false"
+
 from app import models  # noqa: E402  (import after env overrides)
 from app.core.db import engine  # noqa: E402
 

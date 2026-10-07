@@ -613,3 +613,29 @@ async def test_sweep_marks_presence_expired(session: Session) -> None:
         assert inst_row.backend_loaded_at is None
     finally:
         await aredis.aclose()
+
+
+def test_connect_triggers_proactive_warm_up(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    """Phase 16 slice 4: with warm-up enabled, an agent connect schedules
+    ``scheduler.warm_up_agent`` for that agent (the trigger seam)."""
+    from app.api import ws as ws_mod
+    from app.main import app
+
+    monkeypatch.setattr(ws_mod.settings, "SCHEDULER_WARMUP_ON_CONNECT", True)
+    warmed: list[str] = []
+
+    async def fake_warm(agent_id: str) -> None:
+        warmed.append(agent_id)
+
+    monkeypatch.setattr(app.state.scheduler, "warm_up_agent", fake_warm)
+
+    reg = _register(client, session)
+    with client.websocket_connect(
+        f"/provider/ws?agent_id={reg['agent_id']}",
+        headers=_ws_headers(reg["agent_secret"]),
+    ) as ws:
+        hello = _recv_frame(ws)
+        assert hello.type == FrameKind.PROVIDER_HELLO
+        _wait_for(lambda: warmed == [reg["agent_id"]])

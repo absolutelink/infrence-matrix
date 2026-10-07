@@ -28,6 +28,7 @@ import anyio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlmodel import Session, select
 
+from app.core.config import settings
 from app.core.db import engine
 from app.core.redis import RedisNotInitialized
 from app.models import ProviderAgent, ProviderInstance
@@ -47,6 +48,21 @@ WS_CLOSE_SERVER_ERROR = 1011
 WS_CLOSE_TRY_LATER = 1013
 
 router = APIRouter(tags=["provider-ws"])
+
+# Strong references to fire-and-forget background tasks spawned from the WS
+# accept path (metrics ownership, config self-heal, proactive warm-up).
+# asyncio only keeps a weak reference to a running task, so a task that awaits
+# for a long time (a warm-up boot can await up to BACKEND_BOOT_TIMEOUT_SECONDS)
+# could otherwise be garbage-collected mid-flight and silently abort. Holding
+# the task here and discarding it on completion is the documented pattern.
+_background_tasks: set[asyncio.Task[None]] = set()  # type: ignore[type-arg]
+
+
+def _spawn_background(coro: Any) -> None:
+    """Schedule ``coro`` as a background task kept alive until it finishes."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 def _mark_connected(agent_id: str, epoch: int) -> None:
@@ -112,6 +128,23 @@ async def _heal_config_fingerprint(app: Any, agent_id: str) -> None:  # noqa: AR
         await heal_agent_stale_fingerprints(agent_id)
 
 
+async def _warm_up_agent(app: Any, agent_id: str) -> None:
+    """Background proactive init warm-up (Phase 16 slice 4).
+
+    After the socket is up, boot the agent's assigned backends one at a time
+    (bounded by VRAM + ``max_running_backends``) so the agent is warm without
+    waiting for the first request. Detached from the accept loop and
+    exception-suppressed: a slow or failed boot must never break the socket.
+    This is also the seam slice 5's ``agent.assignments.update`` re-warm will
+    reuse.
+    """
+    scheduler = getattr(app.state, "scheduler", None)
+    if scheduler is None:
+        return
+    with contextlib.suppress(Exception):
+        await scheduler.warm_up_agent(agent_id)
+
+
 @router.websocket("/provider/ws")
 async def provider_ws(websocket: WebSocket) -> None:
     agent_id = websocket.query_params.get("agent_id", "")
@@ -141,10 +174,15 @@ async def provider_ws(websocket: WebSocket) -> None:
     _mark_connected(agent_id, epoch)
     # Try to make this agent the machine-level metrics reporter. Run as a
     # background task so a slow provider ack never blocks the handshake.
-    asyncio.create_task(_assign_metrics_owner(websocket.app, agent_id))
+    _spawn_background(_assign_metrics_owner(websocket.app, agent_id))
     # Phase 9 self-heal: a reconnect with a stale config_fingerprint
     # (admin PATCHed while disconnected) gets a fresh provider.config.update.
-    asyncio.create_task(_heal_config_fingerprint(websocket.app, agent_id))
+    _spawn_background(_heal_config_fingerprint(websocket.app, agent_id))
+    # Phase 16 slice 4: proactively warm the agent's assigned backends (one at
+    # a time, bounded by VRAM + max_running) so the first request is not the
+    # one that pays for the boot. Operator-toggleable (lazy-boot-only).
+    if settings.SCHEDULER_WARMUP_ON_CONNECT:
+        _spawn_background(_warm_up_agent(websocket.app, agent_id))
     logger.info("provider agent %s connected (epoch %s)", agent_id, epoch)
 
     try:

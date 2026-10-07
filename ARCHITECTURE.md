@@ -624,10 +624,12 @@ Two new constraints layer on top of the existing per-machine VRAM gate:
    type therefore never has two backends resident on one agent at once.
 2. **Serialized init warm-up.** On agent (re)connect the scheduler enqueues
    the agent's assigned backends and boots them **one at a time** under the
-   `im:sched:lock` + a per-agent `_booting` guard, each gated by VRAM +
-   `max_running`, stopping at the first that doesn't fit. This is proactive
-   (not request-driven) but bounded; the remaining backends boot on demand
-   exactly as before.
+   `im:sched:lock` + a per-agent `_warming` guard (each boot also takes the
+   per-alias in-process `state.lock`, exactly as the request path does, so a
+   warm-up boot and a concurrent request for the same alias can never
+   double-boot), each gated by VRAM + `max_running`, stopping at the first
+   that doesn't fit. This is proactive (not request-driven) but bounded; the
+   remaining backends boot on demand exactly as before.
 
 ### Idle-timeout reaper (Phase 6)
 

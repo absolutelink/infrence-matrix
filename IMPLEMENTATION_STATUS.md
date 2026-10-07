@@ -44,8 +44,7 @@ hold is never orphaned, pruned on a later pass once stopped, with a test;
 `instance_id` belongs to a different agent (cross-agent guard) with a test;
 `settings.tsx` help text + CI `build-and-push.yml` env migrated to
 `MACHINE_SECRET`/`AGENT_ID`; a slice-6 note added to the mock serve path.
-Deferred: `max_running_backends` hot-swap + proactive warm-up (slice 4),
-`agent.assignments.update` push / `AGENT_ASSIGNMENTS_UPDATE` (slice 5), real
+Deferred: `agent.assignments.update` push / `AGENT_ASSIGNMENTS_UPDATE` (slice 5), real
 multi-backend-per-process engine hosting + per-port serving (slice 6 — the
 provider_lib dispatch layer is ready; the engine drivers still host one
 backend, and per-backend config updates on a multi-backend agent can flap
@@ -81,7 +80,7 @@ starting a feature, read the linked protocol/doc first.
 | 13 | Server + backend log capture, Redis tails, UI log views | ✅ Complete |
 | 14 | Shell definitions: deferred typing + `awaiting_config` pre-state | ✅ Complete (superseded by 16) |
 | 15 | Manual backend control + `provider.initialize` + download-bound boot budget | ✅ Complete |
-| 16 | Machine-scoped provider **agents**: one container → many same-type backends, placement, `max_running_backends` | 🟡 Docs locked, code pending |
+| 16 | Machine-scoped provider **agents**: one container → many same-type backends, placement, `max_running_backends` | 🟡 slices 1–4 landed (agents, placement, `max_running` hot-swap + proactive warm-up); 5–8 pending |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
 
@@ -1556,21 +1555,22 @@ dicts).
 
 ## Phase 16 — Machine-scoped provider agents 🟡
 
-**Status: slice 3 (atomic breaking cutover) implemented.** The agent data
-model, migration, registration/auth, agent-level WS, scheduler joins,
-placement CRUD, config-push addressing, and the provider lib + all five
-provider packages now speak the agent protocol. **All suites green** (admin
-306, lib 128, mock 25, llama-cpp 63, gufo 69, halogen 72, halogen-flash 161;
-ruff + format clean; alembic upgrade/downgrade/upgrade/check clean; frontend
-`generate-client.sh` + `tsc` clean).
+**Status: slice 4 (`max_running_backends` enforcement + proactive init warm-up)
+implemented.** The agent data model, migration, registration/auth, agent-level
+WS, scheduler joins, placement CRUD, config-push addressing, and the provider
+lib + all five provider packages speak the agent protocol; the scheduler now
+enforces the per-agent `max_running_backends` cap (hot-swap eviction) and
+proactively warms an agent's assigned backends on connect. **All suites green**
+(admin 317, lib 128, mock 25, llama-cpp 63, gufo 69, halogen 72, halogen-flash
+161; ruff + format clean; no model/route change this slice so alembic and the
+generated client are unchanged).
 
-**Still deferred (later slices):** `max_running_backends` hot-swap (slice 4),
-`agent.assignments.update` push on placement change (slice 5), real-engine
-**multi-backend-per-process** hosting — the provider lib still runs one
-`BackendLifecycle` per container and addresses it as the agent's first backend
-(slice 6), and the full React Agents/placement UI (slice 7). The wire
-`AGENT_ASSIGNMENTS_UPDATE` FrameKind and `PROVIDER_TYPE` env are likewise not
-yet introduced (they belong to slices 5/6).
+**Still deferred (later slices):** `agent.assignments.update` push on placement
+change (slice 5), real-engine **multi-backend-per-process** hosting — the
+provider lib still runs one `BackendLifecycle` per container and addresses it as
+the agent's first backend (slice 6), and the full React Agents/placement UI
+(slice 7). The wire `AGENT_ASSIGNMENTS_UPDATE` FrameKind and `PROVIDER_TYPE` env
+are likewise not yet introduced (they belong to slices 5/6).
 
 
 **Goal.** Stop binding a provider container to a single `ProviderDefinition`.
@@ -1665,13 +1665,35 @@ into one container per (machine, type) that owns its backends and one socket.
       `backend.status` → per-backend. Presence sweep marks the **agent**
       disconnected (and its backends unschedulable). *(`AGENT_ASSIGNMENTS_UPDATE`
       FrameKind deferred to slice 5; `AWAITING_CONFIG` removed from both mirrors)*
-- [~] **E. Scheduler** — `app/services/scheduler.py`: candidates join through
-      agent connectivity + placement; add `max_running_backends` gate +
-      hot-swap eviction (per agent, per type); implement the serialized
-      **proactive init warm-up** on agent connect (per-agent `_booting`
-      guard under `im:sched:lock`); VRAM ledger stays per booted backend.
-      *(join-through-agent + eviction/idle keyed by agent done; `max_running`
-      hot-swap + proactive warm-up deferred to slice 4)*
+- [x] **E. Scheduler** — `app/services/scheduler.py`: candidates join through
+      agent connectivity + placement; `max_running_backends` gate + hot-swap
+      eviction (per agent, per type); serialized **proactive init warm-up** on
+      agent connect (per-agent `_warming` guard + per-alias `state.lock` under
+      `im:sched:lock`); VRAM ledger stays per booted backend.
+      *(join-through-agent + eviction/idle keyed by agent done in slice 3;
+      slice 4 landed: `_max_running_for_type`/`_running_on_agent`/
+      `_ensure_agent_capacity` gate the boot path and hot-swap an idle
+      same-agent backend LRU-first (never busy, never the target, never
+      cross-agent) reusing `_eviction_candidates` (agent-scoped, loaded-not-hold
+      filter) + `_stop_instance` + the `_evicting` guard; `warm_up_agent` boots
+      an agent's assigned backends one at a time MRU-first, bounded by VRAM +
+      `max_running`, never evicting (stops at the first that doesn't fit),
+      triggered from the WS accept path behind
+      `settings.SCHEDULER_WARMUP_ON_CONNECT` (default on; off in the test app so
+      raw-socket tests keep their frame contract). `x-max-running-backends` is
+       now read from the committed schema into `ProviderType.max_running_backends`
+       at every commit point (bootstrap / sole-voter / consensus / force-commit).
+       Review hardening: warm-up re-checks `_is_loaded` inside the per-alias
+       `state.lock` (no redundant `backend.start` for a backend a concurrent
+       request booted after the target list was built), breaks the pass when the
+       agent's mirrored `websocket_connected` drops mid-pass, and the WS accept
+       path keeps strong references to its detached background tasks
+       (`_spawn_background` + a module-level set) so a long boot is never GC'd
+       mid-flight; the single-type-per-agent invariant the cap scoping relies on
+       is documented on `_running_on_agent`/`_ensure_agent_capacity`.
+       Residual seam for slice 5: `warm_up_agent(agent_id)` is the single re-warm
+       entry point — `agent.assignments.update` should call it after applying a
+       placement change.)*
 - [~] **F. Placement CRUD + push** — `app/api/admin/definitions.py`:
       `agent_placement` + `agents` on create/PATCH; on placement change push
       `agent.assignments.update` to affected agents; config PATCH still
@@ -1710,8 +1732,12 @@ into one container per (machine, type) that owns its backends and one socket.
       lib: multi-backend dispatch + `agent.assignments.update`; each
       provider package: N backends + halogen-flash singleton. Wire drift
       guard for the new FrameKind. *(admin + provider suites rewritten for the
-      agent contract and green; `max_running`/warm-up/multi-backend/
-      `agent.assignments.update` tests deferred to their slices)*
+      agent contract and green; slice 4 added `test_scheduler.py` coverage for
+      `max_running` cap=1 hot-swap / busy-never-evicted / cap=0 unlimited /
+      same-agent-only / LRU order and for serialized VRAM+cap-bounded proactive
+      warm-up (MRU order, skip-already-running, per-agent guard, boot-failure
+      resilience) plus a WS connect-trigger test; multi-backend/
+      `agent.assignments.update` provider tests deferred to slices 5/6)*
 - [ ] **L. Conformance** — re-run openresponses suite on the mock agent
       (now hosting the mock definition) to confirm the request path is
       unchanged by the agent indirection. *(requires a deployed admin +

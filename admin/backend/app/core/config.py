@@ -92,6 +92,12 @@ class Settings(BaseSettings):
     # `backend.stop` awaits SIGTERM + the engine's exit.
     BACKEND_STOP_TIMEOUT_SECONDS: float = 120.0
 
+    # Phase 16 slice 4: proactively warm an agent's assigned backends (boot
+    # them one at a time, bounded by VRAM + max_running) when its WebSocket
+    # connects, so the first request is not the one that pays for the boot.
+    # Set false for strictly lazy (on-demand-only) booting.
+    SCHEDULER_WARMUP_ON_CONNECT: bool = True
+
     # CORS: the UI is served same-origin from this app; allow Vite dev server.
     CORS_ALLOW_ALL_ORIGINS: bool = True
 

@@ -187,6 +187,7 @@ def _gate_existing_type(
             ptype.schema = schema
             ptype.schema_fingerprint = fp
             ptype.status = "active"
+            _apply_max_running_from_schema(ptype, schema)
             return None
         # Stage the new schema; this agent is the first voter.
         ptype.pending_schema = schema
@@ -216,6 +217,7 @@ def _gate_existing_type(
             ptype.pending_fingerprint = None
             ptype.pending_voters = []
             ptype.status = "active"
+            _apply_max_running_from_schema(ptype, ptype.schema)
             return None
         return _schema_refusal_detail(
             provider_type,
@@ -286,6 +288,22 @@ def _schema_gate(
     return _gate_existing_type(session, ptype, provider_type, schema, agent_id, fp), fp
 
 
+def _apply_max_running_from_schema(ptype: ProviderType, schema: dict[str, Any]) -> None:
+    """Sync ``ProviderType.max_running_backends`` from a committed schema.
+
+    Phase 16 slice 4: the per-agent running cap is declared as a top-level
+    ``x-max-running-backends`` key in the type's shipped ``schema.json``
+    (default unlimited = 0). The scheduler reads this column to enforce the
+    cap (ARCHITECTURE.md §4/§6). Mutates ``ptype`` in the caller's session;
+    the caller commits.
+    """
+    raw = schema.get("x-max-running-backends", 0) if isinstance(schema, dict) else 0
+    try:
+        ptype.max_running_backends = max(0, int(raw))
+    except TypeError, ValueError:
+        ptype.max_running_backends = 0
+
+
 def _bootstrap_type(
     session: Session, provider_type: str, schema: dict[str, Any]
 ) -> ProviderType:
@@ -309,6 +327,8 @@ def _bootstrap_type(
     ).first()
     if ptype is None:  # pragma: no cover - only if the row vanished twice
         raise RuntimeError(f"provider type '{provider_type}' bootstrap failed")
+    _apply_max_running_from_schema(ptype, schema)
+    session.add(ptype)
     return ptype
 
 

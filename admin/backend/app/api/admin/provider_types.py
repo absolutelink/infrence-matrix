@@ -22,7 +22,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
-from app.api.admin.providers import type_agents_of
+from app.api.admin.providers import _apply_max_running_from_schema, type_agents_of
 from app.core.db import get_session
 from app.models import ProviderType
 
@@ -118,6 +118,7 @@ def commit_pending(
     ptype.pending_fingerprint = None
     ptype.pending_voters = []
     ptype.status = "active"
+    _apply_max_running_from_schema(ptype, ptype.schema)
     ptype.updated_at = datetime.now(UTC)
     session.add(ptype)
     session.commit()

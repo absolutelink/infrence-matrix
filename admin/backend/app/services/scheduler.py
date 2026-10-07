@@ -59,6 +59,23 @@ row's ``created_at`` — is older than the definition's
 backend that has never served a request is not reaped against its
 stale pre-boot timestamp. Each tick also refreshes the ``im:vram:used``
 mirror TTL for this process's booted holds.
+
+Phase 16 slice 4 adds two agent-scoped constraints on top of the per-machine
+VRAM gate (ARCHITECTURE.md §6):
+
+* **`max_running_backends` (per agent).** Before booting a backend of type
+  ``T`` on agent ``A``, the scheduler counts ``A``'s loaded backends (an
+  agent is single-type). If the count is at ``ProviderType.max_running_backends``
+  (0 = unlimited; e.g. ``1`` for halogen-flash), it **hot-swaps**: evicts the
+  LRU idle same-agent backend (subject to the same busy/zero-active-slot guard
+  as VRAM eviction, never the target) before admitting the new one. If no
+  evictable same-agent victim exists the boot falls through to the next
+  candidate (stays queued).
+* **Serialized init warm-up.** On agent (re)connect the WS accept path fires
+  ``warm_up_agent`` as a detached background task: it boots the agent's
+  assigned backends **one at a time** (per-agent ``_warming`` guard, each
+  under ``im:sched:lock``), each gated by VRAM + ``max_running``, stopping at
+  the first that does not fit (warm-up never evicts). The rest boot on demand.
 """
 
 import asyncio
@@ -80,6 +97,7 @@ from app.models import (
     ProviderAgent,
     ProviderDefinition,
     ProviderInstance,
+    ProviderType,
 )
 from app.services import redis_keys
 from app.services.connection_manager import manager
@@ -177,6 +195,10 @@ class InferenceScheduler:
         # for, so concurrent acquires on different aliases can never both
         # target the same victim.
         self._evicting: set[str] = set()
+        # Agent ids with an in-flight proactive warm-up pass (see
+        # ``warm_up_agent``). Serializes warm-up boots per agent so a
+        # reconnect during an in-progress warm-up never double-boots.
+        self._warming: set[str] = set()
         self._bg_stop: asyncio.Event | None = None
         self._bg_task: asyncio.Task[None] | None = None  # type: ignore[type-arg]
 
@@ -389,6 +411,22 @@ class InferenceScheduler:
                             machine.uid,
                             definition.vram_required_bytes,
                             free,
+                        )
+                        continue
+                    # Phase 16 slice 4: per-agent max_running_backends cap.
+                    # An agent may run at most ProviderType.max_running_backends
+                    # of its (single-type) backends at once (0 = unlimited).
+                    # If the boot would exceed the cap, hot-swap evict an idle
+                    # same-agent backend LRU-first; if none is evictable the
+                    # boot falls through to the next candidate (stays queued).
+                    if not await self._ensure_agent_capacity(
+                        machine, instance_id, str(instance.agent_id), alias, definition
+                    ):
+                        logger.debug(
+                            "alias %s: agent %s at max_running_backends with no "
+                            "idle same-agent victim; staying queued",
+                            alias,
+                            instance.agent_id,
                         )
                         continue
                     if not await self._boot(str(instance.agent_id), instance_id):
@@ -684,26 +722,40 @@ class InferenceScheduler:
         requesting_alias: str,
         target_instance_id: str,
         held: dict[str, int],
+        *,
+        agent_id: str | None = None,
+        require_hold: bool = True,
     ) -> list[dict]:
-        """Idle, loaded, different-alias instances on ``machine_uid``.
+        """Idle, loaded instances on ``machine_uid`` eligible for eviction.
 
-        Returns dicts with ``id``/``alias``/``vram_bytes``/
+        Returns dicts with ``id``/``agent_id``/``alias``/``vram_bytes``/
         ``last_request_at``, LRU-ordered (oldest request first; ``None``
         sorts first). Instances with any active in-process slot (any
-        alias), with no VRAM hold in the ledger, already being evicted,
-        or of the requesting alias itself are excluded — we never evict
-        something busy, something that frees nothing, or the only home of
+        alias), already being evicted, or of the requesting alias itself
+        are excluded — we never evict something busy or the only home of
         the alias that is asking for the space.
 
-        The DB ``backend_status`` filter is deliberately **absent**: any
-        instance with a positive hold in the merged ledger is a victim,
-        including ``self._booted`` instances whose DB mirror is stale
-        (e.g. a status event lost after an out-of-band stop attempt).
-        The hold requirement — not the DB state — is what makes eviction
-        able to reclaim the space.
+        Two eviction scopes share this builder:
+
+        * **VRAM** (``agent_id=None``, ``require_hold=True``): any
+          different-alias instance on the machine; a positive VRAM hold in
+          the merged ledger is required (evicting something that holds
+          nothing could never free space).
+        * **max_running hot-swap** (``agent_id=<A>``, ``require_hold=False``):
+          restricted to agent ``A`` and required to be *loaded* (DB
+          running/in_use or in ``self._booted``) — a loaded backend counts
+          against the per-agent cap even when it holds zero VRAM (e.g. a
+          mock model), so the hold filter is replaced by a loaded filter.
+
+        The DB ``backend_status`` filter is deliberately **absent** for the
+        VRAM scope: any instance with a positive hold in the merged ledger
+        is a victim, including ``self._booted`` instances whose DB mirror
+        is stale (e.g. a status event lost after an out-of-band stop
+        attempt). The hold requirement — not the DB state — is what makes
+        VRAM eviction able to reclaim the space.
         """
         with Session(engine) as session:
-            rows = session.exec(
+            stmt = (
                 select(ProviderInstance, ProviderDefinition)
                 .join(
                     ProviderDefinition,
@@ -719,7 +771,10 @@ class InferenceScheduler:
                     Machine.uid == machine_uid,
                     ProviderDefinition.alias != requesting_alias,
                 )
-            ).all()
+            )
+            if agent_id is not None:
+                stmt = stmt.where(ProviderAgent.id == uuid.UUID(agent_id))
+            rows = session.exec(stmt).all()
             out: list[dict] = []
             for inst, definition in rows:
                 instance_id = str(inst.id)
@@ -730,7 +785,16 @@ class InferenceScheduler:
                 if self._active_count_on_instance(instance_id) > 0:
                     continue
                 vram_bytes = held.get(instance_id, 0)
-                if vram_bytes <= 0:
+                loaded = (
+                    inst.backend_status in RUNNING_BACKEND_STATUSES
+                    or instance_id in self._booted
+                )
+                if require_hold:
+                    if vram_bytes <= 0:
+                        continue
+                elif not loaded:
+                    # max_running scope: only loaded same-agent backends
+                    # count against the cap, so a stopped one is not a victim.
                     continue
                 out.append(
                     {
@@ -748,6 +812,332 @@ class InferenceScheduler:
                 item["last_request_at"],
             )
         )
+        return out
+
+    # ------------------------------------------------------------------
+    # Per-agent max_running_backends cap (Phase 16 slice 4)
+    # ------------------------------------------------------------------
+    def _max_running_for_type(self, provider_type: str) -> int:
+        """The agent-scoped running cap for ``provider_type`` (0 = unlimited).
+
+        Read from ``ProviderType.max_running_backends`` (declared in the
+        type's shipped ``schema.json`` as ``x-max-running-backends`` and
+        stored at registration). A type with no registry row (e.g. a bare
+        test fixture) is treated as unlimited so the cap never fires
+        accidentally.
+        """
+        with Session(engine) as session:
+            ptype = session.exec(
+                select(ProviderType).where(ProviderType.name == provider_type)
+            ).first()
+        return ptype.max_running_backends if ptype is not None else 0
+
+    def _running_on_agent(self, agent_id: str, exclude_instance_id: str) -> int:
+        """Count of loaded backends on ``agent_id`` (excluding the target).
+
+        "Loaded" merges the DB lifecycle (``running``/``in_use``) with this
+        process's ``self._booted`` ledger, so a backend this process just
+        booted (whose DB status event may lag) still counts against the cap.
+
+        NOTE: this counts ALL of the agent's backends without filtering
+        ``provider_type``. That is correct ONLY because of the Phase 16
+        invariant that a ``ProviderAgent`` is bound to exactly one
+        ``provider_type`` (ARCHITECTURE.md §1 key invariant 1 / §4: every
+        ``ProviderInstance`` on an agent shares the agent's type, and
+        placement never mixes types onto one agent). Under that invariant the
+        per-agent count IS the per-type count the cap is defined over; if an
+        agent ever hosted multiple types this and ``_ensure_agent_capacity``
+        would need a ``provider_type`` filter.
+        """
+        with Session(engine) as session:
+            rows = session.exec(
+                select(ProviderInstance.id, ProviderInstance.backend_status).where(
+                    ProviderInstance.agent_id == uuid.UUID(agent_id)
+                )
+            ).all()
+        count = 0
+        for instance_id, backend_status in rows:
+            sid = str(instance_id)
+            if sid == exclude_instance_id:
+                continue
+            if backend_status in RUNNING_BACKEND_STATUSES or sid in self._booted:
+                count += 1
+        return count
+
+    def _is_loaded(self, instance_id: str) -> bool:
+        """True when ``instance_id`` is already resident (DB running/in_use or
+        in this process's ``self._booted`` ledger)."""
+        if instance_id in self._booted:
+            return True
+        with Session(engine) as session:
+            status = session.exec(
+                select(ProviderInstance.backend_status).where(
+                    ProviderInstance.id == uuid.UUID(instance_id)
+                )
+            ).first()
+        return status in RUNNING_BACKEND_STATUSES
+
+    def _agent_connected(self, agent_id: str) -> bool:
+        """True while the agent's mirrored liveness flag is set.
+
+        ``websocket_connected`` is flipped False synchronously on socket
+        teardown (``ws._mark_disconnected``) and by the presence sweep, so it
+        is the testable, cross-process equivalent of the in-process
+        ``manager.get(agent_id)`` live-socket check.
+        """
+        with Session(engine) as session:
+            connected = session.exec(
+                select(ProviderAgent.websocket_connected).where(
+                    ProviderAgent.id == uuid.UUID(agent_id)
+                )
+            ).first()
+        return bool(connected)
+
+    async def _ensure_agent_capacity(
+        self,
+        machine: Machine,
+        target_instance_id: str,
+        agent_id: str,
+        requesting_alias: str,
+        definition: ProviderDefinition,
+    ) -> bool:
+        """Make room on ``agent_id`` for one more running backend of the
+        target's type, hot-swapping an idle same-agent backend LRU-first if
+        the agent is at ``max_running_backends``.
+
+        Returns True when the boot may proceed (unlimited cap, already under
+        the cap, or a victim was successfully stopped to get under it).
+        Returns False when the cap is reached and no evictable same-agent
+        victim exists (busy or none) — the caller then falls through to the
+        next candidate (stays queued), never evicting a busy backend or the
+        target itself.
+
+        Reuses the shared ``_eviction_candidates`` builder (agent-scoped,
+        loaded-not-hold filter) and ``_stop_instance`` + the ``_evicting``
+        guard; the caller holds ``im:sched:lock:{alias}`` for the whole call.
+
+        The agent-scoped eviction relies on the same single-type-per-agent
+        invariant as ``_running_on_agent`` (see its note): every same-agent
+        victim is of the target's type, so no ``provider_type`` filter is
+        applied to the victim set.
+        """
+        cap = self._max_running_for_type(definition.provider_type)
+        if cap <= 0:
+            return True  # unlimited
+        if self._running_on_agent(agent_id, target_instance_id) < cap:
+            return True
+        held = await self._machine_vram_held(machine)
+        victims = self._eviction_candidates(
+            machine.uid,
+            requesting_alias,
+            target_instance_id,
+            held,
+            agent_id=agent_id,
+            require_hold=False,
+        )
+        for victim in victims:
+            if self._running_on_agent(agent_id, target_instance_id) < cap:
+                break
+            victim_id = victim["id"]
+            self._evicting.add(victim_id)
+            try:
+                stopped = await self._stop_instance(
+                    victim["agent_id"],
+                    victim_id,
+                    machine.uid,
+                    f"max_running hot-swap for alias '{requesting_alias}'",
+                )
+            finally:
+                self._evicting.discard(victim_id)
+            if not stopped:
+                continue
+            logger.warning(
+                "scheduler hot-swap: alias '%s' evicted idle instance %s "
+                "(alias '%s') on agent %s to respect max_running_backends=%d "
+                "[target %s]",
+                requesting_alias,
+                victim_id,
+                victim["alias"],
+                agent_id,
+                cap,
+                target_instance_id,
+            )
+        return self._running_on_agent(agent_id, target_instance_id) < cap
+
+    # ------------------------------------------------------------------
+    # Proactive init warm-up (Phase 16 slice 4)
+    # ------------------------------------------------------------------
+    async def warm_up_agent(self, agent_id: str) -> None:
+        """Boot an agent's assigned backends one at a time after it connects.
+
+        Triggered as a detached background task from the WS accept path (and
+        left as the seam for slice 5's ``agent.assignments.update`` re-warm)
+        so it never blocks the socket handshake. Backends are warmed in a
+        deterministic order (most-recently-used first, never-requested last,
+        alias as tiebreak) and each is gated by machine VRAM admission and
+        the type's ``max_running_backends`` — but warm-up NEVER evicts: it
+        stops at the first backend that does not fit, leaving the rest
+        ``stopped`` to boot on demand exactly as before.
+
+        Serialization: an in-process per-agent ``_warming`` guard makes the
+        pass one-at-a-time (a reconnect during an in-progress warm-up is a
+        no-op), and each individual boot honors the ``im:sched:lock:{alias}``
+        contract for the VRAM/cap decision + ``backend.start`` dispatch — the
+        same discipline the request path uses — so a concurrent request on
+        another alias sharing the machine can never double-book the space.
+        Warmed backends idle out normally via the reaper.
+        """
+        if agent_id in self._warming:
+            logger.debug("warm-up already in progress for agent %s; skipping", agent_id)
+            return
+        self._warming.add(agent_id)
+        try:
+            for target in self._warm_up_targets(agent_id):
+                # Nit: if the agent's socket dropped mid-pass, stop cleanly
+                # instead of letting every remaining target fail _boot with a
+                # ConnectionError + warning (the socket is gone; nothing to
+                # warm). Uses the mirrored websocket_connected flag (set False
+                # synchronously on teardown) so it also holds in tests.
+                if not self._agent_connected(agent_id):
+                    logger.debug(
+                        "warm-up agent %s: disconnected; stopping warm-up", agent_id
+                    )
+                    break
+                instance_id = target["id"]
+                definition = target["definition"]
+                machine = target["machine"]
+                if instance_id in self._evicting:
+                    continue
+                if self._active_count_on_instance(instance_id) > 0:
+                    continue
+                if definition.alias is None:  # pragma: no cover - defensive
+                    continue
+                # Serialize against request admissions for this alias the
+                # same way ``acquire``/``_try_admit`` do: the per-alias
+                # in-process ``state.lock`` is the real single-worker guard
+                # (the Redis sched lock is best-effort). Without it a warm-up
+                # boot and a concurrent request for the same alias could both
+                # issue backend.start before either marks the instance booted.
+                state = self._state_for(definition.alias)
+                booted = False
+                async with state.lock:
+                    # TOCTOU re-check (mirrors _try_admit's needs_boot guard):
+                    # the target list was built before this lock was taken, so
+                    # a concurrent request may have booted this very backend in
+                    # the meantime. Skip it rather than issue a redundant
+                    # backend.start (idempotent on the provider, but the ledger
+                    # and logs should not churn).
+                    if self._is_loaded(instance_id):
+                        continue
+                    lock_token = await self._take_admission_lock(definition.alias)
+                    try:
+                        free = await self._free_vram(machine, instance_id)
+                        if definition.vram_required_bytes > free:
+                            logger.debug(
+                                "warm-up agent %s: no VRAM for instance %s "
+                                "(%d needed, %d free); stopping warm-up",
+                                agent_id,
+                                instance_id,
+                                definition.vram_required_bytes,
+                                free,
+                            )
+                            break
+                        cap = self._max_running_for_type(definition.provider_type)
+                        if (
+                            cap > 0
+                            and self._running_on_agent(agent_id, instance_id) >= cap
+                        ):
+                            logger.debug(
+                                "warm-up agent %s: at max_running_backends=%d before "
+                                "instance %s; stopping warm-up",
+                                agent_id,
+                                cap,
+                                instance_id,
+                            )
+                            break
+                        if await self._boot(agent_id, instance_id):
+                            await self._mark_booted(
+                                instance_id, machine.uid, definition
+                            )
+                            booted = True
+                        # else: a single backend failing to boot must not
+                        # strand the rest of the pass; fall through to next.
+                    finally:
+                        await self._release_admission_lock(definition.alias, lock_token)
+                if not booted:
+                    continue
+                logger.info(
+                    "warm-up: booted instance %s (alias '%s') on agent %s",
+                    instance_id,
+                    definition.alias,
+                    agent_id,
+                )
+        except Exception:  # noqa: BLE001 - warm-up is best-effort; never fatal
+            logger.exception("warm-up failed for agent %s", agent_id)
+        finally:
+            self._warming.discard(agent_id)
+
+    def _warm_up_targets(self, agent_id: str) -> list[dict]:
+        """The agent's schedulable backends in warm-up order.
+
+        Enabled definitions on a still-connected agent, ordered
+        most-recently-used first (``last_request_at`` desc; never-requested
+        last), with the definition alias as a deterministic tiebreak. Only
+        ``stopped`` backends are returned — an already-loaded backend is warm
+        by definition and must not be re-booted.
+        """
+        with Session(engine) as session:
+            rows = session.exec(
+                select(ProviderInstance, ProviderDefinition, Machine)
+                .join(
+                    ProviderDefinition,
+                    col(ProviderInstance.provider_definition_id)
+                    == col(ProviderDefinition.id),
+                )
+                .join(
+                    ProviderAgent,
+                    col(ProviderInstance.agent_id) == col(ProviderAgent.id),
+                )
+                .join(Machine, col(ProviderAgent.machine_id) == col(Machine.id))
+                .where(
+                    ProviderAgent.id == uuid.UUID(agent_id),
+                    col(ProviderAgent.websocket_connected) == True,  # noqa: E712
+                    col(ProviderDefinition.enabled) == True,  # noqa: E712
+                )
+            ).all()
+            out: list[dict] = []
+            expunged: set[int] = set()
+            for inst, definition, machine in rows:
+                if inst.backend_status in RUNNING_BACKEND_STATUSES:
+                    continue  # already warm
+                if str(inst.id) in self._booted:
+                    continue
+                # The Machine object is shared across every row of the same
+                # agent (identity map); expunge each tracked instance only
+                # once so a second expunge of the same object is a no-op.
+                for obj in (inst, definition, machine):
+                    if id(obj) not in expunged:
+                        session.expunge(obj)
+                        expunged.add(id(obj))
+                out.append(
+                    {
+                        "id": str(inst.id),
+                        "definition": definition,
+                        "machine": machine,
+                        "last_request_at": inst.last_request_at,
+                    }
+                )
+
+        def _key(item: dict) -> tuple[int, float, str]:
+            lra = item["last_request_at"]
+            if lra is None:
+                return (1, 0.0, item["definition"].alias)
+            if lra.tzinfo is None:
+                lra = lra.replace(tzinfo=UTC)
+            # MRU first: negate the epoch so the most recent sorts smallest.
+            return (0, -lra.timestamp(), item["definition"].alias)
+
+        out.sort(key=_key)
         return out
 
     # ------------------------------------------------------------------

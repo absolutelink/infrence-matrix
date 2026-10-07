@@ -18,7 +18,13 @@ import redis.asyncio as aioredis
 from sqlmodel import Session, select
 
 from app.core.db import engine
-from app.models import Machine, ProviderAgent, ProviderDefinition, ProviderInstance
+from app.models import (
+    Machine,
+    ProviderAgent,
+    ProviderDefinition,
+    ProviderInstance,
+    ProviderType,
+)
 from app.services import redis_keys
 from app.services.connection_manager import manager
 from app.services.scheduler import (
@@ -35,6 +41,34 @@ from tests.helpers import (
 )
 
 TEST_REDIS_URL = __import__("os").environ["TEST_REDIS_URL"]
+
+
+def make_provider_type(
+    session: Session, name: str, *, max_running: int
+) -> ProviderType:
+    """Seed a ProviderType row so the scheduler can read its per-agent
+    ``max_running_backends`` cap (slice 4). The scheduler treats a missing
+    row as unlimited, so cap tests must create one explicitly."""
+    existing = session.exec(
+        select(ProviderType).where(ProviderType.name == name)
+    ).first()
+    if existing is not None:
+        existing.max_running_backends = max_running
+        session.add(existing)
+        session.commit()
+        session.refresh(existing)
+        return existing
+    ptype = ProviderType(
+        name=name,
+        schema={"type": "object"},
+        schema_fingerprint=f"fp-{name}",
+        max_running_backends=max_running,
+        status="active",
+    )
+    session.add(ptype)
+    session.commit()
+    session.refresh(ptype)
+    return ptype
 
 
 def _agent(
@@ -1543,3 +1577,477 @@ async def test_reaper_refreshes_mirror_ttl(
     await scheduler._reap_idle_once()
     ttl = await aredis.ttl(redis_keys.vram_used_key("reap-ttl"))
     assert 0 < ttl <= redis_keys.VRAM_USED_TTL_SECONDS
+
+
+# ===========================================================================
+# Phase 16 slice 4: per-agent max_running_backends cap + hot-swap eviction
+#
+# An agent is single-type; the scheduler counts its loaded backends and, at
+# ProviderType.max_running_backends (0 = unlimited), hot-swaps an idle
+# same-agent backend LRU-first before admitting a new one. VRAM is kept
+# generous in these tests so the cap — not the machine budget — is the
+# binding constraint.
+# ===========================================================================
+def capped_agent_stack(
+    session: Session,
+    *,
+    machine_uid: str,
+    provider_type: str,
+    max_running: int,
+    aliases: list[str],
+    total_vram: int = 1000,
+    vram_required: int = 10,
+    first_status: str = "running",
+) -> tuple[Machine, ProviderAgent, list[ProviderInstance]]:
+    """One machine + one connected agent of ``provider_type`` (cap
+    ``max_running``) hosting one backend per alias. The first backend is
+    ``first_status`` (loaded by default), the rest ``stopped``."""
+    make_provider_type(session, provider_type, max_running=max_running)
+    machine = get_or_create_machine(session, uid=machine_uid, total_vram=total_vram)
+    agent = make_agent(session, machine, provider_type=provider_type, connected=True)
+    instances: list[ProviderInstance] = []
+    for idx, alias in enumerate(aliases):
+        definition = make_definition(
+            session,
+            alias=alias,
+            provider_type=provider_type,
+            vram_required=vram_required,
+            capacity=1,
+            backend_config={"model": {"file": "m.gguf"}},
+        )
+        status = first_status if idx == 0 else "stopped"
+        instances.append(
+            make_instance(session, agent, definition, backend_status=status)
+        )
+    return machine, agent, instances
+
+
+async def test_max_running_one_hot_swaps_idle_backend(
+    session: Session, aredis, boot_calls
+) -> None:
+    """cap=1: booting a 2nd backend evicts the idle 1st (LRU) then boots."""
+    _, _, (inst_a, inst_b) = capped_agent_stack(
+        session,
+        machine_uid="mr-hot",
+        provider_type="mrt1",
+        max_running=1,
+        aliases=["mra", "mrb"],
+    )
+    scheduler = InferenceScheduler(aredis, queue_timeout=1.0)
+    admission = await scheduler.acquire("mrb", "rb")
+    assert admission.instance_id == str(inst_b.id)
+    # Idle A hot-swapped out, B booted in.
+    assert (str(inst_a.id), "backend.stop") in boot_calls
+    assert (str(inst_b.id), "backend.start") in boot_calls
+    assert str(inst_a.id) not in scheduler._booted
+    assert str(inst_b.id) in scheduler._booted
+
+
+async def test_max_running_one_never_evicts_busy_backend(
+    session: Session, aredis, boot_calls
+) -> None:
+    """cap=1: the 1st backend holds an ACTIVE slot -> not evictable; the 2nd
+    boot falls through and the request stays queued (QueueTimeout)."""
+    _, _, (inst_a, inst_b) = capped_agent_stack(
+        session,
+        machine_uid="mr-busy",
+        provider_type="mrb1",
+        max_running=1,
+        aliases=["mrba", "mrbb"],
+    )
+    scheduler = InferenceScheduler(aredis, queue_timeout=0.3)
+    # Occupy A with an active slot (A is already running; no boot). Admitting
+    # onto the DB-running A adopts its hold into this process's ledger.
+    await scheduler.acquire("mrba", "ra")
+    assert scheduler._active_count_on_instance(str(inst_a.id)) == 1
+    assert str(inst_a.id) in scheduler._booted
+    with pytest.raises(QueueTimeout):
+        await scheduler.acquire("mrbb", "rb")
+    # Busy A was never stopped; B never booted.
+    assert (str(inst_a.id), "backend.stop") not in boot_calls
+    assert (str(inst_b.id), "backend.start") not in boot_calls
+    assert str(inst_b.id) not in scheduler._booted
+    await scheduler.release("mrba", "ra")
+
+
+async def test_max_running_zero_is_unlimited(
+    session: Session, aredis, boot_calls
+) -> None:
+    """cap=0 (unlimited): a 2nd backend boots alongside the idle 1st; no
+    hot-swap, both resident."""
+    _, _, (inst_a, inst_b) = capped_agent_stack(
+        session,
+        machine_uid="mr-zero",
+        provider_type="mrz0",
+        max_running=0,
+        aliases=["mrza", "mrzb"],
+    )
+    scheduler = InferenceScheduler(aredis, queue_timeout=1.0)
+    admission = await scheduler.acquire("mrzb", "rb")
+    assert admission.instance_id == str(inst_b.id)
+    # Unlimited: booting B alongside the idle A must NOT hot-swap A out.
+    assert (str(inst_a.id), "backend.stop") not in boot_calls
+    assert (str(inst_b.id), "backend.start") in boot_calls
+    assert str(inst_b.id) in scheduler._booted
+
+
+async def test_max_running_hot_swap_is_same_agent_only(
+    session: Session, aredis, boot_calls
+) -> None:
+    """The hot-swap victim is scoped to the requesting agent: an idle backend
+    on a DIFFERENT agent of the same type is never touched."""
+    make_provider_type(session, "mrx", max_running=1)
+    machine = get_or_create_machine(session, uid="mr-xagent", total_vram=1000)
+    agent_a = make_agent(session, machine, provider_type="mrx", connected=True)
+    agent_b = make_agent(session, machine, provider_type="mrx", connected=True)
+    # Agent A: idle running backend (victim) + a stopped target.
+    def_a1 = make_definition(
+        session, alias="xa1", provider_type="mrx", vram_required=10,
+        backend_config={"model": {"file": "m.gguf"}},
+    )
+    def_a2 = make_definition(
+        session, alias="xa2", provider_type="mrx", vram_required=10,
+        backend_config={"model": {"file": "m.gguf"}},
+    )
+    # Agent B: an idle running backend that must be left alone.
+    def_b1 = make_definition(
+        session, alias="xb1", provider_type="mrx", vram_required=10,
+        backend_config={"model": {"file": "m.gguf"}},
+    )
+    inst_a1 = make_instance(session, agent_a, def_a1, backend_status="running")
+    inst_a2 = make_instance(session, agent_a, def_a2, backend_status="stopped")
+    inst_b1 = make_instance(session, agent_b, def_b1, backend_status="running")
+
+    scheduler = InferenceScheduler(aredis, queue_timeout=1.0)
+    admission = await scheduler.acquire("xa2", "ra2")
+    assert admission.instance_id == str(inst_a2.id)
+    # Same-agent idle victim A1 hot-swapped out; cross-agent B1 untouched.
+    assert (str(inst_a1.id), "backend.stop") in boot_calls
+    assert (str(inst_b1.id), "backend.stop") not in boot_calls
+    assert (str(inst_a2.id), "backend.start") in boot_calls
+
+
+async def test_max_running_hot_swap_lru_order_same_agent(
+    session: Session, aredis, boot_calls
+) -> None:
+    """cap=2 with two idle same-agent backends and a 3rd boot: only the LRU
+    (oldest last_request_at) is hot-swapped out to get under the cap."""
+    from datetime import UTC, datetime, timedelta
+
+    make_provider_type(session, "mrl", max_running=2)
+    machine = get_or_create_machine(session, uid="mr-lru", total_vram=1000)
+    agent = make_agent(session, machine, provider_type="mrl", connected=True)
+    now = datetime.now(UTC)
+    defs = {}
+    insts = {}
+    for alias, age in (("lra", 200), ("lrb", 5)):
+        defs[alias] = make_definition(
+            session, alias=alias, provider_type="mrl", vram_required=10,
+            backend_config={"model": {"file": "m.gguf"}},
+        )
+        insts[alias] = make_instance(
+            session,
+            agent,
+            defs[alias],
+            backend_status="running",
+            last_request_at=now - timedelta(seconds=age),
+        )
+    def_c = make_definition(
+        session, alias="lrc", provider_type="mrl", vram_required=10,
+        backend_config={"model": {"file": "m.gguf"}},
+    )
+    inst_c = make_instance(session, agent, def_c, backend_status="stopped")
+
+    scheduler = InferenceScheduler(aredis, queue_timeout=1.0)
+    admission = await scheduler.acquire("lrc", "rc")
+    assert admission.instance_id == str(inst_c.id)
+    # Two running (lra, lrb) at cap=2; booting a 3rd needs running<2, so the
+    # single LRU (lra, oldest) is evicted and lrb is left resident.
+    assert (str(insts["lra"].id), "backend.stop") in boot_calls
+    assert (str(insts["lrb"].id), "backend.stop") not in boot_calls
+    assert (str(inst_c.id), "backend.start") in boot_calls
+
+
+# ===========================================================================
+# Phase 16 slice 4: proactive init warm-up on agent connect
+# ===========================================================================
+def warmup_agent_stack(
+    session: Session,
+    *,
+    machine_uid: str,
+    provider_type: str,
+    max_running: int,
+    aliases: list[str],
+    total_vram: int = 1000,
+    vram_required: int = 10,
+    last_request_ages: dict[str, float] | None = None,
+) -> tuple[ProviderAgent, dict[str, ProviderInstance]]:
+    """A connected agent with N stopped backends (one per alias) for warm-up."""
+    make_provider_type(session, provider_type, max_running=max_running)
+    machine = get_or_create_machine(session, uid=machine_uid, total_vram=total_vram)
+    agent = make_agent(session, machine, provider_type=provider_type, connected=True)
+    from datetime import UTC, datetime, timedelta
+
+    insts: dict[str, ProviderInstance] = {}
+    for alias in aliases:
+        definition = make_definition(
+            session,
+            alias=alias,
+            provider_type=provider_type,
+            vram_required=vram_required,
+            capacity=1,
+            backend_config={"model": {"file": "m.gguf"}},
+        )
+        age = (last_request_ages or {}).get(alias)
+        last = None if age is None else datetime.now(UTC) - timedelta(seconds=age)
+        insts[alias] = make_instance(
+            session, agent, definition, backend_status="stopped", last_request_at=last
+        )
+    return agent, insts
+
+
+async def test_warm_up_boots_up_to_cap_serialized(
+    session: Session, aredis, monkeypatch
+) -> None:
+    """cap=2 of 4 assigned backends: exactly 2 boot, one at a time (never
+    concurrently), the rest stay stopped for on-demand boot."""
+    agent, insts = warmup_agent_stack(
+        session,
+        machine_uid="wu-cap",
+        provider_type="wucap",
+        max_running=2,
+        aliases=["wua", "wub", "wuc", "wud"],
+    )
+    calls: list[tuple[str, str]] = []
+    state = {"in_flight": 0, "max_in_flight": 0}
+
+    async def fake(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        if type_ == "backend.start":
+            state["in_flight"] += 1
+            state["max_in_flight"] = max(state["max_in_flight"], state["in_flight"])
+            await asyncio.sleep(0.02)  # widen any concurrency window
+            state["in_flight"] -= 1
+        calls.append((payload.get("instance_id", agent_id), type_))
+        return Frame(type="ack", payload={"ok": True})
+
+    monkeypatch.setattr(manager, "send_command", fake)
+    scheduler = InferenceScheduler(aredis)
+    await scheduler.warm_up_agent(str(agent.id))
+
+    starts = [c for c in calls if c[1] == "backend.start"]
+    assert len(starts) == 2, f"expected exactly cap=2 boots, got {starts}"
+    assert state["max_in_flight"] == 1, "warm-up boots must be serialized"
+    # Exactly two of the four are now held; two remain stopped.
+    assert len([i for i in insts.values() if str(i.id) in scheduler._booted]) == 2
+
+
+async def test_warm_up_bounded_by_vram(
+    session: Session, aredis, monkeypatch
+) -> None:
+    """Unlimited cap but tight VRAM: warm-up stops at the first backend that
+    does not fit (no eviction during warm-up)."""
+    agent, _ = warmup_agent_stack(
+        session,
+        machine_uid="wu-vram",
+        provider_type="wuvram",
+        max_running=0,  # unlimited cap -> VRAM is the only bound
+        aliases=["wva", "wvb", "wvc"],
+        total_vram=100,
+        vram_required=60,
+    )
+    calls: list[tuple[str, str]] = []
+
+    async def fake(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        calls.append((payload.get("instance_id", agent_id), type_))
+        return Frame(type="ack", payload={"ok": True})
+
+    monkeypatch.setattr(manager, "send_command", fake)
+    scheduler = InferenceScheduler(aredis)
+    await scheduler.warm_up_agent(str(agent.id))
+    # 60 fits (free 100); the next needs 60 but only 40 remains -> stop.
+    assert [c for c in calls if c[1] == "backend.start"] and len(
+        [c for c in calls if c[1] == "backend.start"]
+    ) == 1
+    # Warm-up never evicts.
+    assert not [c for c in calls if c[1] == "backend.stop"]
+
+
+async def test_warm_up_order_is_most_recently_used(
+    session: Session, aredis, monkeypatch
+) -> None:
+    """Warm-up boots MRU-first (last_request_at desc), never-requested last."""
+    agent, insts = warmup_agent_stack(
+        session,
+        machine_uid="wu-order",
+        provider_type="wuord",
+        max_running=0,  # unlimited so all three boot
+        aliases=["wo-old", "wo-new", "wo-none"],
+        last_request_ages={"wo-old": 500, "wo-new": 10},  # wo-none never requested
+    )
+    order: list[str] = []
+
+    async def fake(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        if type_ == "backend.start":
+            order.append(payload.get("instance_id"))
+        return Frame(type="ack", payload={"ok": True})
+
+    monkeypatch.setattr(manager, "send_command", fake)
+    scheduler = InferenceScheduler(aredis)
+    await scheduler.warm_up_agent(str(agent.id))
+    assert order == [
+        str(insts["wo-new"].id),
+        str(insts["wo-old"].id),
+        str(insts["wo-none"].id),
+    ]
+
+
+async def test_warm_up_skips_already_running_and_is_guarded(
+    session: Session, aredis, monkeypatch
+) -> None:
+    """An already-loaded backend is not re-booted; concurrent warm-up passes
+    for the same agent collapse to one (per-agent ``_warming`` guard)."""
+    make_provider_type(session, "wug", max_running=0)
+    machine = get_or_create_machine(session, uid="wu-guard", total_vram=1000)
+    agent = make_agent(session, machine, provider_type="wug", connected=True)
+    def_run = make_definition(
+        session, alias="grun", provider_type="wug", vram_required=10,
+        backend_config={"model": {"file": "m.gguf"}},
+    )
+    def_stop = make_definition(
+        session, alias="gstop", provider_type="wug", vram_required=10,
+        backend_config={"model": {"file": "m.gguf"}},
+    )
+    inst_run = make_instance(session, agent, def_run, backend_status="running")
+    inst_stop = make_instance(session, agent, def_stop, backend_status="stopped")
+
+    calls: list[tuple[str, str]] = []
+
+    async def fake(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        calls.append((payload.get("instance_id", agent_id), type_))
+        await asyncio.sleep(0.02)
+        return Frame(type="ack", payload={"ok": True})
+
+    monkeypatch.setattr(manager, "send_command", fake)
+    scheduler = InferenceScheduler(aredis)
+    # Two passes concurrently: the second must no-op on the guard.
+    await asyncio.gather(
+        scheduler.warm_up_agent(str(agent.id)),
+        scheduler.warm_up_agent(str(agent.id)),
+    )
+    starts = [c for c in calls if c[1] == "backend.start"]
+    # Only the stopped backend boots; the running one is skipped; the guard
+    # prevents a double pass.
+    assert starts == [(str(inst_stop.id), "backend.start")]
+    assert (str(inst_run.id), "backend.start") not in calls
+
+
+async def test_warm_up_survives_boot_failure(
+    session: Session, aredis, monkeypatch
+) -> None:
+    """A refused backend.start does not abort the whole warm-up pass; the
+    next assigned backend still boots."""
+    agent, insts = warmup_agent_stack(
+        session,
+        machine_uid="wu-fail",
+        provider_type="wufail",
+        max_running=0,
+        aliases=["wfa", "wfb"],
+    )
+    calls: list[tuple[str, str]] = []
+
+    async def fake(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        iid = payload.get("instance_id", agent_id)
+        calls.append((iid, type_))
+        if type_ == "backend.start" and iid == str(insts["wfa"].id):
+            return Frame(type="ack", payload={"ok": False, "error": "boom"})
+        return Frame(type="ack", payload={"ok": True})
+
+    monkeypatch.setattr(manager, "send_command", fake)
+    scheduler = InferenceScheduler(aredis)
+    await scheduler.warm_up_agent(str(agent.id))
+    # wfa failed (not held), wfb still warmed.
+    assert (str(insts["wfa"].id), "backend.start") in calls
+    assert (str(insts["wfb"].id), "backend.start") in calls
+    assert str(insts["wfa"].id) not in scheduler._booted
+    assert str(insts["wfb"].id) in scheduler._booted
+
+
+async def test_warm_up_skips_backend_booted_by_concurrent_request(
+    session: Session, aredis, monkeypatch
+) -> None:
+    """TOCTOU (Low): a backend a concurrent request booted after the warm-up
+    target list was built must NOT get a redundant backend.start — the
+    in-lock re-check skips it (mirrors _try_admit's needs_boot guard)."""
+    # Two stopped backends, unlimited cap; MRU tiebreak orders toca before
+    # tocb (both never-requested -> alias asc).
+    agent, insts = warmup_agent_stack(
+        session,
+        machine_uid="wu-toctou",
+        provider_type="wutoct",
+        max_running=0,
+        aliases=["toca", "tocb"],
+    )
+    gate = asyncio.Event()
+    starts: list[str] = []
+
+    async def fake(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        iid = payload.get("instance_id", agent_id)
+        if type_ == "backend.start":
+            starts.append(iid)
+            if iid == str(insts["toca"].id):
+                await gate.wait()  # park warm-up inside toca's boot
+        return Frame(type="ack", payload={"ok": True})
+
+    monkeypatch.setattr(manager, "send_command", fake)
+    scheduler = InferenceScheduler(aredis)
+    warm = asyncio.create_task(scheduler.warm_up_agent(str(agent.id)))
+    # Warm-up has begun booting toca and is parked; tocb is still a target.
+    await wait_until(lambda: str(insts["toca"].id) in starts)
+    # A concurrent request boots tocb (different alias -> no lock contention).
+    await scheduler.acquire("tocb", "rb")
+    assert str(insts["tocb"].id) in scheduler._booted
+    # Release warm-up: it finishes toca, then reaches tocb (now loaded) and
+    # must skip it rather than re-boot.
+    gate.set()
+    await asyncio.wait_for(warm, timeout=3)
+    # tocb booted exactly once (by the request), never by warm-up.
+    assert starts.count(str(insts["tocb"].id)) == 1
+    assert starts.count(str(insts["toca"].id)) == 1
+    await scheduler.release("tocb", "rb")
+
+
+async def test_warm_up_stops_when_agent_disconnects_mid_pass(
+    session: Session, aredis, monkeypatch
+) -> None:
+    """Nit: when the agent's socket drops mid-warm-up the pass stops cleanly
+    instead of failing every remaining backend.start with a ConnectionError."""
+    agent, insts = warmup_agent_stack(
+        session,
+        machine_uid="wu-disc",
+        provider_type="wudisc",
+        max_running=0,
+        aliases=["dca", "dcb", "dcc"],
+    )
+    starts: list[str] = []
+
+    async def fake(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        iid = payload.get("instance_id", agent_id)
+        if type_ == "backend.start":
+            starts.append(iid)
+            if iid == str(insts["dca"].id):
+                # Simulate the socket dropping right after the first boot:
+                # flip the mirrored liveness flag the warm-up loop re-reads.
+                with Session(engine) as s:
+                    row = s.get(ProviderAgent, agent.id)
+                    row.websocket_connected = False
+                    s.add(row)
+                    s.commit()
+        return Frame(type="ack", payload={"ok": True})
+
+    monkeypatch.setattr(manager, "send_command", fake)
+    scheduler = InferenceScheduler(aredis)
+    await scheduler.warm_up_agent(str(agent.id))
+    # Only the first backend booted; the disconnect broke the loop before dcb.
+    assert starts == [str(insts["dca"].id)]
+    assert str(insts["dcb"].id) not in scheduler._booted
+    assert str(insts["dcc"].id) not in scheduler._booted
