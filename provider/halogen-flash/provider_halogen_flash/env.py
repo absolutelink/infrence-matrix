@@ -207,11 +207,14 @@ def build_env(
 
     `options` is the flat semantic dict — pass `flatten_options(cfg)`
     for a Phase 12 sectioned config (or a legacy `cfg["options"]`
-    blob). `cache_dir` is the per-instance disk-cache directory: it is
-    exported as HALOGEN_CACHE_DIR only when `options.cache_dir_enabled`
-    is true (legacy semantics). `npu_models` (already NPU-probe-gated
-    by the caller) joins with commas so the engine reads a bare id list,
-    not a Python repr.
+    blob). `cache_dir` is the per-instance disk-cache directory,
+    exported as HALOGEN_CACHE_DIR unless `cache_dir_enabled` is
+    EXPLICITLY false: the schema default is true and the UI prunes
+    untouched defaults, so an absent key means "enabled" (a config
+    carrying only e.g. `cache_disk_gib` must still get its cache dir —
+    the engine cannot persist a disk cache without it). `npu_models`
+    (already NPU-probe-gated by the caller) joins with commas so the
+    engine reads a bare id list, not a Python repr.
 
     `checkpoint_path` / `tokenizer_path` are `None` when the operator left
     `artifacts.model` / `artifacts.tokenizer` blank: the variable is then
@@ -242,7 +245,12 @@ def build_env(
     for key, variable in ENV_MAP.items():
         if opts.get(key) is not None:
             env[variable] = str(opts[key])
-    if opts.get("cache_dir_enabled") is True and cache_dir is not None:
+    # Absent (pruned default) or null behave like the schema default
+    # `true`; only an explicit false disables the export.
+    cache_dir_enabled = opts.get("cache_dir_enabled")
+    if cache_dir_enabled is None:
+        cache_dir_enabled = True
+    if cache_dir_enabled is True and cache_dir is not None:
         Path(cache_dir).mkdir(parents=True, exist_ok=True)
         env["HALOGEN_CACHE_DIR"] = str(cache_dir)
     if npu_models:

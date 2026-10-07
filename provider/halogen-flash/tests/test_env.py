@@ -143,6 +143,27 @@ def test_cache_dir_only_when_enabled(tmp_path) -> None:
     assert "HALOGEN_CACHE_DIR" not in env
 
 
+def test_cache_dir_emitted_when_key_pruned_away(tmp_path) -> None:
+    """UI prunes untouched defaults: an ABSENT cache_dir_enabled follows
+    the schema default (true) and must export the dir. Production symptom
+    this guards: backend_config = {"disk_cache": {"cache_disk_gib": 512}}
+    started the engine with HALOGEN_CACHE_DISK_GIB but no HALOGEN_CACHE_DIR
+    (disk cache enabled but nowhere to persist)."""
+    cache = tmp_path / "fcache-default"
+    env = build_env(
+        {"cache_disk_gib": 512},
+        api_port=1,
+        engine_port=2,
+        checkpoint_path="/c",
+        tokenizer_path="/t",
+        cache_dir=cache,
+        base_env={},
+    )
+    assert env["HALOGEN_CACHE_DIR"] == str(cache)
+    assert env["HALOGEN_CACHE_DISK_GIB"] == "512"
+    assert cache.is_dir()
+
+
 def test_npu_models_joined_as_bare_comma_list() -> None:
     env = build_env(
         {},
