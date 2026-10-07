@@ -174,6 +174,80 @@ def test_status_events_persist(client: TestClient, session: Session) -> None:
 
         _wait_for(running)
 
+        def loaded_clock_stamped() -> bool:
+            session.expire_all()
+            row = session.exec(
+                select(ProviderInstance).where(
+                    ProviderInstance.id == uuid.UUID(instance_id)
+                )
+            ).one()
+            return row.backend_loaded_at is not None
+
+        # Entering the loaded set arms the idle-reaper clock at boot time.
+        _wait_for(loaded_clock_stamped)
+        loaded_once = session.exec(
+            select(ProviderInstance).where(
+                ProviderInstance.id == uuid.UUID(instance_id)
+            )
+        ).one().backend_loaded_at
+
+        # in_use -> running (idle heartbeat after a slot release) must NOT
+        # re-arm the clock: the backend has been loaded the whole time.
+        ws.send_text(
+            Frame(
+                type="backend.status",
+                id="ev-3",
+                epoch=epoch,
+                payload={"backend_status": "in_use"},
+            ).to_json()
+        )
+        ws.send_text(
+            Frame(
+                type="backend.status",
+                id="ev-4",
+                epoch=epoch,
+                payload={"backend_status": "running"},
+            ).to_json()
+        )
+
+        def back_to_running() -> bool:
+            session.expire_all()
+            row = session.exec(
+                select(ProviderInstance).where(
+                    ProviderInstance.id == uuid.UUID(instance_id)
+                )
+            ).one()
+            return row.backend_status == "running"
+
+        _wait_for(back_to_running)
+        row = session.exec(
+            select(ProviderInstance).where(
+                ProviderInstance.id == uuid.UUID(instance_id)
+            )
+        ).one()
+        assert row.backend_loaded_at == loaded_once
+
+        # Leaving the loaded set clears the clock; the next boot re-arms it.
+        ws.send_text(
+            Frame(
+                type="backend.status",
+                id="ev-5",
+                epoch=epoch,
+                payload={"backend_status": "stopped"},
+            ).to_json()
+        )
+
+        def stopped() -> bool:
+            session.expire_all()
+            row = session.exec(
+                select(ProviderInstance).where(
+                    ProviderInstance.id == uuid.UUID(instance_id)
+                )
+            ).one()
+            return row.backend_status == "stopped" and row.backend_loaded_at is None
+
+        _wait_for(stopped)
+
 
 def test_epoch_fencing_drops_stale_frames(client: TestClient, session: Session) -> None:
     reg = _register(client, session)
@@ -302,6 +376,65 @@ def test_reconnect_bumps_epoch(client: TestClient, session: Session) -> None:
         return row.epoch == 2 and row.websocket_connected is False
 
     _wait_for(final_state)
+
+
+def test_disconnect_clears_and_reconnect_rearms_load_clock(
+    client: TestClient, session: Session
+) -> None:
+    """A dead socket means "backend state unknown": the load clock must be
+    cleared so a container restart that re-reports `running` over the new
+    socket re-arms the idle-reaper window at the real (re)boot time —
+    never against the previous boot's stamp."""
+    reg = _register(client, session)
+    instance_id = reg["instance_id"]
+
+    def row() -> ProviderInstance:
+        session.expire_all()
+        return session.exec(
+            select(ProviderInstance).where(
+                ProviderInstance.id == uuid.UUID(instance_id)
+            )
+        ).one()
+
+    with client.websocket_connect(
+        f"/provider/ws?instance_id={instance_id}",
+        headers=_ws_headers(reg["instance_secret"]),
+    ) as ws:
+        hello = _recv_frame(ws)
+        ws.send_text(
+            Frame(
+                type="backend.status",
+                id="clock-1",
+                epoch=hello.epoch,
+                payload={"backend_status": "running"},
+            ).to_json()
+        )
+        _wait_for(lambda: row().backend_loaded_at is not None)
+    loaded_first = row().backend_loaded_at
+
+    # Socket closed -> disconnect handling clears the clock.
+    _wait_for(lambda: row().backend_loaded_at is None)
+
+    with client.websocket_connect(
+        f"/provider/ws?instance_id={instance_id}",
+        headers=_ws_headers(reg["instance_secret"]),
+    ) as ws:
+        hello2 = _recv_frame(ws)
+        # The provider re-reports the CURRENT (still-running-in-the-new-
+        # container) backend: DB still says running, clock is NULL ->
+        # must re-arm.
+        ws.send_text(
+            Frame(
+                type="backend.status",
+                id="clock-2",
+                epoch=hello2.epoch,
+                payload={"backend_status": "running"},
+            ).to_json()
+        )
+        _wait_for(
+            lambda: row().backend_loaded_at is not None
+            and row().backend_loaded_at != loaded_first
+        )
 
 
 # ---------------------------------------------------------------------------

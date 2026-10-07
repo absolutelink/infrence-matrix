@@ -11,7 +11,9 @@ discipline. Chat-spec differences:
   id — but we never surface it; it is captured for persistence).
 - Chat SSE is data-only — no ``event:`` lines — so each chunk is framed as
   ``data: {chunk}\\n\\n`` and the stream ends with ``data: [DONE]\\n\\n``.
-- Mid-stream failures use chat-style error framing:
+- Failures raised by the awaited ``litellm.acompletion`` call (before any
+  SSE byte) are a real HTTP 502 JSON, like the non-stream path. Once the
+  stream has started, mid-stream failures use chat-style error framing:
   ``data: {"error": {...}}\\n\\n`` + ``[DONE]`` (not ``response.failed``).
 - Persistence reuses the Phase 6 ``persist_turn`` path with
   ``parameters.api_format = "chat_completions"``: the request
@@ -47,7 +49,7 @@ from app.api.v1.responses import (
     _as_item_list,
     get_scheduler,
     map_exception_to_error,
-    persist_turn,
+    persist_turn_logged,
 )
 from app.core.db import engine
 from app.models import ProviderDefinition, backend_config_is_authored
@@ -239,6 +241,78 @@ async def create_chat_completion(request: Request) -> Any:
     input_items_for_record = _as_item_list(messages)
 
     if stream:
+        # Await the call itself BEFORE committing the SSE response:
+        # a call-time raise (upstream 4xx/5xx after litellm's retries,
+        # connection refused) maps to a real HTTP 502 like the non-stream
+        # path. Once headers are committed the only honest signal left is
+        # an aborted stream — which browsers report as a bare network
+        # error. Failures raised while iterating (after the first await
+        # of the committed stream) keep the in-stream error framing.
+        try:
+            upstream = await litellm.acompletion(
+                model=alias,
+                custom_llm_provider="openai",
+                # The openai chat path demands a non-empty key even for
+                # unauthenticated local upstreams; the provider ignores it.
+                api_key="unused",
+                api_base=f"{admission.base_url}/v1",
+                stream=True,
+                messages=messages,
+                # Forced include_usage (computed above) so token counts
+                # persist on the streaming path.
+                stream_options=stream_options,
+                # Belt-and-suspenders: never let litellm's gpt-5 conditional
+                # bridge reroute this chat call to /v1/responses.
+                _skip_responses_api_bridge=True,
+                **passthrough,
+            )
+        except asyncio.CancelledError:
+            # Client vanished during the await: free the slot (idempotent)
+            # before unwinding, shielded so the cancel cannot skip it.
+            with contextlib.suppress(Exception):
+                await asyncio.shield(scheduler.release(alias, request_id))
+            raise
+        except Exception as exc:  # noqa: BLE001 - call-time litellm failure
+            error = map_exception_to_error(exc)
+            logger.warning(
+                "litellm chat call failed for %s before streaming: %s",
+                client_completion_id,
+                exc,
+            )
+            # Shielded like the CancelledError branch above: a cancel
+            # landing here must not skip the release (a leaked active
+            # slot would also block the reaper's zero-slots guard).
+            with contextlib.suppress(Exception):
+                await asyncio.shield(scheduler.release(alias, request_id))
+            persist_turn_logged(
+                client_response_id=client_completion_id,
+                previous_response_id=None,
+                input_items=input_items_for_record,
+                output_items=[],
+                definition_id=definition_id,
+                instance_id=uuid.UUID(admission.instance_id),
+                parameters=_record_parameters(
+                    base_params,
+                    admission,
+                    stream=True,
+                    litellm_id=None,
+                    passthrough=passthrough,
+                ),
+                status="failed",
+                usage=None,
+                error=error,
+                store=store,
+            )
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": {
+                        "type": error["type"],
+                        "code": error["code"],
+                        "message": error["message"],
+                    }
+                },
+            )
         return StreamingResponse(
             _stream_chat(
                 scheduler=scheduler,
@@ -248,9 +322,8 @@ async def create_chat_completion(request: Request) -> Any:
                 input_items_for_record=input_items_for_record,
                 definition_id=definition_id,
                 admission=admission,
-                messages=messages,
+                upstream=upstream,
                 passthrough=passthrough,
-                stream_options=stream_options,
                 base_params=base_params,
                 store=store,
             ),
@@ -299,38 +372,27 @@ async def _stream_chat(
     input_items_for_record: list[dict[str, Any]],
     definition_id: uuid.UUID,
     admission: Admission,
-    messages: list[dict[str, Any]],
+    upstream: Any,
     passthrough: dict[str, Any],
-    stream_options: dict[str, Any],
     base_params: dict[str, Any],
     store: bool = True,
 ) -> AsyncIterator[str]:
+    """Relay an already-created litellm chat stream as SSE.
+
+    The awaited ``litellm.acompletion`` call happens in the route (a
+    call-time failure is a real HTTP 502 there); by the time this runs
+    the response headers are committed, so every failure while
+    iterating must surface as the chat-style error frame + [DONE],
+    never as an aborted chunked body.
+    """
     aggregator = _ChatChunkAggregator()
     terminal_usage: dict[str, Any] | None = None
     litellm_id: str | None = None
     failed_error: dict[str, Any] | None = None
 
-    stream = None
     try:
-        stream = await litellm.acompletion(
-            model=alias,
-            custom_llm_provider="openai",
-            # The openai chat path demands a non-empty key even for
-            # unauthenticated local upstreams; the provider ignores it.
-            api_key="unused",
-            api_base=f"{admission.base_url}/v1",
-            stream=True,
-            messages=messages,
-            # Forced include_usage (computed in the route) so token
-            # counts persist on the streaming path.
-            stream_options=stream_options,
-            # Belt-and-suspenders: never let litellm's gpt-5 conditional
-            # bridge reroute this chat call to /v1/responses.
-            _skip_responses_api_bridge=True,
-            **passthrough,
-        )
         try:
-            async for chunk in stream:
+            async for chunk in upstream:
                 data = to_dict(chunk)
                 if litellm_id is None:
                     litellm_id = data.get("id")
@@ -355,9 +417,9 @@ async def _stream_chat(
         # slot release or persistence on the client-disconnect path
         # (same pattern as Phase 6 _stream_response).
         async def _cleanup() -> None:
-            if stream is not None:
+            if upstream is not None:
                 with contextlib.suppress(Exception):
-                    await stream.aclose()
+                    await upstream.aclose()
             with contextlib.suppress(Exception):
                 await scheduler.release(alias, request_id)
 
@@ -370,26 +432,25 @@ async def _stream_chat(
                 "code": "client_disconnected",
                 "message": "client disconnected before the completion finished",
             }
-        with contextlib.suppress(Exception):
-            persist_turn(
-                client_response_id=client_completion_id,
-                previous_response_id=None,
-                input_items=input_items_for_record,
-                output_items=aggregator.output_items() if completed else [],
-                definition_id=definition_id,
-                instance_id=uuid.UUID(admission.instance_id),
-                parameters=_record_parameters(
-                    base_params,
-                    admission,
-                    stream=True,
-                    litellm_id=litellm_id,
-                    passthrough=passthrough,
-                ),
-                status="completed" if completed else "failed",
-                usage=terminal_usage if completed else None,
-                error=None if completed else failed_error,
-                store=store,
-            )
+        persist_turn_logged(
+            client_response_id=client_completion_id,
+            previous_response_id=None,
+            input_items=input_items_for_record,
+            output_items=aggregator.output_items() if completed else [],
+            definition_id=definition_id,
+            instance_id=uuid.UUID(admission.instance_id),
+            parameters=_record_parameters(
+                base_params,
+                admission,
+                stream=True,
+                litellm_id=litellm_id,
+                passthrough=passthrough,
+            ),
+            status="completed" if completed else "failed",
+            usage=terminal_usage if completed else None,
+            error=None if completed else failed_error,
+            store=store,
+        )
 
 
 async def _non_stream_chat(
@@ -420,26 +481,25 @@ async def _non_stream_chat(
             )
         except Exception as exc:  # noqa: BLE001
             error = map_exception_to_error(exc)
-            with contextlib.suppress(Exception):
-                persist_turn(
-                    client_response_id=client_completion_id,
-                    previous_response_id=None,
-                    input_items=input_items_for_record,
-                    output_items=[],
-                    definition_id=definition_id,
-                    instance_id=uuid.UUID(admission.instance_id),
-                    parameters=_record_parameters(
-                        base_params,
-                        admission,
-                        stream=False,
-                        litellm_id=None,
-                        passthrough=passthrough,
-                    ),
-                    status="failed",
-                    usage=None,
-                    error=error,
-                    store=store,
-                )
+            persist_turn_logged(
+                client_response_id=client_completion_id,
+                previous_response_id=None,
+                input_items=input_items_for_record,
+                output_items=[],
+                definition_id=definition_id,
+                instance_id=uuid.UUID(admission.instance_id),
+                parameters=_record_parameters(
+                    base_params,
+                    admission,
+                    stream=False,
+                    litellm_id=None,
+                    passthrough=passthrough,
+                ),
+                status="failed",
+                usage=None,
+                error=error,
+                store=store,
+            )
             return JSONResponse(
                 status_code=502,
                 content={
@@ -464,26 +524,25 @@ async def _non_stream_chat(
             if isinstance(choice, dict) and isinstance(choice.get("message"), dict):
                 output_items.append(choice["message"])
 
-        with contextlib.suppress(Exception):
-            persist_turn(
-                client_response_id=client_completion_id,
-                previous_response_id=None,
-                input_items=input_items_for_record,
-                output_items=output_items,
-                definition_id=definition_id,
-                instance_id=uuid.UUID(admission.instance_id),
-                parameters=_record_parameters(
-                    base_params,
-                    admission,
-                    stream=False,
-                    litellm_id=litellm_id,
-                    passthrough=passthrough,
-                ),
-                status="completed",
-                usage=usage,
-                error=None,
-                store=store,
-            )
+        persist_turn_logged(
+            client_response_id=client_completion_id,
+            previous_response_id=None,
+            input_items=input_items_for_record,
+            output_items=output_items,
+            definition_id=definition_id,
+            instance_id=uuid.UUID(admission.instance_id),
+            parameters=_record_parameters(
+                base_params,
+                admission,
+                stream=False,
+                litellm_id=litellm_id,
+                passthrough=passthrough,
+            ),
+            status="completed",
+            usage=usage,
+            error=None,
+            store=store,
+        )
         return JSONResponse(content=data)
     finally:
         # Guaranteed slot release on EVERY exit path — including

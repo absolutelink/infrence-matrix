@@ -267,6 +267,19 @@ def persist_turn(
         session.commit()
 
 
+def persist_turn_logged(**kwargs: Any) -> None:
+    """``persist_turn`` for the response paths, where a DB failure must
+    never break the terminal handling — but silently swallowing it loses
+    the turn record unnoticed. Log loudly instead."""
+    try:
+        persist_turn(**kwargs)
+    except Exception:
+        logger.exception(
+            "failed to persist response turn %s",
+            kwargs.get("client_response_id"),
+        )
+
+
 @router.post("/v1/responses")
 async def create_response(request: Request) -> Any:
     body = await request.json()
@@ -516,25 +529,24 @@ async def _stream_response(
             await asyncio.shield(_cleanup())
         # Persist once at terminal. Synchronous DB work: runs to completion
         # without needing to be awaited, so cancellation cannot interrupt it.
-        with contextlib.suppress(Exception):
-            persist_turn(
-                client_response_id=client_response_id,
-                previous_response_id=previous_response_id,
-                input_items=input_items_for_record,
-                output_items=terminal_output,
-                definition_id=definition_id,
-                instance_id=uuid.UUID(admission.instance_id) if admission else None,
-                parameters={
-                    **base_params,
-                    "litellm_response_id": litellm_wrapped_id,
-                    "api_base": admission.base_url if admission else None,
-                    "stream": True,
-                },
-                status="completed" if completed else "failed",
-                usage=terminal_usage if completed else None,
-                error=failed_error if not completed else None,
-                store=store,
-            )
+        persist_turn_logged(
+            client_response_id=client_response_id,
+            previous_response_id=previous_response_id,
+            input_items=input_items_for_record,
+            output_items=terminal_output,
+            definition_id=definition_id,
+            instance_id=uuid.UUID(admission.instance_id) if admission else None,
+            parameters={
+                **base_params,
+                "litellm_response_id": litellm_wrapped_id,
+                "api_base": admission.base_url if admission else None,
+                "stream": True,
+            },
+            status="completed" if completed else "failed",
+            usage=terminal_usage if completed else None,
+            error=failed_error if not completed else None,
+            store=store,
+        )
 
 
 async def _non_stream_response(
@@ -564,24 +576,23 @@ async def _non_stream_response(
             )
         except Exception as exc:  # noqa: BLE001
             error = map_exception_to_error(exc)
-            with contextlib.suppress(Exception):
-                persist_turn(
-                    client_response_id=client_response_id,
-                    previous_response_id=previous_response_id,
-                    input_items=input_items_for_record,
-                    output_items=[],
-                    definition_id=definition_id,
-                    instance_id=uuid.UUID(admission.instance_id),
-                    parameters={
-                        **base_params,
-                        "api_base": admission.base_url,
-                        "stream": False,
-                    },
-                    status="failed",
-                    usage=None,
-                    error=error,
-                    store=store,
-                )
+            persist_turn_logged(
+                client_response_id=client_response_id,
+                previous_response_id=previous_response_id,
+                input_items=input_items_for_record,
+                output_items=[],
+                definition_id=definition_id,
+                instance_id=uuid.UUID(admission.instance_id),
+                parameters={
+                    **base_params,
+                    "api_base": admission.base_url,
+                    "stream": False,
+                },
+                status="failed",
+                usage=None,
+                error=error,
+                store=store,
+            )
             return JSONResponse(
                 status_code=502,
                 content={
@@ -601,25 +612,24 @@ async def _non_stream_response(
         output_items = _clean_output_items(_as_item_list(data.get("output")))
         data["output"] = output_items
 
-        with contextlib.suppress(Exception):
-            persist_turn(
-                client_response_id=client_response_id,
-                previous_response_id=previous_response_id,
-                input_items=input_items_for_record,
-                output_items=output_items,
-                definition_id=definition_id,
-                instance_id=uuid.UUID(admission.instance_id),
-                parameters={
-                    **base_params,
-                    "litellm_response_id": litellm_wrapped_id,
-                    "api_base": admission.base_url,
-                    "stream": False,
-                },
-                status=data.get("status", "completed"),
-                usage=to_dict(usage) if usage else None,
-                error=None,
-                store=store,
-            )
+        persist_turn_logged(
+            client_response_id=client_response_id,
+            previous_response_id=previous_response_id,
+            input_items=input_items_for_record,
+            output_items=output_items,
+            definition_id=definition_id,
+            instance_id=uuid.UUID(admission.instance_id),
+            parameters={
+                **base_params,
+                "litellm_response_id": litellm_wrapped_id,
+                "api_base": admission.base_url,
+                "stream": False,
+            },
+            status=data.get("status", "completed"),
+            usage=to_dict(usage) if usage else None,
+            error=None,
+            store=store,
+        )
         return JSONResponse(content=data)
     finally:
         # Guaranteed slot release on EVERY exit path — including

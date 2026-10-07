@@ -965,6 +965,7 @@ def make_reap_target(
     connected: bool = True,
     backend_status: str = "running",
     vram_required: int = 50,
+    backend_loaded_age_seconds: float | None = None,
 ) -> ProviderInstance:
     machine = session.query(Machine).filter(Machine.uid == machine_uid).first()
     if machine is None:
@@ -990,12 +991,18 @@ def make_reap_target(
         if last_request_age_seconds is None
         else datetime.now(UTC) - timedelta(seconds=last_request_age_seconds)
     )
+    loaded_at = (
+        None
+        if backend_loaded_age_seconds is None
+        else datetime.now(UTC) - timedelta(seconds=backend_loaded_age_seconds)
+    )
     instance = ProviderInstance(
         machine_id=machine.id,
         provider_definition_id=definition.id,
         backend_status=backend_status,
         websocket_connected=connected,
         last_request_at=last,
+        backend_loaded_at=loaded_at,
     )
     session.add(instance)
     session.commit()
@@ -1034,6 +1041,66 @@ async def test_reaper_stops_idle_loaded_instance(
     assert await aredis.hgetall(redis_keys.vram_used_key("reap-1")) == {}
     with Session(engine) as s:
         assert s.get(ProviderInstance, instance.id).backend_status == "stopped"
+
+
+async def test_reaper_does_not_stop_freshly_loaded_instance_with_stale_clock(
+    session: Session, aredis, monkeypatch
+) -> None:
+    """The boot re-arms the idle clock: last_request_at predates the load,
+    but backend_loaded_at is fresh -> nothing to reap yet."""
+    instance = make_reap_target(
+        session,
+        machine_uid="reap-fresh",
+        alias="rf-a",
+        idle_timeout=10,
+        last_request_age_seconds=30,
+        backend_loaded_age_seconds=1,
+    )
+    calls: list[tuple[str, str]] = []
+
+    async def fake(instance_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        calls.append((instance_id, type_))
+        return Frame(type="ack", payload={"ok": True})
+
+    monkeypatch.setattr(manager, "send_command", fake)
+    scheduler = InferenceScheduler(aredis)
+    await scheduler._mark_booted(
+        str(instance.id),
+        "reap-fresh",
+        session.get(ProviderDefinition, instance.provider_definition_id),
+    )
+    assert await scheduler._reap_idle_once() == 0
+    assert calls == []
+
+
+async def test_reaper_stops_never_served_instance_from_load_clock(
+    session: Session, aredis, monkeypatch
+) -> None:
+    """Never served a request (last_request_at None): the load clock alone
+    decides — loaded past the timeout -> reap."""
+    instance = make_reap_target(
+        session,
+        machine_uid="reap-loadonly",
+        alias="rl-a",
+        idle_timeout=10,
+        last_request_age_seconds=None,
+        backend_loaded_age_seconds=30,
+    )
+    calls: list[tuple[str, str]] = []
+
+    async def fake(instance_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        calls.append((instance_id, type_))
+        return Frame(type="ack", payload={"ok": True})
+
+    monkeypatch.setattr(manager, "send_command", fake)
+    scheduler = InferenceScheduler(aredis)
+    await scheduler._mark_booted(
+        str(instance.id),
+        "reap-loadonly",
+        session.get(ProviderDefinition, instance.provider_definition_id),
+    )
+    assert await scheduler._reap_idle_once() == 1
+    assert (str(instance.id), "backend.stop") in calls
 
 
 async def test_reaper_never_stops_zero_timeout(

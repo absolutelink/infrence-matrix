@@ -51,10 +51,13 @@ same ``acquire``/``release`` interface.
 
 The idle-timeout reaper (``_idle_reaper``, started by ``start_background``)
 runs every ``IDLE_REAPER_INTERVAL_SECONDS``: connected instances whose
-backend is loaded, with zero active in-process slots, and whose
-``last_request_at`` is older than the definition's
+backend is loaded, with zero active in-process slots, and whose idle
+clock — ``max(last_request_at, backend_loaded_at)``, falling back to the
+row's ``created_at`` — is older than the definition's
 ``idle_timeout_seconds`` get ``backend.stop`` (``idle_timeout_seconds ==
-0`` means never idle-stop). Each tick also refreshes the ``im:vram:used``
+0`` means never idle-stop). A boot re-arms the clock: a just-started
+backend that has never served a request is not reaped against its
+stale pre-boot timestamp. Each tick also refreshes the ``im:vram:used``
 mirror TTL for this process's booted holds.
 """
 
@@ -608,6 +611,9 @@ class InferenceScheduler:
             inst = session.get(ProviderInstance, uuid.UUID(instance_id))
             if inst is not None and inst.backend_status != BackendStatusValue.STOPPED:
                 inst.backend_status = BackendStatusValue.STOPPED
+                # Not loaded -> no load clock (the invariant that keeps
+                # max(last_request_at, backend_loaded_at) honest).
+                inst.backend_loaded_at = None
                 inst.updated_at = datetime.now(UTC)
                 session.add(inst)
                 session.commit()
@@ -944,9 +950,10 @@ class InferenceScheduler:
           owns so the observability mirror survives a boot that outlives
           the 60s key TTL (the ledger itself is in-process and authoritative).
         * Stop every connected instance whose backend is loaded, which has
-          **zero active in-process slots**, and whose ``last_request_at``
-          is at least ``idle_timeout_seconds`` old. ``idle_timeout_seconds
-          == 0`` means "never idle-stop".
+          **zero active in-process slots**, and whose idle clock —
+          ``max(last_request_at, backend_loaded_at)``, falling back to the
+          row's ``created_at`` — is at least ``idle_timeout_seconds`` old.
+          ``idle_timeout_seconds == 0`` means "never idle-stop".
 
         The loop is resilient: an exception in a tick is logged and the
         next tick still runs. Only stopped-on-success instances lose their
@@ -1034,9 +1041,24 @@ class InferenceScheduler:
                 if timeout is None or timeout <= 0:
                     continue  # 0 = never idle-stop
                 last = inst.last_request_at
+                loaded_at = inst.backend_loaded_at
+                # Normalize BEFORE comparing: a naive timestamp (legacy
+                # row or driver) would raise TypeError inside the tick,
+                # and the reaper swallows tick exceptions — the reap
+                # would silently never happen again.
+                if last is not None and last.tzinfo is None:
+                    last = last.replace(tzinfo=UTC)
+                if loaded_at is not None and loaded_at.tzinfo is None:
+                    loaded_at = loaded_at.replace(tzinfo=UTC)
+                # A just-loaded backend starts its idle window at boot:
+                # never-served instances (last_request_at from a previous
+                # boot, or None) must not be reaped against the old clock.
+                if loaded_at is not None and (last is None or loaded_at > last):
+                    last = loaded_at
                 if last is None:
-                    # Never served a request: only reap if the row itself
-                    # has been around at least that long.
+                    # Never served a request and load time unknown (e.g.
+                    # rows predating the load clock): only reap if the row
+                    # itself has been around at least that long.
                     last = inst.created_at
                 if last.tzinfo is None:
                     last = last.replace(tzinfo=UTC)

@@ -322,6 +322,15 @@ class ProviderInstance(SQLModel, table=True):
     last_request_at: datetime | None = Field(
         default=None, sa_column=Column(DateTime(timezone=True))
     )
+    # When the backend last entered a loaded state (running/in_use),
+    # stamped by the backend.status / provider.status ingest. The idle
+    # reaper's baseline is max(last_request_at, backend_loaded_at): a
+    # freshly booted backend that has never served a request must not be
+    # reaped against its stale pre-boot clock (or the instance row's
+    # created_at). Cleared whenever the backend leaves the loaded set.
+    backend_loaded_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True))
+    )
 
     # Hash of the backend_config the instance last applied. Drives auto
     # cache-clear on config change (Phase 9).

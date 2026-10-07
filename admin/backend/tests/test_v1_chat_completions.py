@@ -404,11 +404,60 @@ def test_midstream_failure_error_frame_and_failed_record(
     assert scheduler.active_count("ct-fail") == 0
 
 
+def test_prefirstchunk_failure_is_http_502_and_failed_record(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    """A failure raised by the awaited ``acompletion`` call (e.g. the
+    provider 501s on an unsupported surface) must surface as a real HTTP
+    status, not an aborted SSE body: headers are only committed after the
+    call succeeds. Persists a failed record and releases the slot."""
+    instance = seed_instance(session, alias="ct-prefail", machine_uid="ct-prefail-m")
+
+    async def raising_acompletion(*args, **kwargs):  # noqa: ARG001
+        raise litellm.exceptions.APIError(
+            status_code=501,
+            message="Error code: 501 - no chat stream",
+            llm_provider="openai",
+            model="ct-prefail",
+        )
+
+    monkeypatch.setattr(litellm, "acompletion", raising_acompletion)
+
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ct-prefail",
+            "messages": [{"role": "user", "content": "x"}],
+            "stream": True,
+        },
+    )
+    assert resp.status_code == 502
+    body = resp.json()
+    assert body["error"]["type"] == "server_error"
+    assert body["error"]["code"] == "upstream_failed"
+
+    record = (
+        session.query(ResponseRecord)
+        .filter(
+            ResponseRecord.provider_definition_id == instance.provider_definition_id
+        )
+        .order_by(ResponseRecord.created_at.desc())  # type: ignore[attr-defined]
+        .first()
+    )
+    assert record is not None
+    assert record.status == "failed"
+    assert record.error_code == "upstream_failed"
+    assert record.output_items == []
+
+    scheduler = client.app.state.scheduler
+    assert scheduler.active_count("ct-prefail") == 0
+
+
 # ---------------------------------------------------------------------------
 # Client disconnect (generator aclose) releases slot + persists failed
 # ---------------------------------------------------------------------------
 async def test_stream_generator_aclose_releases_and_persists_failed(
-    session, monkeypatch
+    session,
 ) -> None:
     """Same cancellation-safe pattern as Phase 6: drive the route generator
     directly and aclose it mid-stream."""
@@ -418,14 +467,9 @@ async def test_stream_generator_aclose_releases_and_persists_failed(
     instance = seed_instance(session, alias="ct-gen", machine_uid="ct-gen-m")
     definition_id = instance.provider_definition_id
 
-    async def hang_acompletion(*args, **kwargs):  # noqa: ARG001
-        async def gen():
-            yield chat_chunk({"role": "assistant", "content": "first"})
-            await asyncio.sleep(120)
-
-        return gen()
-
-    monkeypatch.setattr(litellm, "acompletion", hang_acompletion)
+    async def hang_stream():
+        yield chat_chunk({"role": "assistant", "content": "first"})
+        await asyncio.sleep(120)
 
     import os
 
@@ -443,9 +487,8 @@ async def test_stream_generator_aclose_releases_and_persists_failed(
         input_items_for_record=[{"role": "user", "content": "x"}],
         definition_id=definition_id,
         admission=admission,
-        messages=[{"role": "user", "content": "x"}],
+        upstream=hang_stream(),
         passthrough={},
-        stream_options={"include_usage": True},
         base_params={
             "model": "ct-gen",
             "provider_type": "mock",

@@ -61,6 +61,16 @@ _NON_LOADED_BACKEND_STATUSES = frozenset(
     }
 )
 
+# Backend states that mean "weights resident, could serve a request"
+# (mirrors app.services.scheduler.RUNNING_BACKEND_STATUSES — kept local
+# to avoid a scheduler import cycle). Drives the idle-reaper load clock.
+_LOADED_BACKEND_STATUSES = frozenset(
+    {
+        BackendStatusValue.RUNNING,
+        BackendStatusValue.IN_USE,
+    }
+)
+
 # TTL for the Redis presence key. The provider must send or receive traffic
 # (pings keep it alive) more often than this. Must be an int (Redis ex=).
 PRESENCE_TTL_SECONDS = 60
@@ -347,6 +357,24 @@ class ConnectionManager:
                     instance_status = InstanceStatusValue.AWAITING_CONFIG
                 inst.instance_status = instance_status
             if backend_status:
+                # Idle-reaper clock: a backend entering a loaded state
+                # starts a fresh idle window *now* — not at the last
+                # request it served before its previous stop (or never).
+                # Also stamped when a loaded report arrives with the
+                # clock missing (e.g. an admin restart while the backend
+                # was already running). Deliberate consequence: a socket
+                # that flaps re-arms the clock on each reconnect — the
+                # conservative direction (a live backend is never killed
+                # early; a flapping one stays up).
+                now = datetime.now(UTC)
+                loaded = backend_status in _LOADED_BACKEND_STATUSES
+                if not loaded:
+                    inst.backend_loaded_at = None
+                elif (
+                    inst.backend_status not in _LOADED_BACKEND_STATUSES
+                    or inst.backend_loaded_at is None
+                ):
+                    inst.backend_loaded_at = now
                 inst.backend_status = backend_status
             if error_message is not None:
                 inst.error_message = error_message

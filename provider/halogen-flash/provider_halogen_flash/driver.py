@@ -7,6 +7,10 @@ Halogen Flash specifics:
 
 - **Native /v1/responses.** The backend itself speaks OpenResponses
   SSE; the driver mostly passes events through unchanged.
+- **Native /v1/chat/completions.** The same API port speaks OpenAI chat
+  SSE (``chat.completion.chunk`` + ``[DONE]``); the driver relays those
+  chunks for the provider app's chat surface (which aggregates the
+  non-stream case).
 - **Usage normalization override.** The backend is NOT spec-compliant
   on usage (it reports chat-style counts, native timing keys, partial
   details, or nothing). Before the terminal event is yielded, the
@@ -624,30 +628,28 @@ class HalogenFlashBackend(BackendDriver):
         return self._client
 
     # ------------------------------------------------------------------
-    # Streaming: native OpenResponses passthrough + usage override
+    # Streaming: SSE relay from the API port
     # ------------------------------------------------------------------
-    def stream_responses(
-        self, request: dict[str, Any]
+    async def _stream_sse(
+        self, path: str, request: dict[str, Any]
     ) -> AsyncIterator[dict[str, Any]]:
-        return self._stream_native_responses(request)
+        """POST `request` to the API port with stream forced and yield the
+        parsed ``data:`` payloads.
 
-    async def _stream_native_responses(
-        self, request: dict[str, Any]
-    ) -> AsyncIterator[dict[str, Any]]:
+        Shared by both surfaces (native OpenResponses events and
+        OpenAI chat.completion.chunk objects). The stream is always
+        forced: the driver contract is closeable async-iteration, and
+        closing this generator cancels the upstream request so the
+        lifecycle frees the slot on upstream close.
+        """
         body = dict(request)
         body["stream"] = True
-        # Accumulators for the usage override: what the stream itself
-        # produced, used only when the backend under-reports.
-        text_chars = 0
-        reasoning_tokens = 0
         client = self._http_client()
-        async with client.stream(
-            "POST", f"{self.base_url}/v1/responses", json=body
-        ) as resp:
+        async with client.stream("POST", f"{self.base_url}{path}", json=body) as resp:
             if resp.status_code != 200:
                 detail = await resp.aread()
                 raise RuntimeError(
-                    f"upstream /v1/responses returned HTTP {resp.status_code}: "
+                    f"upstream {path} returned HTTP {resp.status_code}: "
                     f"{detail.decode(errors='replace')[:500]}"
                 )
             async for raw in resp.aiter_lines():
@@ -658,10 +660,30 @@ class HalogenFlashBackend(BackendDriver):
                 if not data or data == "[DONE]":
                     continue
                 try:
-                    event = json.loads(data)
+                    yield json.loads(data)
                 except ValueError:
                     logger.debug("skipping unparseable SSE data: %r", data[:120])
-                    continue
+
+    def stream_responses(
+        self, request: dict[str, Any]
+    ) -> AsyncIterator[dict[str, Any]]:
+        return self._stream_native_responses(request)
+
+    def stream_chat_completions(
+        self, request: dict[str, Any]
+    ) -> AsyncIterator[dict[str, Any]]:
+        return self._stream_sse("/v1/chat/completions", request)
+
+    async def _stream_native_responses(
+        self, request: dict[str, Any]
+    ) -> AsyncIterator[dict[str, Any]]:
+        # Accumulators for the usage override: what the stream itself
+        # produced, used only when the backend under-reports.
+        text_chars = 0
+        reasoning_tokens = 0
+        upstream = self._stream_sse("/v1/responses", request)
+        try:
+            async for event in upstream:
                 etype = event.get("type")
                 if etype == "response.output_text.delta":
                     text_chars += len(event.get("delta") or "")
@@ -686,6 +708,12 @@ class HalogenFlashBackend(BackendDriver):
                         reasoning_tokens=reasoning_tokens,
                     )
                 yield event
+        finally:
+            # Closing THIS generator must deterministically close the
+            # inner relay (which owns the upstream HTTP stream): the
+            # lifecycle's release is driven by upstream close, never by
+            # refcount GC of an orphaned async generator.
+            await upstream.aclose()
 
     # ------------------------------------------------------------------
     # Teardown

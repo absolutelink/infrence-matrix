@@ -14,6 +14,9 @@ HALOGEN_* environment, and serves **native OpenResponses SSE** on
                            response.completed carries a chat-style
                            usage blob (prompt_tokens/completion_tokens
                            + timings) instead of a spec usage object.
+  POST /v1/chat/completions OpenAI chat.completion.chunk SSE + [DONE]
+                           (the real API port speaks chat natively; the
+                           driver relays these chunks).
 """
 
 import stat
@@ -129,6 +132,43 @@ FAKE_SCRIPT = textwrap.dedent(
                             "completion_tokens": N_DELTAS,
                             "timings": {"cache_n": 80, "ttft": 0.4}}}})
                 self._stream(frames, "responses_cancelled")
+            elif self.path == "/v1/chat/completions":
+                with open(os.path.join(STATE_DIR, "last_chat_request.json"), "w") as fh:
+                    json.dump(request, fh)
+                if os.environ.get("FAKE_CHAT_STATUS"):
+                    code = int(os.environ["FAKE_CHAT_STATUS"])
+                    self._send(code, {"error": {"message": "chat unavailable"}})
+                    return
+
+                def frames():
+                    yield sse({"id": "chatcmpl_flash", "object": "chat.completion.chunk",
+                               "created": 1, "model": "halogen-qwen3.8-flash",
+                               "choices": [{"index": 0,
+                                            "delta": {"role": "assistant"}}]},
+                              event_type="message")
+                    for i in range(N_DELTAS):
+                        yield sse({"id": "chatcmpl_flash",
+                                   "object": "chat.completion.chunk",
+                                   "created": 1, "model": "halogen-qwen3.8-flash",
+                                   "choices": [{"index": 0,
+                                                "delta": {"content": "tok%d" % i},
+                                                "finish_reason": None}]})
+                    yield sse({"id": "chatcmpl_flash",
+                               "object": "chat.completion.chunk",
+                               "created": 1, "model": "halogen-qwen3.8-flash",
+                               "choices": [{"index": 0, "delta": {},
+                                           "finish_reason": "stop"}]})
+                    # OpenAI streaming-shape final usage chunk: choices
+                    # empty, usage present (what include_usage produces).
+                    yield sse({"id": "chatcmpl_flash",
+                               "object": "chat.completion.chunk",
+                               "created": 1, "model": "halogen-qwen3.8-flash",
+                               "choices": [],
+                               "usage": {"prompt_tokens": 100,
+                                         "completion_tokens": N_DELTAS,
+                                         "total_tokens": 100 + N_DELTAS}})
+                    yield b"data: [DONE]\\n\\n"
+                self._stream(frames, "chat_cancelled")
             else:
                 self._send(404, {"error": "not found"})
 

@@ -102,6 +102,8 @@ def instance_dict(inst: ProviderInstance) -> dict[str, Any]:
         "epoch": inst.epoch,
         "last_seen": iso_utc(inst.last_seen),
         "last_request_at": iso_utc(inst.last_request_at),
+        # Idle-reaper load clock: when this backend entered running/in_use.
+        "backend_loaded_at": iso_utc(inst.backend_loaded_at),
         "config_fingerprint": inst.config_fingerprint,
         # Phase 12 E6: drives the waiting_schema badge (the instance's
         # last-reported schema fingerprint vs the type's committed one).

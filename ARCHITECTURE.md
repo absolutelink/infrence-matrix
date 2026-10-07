@@ -256,6 +256,7 @@ of the same definition.
 | `websocket_connected` | DB mirror; authoritative liveness is the Redis presence key. |
 | `epoch` | Connection epoch: bumped on every accepted socket; stale-epoch frames ignored (fencing). |
 | `last_seen` / `last_request_at` | Liveness + idle tracking. |
+| `backend_loaded_at` | When the backend last entered `running`/`in_use` (stamped by the status ingest on transition; cleared when it leaves the loaded set or the socket dies). The idle reaper's window baseline is `max(last_request_at, backend_loaded_at)` so a freshly booted, never-requested backend is not reaped against a stale clock. |
 | `config_fingerprint` | SHA-256 of the applied `backend_config`; drives auto cache-clear and the Phase 9 `provider.config.update` push (admin PATCH + reconnect self-heal). |
 | `reported_schema_fingerprint` | Schema fingerprint the instance presented at its last registration attempt (Phase 12; drives the `waiting_schema` badge and the pending voter roster). |
 | `assigned_gpus` | Instance-reported GPU UUIDs this backend is bound to; VRAM accounting + metrics dedup. |
@@ -537,9 +538,11 @@ by `start_background` and stopped by `stop`. Each tick:
   a long boot outliving the 60s key TTL keeps its mirror alive).
 - Stops every **connected** instance whose `backend_status` is
   `running`/`in_use`, which has **zero active in-process slots**, and
-  whose `last_request_at` is at least the definition's
-  `idle_timeout_seconds` old (never-requested instances fall back to
-  `created_at`). `idle_timeout_seconds == 0` means **never idle-stop**.
+  whose idle clock — `max(last_request_at, backend_loaded_at)` (a boot
+  re-arms the window at load time), falling back to `created_at` when
+  both are null — is at least the definition's
+  `idle_timeout_seconds` old. `idle_timeout_seconds == 0` means **never
+  idle-stop**.
 - On a successful stop the VRAM hold is cleared (ledger + mirror + DB
   `backend_status=stopped`). A NAK/exception is logged and simply
   retried next tick. The whole tick is wrapped in try/except so one bad
@@ -809,18 +812,19 @@ operation:
    consensus forever unless the operator **force-commits** the pending
    schema. Stale instance rows should be deleted when hardware is
    decommissioned.
-7. Scheduler VRAM eviction is implemented (§6): idle different-alias
+8. Scheduler VRAM eviction is implemented (§6): idle different-alias
    backends are stopped LRU-first to make room. Remaining nuance:
    eviction is per-machine (no cross-machine rebalancing) and victims are
    chosen purely by LRU idle time — there is no priority/weight scheme,
    so a just-booted large model can be evicted for a newly arriving
    request if it happens to be the oldest idle hold.
-8. The idle-timeout reaper is implemented (§6). Remaining nuance: idle
-   detection is admin-side from `last_request_at` + in-process slot
+9. The idle-timeout reaper is implemented (§6). Remaining nuance: idle
+   detection is admin-side from the idle clock
+   (`max(last_request_at, backend_loaded_at)`) + in-process slot
    counts, so a backend kept busy by traffic that bypasses the admin
    (direct provider-port calls) is invisible to the reaper.
-9. Benchmarks removed; performance testing is out-of-band.
-10. Config-update retry is bounded (3 attempts for drain-refused only);
+10. Benchmarks removed; performance testing is out-of-band.
+11. Config-update retry is bounded (3 attempts for drain-refused only);
     a provider that stays busy past the retries surfaces the failure in
     the PATCH response and relies on the reconnect/sweep self-heal for
     eventual consistency. The admin does not queue config pushes.

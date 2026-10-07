@@ -209,11 +209,13 @@ Tests: `provider/llama-cpp/tests`, `test_metrics_ownership.py`.
   periodic task (`IDLE_REAPER_INTERVAL_SECONDS`, default 15.0,
   injectable for tests), started by `start_background`, stopped by
   `stop`. Stops connected, loaded instances with zero active slots whose
-  `last_request_at` (fallback `created_at`) is older than the
-  definition's `idle_timeout_seconds`; `idle_timeout_seconds == 0` means
-  never idle-stop. Clears ledger + mirror + DB status on success; a
-  NAK/exception is retried next tick; each tick is try/except-guarded.
-  Each tick also refreshes the `im:vram:used` TTL for this process's
+  idle clock — `max(last_request_at, backend_loaded_at)`, fallback
+  `created_at` (see the hotfix section; the boot re-arms the window) —
+  is older than the definition's `idle_timeout_seconds`;
+  `idle_timeout_seconds == 0` means never idle-stop. Clears ledger +
+  mirror + DB status on success; a NAK/exception is retried next tick;
+  each tick is try/except-guarded. Each tick also refreshes the
+  `im:vram:used` TTL for this process's
   booted holds.
 - **Cold-boot SSE keepalive** — the streaming `POST /v1/responses`
   response starts immediately and emits `: keep-alive` SSE comment lines
@@ -1412,6 +1414,64 @@ commands), `admin/backend/tests/test_instance_actions.py` (14: routes,
 payloads, timeouts, fences, NAK mapping, metadata ingest, port clash).
 Admin 290 · lib 128 · halogen-flash 153 · halogen 70 · gufo 67 ·
 llama-cpp 61 · mock 23 pass; ruff + biome + tsc + vite build clean.
+
+---
+
+## Hotfix — halogen-flash chat surface + reaper load clock (2026-10-07)
+
+Production report: playground chat completions against the halogen-flash
+alias died with a bare "network error"; `/v1/responses` worked but the
+engine only saw the message a few seconds after submit. Three defects,
+one per layer:
+
+- **halogen-flash had no chat surface (501 → the whole failure chain).**
+  The API port speaks OpenAI `/v1/chat/completions` natively, but
+  `HalogenFlashBackend` only implemented `stream_responses`, so the
+  provider app returned 501 and litellm burned 3 retries before giving
+  up. Fix: `stream_chat_completions` proxies the API port's chat SSE
+  (`stream` forced, `[DONE]` skipped, chunks relayed verbatim; slot
+  release stays driven by upstream close). Tests: fake engine now serves
+  chat SSE; `provider/halogen-flash/tests/test_chat_stream.py` (5:
+  relay + force-stream + upstream-501 raise + cancel-on-aclose +
+  lifecycle slot release).
+- **Admin streaming chat aborted the SSE response on pre-first-chunk
+  errors.** `_stream_chat` awaited `litellm.acompletion` inside the
+  generator, **after** the route had committed 200 +
+  `text/event-stream` headers: a raising call (any upstream 4xx/5xx
+  after litellm's retries) escaped the generator, uvicorn cut the
+  chunked body mid-flight, and clients surfaced a raw network error.
+  Fix: the route awaits the call *before* returning the
+  StreamingResponse — a call-time failure maps to a real HTTP 502 JSON
+  (like the non-stream path), persists a failed `ResponseRecord`, and
+  releases the slot (client disconnect during the await releases under
+  shield). Only failures raised while iterating the committed stream
+  keep the in-stream framing (`data: {"error": ...}` + `[DONE]`).
+  Test: `test_prefirstchunk_failure_is_http_502_and_failed_record`.
+- **The idle reaper killed freshly booted backends.** Its clock was
+  `last_request_at` alone (fallback `created_at`), so a backend loaded
+  via the UI or a scheduler boot that had never served a request was
+  reaped on the next tick ("stopped ... after 5877s idle" while the
+  boot was 15s old) — and every following request paid a full engine
+  re-boot before the engine saw traffic (the responses delay). Fix: new
+  `ProviderInstance.backend_loaded_at` (nullable additive migration
+  `d3a9c6e1f842`), stamped by `connection_manager._persist_status` on
+  transitions into running/in_use (also when a loaded report arrives
+  with a missing clock, e.g. after an admin restart), cleared when the
+  backend leaves the loaded set, when the socket dies (`ws.py`
+  `_mark_disconnected` + the presence sweep — a dead socket makes the
+  backend state unknown, so the reconnect's `running` re-arms at the
+  real boot time), and by the scheduler's `_persist_stopped` mirror.
+  Never re-armed by running→in_use→running idle heartbeats. The reaper
+  baseline is `max(last_request_at, backend_loaded_at)` with the old
+  `created_at` fallback (tz-normalized before comparing). Exposed in
+  the instance API payload for debugging. Tests: reaper (fresh load not
+  reaped; load-clock reap), WS status-ingest clock assertions, and
+  disconnect→reconnect clock re-arm.
+
+Suites after the fix: admin **294** · lib **128** · mock **23** ·
+llama-cpp **61** · halogen **70** · halogen-flash **158** · gufo **67**.
+Client regenerated (no surface change: instance payloads are free-form
+dicts).
 
 ---
 

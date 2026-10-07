@@ -80,6 +80,11 @@ def _mark_disconnected(instance_id: str) -> None:
         inst.instance_status = InstanceStatusValue.DISCONNECTED
         inst.last_seen = now
         inst.updated_at = now
+        # Backend state is unknown once the socket is gone (a container
+        # restart may leave the DB mirror saying "running" for a process
+        # that died). Drop the idle-reaper load clock so the next loaded
+        # status report re-arms it at the real boot time.
+        inst.backend_loaded_at = None
         session.add(inst)
         session.commit()
 

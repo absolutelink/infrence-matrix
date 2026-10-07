@@ -60,6 +60,9 @@ async def sweep_once(redis_client: aioredis.Redis) -> list[str]:
             for inst in rows:
                 inst.websocket_connected = False
                 inst.instance_status = InstanceStatusValue.DISCONNECTED
+                # Backend state is unknown on a dead socket: drop the
+                # idle-reaper load clock so a reconnect boot re-arms it.
+                inst.backend_loaded_at = None
                 inst.updated_at = now
                 session.add(inst)
             session.commit()
