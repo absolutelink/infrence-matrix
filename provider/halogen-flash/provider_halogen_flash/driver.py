@@ -48,6 +48,7 @@ from provider_lib.log_ring import CursorLogRing
 from provider_lib.schema import load_schema, validate_backend_config
 
 from provider_halogen_flash.env import (
+    DEFAULT_DOWNLOAD_REPO,
     build_argv,
     build_env,
     effective_capacity,
@@ -251,6 +252,30 @@ class HalogenFlashBackend(BackendDriver):
             return artifacts[name]
         return self._config.get(name)
 
+    def _download_repo(self, options: dict[str, Any]) -> str | None:
+        """Repo the ENGINE pulls missing files from (`HALOGEN_DOWNLOAD`).
+
+        The provider never downloads for a blank artifact selection — the
+        image does it at start, into the checkpoint's own directory (the
+        checkpoint itself when absent, then its overlay sidecar, ngram table
+        and vision tower, and the tokenizer). Resolution order:
+
+        1. `troubleshooting.download` — an explicit repo id, or an EMPTY
+           string to opt out of engine downloads entirely.
+        2. The `artifacts.model` HF descriptor's repo (an operator-picked
+           file must pull its companions from the same repo, not ours).
+        3. `DEFAULT_DOWNLOAD_REPO` — this provider image's weights repo.
+        """
+        explicit = options.get("download")
+        if explicit is not None:
+            return str(explicit).strip() or None
+        model = self._artifact_descriptor("model")
+        if isinstance(model, dict) and not model.get("path"):
+            repo = str(model.get("repo") or "").strip()
+            if repo:
+                return repo
+        return DEFAULT_DOWNLOAD_REPO
+
     async def _resolve_artifact(self, descriptor: Any, kind: str) -> str:
         """Resolve a halogen-flash artifact to a local path.
 
@@ -294,10 +319,20 @@ class HalogenFlashBackend(BackendDriver):
         # would otherwise surface as a confusing stdbuf exit; check first.
         if not shutil.which(self._binary) and not Path(self._binary).exists():
             raise RuntimeError(f"halogen-flash entrypoint not found: {self._binary}")
-        # `artifacts.model` / `artifacts.tokenizer` are optional: left blank,
-        # nothing is resolved and the variables are not exported, so the
-        # image's own defaults win (v2/w4b head under MODELS_DIR, then the
-        # checkpoint's sidecar tokenizer). See env.build_env.
+        # `artifacts.model` / `artifacts.tokenizer` are optional and the
+        # provider NEVER downloads on their behalf when they are blank: the
+        # engine's own start-time pass (HALOGEN_DOWNLOAD, always exported)
+        # fetches the default checkpoint and whatever companions are missing
+        # into MODELS_DIR. A blank artifact therefore exports no
+        # HALOGEN_CHECKPOINT / HALOGEN_TOKENIZER at all — an empty string
+        # would defeat both fallbacks. See env.build_env.
+        options = self._options()
+        # HALOGEN_DOWNLOAD is an ordinary ENV_MAP option, so the driver
+        # resolves the effective repo and writes it back: the ENGINE fetches
+        # what is missing at start, while the provider itself stays off the
+        # network for blank or path-pinned artifacts. None = opted out.
+        download_repo = self._download_repo(options) or None
+        options["download"] = download_repo
         checkpoint_desc = self._artifact_descriptor("model")
         tokenizer_desc = self._artifact_descriptor("tokenizer")
         checkpoint = (
@@ -311,7 +346,12 @@ class HalogenFlashBackend(BackendDriver):
             else None
         )
         if checkpoint is None:
-            logger.info("artifacts.model blank — using the image default checkpoint")
+            logger.info(
+                "artifacts.model blank — the engine downloads/uses its default "
+                "checkpoint under %s (HALOGEN_DOWNLOAD=%s)",
+                self._settings.MODELS_DIR,
+                download_repo or "unset",
+            )
         if tokenizer is None:
             logger.info("artifacts.tokenizer blank — using the image default tokenizer")
         self.resolved_artifacts = [p for p in (checkpoint, tokenizer) if p is not None]
@@ -322,7 +362,6 @@ class HalogenFlashBackend(BackendDriver):
         # "look beside the checkpoint" (emit 1); `false` is an explicit
         # off-switch for the vision tower (emit 0). An absent value emits
         # nothing (engine default).
-        options = self._options()
         for name in ("vision_tower", "mtp_head"):
             descriptor = self._artifact_descriptor(name)
             if descriptor is None:
@@ -339,6 +378,15 @@ class HalogenFlashBackend(BackendDriver):
                 local = await self._resolve_artifact(descriptor, name)
                 options[name] = local
                 self.resolved_artifacts.append(local)
+        if download_repo and checkpoint is not None:
+            # The engine writes what it fetches (overlay sidecar, ngram table,
+            # vision tower, tokenizer/) BESIDE the checkpoint and the driver
+            # never learns those paths, so the whole checkpoint directory is
+            # kept. Skipped when the checkpoint sits directly in the models
+            # root — protecting the root would disable pruning entirely.
+            parent = Path(checkpoint).resolve().parent
+            if parent != Path(self._settings.MODELS_DIR).resolve():
+                self.resolved_artifacts.append(str(parent))
         api_port, engine_port = self._ports
         cache_dir = Path(self._settings.CACHE_DIR) / "halogen-flash"
         npu_models = await self._npu_models_for_env()

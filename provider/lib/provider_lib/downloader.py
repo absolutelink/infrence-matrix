@@ -219,12 +219,22 @@ async def _download_hf(
     local_subdir: Path | None = None,
 ) -> str:
     try:
+        from huggingface_hub import constants as hf_constants
         from huggingface_hub import hf_hub_download
     except ImportError as exc:  # pragma: no cover - depends on install
         raise DownloadError(
             "huggingface_hub is not installed; cannot download HF artifacts "
             f"({repo}/{filename})"
         ) from exc
+
+    # Reaching this function IS the operator's intent — `ensure_artifact`
+    # only gets here when a descriptor's file is genuinely missing. Engine
+    # images bake HF_HUB_OFFLINE=1 so a served front-end never reaches for
+    # the Hub at request time, and that env would fail every provider-side
+    # download; clear the hub's in-process switch (re-read per request in
+    # `huggingface_hub.utils._http`) WITHOUT touching `os.environ`, which the
+    # spawned backend children must keep inheriting verbatim.
+    hf_constants.HF_HUB_OFFLINE = False
 
     if local_subdir is not None:
         local_dir = Path(models_dir) / local_subdir

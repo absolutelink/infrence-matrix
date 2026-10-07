@@ -56,6 +56,41 @@ async def test_flat_resolution_without_download(tmp_path: Path) -> None:
     assert got == str(flat)
 
 
+async def test_offline_env_does_not_block_an_operator_download(
+    tmp_path, monkeypatch
+) -> None:
+    """Engine images bake HF_HUB_OFFLINE=1 so the served backend never
+    reaches for the Hub mid-request — but that env must not silence the
+    provider's own artifact fetch, which only runs when the operator picked
+    an HF file. The hub's in-process switch is cleared; os.environ is left
+    exactly as the image set it (backend children still inherit it)."""
+    import huggingface_hub.constants as hf_constants
+
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    hf_constants.HF_HUB_OFFLINE = True
+
+    seen: dict[str, object] = {}
+
+    def fake_hf_hub_download(**kwargs):
+        seen["flag_during_call"] = hf_constants.HF_HUB_OFFLINE
+        target = Path(kwargs["local_dir"]) / kwargs["filename"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"downloaded")
+        return str(target)
+
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", fake_hf_hub_download)
+    got = await ensure_artifact(
+        {"source": "hf", "repo": "some/repo", "file": "model.gguf"},
+        models_dir=tmp_path,
+    )
+
+    assert seen["flag_during_call"] is False
+    assert got == str(tmp_path / "some" / "repo" / "model.gguf")
+    import os
+
+    assert os.environ["HF_HUB_OFFLINE"] == "1"
+
+
 async def test_download_progress_events_and_returns_path(tmp_path, monkeypatch) -> None:
     """Progress (0.36+ reality): hf_hub_download exposes NO bar hook and
     hf_xet bypasses http_get's tqdm entirely — _download_hf therefore polls

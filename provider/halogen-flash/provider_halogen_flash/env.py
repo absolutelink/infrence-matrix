@@ -87,6 +87,10 @@ ENV_MAP: dict[str, str] = {
     "vision_max_pixels": "HALOGEN_VISION_MAX_PIXELS",
     # MTP head (driver-resolved from artifacts.mtp_head)
     "mtp_head": "HALOGEN_MTP_HEAD",
+    # Engine-side auto-download repo (driver-resolved: explicit
+    # `troubleshooting.download` > the artifacts.model descriptor repo >
+    # DEFAULT_DOWNLOAD_REPO; None = never emitted = no engine downloads).
+    "download": "HALOGEN_DOWNLOAD",
 }
 
 # backend_config sections whose leaf keys flatten into the semantic
@@ -133,6 +137,13 @@ FLASH_PORT_END = 8290
 FLASH_PORT_PAIRS = (FLASH_PORT_END - FLASH_PORT_START) // 2  # 45 slots
 
 DEFAULT_KV_SLOTS = 1
+
+# The weights repo this provider image is built for. The Flash entrypoint
+# ships no repo of its own, so `HALOGEN_DOWNLOAD` (the engine's start-time
+# auto-download of the checkpoint, its overlay / ngram / vision companions
+# and the tokenizer, into the checkpoint's own directory) has to be named by
+# us. See `HalogenFlashBackend._download_repo`.
+DEFAULT_DOWNLOAD_REPO = "peonist-ai/halogen-qwen3.8-flash-next"
 
 
 def derive_static_ports(machine_uid: str) -> tuple[int, int]:
@@ -209,6 +220,14 @@ def build_env(
     and `need_tokenizer` falls back to the checkpoint's sidecar
     `tokenizer/` when the image default `/tokenizer` is not mounted.
     Overriding either with an empty string would defeat that fallback.
+
+    The repo the ENGINE downloads missing files from is the ordinary
+    `download` → `HALOGEN_DOWNLOAD` option (the driver resolves it — see
+    `HalogenFlashBackend._download_repo`). `maybe_download` fires only for
+    files that are genuinely missing, into the checkpoint's own directory:
+    the checkpoint itself when absent, then its overlay sidecar, ngram
+    table and vision tower, and the tokenizer. This is what makes a blank
+    artifact selection work without the provider ever touching the network.
     """
     env = dict(base_env if base_env is not None else os.environ)
     env["HALOGEN_API_PORT"] = str(api_port)

@@ -8,6 +8,7 @@ stream cancellation.
 
 import json
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -16,7 +17,7 @@ from provider_lib.backend import BackendLifecycle
 from provider_lib.wire import BackendStatusValue
 
 from provider_halogen_flash.driver import HalogenFlashBackend
-from provider_halogen_flash.env import derive_static_ports
+from provider_halogen_flash.env import DEFAULT_DOWNLOAD_REPO, derive_static_ports
 
 
 def _wait_for(predicate, timeout: float = 5.0) -> None:
@@ -285,10 +286,11 @@ async def test_early_exit_includes_stderr_tail(
 async def test_blank_artifacts_defer_to_image_defaults(
     tmp_path, fake_flash_binary, state_dir
 ) -> None:
-    """No `artifacts.model` / `artifacts.tokenizer`: nothing is resolved and
-    neither variable is exported, so the image picks its own checkpoint
-    (`resolve_checkpoint` under MODELS_DIR) and sidecar tokenizer
-    (`need_tokenizer`) instead of being pinned to a missing path."""
+    """No `artifacts.model` / `artifacts.tokenizer`: the provider downloads
+    NOTHING and exports neither variable, so the image picks its own
+    checkpoint (`resolve_checkpoint`) and sidecar tokenizer
+    (`need_tokenizer`) — and `HALOGEN_DOWNLOAD` is still set, which is what
+    lets the engine fetch that default head into MODELS_DIR on a cold box."""
     settings = make_settings(tmp_path, fake_flash_binary)
     driver = HalogenFlashBackend(settings, {}, npu_probe=lambda: NPU_UNAVAILABLE)
     try:
@@ -296,7 +298,113 @@ async def test_blank_artifacts_defer_to_image_defaults(
         recorded = json.loads((state_dir / "env.json").read_text())
         assert "HALOGEN_CHECKPOINT" not in recorded
         assert "HALOGEN_TOKENIZER" not in recorded
+        assert recorded["HALOGEN_DOWNLOAD"] == DEFAULT_DOWNLOAD_REPO
         # Nothing resolved => storage.prune_unused refuses to run (by design).
         assert driver.resolved_artifacts == []
+    finally:
+        await driver.aclose()
+
+
+def test_download_repo_resolution_order(tmp_path, fake_flash_binary) -> None:
+    """Explicit `troubleshooting.download` > the HF descriptor's repo > this
+    image's weights repo; an explicit EMPTY string opts out entirely."""
+    from provider_halogen_flash.env import flatten_options
+
+    def repo_for(cfg: dict[str, Any]) -> str | None:
+        driver = HalogenFlashBackend(
+            make_settings(tmp_path, fake_flash_binary),
+            cfg,
+            npu_probe=lambda: NPU_UNAVAILABLE,
+        )
+        return driver._download_repo(flatten_options(cfg))
+
+    assert repo_for({}) == DEFAULT_DOWNLOAD_REPO
+    assert (
+        repo_for({"artifacts": {"model": {"path": "/models/x.hgn"}}})
+        == DEFAULT_DOWNLOAD_REPO
+    )
+    assert (
+        repo_for(
+            {
+                "artifacts": {
+                    "model": {"source": "hf", "repo": "someone/else", "file": "x.hgn"}
+                }
+            }
+        )
+        == "someone/else"
+    )
+    assert (
+        repo_for({"troubleshooting": {"download": "explicit/repo"}}) == "explicit/repo"
+    )
+    # The explicit key wins over the descriptor repo.
+    assert (
+        repo_for(
+            {
+                "artifacts": {
+                    "model": {"source": "hf", "repo": "someone/else", "file": "x.hgn"}
+                },
+                "troubleshooting": {"download": "explicit/repo"},
+            }
+        )
+        == "explicit/repo"
+    )
+    # Empty string = air-gapped opt-out (never an accidental default).
+    assert repo_for({"troubleshooting": {"download": ""}}) is None
+    assert repo_for({"troubleshooting": {"download": "   "}}) is None
+
+
+async def test_repo_layout_checkpoint_keeps_its_companion_dir(
+    tmp_path, fake_flash_binary, state_dir
+) -> None:
+    """Engine-fetched companions (overlay, ngram table, tokenizer/) land
+    BESIDE the checkpoint and the driver never sees those paths, so the
+    directory joins `resolved_artifacts` — unless the checkpoint sits in the
+    models root, where protecting "everything" would disable pruning."""
+    models = tmp_path / "models"
+    repo_dir = models / "peonist-ai" / "halogen-qwen3.8-flash-next"
+    repo_dir.mkdir(parents=True)
+    ckpt = repo_dir / "qwen38-flash-next-v2.hgn"
+    ckpt.write_bytes(b"hgn-fake")
+    settings = make_settings(tmp_path, fake_flash_binary)
+    driver = HalogenFlashBackend(
+        settings,
+        {"artifacts": {"model": {"path": str(ckpt)}}},
+        npu_probe=lambda: NPU_UNAVAILABLE,
+    )
+    try:
+        await driver.start()
+        assert str(repo_dir.resolve()) in [
+            str(Path(p).resolve()) for p in driver.resolved_artifacts
+        ]
+        assert str(models.resolve()) not in [
+            str(Path(p).resolve()) for p in driver.resolved_artifacts
+        ]
+        recorded = json.loads((state_dir / "env.json").read_text())
+        assert recorded["HALOGEN_DOWNLOAD"] == DEFAULT_DOWNLOAD_REPO
+    finally:
+        await driver.aclose()
+
+
+async def test_models_root_checkpoint_does_not_protect_the_root(
+    tmp_path, fake_flash_binary, local_artifacts
+) -> None:
+    settings = make_settings(tmp_path, fake_flash_binary)
+    driver = HalogenFlashBackend(
+        settings,
+        {
+            "artifacts": {
+                "model": {"path": local_artifacts["checkpoint"]},
+                "tokenizer": {"path": local_artifacts["tokenizer"]},
+            }
+        },
+        npu_probe=lambda: NPU_UNAVAILABLE,
+    )
+    try:
+        await driver.start()
+        resolved = {str(Path(p).resolve()) for p in driver.resolved_artifacts}
+        assert resolved == {
+            str(local_artifacts["checkpoint"]),
+            str(local_artifacts["tokenizer"]),
+        }
     finally:
         await driver.aclose()

@@ -811,13 +811,11 @@ Concurrency" (2) · `disk_cache` "Disk / Prompt Caching" (3) ·
 `npu` (9) · `networking` (10) · `troubleshooting` (11).
 
 - `artifacts.model` = the `.hgn` **checkpoint**, `artifacts.tokenizer` = the
-  tokenizer **directory** — both OPTIONAL: leaving the checkpoint blank
-  exports no `HALOGEN_CHECKPOINT` at all, so the image entrypoint picks its
-  own default head under `MODELS_DIR` (`resolve_checkpoint`:
+  tokenizer **directory** — both OPTIONAL. Leaving a blank artifact exports
+  no variable at all, so the image resolves it itself (`resolve_checkpoint`:
   `qwen38-flash-next-v2.hgn`, falling back to the legacy
-  `qwen38-flash-next-w4b.hgn` when only that is present); leaving the
-  tokenizer blank exports no `HALOGEN_TOKENIZER`, and `need_tokenizer` uses
-  the checkpoint's sidecar `tokenizer/` directory. Never substitute an
+  `qwen38-flash-next-w4b.hgn` when only that is present; `need_tokenizer`:
+  the checkpoint's sidecar `tokenizer/` directory). Never substitute an
   empty string — that defeats both fallbacks. The engine needs a directory,
   and `ensure_artifact` downloads single files
   only — so a tokenizer HF descriptor must name a SINGLE file, while a
@@ -825,24 +823,43 @@ Concurrency" (2) · `disk_cache` "Disk / Prompt Caching" (3) ·
   (the driver's exists() special-case accepts file or dir). All accept
   `{"path": ...}` or HF descriptors (with optional `revision`, passed
   through to `ensure_artifact`).
+- **Downloads belong to the engine, not the provider.** The provider
+  downloads ONLY for an operator-picked HuggingFace file (an HF descriptor
+  in `artifacts`). A blank selection downloads NOTHING provider-side:
+  `HALOGEN_DOWNLOAD` is exported anyway (driver resolution order:
+  `troubleshooting.download` → the `artifacts.model` HF descriptor's repo →
+  `env.DEFAULT_DOWNLOAD_REPO`, this image's weights repo) and the entrypoint's
+  `maybe_download` pass pulls whatever is missing into the checkpoint's own
+  directory under `MODELS_DIR` — the checkpoint itself, its overlay sidecar /
+  ngram table / vision tower, and the tokenizer. `troubleshooting.download:
+  ""` opts out entirely (air-gapped host): the variable is then not emitted
+  and nothing is fetched anywhere. Because the driver never learns those
+  engine-fetched paths, a resolved checkpoint also contributes its **parent
+  directory** to `resolved_artifacts`, so `storage.prune_unused` cannot delete
+  a live tokenizer/sidecar (skipped when the checkpoint sits directly in the
+  models root — protecting that would disable pruning altogether).
 - `artifacts.vision_tower` / `artifacts.mtp_head` resolve to local
   paths and are exported as `HALOGEN_VISION_TOWER` / `HALOGEN_MTP_HEAD`;
   `vision_tower: true` means "look beside the checkpoint" (emits `1`),
   `vision_tower: false` is an explicit off-switch (emits `0`); absent
   emits nothing (engine default).
 - `npu.npu_models` is a **string array** of bare upstream ids/paths
-  (not descriptors), joined to a comma list at export.
+  (not descriptors), joined to a comma list at export. The NPU pin
+  download (`npu.auto_download_pins`, default `true`) is the one other
+  provider-side fetch: it only runs on a host whose NPU probe passes
+  (`/dev/accel` + XRT), never on gfx1151.
 - Fields from the upstream FLAGS.md that this driver does not wire yet
   are present in the schema with `x-supported: false` (shown disabled in
   the UI): `context.admit_ticks`, `disk_cache.cache_file`,
   `sampling.repetition_penalty`, `reasoning.thinking_budget_message` /
   `eos_guard` / `template_unchecked`, `npu.npu_with_gpu` / `npu_verify`
-  / `npu_emb_batch` / `npu_queue`, `networking.bind`, and the whole
+  / `npu_emb_batch` / `npu_queue`, `networking.bind`, and the rest of the
   `troubleshooting` section (verbose, startup_progress,
   engine_watchdog_s/defer_s, engine_wait_s, flash_pin_trunk,
   frag_warn_blocks/stalls, dmalloc_log, prefill_cancel,
   prefill_keep_trunk, ngram_gather_threads, matmul_tuning_file,
-  gguf_cache, gguf_threads, ck_overlay, download).
+  gguf_cache, gguf_threads, ck_overlay). `troubleshooting.download`
+  (`HALOGEN_DOWNLOAD`) IS wired — see the download rule above.
 
 ### Env mapping (env.py)
 
@@ -851,10 +868,14 @@ Fixed wiring is identical to halogen (`HALOGEN_API_PORT`,
 `HALOGEN_CHECKPOINT` / `HALOGEN_TOKENIZER` are exported **only when the
 matching `artifacts` entry is configured** — a blank artifact omits the
 variable so the image's own `resolve_checkpoint` / sidecar-tokenizer
-defaults apply. The section leaves are flattened into the same
+defaults apply (and `HALOGEN_DOWNLOAD` is still exported, so the image can
+fetch that default itself). The section leaves are flattened into the same
 semantic option names by `flatten_options()` (legacy flat
 `cfg["options"]` merged first, sections win), and `ENV_MAP` maps them to
-`HALOGEN_*` env vars (each emitted only when present and not None):
+`HALOGEN_*` env vars (each emitted only when present and not None).
+`download` (`HALOGEN_DOWNLOAD`) is in `ENV_MAP` like any other option, but
+its value is **driver-resolved** (`_download_repo`) before `build_env` runs,
+so an unset key still emits the effective repo:
 
 | Option (section.field) | Env |
 | --- | --- |
@@ -902,13 +923,15 @@ semantic option names by `flatten_options()` (legacy flat
 | `vision.vision_max_pixels` | `HALOGEN_VISION_MAX_PIXELS` |
 | `artifacts.vision_tower` (resolved) | `HALOGEN_VISION_TOWER` |
 | `artifacts.mtp_head` (resolved) | `HALOGEN_MTP_HEAD` |
+| `download` (driver-resolved repo, see above) | `HALOGEN_DOWNLOAD` |
 
-Plus two conditional vars:
+Plus three conditional vars:
 
 | Condition | Env |
 | --- | --- |
 | `disk_cache.cache_dir_enabled` is `true` | `HALOGEN_CACHE_DIR = <CACHE_DIR>/halogen-flash` (created on start) |
 | `npu.npu_models` non-empty **and** the NPU probe passes | `HALOGEN_NPU_MODELS = <id>,<id>` (bare comma list, never a Python repr) |
+| `artifacts.model` / `artifacts.tokenizer` configured | `HALOGEN_CHECKPOINT` / `HALOGEN_TOKENIZER` — a **blank** artifact omits the variable entirely (never `""`), leaving resolution to the image |
 
 Binary from env `HALOGEN_FLASH_SERVER_PATH` (default
 `halogen-flash-server`); same `stdbuf -oL -eL <entrypoint> all` spawn

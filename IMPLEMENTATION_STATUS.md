@@ -1196,9 +1196,12 @@ immutable while instances are attached.
   tree, never into the engine's interpreter). The base's global
   python3.12 + ROCm site-packages are left untouched and PATH is not
   prepended — `entrypoint.sh` resolves `python3` from PATH, so venv-first
-  PATH would break the engine. Also restored `HF_HUB_OFFLINE=0` (the
-  engine image sets `1`; the provider's `ensure_artifact` downloads then
-  fail). Verified locally by reproducing the restricted `COPY` set +
+  PATH would break the engine. `HF_HUB_OFFLINE` is left exactly as the engine
+  image bakes it (`1`, which is what stops the front-end reaching for the Hub
+  at request time): provider-side fetches clear huggingface_hub's *in-process*
+  offline switch in `provider_lib.downloader` instead of mutating the
+  environment the backend child inherits. Verified locally by reproducing the
+  restricted `COPY` set +
   `uv sync --frozen --no-dev --package matrix-provider-halogen-flash`
   (imports resolve, `.pth` paths correct).
 - **HF artifact picker always failed validation (Phase 12 E regression,
@@ -1229,12 +1232,36 @@ immutable while instances are attached.
   uses the checkpoint's sidecar `tokenizer/`). `resolved_artifacts` then
   holds only what was resolved, so `storage.prune_unused` keeps refusing to
   run with an empty reference set (the guard is load-bearing, not new).
-  Shipped schema fingerprint: `4157ffa0438b…53ba12bd` (pin in
-  `test_schema_sections.py`). Safe to change now because the fleet has no
-  committed `halogen-flash` ProviderType row yet (only `llama-cpp` is
-  registered); once Flash instances exist this is a consensus change.
-  `llama-cpp`, `gufo` and `halogen` still require `artifacts.model` — those
-  engines have no in-image checkpoint default.
+   Shipped schema fingerprint: `79584684e7f4…a03a98b8` (pin in
+   `test_schema_sections.py`; the `download` wiring below re-pinned it from
+   the optional-artifacts value). Safe to change now because the fleet has no
+   committed `halogen-flash` ProviderType row yet (only `llama-cpp` is
+   registered); once Flash instances exist this is a consensus change.
+   `llama-cpp` and `gufo` still require `artifacts.model`. The plain `halogen`
+   provider keeps its required checkpoint too — its entrypoint discovers a
+   default under `/models` but has no `maybe_download` pass.
+- **Downloads belong to the engine, not the provider (2026-10-07, operator
+  rule).** `HALOGEN_DOWNLOAD` is now wired (`ENV_MAP["download"]`, value
+  driver-resolved by `HalogenFlashBackend._download_repo`: explicit
+  `troubleshooting.download` → the `artifacts.model` HF descriptor's repo →
+  `env.DEFAULT_DOWNLOAD_REPO` = `peonist-ai/halogen-qwen3.8-flash-next`;
+  `""` opts out and emits nothing). The entrypoint's `maybe_download` pass
+  then pulls what is missing — the default checkpoint for a blank selection,
+  plus the overlay sidecar / ngram table / vision tower / tokenizer — into
+  the checkpoint's own directory under `MODELS_DIR`. The provider only ever
+  calls `ensure_artifact` for an operator-picked HF descriptor, so a blank
+  selection touches no network from Python. `networking.bind` stays unwired;
+  `troubleshooting` is no longer "the whole section unwired". Because the
+  driver cannot know the engine's fetched paths, a resolved checkpoint
+  contributes its **parent directory** to `resolved_artifacts` (skipped when
+  the checkpoint sits directly in the models root, which would make
+  `storage.prune_unused` a no-op); with a fully blank selection
+  `resolved_artifacts` stays empty and pruning refuses to run by design.
+  Provider-side downloads also no longer depend on the ambient
+  `HF_HUB_OFFLINE`: `provider_lib.downloader._download_hf` clears
+  huggingface_hub's in-process offline switch (read per request in
+  `utils/_http`) without touching `os.environ`, so the engine child still
+  inherits the image's `HF_HUB_OFFLINE=1`.
 
 ### Accepted risks (per spec)
 

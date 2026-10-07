@@ -48,9 +48,14 @@ RUN python3.14 -m pip install --no-cache-dir uv \
     && rm -rf /root/.cache/uv \
     && mkdir -p /models /cache
 
+# HF_HUB_OFFLINE stays exactly as the Halogen image bakes it (1): it is what
+# stops the front-end reaching for the Hub at request time. Downloads are the
+# engine's own job at start (HALOGEN_DOWNLOAD, which overrides the flag for
+# its `hf download` calls) and — for an operator-picked HuggingFace artifact —
+# the provider's, which clears huggingface_hub's in-process offline switch in
+# provider_lib.downloader without touching this environment.
 ENV PROVIDER_PORT=8081 \
     HALOGEN_FLASH_SERVER_PATH=/usr/local/bin/entrypoint.sh \
-    HF_HUB_OFFLINE=0 \
     HF_HUB_DISABLE_XET=0
 
 EXPOSE 8081

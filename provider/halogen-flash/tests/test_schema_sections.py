@@ -134,7 +134,7 @@ def test_schema_has_the_planned_sections() -> None:
 # schema.json, every known halogen-flash instance must re-register with
 # the new file (or the operator force-commits); update this pin
 # deliberately.
-SHIPPED_SCHEMA_FP = "4157ffa0438b2f807eb51620832ab799306fc87589531c928e890f6653ba12bd"
+SHIPPED_SCHEMA_FP = "79584684e7f41ca75f62a6a322b3047528651380180bbe4c8eae3eafa03a98b8"
 
 
 def test_schema_fingerprint_is_stable() -> None:
@@ -340,7 +340,11 @@ def test_wired_set_matches_schema_unsupported_false_complement() -> None:
     assert "HALOGEN_ADMIT_TICKS" in unwired
     assert "HALOGEN_REPETITION_PENALTY" in unwired
     assert "HALOGEN_CK_OVERLAY" in unwired
-    assert "HALOGEN_DOWNLOAD" in unwired
+    # HALOGEN_DOWNLOAD is wired by this provider (driver-resolved): the
+    # engine's own start-time download is what a blank artifact selection
+    # relies on, so it must NOT sit in the documented-but-unwired set.
+    assert "HALOGEN_DOWNLOAD" in wired
+    assert "HALOGEN_DOWNLOAD" not in unwired
     # Wired and unwired sets are disjoint and cover the whole flag list.
     assert wired & unwired == set()
     total_fields = sum(len(sec["properties"]) for sec in SCHEMA["properties"].values())

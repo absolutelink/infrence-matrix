@@ -11,6 +11,7 @@ from provider_lib.schema import validate_backend_config
 from provider_halogen_flash.driver import SCHEMA
 from provider_halogen_flash.env import (
     CONFIG_SECTIONS,
+    DEFAULT_DOWNLOAD_REPO,
     ENV_MAP,
     FLASH_PORT_END,
     FLASH_PORT_START,
@@ -35,9 +36,10 @@ def _env(**opts):
 
 
 def test_env_map_covers_all_ported_options() -> None:
-    # 44 semantic HALOGEN_* vars wired by this provider (43 legacy-ported
-    # options + the Phase 12 artifacts-resolved mtp_head).
-    assert len(ENV_MAP) == 44
+    # 45 semantic HALOGEN_* vars wired by this provider (43 legacy-ported
+    # options + the Phase 12 artifacts-resolved mtp_head + the driver-
+    # resolved engine auto-download repo).
+    assert len(ENV_MAP) == 45
     assert ENV_MAP["kv_slots"] == "HALOGEN_KV_SLOTS"
     assert ENV_MAP["composable_context_bytes"] == "HALOGEN_COMPOSABLE_CONTEXT_BYTES"
     assert ENV_MAP["vision_max_pixels"] == "HALOGEN_VISION_MAX_PIXELS"
@@ -97,6 +99,22 @@ def test_blank_artifacts_omit_the_engine_paths() -> None:
     )
     assert half["HALOGEN_CHECKPOINT"] == "/models/flash.hgn"
     assert "HALOGEN_TOKENIZER" not in half
+
+
+def test_download_repo_is_the_engine_fetch_switch() -> None:
+    """`download` → HALOGEN_DOWNLOAD is an ordinary ENV_MAP option, but its
+    value is DRIVER-resolved. It is what lets the engine pull the files it is
+    missing into MODELS_DIR at start; None (operator opted out with an empty
+    `troubleshooting.download`) is never emitted, so the image stays offline.
+    """
+    env = _env(download="peonist-ai/halogen-qwen3.8-flash-next")
+    assert env["HALOGEN_DOWNLOAD"] == "peonist-ai/halogen-qwen3.8-flash-next"
+    assert "HALOGEN_DOWNLOAD" not in _env()
+    assert "HALOGEN_DOWNLOAD" not in _env(download=None)
+
+
+def test_default_download_repo_is_the_pinned_weights_repo() -> None:
+    assert DEFAULT_DOWNLOAD_REPO == "peonist-ai/halogen-qwen3.8-flash-next"
 
 
 def test_cache_dir_only_when_enabled(tmp_path) -> None:

@@ -15,14 +15,14 @@
         "model": {
           "$ref": "#/$defs/hfFile",
           "title": "Checkpoint",
-          "description": "Primary .hgn checkpoint (hf-file descriptor or local path). Resolved path exported as HALOGEN_CHECKPOINT. When blank the variable is not exported and the image entrypoint picks its own default under MODELS_DIR (qwen38-flash-next-v2.hgn, or qwen38-flash-next-w4b.hgn when only that is present).",
+          "description": "Primary .hgn checkpoint. A HuggingFace descriptor is the ONLY case where the provider downloads (into MODELS_DIR/<repo>/<file>, with progress in the admin); {path} is used as-is and must already exist. Leave blank to download nothing here: HALOGEN_CHECKPOINT is then not exported, so the image entrypoint serves its own default head under /models and pulls it (plus its companions) via HALOGEN_DOWNLOAD.",
           "x-flag": "HALOGEN_CHECKPOINT",
           "x-order": 1
         },
         "tokenizer": {
           "$ref": "#/$defs/hfFile",
           "title": "Tokenizer",
-          "description": "Tokenizer artifact. The engine expects a tokenizer DIRECTORY: use {path} pointing at a local directory (exists() accepts file or dir). A {source:hf,repo,file} descriptor must name a SINGLE downloadable file (the downloader is file-only; it cannot fetch a directory tree) — unpack the tokenizer folder locally and reference it by path. Resolved path exported as HALOGEN_TOKENIZER. When blank the variable is not exported and the engine falls back to the checkpoint's sidecar tokenizer/ directory.",
+          "description": "Tokenizer artifact. The engine expects a tokenizer DIRECTORY: use {path} pointing at a local directory (exists() accepts file or dir). A {source:hf,repo,file} descriptor must name a SINGLE downloadable file (the downloader is file-only; it cannot fetch a directory tree) — unpack the tokenizer folder locally and reference it by path. Resolved path exported as HALOGEN_TOKENIZER. Leave blank to export nothing: the engine uses the checkpoint's sidecar tokenizer/ directory, or downloads it from HALOGEN_DOWNLOAD.",
           "x-flag": "HALOGEN_TOKENIZER",
           "x-order": 2
         },
@@ -823,11 +823,10 @@
         },
         "download": {
           "type": "string",
-          "default": "",
+          "default": "peonist-ai/halogen-qwen3.8-flash-next",
           "title": "Auto-download repo",
-          "description": "Repo id the engine may auto-download artifacts from (upstream flag; not yet wired by this provider — downloads happen in the driver via artifacts).",
-          "x-flag": "HALOGEN_DOWNLOAD",
-          "x-supported": false
+          "description": "Repo the ENGINE downloads from at start (its maybe_download pass): the checkpoint itself when absent, then its overlay sidecar, ngram table and vision tower, and the tokenizer — written into the checkpoint's own directory under MODELS_DIR. The provider never downloads for a blank artifact selection; this is what makes a blank selection work. Unset falls back to the artifacts.model repo when that is a HuggingFace descriptor, else to this image's weights repo. An empty string forbids engine downloads entirely (air-gapped hosts).",
+          "x-flag": "HALOGEN_DOWNLOAD"
         }
       }
     }
