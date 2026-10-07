@@ -660,7 +660,7 @@ def test_patch_push_slower_than_idle_tx_timeout_still_200(
         resp = results_box.get("resp")
         if resp is not None and resp.status_code != 200:
             # Debug visibility: why did the PATCH fail?
-            print("PATCH-DEBUG", resp.status_code, resp.text[:400])
+            print("PATCH-DEBUG", resp.status_code, resp.text[:400])  # noqa: T201
 
     finally:
         app.dependency_overrides.pop(get_session, None)

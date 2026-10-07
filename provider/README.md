@@ -1036,18 +1036,24 @@ matter).
 ```python
 from provider_lib.ops import install_backend_ops
 
+
 async def re_register() -> dict[str, Any] | None:
     """Re-run the registration handshake and adopt its response."""
     hardware = await build_hardware_report(client.settings)
     result = await client.register(
-        provider_type=PROVIDER_TYPE, version=VERSION,
-        port=client.settings.PROVIDER_PORT, hardware=hardware, schema=SCHEMA,
+        provider_type=PROVIDER_TYPE,
+        version=VERSION,
+        port=client.settings.PROVIDER_PORT,
+        hardware=hardware,
+        schema=SCHEMA,
     )
     apply_registration(lifecycle, result, resolved_state)
     return result.provider_definition
 
-install_backend_ops(client, lifecycle, backend_name=PROVIDER_TYPE,
-                    re_register=re_register)
+
+install_backend_ops(
+    client, lifecycle, backend_name=PROVIDER_TYPE, re_register=re_register
+)
 ```
 
 `re_register` is the only provider-specific part of `provider.initialize`

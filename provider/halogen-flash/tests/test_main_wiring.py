@@ -269,7 +269,10 @@ async def test_initialize_re_registers_and_reprovisions(
         assert acks[0].payload["ok"] is True
         assert acks[0].payload["detail"]["accepted"] is True
         assert len(REGISTRATIONS) == 2, "initialize must re-register"
-        assert REGISTRATIONS[1]["registration_token"] == settings.PROVIDER_REGISTRATION_TOKEN
+        assert (
+            REGISTRATIONS[1]["registration_token"]
+            == settings.PROVIDER_REGISTRATION_TOKEN
+        )
 
         await _await_frames(
             lambda f: (
