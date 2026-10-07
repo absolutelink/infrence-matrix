@@ -551,3 +551,132 @@ def test_heal_guard_cleared_on_exception(monkeypatch) -> None:
         assert instance_id not in cu._push_in_flight
 
     asyncio.run(run())
+
+
+def test_patch_push_slower_than_idle_tx_timeout_still_200(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    """N-8 (prod incident): a config.push slower than Postgres's
+    idle_in_transaction_session_timeout (15s) used to 500 the PATCH —
+    the route session sat idle-in-transaction across the awaited push and
+    Postgres killed the connection. The route now ends its transaction
+    before awaiting (push_config_update_by_id) and re-reads after, so a
+    slow push yields a correct 200 even when the underlying connection
+    dies mid-push.
+
+    Simulated by making the push abort this test process's route-side
+    pooled connections (connection-killing monkeypatch, mirroring the
+    server-side termination) while the provider acks ok."""
+    import asyncio
+
+    from sqlmodel import select
+
+    from app.api.admin.providers import compute_config_fingerprint
+    from app.core.db import get_session
+    from app.main import app
+    from app.services import config_update as cu
+    from app.services.wire import Frame
+
+    # _make_stack seeds the machine + definition (token flow-token);
+    # _register then bootstraps the mock ProviderType (permissive schema)
+    # and leaves a CONNECTED instance — exactly what the push fans out to.
+    _make_stack(session, backend_config={"delta_count": 3})
+    reg = _register(client)
+    from sqlmodel import select as _select
+
+    definition = session.exec(
+        _select(ProviderDefinition).where(
+            ProviderDefinition.id == uuid.UUID(reg["provider_definition"]["id"])
+        )
+    ).one()
+    # No real WS is opened here (send_command is monkeypatched below);
+    # mark the registered instance connected so the fan-out has a target.
+    instance = session.exec(
+        _select(ProviderInstance).where(
+            ProviderInstance.provider_definition_id == definition.id
+        )
+    ).one()
+    instance.websocket_connected = True
+    session.add(instance)
+    session.commit()
+
+    slow_gate = asyncio.Event()
+
+    async def slow_send(instance_id, kind, payload, timeout=None):  # noqa: ARG001
+        # Simulate a >15s provider apply: hold the push while the
+        # route's open transaction would idle out.
+        await asyncio.wait_for(slow_gate.wait(), timeout=5)
+        return Frame(
+            type="ack",
+            payload={
+                "ok": True,
+                "detail": {"config_fingerprint": payload["config_fingerprint"]},
+            },
+        )
+
+    monkeypatch.setattr(cu.manager, "send_command", slow_send)
+
+    real_get_session = get_session
+
+    def killing_get_session():
+        """Yield a session, then KILL its pooled connections on close —
+        exactly the server-side effect of
+        idle_in_transaction_session_timeout while the push runs."""
+        gen = real_get_session()
+        s = next(gen)
+        try:
+            yield s
+        finally:
+            engine_obj = s.get_bind()
+            s.close()
+            engine_obj.dispose()
+
+    app.dependency_overrides[get_session] = killing_get_session
+    try:
+        # Fire the PATCH in a thread; release the gate shortly after the
+        # push begins.
+        import threading
+
+        results_box: dict = {}
+
+        def do_patch():
+            results_box["resp"] = client.patch(
+                f"/admin/api/definitions/{definition.id}",
+                json={"backend_config": {"delta_count": 7}},
+            )
+
+        t = threading.Thread(target=do_patch)
+        t.start()
+        # Wait until the slow push is in flight, then let it proceed.
+        in_flight = False
+        for _ in range(100):
+            if cu._push_in_flight:
+                in_flight = True
+                break
+            time.sleep(0.05)
+        assert in_flight, "push never started"
+        slow_gate.set()
+        t.join(timeout=30)
+        resp = results_box.get("resp")
+        if resp is not None and resp.status_code != 200:
+            # Debug visibility: why did the PATCH fail?
+            print("PATCH-DEBUG", resp.status_code, resp.text[:400])
+
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+
+    assert resp is not None
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    expected = compute_config_fingerprint({"delta_count": 7})
+    assert body["config_fingerprint"] == expected
+    assert body["config_update_results"][0]["ok"] is True
+    # The ack-echoed fingerprint was persisted despite the killed route
+    # connection.
+    session.expunge_all()
+    inst = session.exec(
+        select(ProviderInstance).where(
+            ProviderInstance.provider_definition_id == definition.id
+        )
+    ).first()
+    assert inst is not None and inst.config_fingerprint == expected

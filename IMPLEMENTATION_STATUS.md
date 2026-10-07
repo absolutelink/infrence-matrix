@@ -1155,6 +1155,24 @@ immutable while instances are attached.
   runs of `test_mock_phase4.py`/`test_main_wiring.py` fail in
   pydantic-settings at `ProviderSettings()` — pre-existing, not a
   Phase 14 regression).
+- **N-8 post-deploy fix (prod incident 2026-10-07):** the UI PATCH on
+  `rocinante-testing` returned **500 idle-in-transaction** — the route
+  session sat inside an open write transaction across the awaited
+  `provider.config.update` (llama.cpp apply ≫ 15s) and Postgres's
+  `idle_in_transaction_session_timeout` (15s, `app/core/db.py`) killed
+  the connection before the final `instances` re-read. The admin row and
+  the push themselves succeeded (config was live; the 500 was cosmetic
+  on that path — but any future PATCH during a long apply would fail the
+  same way, and local tests (≈1s boots) can never reproduce it). Fix:
+  the PATCH route commits + `expire_all()` + `commit()` (ends the
+  transaction) BEFORE awaiting, pushes via the new
+  `config_update.push_config_update_by_id` (resolves the definition in
+  its own short session), and re-binds the row after the await
+  (`get` may return None if the definition was deleted mid-push —
+  handled with a `deleted_during_push` acknowledgment). Regression test:
+  `test_patch_push_slower_than_idle_tx_timeout_still_200` (route-side
+  connections disposed mid-push; asserts 200 + ack-echoed fingerprint
+  persisted).
 
 ### Accepted risks (per spec)
 

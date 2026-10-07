@@ -450,23 +450,47 @@ async def patch_definition(
             reasons.append("backend_config")
         if definition.capacity != old_capacity:
             reasons.append("capacity")
-        pushed = await config_update.push_config_update(definition)
+        # N-8: the push can legitimately take minutes (drain + artifact
+        # download + boot; command timeout 300s, retries on top). The
+        # route session would otherwise sit idle-in-transaction across
+        # that await and Postgres's
+        # idle_in_transaction_session_timeout (15s, app/core/db.py) kills
+        # the connection — the final re-read here would then 500 even
+        # though the admin row and the push both succeeded. COMMIT
+        # (already done above) and end the transaction, then re-bind the
+        # row after the await: a committed session opens its NEXT
+        # transaction lazily on the following statement, so nothing sits
+        # open during the minutes-long push. The push resolves the
+        # definition in its own session (push_config_update_by_id).
+        definition_id = definition.id
+        alias = definition.alias
+        session.expire_all()
+        session.commit()
+
+        pushed = await config_update.push_config_update_by_id(definition_id)
         results = [r.to_dict() for r in pushed]
         logger.info(
             "definition %s %s changed (%s -> %s; shell→configured=%s); "
             "pushed to %d connected instance(s)",
-            definition.alias,
+            alias,
             "+".join(reasons),
             str(old_fp)[:8],
             str(new_fp)[:8],
             was_shell,
             len(results),
         )
-        # The push commits instance fingerprints / model_metadata in a
-        # separate session; drop the cached relationship + row so the
-        # response reflects the post-push state.
-        session.expire_all()
-        session.refresh(definition)
+        # Re-bind the row post-push (model_metadata may have been
+        # discovered during the apply; _record_success wrote it in
+        # another session).
+        definition = session.get(ProviderDefinition, definition_id)
+        if definition is None:  # pragma: no cover - deleted mid-push
+            instances = []
+            return {
+                "id": str(definition_id),
+                "alias": alias,
+                "deleted_during_push": True,
+                "config_update_results": results,
+            }
 
     instances = session.exec(
         select(ProviderInstance).where(

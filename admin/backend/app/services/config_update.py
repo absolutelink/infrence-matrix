@@ -241,14 +241,35 @@ async def _push_guarded(
         _push_in_flight.discard(instance_id)
 
 
+async def push_config_update_by_id(definition_id: Any) -> list[UpdateResult]:
+    """ID-addressed entry point for the PATCH-driven fan-out.
+
+    Same as :func:`push_config_update` but resolves the definition in its
+    own short session — the PATCH route commits + abandons its ORM object
+    before awaiting (N-8: never hold a route transaction across the
+    300s push so the 15s idle-in-transaction timeout can't kill the
+    request mid-push).
+    """
+    with Session(engine) as session:
+        definition = session.get(ProviderDefinition, definition_id)
+        if definition is None:
+            logger.warning(
+                "push_config_update_by_id: definition %s vanished; skipping",
+                definition_id,
+            )
+            return []
+        session.expunge(definition)
+    return await push_config_update(definition)
+
+
 async def push_config_update(definition: ProviderDefinition) -> list[UpdateResult]:
     """Push the definition's current backend_config to every connected
     instance; returns per-instance results (never raises for a failed
     provider — failures are reported, not fatal).
 
-    This is the PATCH-driven fan-out entry point. Instances with another
-    push already in flight are skipped (omitted from the results) rather
-    than queued behind it.
+    This is the original fan-out entry point (used by the by-id wrapper
+    and tests). Instances with another push already in flight are
+    skipped (omitted from the results) rather than queued behind it.
     """
     from app.api.admin.providers import compute_config_fingerprint
 
