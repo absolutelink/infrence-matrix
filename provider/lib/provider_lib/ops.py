@@ -47,6 +47,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from provider_lib.admin_client import AdminClient
+from provider_lib.assignments import HandleFactory, install_assignment_handler
 from provider_lib.backend import BackendLifecycle
 from provider_lib.config_update import RETRY_AFTER_SECONDS
 from provider_lib.registry import BackendRegistry, registry_from_lifecycle
@@ -336,6 +337,7 @@ def install_backend_ops(
     *,
     backend_name: str,
     re_register: ReRegister | None = None,
+    make_handle: HandleFactory | None = None,
 ) -> BackendOps | None:
     """Register the operator-driven lifecycle commands on `client`.
 
@@ -354,6 +356,14 @@ def install_backend_ops(
     the current epoch — keeps carrying the status events the operator is
     watching.
 
+    Phase 16 slice 5: this also installs the ``agent.assignments.update``
+    handler on the shared registry so every provider acks placement pushes
+    (never a silent 30s command timeout). ``make_handle`` lets a package that
+    hosts N backends (the mock) actually spawn/retire lifecycles; packages that
+    host one omit it and the handler refuses adds it cannot serve. The per-
+    backend ops dispatcher builds a ``BackendOps`` lazily so a backend added by
+    a live assignments push is immediately drivable by ``backend.start`` etc.
+
     Returns the single ``BackendOps`` when exactly one backend is hosted
     (backward-compat for callers that await `.busy` / `.join()`), else None.
     """
@@ -363,13 +373,24 @@ def install_backend_ops(
         else registry_from_lifecycle(lifecycle_or_registry)
     )
     ops_by_handle: dict[int, BackendOps] = {}
+
+    def _ops_for(handle: Any) -> BackendOps:
+        # Lazily build (and cache) a BackendOps for any resolved handle, so a
+        # backend added by a live agent.assignments.update is immediately
+        # drivable by backend.start/stop/restart/initialize.
+        ops = ops_by_handle.get(id(handle))
+        if ops is None:
+            ops = BackendOps(
+                client,
+                handle.lifecycle,
+                backend_name=backend_name,
+                re_register=re_register,
+            )
+            ops_by_handle[id(handle)] = ops
+        return ops
+
     for handle in registry.handles():
-        ops_by_handle[id(handle)] = BackendOps(
-            client,
-            handle.lifecycle,
-            backend_name=backend_name,
-            re_register=re_register,
-        )
+        _ops_for(handle)
 
     def _target(frame: Frame) -> BackendOps | None:
         # H3 hardening: a named instance_id must match a backend this agent
@@ -379,7 +400,7 @@ def install_backend_ops(
         # convenience); ambiguous on multi-backend -> None -> NAK.
         iid = (frame.payload or {}).get("instance_id")
         handle = registry.resolve_target(str(iid) if iid is not None else None)
-        return ops_by_handle.get(id(handle)) if handle is not None else None
+        return _ops_for(handle) if handle is not None else None
 
     async def _dispatch(frame: Frame, method: str, step: str) -> dict[str, Any]:
         ops = _target(frame)
@@ -395,6 +416,7 @@ def install_backend_ops(
     client.on_command(
         "provider.initialize", lambda f: _dispatch(f, "on_initialize", "initialize")
     )
+    install_assignment_handler(client, registry, make_handle=make_handle)
     if len(ops_by_handle) == 1:
         return next(iter(ops_by_handle.values()))
     return None

@@ -2,7 +2,12 @@
 
 **Overhaul branch:** `litellm-architecture-overhaul`
 **Last updated:** 2026-10-07 (**Phase 16 🟡 machine-scoped provider agents —
-slice 3 atomic cutover implemented**: a provider container is now an *agent*
+slice 5 implemented**: `agent.assignments.update` push + event-driven placement
+reconciliation — a placement change now propagates to a live agent over its
+socket without a re-registration via the single shared `reconcile_agent_placement`
+diff (busy-safe on both sides) + the slice-4 warm-up re-trigger; provider_lib
+reconciles its `BackendRegistry` and every package acks. Prior: slice 3 atomic
+cutover — a provider container is now an *agent*
 bound to a machine + one provider type; auth moves to a shared
 `Machine.registration_secret` + `AGENT_ID`; one agent-level WS multiplexes
 per-backend frames addressed by `ProviderInstance` id; definitions get
@@ -80,7 +85,7 @@ starting a feature, read the linked protocol/doc first.
 | 13 | Server + backend log capture, Redis tails, UI log views | ✅ Complete |
 | 14 | Shell definitions: deferred typing + `awaiting_config` pre-state | ✅ Complete (superseded by 16) |
 | 15 | Manual backend control + `provider.initialize` + download-bound boot budget | ✅ Complete |
-| 16 | Machine-scoped provider **agents**: one container → many same-type backends, placement, `max_running_backends` | 🟡 slices 1–4 landed (agents, placement, `max_running` hot-swap + proactive warm-up); 5–8 pending |
+| 16 | Machine-scoped provider **agents**: one container → many same-type backends, placement, `max_running_backends` | 🟡 slices 1–5 landed (agents, placement, `max_running` hot-swap + proactive warm-up, `agent.assignments.update` push); 6–8 pending |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
 
@@ -1555,22 +1560,29 @@ dicts).
 
 ## Phase 16 — Machine-scoped provider agents 🟡
 
-**Status: slice 4 (`max_running_backends` enforcement + proactive init warm-up)
-implemented.** The agent data model, migration, registration/auth, agent-level
-WS, scheduler joins, placement CRUD, config-push addressing, and the provider
-lib + all five provider packages speak the agent protocol; the scheduler now
-enforces the per-agent `max_running_backends` cap (hot-swap eviction) and
-proactively warms an agent's assigned backends on connect. **All suites green**
-(admin 317, lib 128, mock 25, llama-cpp 63, gufo 69, halogen 72, halogen-flash
-161; ruff + format clean; no model/route change this slice so alembic and the
-generated client are unchanged).
+**Status: slice 5 (`agent.assignments.update` push + event-driven placement
+reconciliation) implemented.** The agent data model, migration, registration/
+auth, agent-level WS, scheduler joins, placement CRUD, config-push addressing,
+and the provider lib + all five provider packages speak the agent protocol; the
+scheduler enforces the per-agent `max_running_backends` cap (hot-swap eviction)
+and proactively warms an agent's assigned backends on connect; and a placement
+change now propagates to a LIVE agent over its socket without a re-registration
+(the slice-3 "prune only on next registration" interim is replaced by the shared
+`reconcile_agent_placement` diff). **All suites green** (admin 328, lib 137,
+mock 29, llama-cpp 63, gufo 69, halogen 72, halogen-flash 161; ruff + format
+clean; no model/route-schema change this slice so alembic and the generated
+client are unchanged — the added `request: Request` params do not alter
+OpenAPI).
 
-**Still deferred (later slices):** `agent.assignments.update` push on placement
-change (slice 5), real-engine **multi-backend-per-process** hosting — the
-provider lib still runs one `BackendLifecycle` per container and addresses it as
-the agent's first backend (slice 6), and the full React Agents/placement UI
-(slice 7). The wire `AGENT_ASSIGNMENTS_UPDATE` FrameKind and `PROVIDER_TYPE` env
-are likewise not yet introduced (they belong to slices 5/6).
+**Still deferred (later slices):** real-engine **multi-backend-per-process**
+hosting — the provider lib still runs one `BackendLifecycle` per real container
+and addresses it as the agent's first backend (slice 6; the mock now hosts N and
+demonstrates the assignments reconcile, and real packages safely *refuse* an
+assignment add they cannot host rather than crashing), halogen-flash
+`x-max-running-backends: 1` schema declaration (slice 6), and the full React
+Agents/placement UI (slice 7). The wire `AGENT_ASSIGNMENTS_UPDATE` FrameKind is
+now introduced (both mirrors + drift guard green); the `PROVIDER_TYPE` env is
+slice 6.
 
 
 **Goal.** Stop binding a provider container to a single `ProviderDefinition`.
@@ -1663,8 +1675,9 @@ into one container per (machine, type) that owns its backends and one socket.
       `instance_id` in payload for per-backend commands; add
       `AGENT_ASSIGNMENTS_UPDATE` FrameKind; `provider.status` → agent_status,
       `backend.status` → per-backend. Presence sweep marks the **agent**
-      disconnected (and its backends unschedulable). *(`AGENT_ASSIGNMENTS_UPDATE`
-      FrameKind deferred to slice 5; `AWAITING_CONFIG` removed from both mirrors)*
+       disconnected (and its backends unschedulable). *(`AGENT_ASSIGNMENTS_UPDATE`
+       FrameKind landed in slice 5 (both mirrors + drift guard green);
+       `AWAITING_CONFIG` removed from both mirrors)*
 - [x] **E. Scheduler** — `app/services/scheduler.py`: candidates join through
       agent connectivity + placement; `max_running_backends` gate + hot-swap
       eviction (per agent, per type); serialized **proactive init warm-up** on
@@ -1690,17 +1703,54 @@ into one container per (machine, type) that owns its backends and one socket.
        path keeps strong references to its detached background tasks
        (`_spawn_background` + a module-level set) so a long boot is never GC'd
        mid-flight; the single-type-per-agent invariant the cap scoping relies on
-       is documented on `_running_on_agent`/`_ensure_agent_capacity`.
-       Residual seam for slice 5: `warm_up_agent(agent_id)` is the single re-warm
-       entry point — `agent.assignments.update` should call it after applying a
-       placement change.)*
-- [~] **F. Placement CRUD + push** — `app/api/admin/definitions.py`:
+        is documented on `_running_on_agent`/`_ensure_agent_capacity`.
+        Slice 5 wired the residual seam: `push_agent_assignments` calls
+        `warm_up_agent(agent_id)` (as a tracked background task) after a
+        placement push that added backends.)*
+- [x] **F. Placement CRUD + push** — `app/api/admin/definitions.py`:
       `agent_placement` + `agents` on create/PATCH; on placement change push
       `agent.assignments.update` to affected agents; config PATCH still
       pushes `provider.config.update` per backend. New
       `app/api/admin/agents.py` reads. Machines route exposes/rotates
       `registration_secret`. *(placement persistence + agent reads + machine
-      secret done; `agent.assignments.update` push deferred to slice 5)*
+      secret done in slice 3; **slice 5 landed the live push**: new
+      `app/services/assignments.py` is the ONE placement-diff path
+      (`reconcile_agent_placement` — create stopped rows at `base_port + next
+      free offset`, retire de-placed rows busy-safe, build the full assignment
+      set), shared by registration (`prune_unplaced_backends` is now a thin
+      wrapper) and `push_agent_assignments`. Create/PATCH (placement/enabled/
+      alias) fan out via `push_agent_assignments_for_type`; a connected agent
+      gets `agent.assignments.update` (epoch-fenced) then the slice-4
+      `warm_up_agent` re-warm seam fires as a background task; a disconnected
+      agent still has ghost rows pruned but receives no frame. Busy-safe
+      removal mirrors on both sides (admin leaves a `running`/`in_use` row +
+      reports `refused`; provider refuses to stop a busy handle). DELETE needs
+      no live push (the connected-host guard already forbids it). provider_lib
+      `assignments.install_assignment_handler` reconciles the `BackendRegistry`
+      (add via a package `make_handle` factory, busy-safe remove, ack
+       `{ok, added, removed, refused}`) and is auto-installed by
+       `install_backend_ops` so every package acks (no 30s timeout); the mock
+       supplies a factory and demonstrates N add/remove.
+       *Slice 5 review hardening:* **B1** the provider remove-loop now resolves
+       each handle's identity via `lifecycle.instance_id or` registry key (like
+       `resolve_target`) so a single-backend agent whose handle is still keyed
+       `""` (pre-`apply_registration`) is NOT torn down on a same-type push;
+       **H1** `push_agent_assignments` runs the per-machine connected-peer port
+       clash check on newly-created rows and rolls back + refuses (`port_conflict`)
+       any collision (registration already had `_reject_port_clash`); **M1**
+       registration renumber reserves retained busy-ghost ports so two rows on
+       one agent never share a port; **M2** warm-up is gated on the provider's
+       `ack_added ∩ diff.added` (not admin `diff.added` alone) so a refused add
+       on a single-backend agent triggers no futile `backend.start`; **L1** a
+       `provider_type` change is a placement trigger (pushes the new type);
+       **L3** the push also catches `TimeoutError` (30s stall) for a clean skip;
+       **L2** documented that an already-hosted handle's alias rides the next
+       `provider.config.update`/re-registration (not refreshed by
+       `assignments.update`). New discriminating tests: admin
+       `test_push_no_warm_when_provider_refuses_add`,
+       `test_push_refuses_port_collision_with_connected_peer`,
+       `test_renumber_avoids_retained_busy_ghost`; provider-lib
+       `test_single_backend_placeholder_key_is_kept`.)*
 - [~] **G. Provider lib** — `provider_lib/admin_client.py`: register as agent
       (machine secret + agent_id + type), one socket, dispatch per-backend
       commands by `instance_id`, handle `agent.assignments.update`
@@ -1708,10 +1758,11 @@ into one container per (machine, type) that owns its backends and one socket.
       `AGENT_ID`, `PROVIDER_TYPE`, base `PROVIDER_PORT`. `app_factory.py`:
       serve N backend apps (one per backend port). `schema.py`: read
       `x-max-running-backends`. *(agent registration + WS + `MACHINE_SECRET`/
-      `AGENT_ID` + per-backend `instance_id` status/commands done; single
-      backend per process; `PROVIDER_TYPE` env, N-app serving,
-      `agent.assignments.update`, `x-max-running-backends` deferred to
-      slices 4–6)*
+      `AGENT_ID` + per-backend `instance_id` status/commands done; slice 5 added
+      `assignments.install_assignment_handler` (auto-installed by
+      `install_backend_ops`, busy-safe registry reconcile + ack) and the mock's
+      `make_handle` factory; single backend per real process + N-app serving +
+      `PROVIDER_TYPE` env + `x-max-running-backends` deferred to slice 6)*
 - [~] **H. Provider packages** — mock/llama-cpp/gufo/halogen/halogen-flash:
       multi-backend driver instances keyed by definition; halogen-flash sets
       `x-max-running-backends: 1` in its `schema.json`; each keeps its
@@ -1736,8 +1787,21 @@ into one container per (machine, type) that owns its backends and one socket.
       `max_running` cap=1 hot-swap / busy-never-evicted / cap=0 unlimited /
       same-agent-only / LRU order and for serialized VRAM+cap-bounded proactive
       warm-up (MRU order, skip-already-running, per-agent guard, boot-failure
-      resilience) plus a WS connect-trigger test; multi-backend/
-      `agent.assignments.update` provider tests deferred to slices 5/6)*
+       resilience) plus a WS connect-trigger test; **slice 5 added**
+       `test_assignments_push.py` (admin: create-row + warm-up, busy-safe
+       refusal keeps the row, idle-drop removes it, disconnected prune-only,
+       CREATE fan-out to connected agents, shared-diff equivalence),
+       provider-lib `test_assignments.py` (add/remove/idempotent/busy-refuse/
+       single-backend-refuses-unknown/ack-shape) and mock
+       `test_assignments_wiring.py` (N add+remove reconcile + per-backend
+        `provider.config.update` reaches the correct lifecycle on a 2-backend
+        agent); **slice 5 review added** discriminating tests — admin
+        `test_push_no_warm_when_provider_refuses_add` (M2),
+        `test_push_refuses_port_collision_with_connected_peer` (H1),
+        `test_renumber_avoids_retained_busy_ghost` (M1) and provider-lib
+        `test_single_backend_placeholder_key_is_kept` (B1), each verified to fail
+        against the pre-fix code; real-engine N-per-process serving tests remain
+        slice 6)*
 - [ ] **L. Conformance** — re-run openresponses suite on the mock agent
       (now hosting the mock definition) to confirm the request path is
       unchanged by the agent indirection. *(requires a deployed admin +

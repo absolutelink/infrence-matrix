@@ -47,6 +47,15 @@ class BackendRegistry:
     def add(self, handle: BackendHandle) -> None:
         self._handles[handle.instance_id] = handle
 
+    def remove(self, instance_id: str) -> BackendHandle | None:
+        """Drop a hosted handle by its key (slice 5 assignments reconcile).
+
+        Returns the removed handle (or ``None`` when no handle is keyed by
+        ``instance_id``). The caller is responsible for having stopped the
+        lifecycle first (busy-safe removal is enforced upstream).
+        """
+        return self._handles.pop(str(instance_id), None)
+
     def get(self, instance_id: str) -> BackendHandle | None:
         return self._handles.get(instance_id)
 

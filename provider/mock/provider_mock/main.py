@@ -157,8 +157,28 @@ def install_command_handlers(
     # provider_lib.ops, shared across providers: an operator-driven boot
     # runs in the background (`wait_for_running: false`) so a slow engine
     # never blocks the admin's request.
+    #
+    # Phase 16 slice 5: a multi-backend agent supplies a `make_handle` factory
+    # so an `agent.assignments.update` push can spawn a fresh lifecycle for a
+    # newly-placed backend (and retire one that was dropped). A single-
+    # lifecycle agent passes none — the shared handler then refuses adds it
+    # cannot host rather than crashing.
+    make_handle = None
+    if isinstance(target, BackendRegistry):
+
+        def make_handle(entry: dict[str, Any]) -> BackendHandle:  # noqa: ARG001
+            iid = str(entry["instance_id"])
+            lifecycle = make_lifecycle(client, instance_id=iid)
+            config_state = ConfigState()
+            _apply_assignment(lifecycle, entry, config_state)
+            return BackendHandle(iid, lifecycle, config_state)
+
     install_backend_ops(
-        client, target, backend_name=PROVIDER_TYPE, re_register=re_register
+        client,
+        target,
+        backend_name=PROVIDER_TYPE,
+        re_register=re_register,
+        make_handle=make_handle,
     )
     install_config_handlers(client, target, resolved_state, client.settings)
 
@@ -186,6 +206,30 @@ def _apply_backend(
     if config_state is not None:
         fp = definition.get("config_fingerprint")
         config_state.applied_fingerprint = fp if isinstance(fp, str) else None
+
+
+def _apply_assignment(
+    lifecycle: BackendLifecycle,
+    entry: dict[str, Any],
+    config_state: ConfigState,
+) -> None:
+    """Adopt an ``agent.assignments.update`` entry (flat shape) into a freshly
+    built lifecycle: instance id, capacity, model alias, backend_config, and
+    the applied fingerprint (slice 5)."""
+    iid = entry.get("instance_id")
+    if iid is not None:
+        lifecycle.instance_id = str(iid)
+    capacity = entry.get("capacity")
+    if isinstance(capacity, int) and capacity >= 1:
+        lifecycle.capacity = capacity
+    alias = entry.get("alias")
+    if isinstance(alias, str) and alias and isinstance(lifecycle.driver, MockBackend):
+        lifecycle.driver.model = alias
+    backend_config = entry.get("backend_config")
+    if isinstance(backend_config, dict):
+        lifecycle.driver.apply_config(backend_config)
+    fp = entry.get("config_fingerprint")
+    config_state.applied_fingerprint = fp if isinstance(fp, str) else None
 
 
 def apply_registration(

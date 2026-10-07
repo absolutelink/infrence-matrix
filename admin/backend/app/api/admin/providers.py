@@ -47,8 +47,8 @@ from app.models import (
     ProviderType,
 )
 from app.services import redis_keys
+from app.services.assignments import reconcile_agent_placement
 from app.services.hashing import canonical_json_sha256
-from app.services.wire import BackendStatusValue
 
 logger = logging.getLogger("admin.providers")
 
@@ -374,30 +374,20 @@ def prune_unplaced_backends(
     """Delete ``ProviderInstance`` rows this agent hosts that are no longer in
     its resolved placement (M2).
 
-    Interim cleanup until slice 5's ``agent.assignments.update`` push lets the
-    admin actively retire a de-placed backend: without this, a definition
-    un-linked from an agent (or flipped to ``specific`` elsewhere) leaves a
-    schedulable ghost row that the scheduler could still boot.
-
-    MEDIUM (round 2): a backend that is still ``running``/``in_use`` is NOT
-    deleted — its engine holds VRAM and the scheduler's per-booted-instance
-    hold is keyed by the instance id, so dropping the row would leak the hold
-    and orphan the engine until restart. Those rows are left in place and get
-    pruned on a later registration/PATCH once they have stopped. Returns the
-    number of rows deleted.
+    Slice 5: this is now a thin wrapper over the shared
+    :func:`app.services.assignments.reconcile_agent_placement` diff (the same
+    path the live ``agent.assignments.update`` push uses), so there is exactly
+    ONE placement-diff implementation. It runs the prune half only
+    (``create_new=False``): a still-``running``/``in_use`` backend is NOT
+    deleted (busy-safe — its engine holds VRAM and the scheduler's
+    per-booted hold is keyed by the instance id), and is left for a later
+    registration/PATCH to retire once it stops. Returns the number of rows
+    deleted.
     """
-    keep = {d.id for d in placed}
-    live = (BackendStatusValue.RUNNING, BackendStatusValue.IN_USE)
-    ghosts = [
-        inst
-        for inst in session.exec(
-            select(ProviderInstance).where(ProviderInstance.agent_id == agent.id)
-        ).all()
-        if inst.provider_definition_id not in keep and inst.backend_status not in live
-    ]
-    for inst in ghosts:
-        session.delete(inst)
-    return len(ghosts)
+    diff = reconcile_agent_placement(
+        session, agent, placed, create_new=False, renumber_ports=False
+    )
+    return len(diff.removed)
 
 
 def _reject_port_clash(
@@ -557,41 +547,36 @@ async def register_provider(
         )
         raise HTTPException(status_code=409, detail=refusal)
 
-    # 7. Resolve placed definitions and upsert one ProviderInstance each,
-    #    assigning stable ports base_port + offset (sorted by alias).
+    # 7. Resolve placed definitions and reconcile one ProviderInstance each
+    #    (create stopped rows at ``base_port + sorted-alias offset``, refresh
+    #    fingerprints, and retire de-placed ghosts busy-safe). Slice 5: this is
+    #    the SAME shared diff the live ``agent.assignments.update`` push runs,
+    #    so registration and placement-change reconciliation never diverge.
     placed = _placed_definitions(session, agent)
     ports = [agent.base_port + i for i in range(len(placed))]
     _reject_port_clash(session, agent, ports)
+    diff = reconcile_agent_placement(
+        session, agent, placed, create_new=True, renumber_ports=True
+    )
+    pruned = len(diff.removed)
 
-    backends: list[dict[str, Any]] = []
-    for offset, definition in zip(range(len(placed)), placed, strict=True):
-        port = agent.base_port + offset
-        instance = session.exec(
-            select(ProviderInstance).where(
-                ProviderInstance.agent_id == agent.id,
-                ProviderInstance.provider_definition_id == definition.id,
-            )
-        ).first()
-        if instance is None:
-            instance = ProviderInstance(
-                agent_id=agent.id,
-                provider_definition_id=definition.id,
-            )
-        instance.port = port
-        instance.config_fingerprint = compute_config_fingerprint(
-            definition.backend_config
-        )
-        session.add(instance)
-        backends.append(
-            {
-                "instance_id": str(instance.id),
-                "port": port,
-                "definition": _definition_dict(definition, instance.config_fingerprint),
-            }
-        )
-    # M2: retire backends this agent no longer hosts (de-placed since its last
-    # registration) so no schedulable ghost survives the re-key.
-    pruned = prune_unplaced_backends(session, agent, placed)
+    # Build the response backends list from the reconciled rows, preserving the
+    # registration response shape (instance id + port + definition echo).
+    rows = {
+        inst.provider_definition_id: inst
+        for inst in session.exec(
+            select(ProviderInstance).where(ProviderInstance.agent_id == agent.id)
+        ).all()
+    }
+    backends: list[dict[str, Any]] = [
+        {
+            "instance_id": str(rows[d.id].id),
+            "port": rows[d.id].port,
+            "definition": _definition_dict(d, rows[d.id].config_fingerprint),
+        }
+        for d in placed
+        if d.id in rows
+    ]
     session.commit()
 
     # 8. Mint a fresh per-agent secret; store in Redis only (never Postgres).

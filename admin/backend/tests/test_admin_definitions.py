@@ -243,27 +243,34 @@ def test_patch_non_config_fields_do_not_push(
     client: TestClient, session: Session, monkeypatch
 ) -> None:
     from app.services import config_update as cu
+    from app.services.wire import Frame, FrameKind
 
     created = _create(client, alias="nc-model")
     _connected_backend(session, created["id"])
 
-    calls: list = []
+    sent: list[tuple[str, dict]] = []
 
-    async def no_send(*args, **kwargs):  # noqa: ARG001
-        calls.append(args)
-        raise AssertionError("must not be called")
+    async def record_send(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        sent.append((type_, dict(payload)))
+        return Frame(
+            type="ack", payload={"ok": True, "added": [], "removed": [], "refused": []}
+        )
 
-    monkeypatch.setattr(cu.manager, "send_command", no_send)
+    monkeypatch.setattr(cu.manager, "send_command", record_send)
 
-    # idle_timeout + enabled only: admin-side fields, no provider push
-    # (the idle reaper is admin-side; the provider consumes no idle).
+    # idle_timeout + enabled: neither is a CONFIG push (the idle reaper is
+    # admin-side; the provider consumes no idle). Phase 16 slice 5: disabling a
+    # definition IS a placement change, so an agent.assignments.update removal
+    # is pushed to the connected agent — but never a provider.config.update.
     resp = client.patch(
         f"/admin/api/definitions/{created['id']}",
         json={"idle_timeout_seconds": 60, "enabled": False},
     )
     assert resp.status_code == 200
     assert resp.json()["config_update_results"] == []
-    assert calls == []
+    types = [t for t, _ in sent]
+    assert "provider.config.update" not in types
+    assert FrameKind.AGENT_ASSIGNMENTS_UPDATE in types
     assert resp.json()["idle_timeout_seconds"] == 60
     assert resp.json()["enabled"] is False
 

@@ -56,7 +56,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import jsonschema
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
@@ -71,8 +71,7 @@ from app.models import (
     ProviderInstance,
     ProviderType,
 )
-from app.services import alias_registry, config_update
-from app.services.wire import BackendStatusValue
+from app.services import alias_registry, assignments, config_update
 
 logger = logging.getLogger("admin.definitions")
 
@@ -278,41 +277,6 @@ def _placement_agent_ids(session: Session, definition: ProviderDefinition) -> li
     ]
 
 
-def _prune_stale_placement(session: Session, definition: ProviderDefinition) -> int:
-    """M2: delete instances of this definition whose owning agent no longer
-    places it (interim until slice 5's assignments push).
-
-    A definition is placed on an agent when it is ``any_of_type`` and the
-    agent's provider_type matches, or it is ``specific`` and the agent is
-    linked. Any other agent hosting a row for this definition is a ghost.
-
-    MEDIUM (round 2): a still-``running``/``in_use`` backend is NOT deleted —
-    its engine holds VRAM and the scheduler's per-booted hold is keyed by the
-    instance id, so dropping the row would leak the hold and orphan the engine.
-    Those rows survive until they stop and a later registration/PATCH prunes
-    them.
-    """
-    linked = set(_placement_agent_ids(session, definition))
-    live = (BackendStatusValue.RUNNING, BackendStatusValue.IN_USE)
-    stale = 0
-    for inst in session.exec(
-        select(ProviderInstance).where(
-            ProviderInstance.provider_definition_id == definition.id
-        )
-    ).all():
-        agent = inst.agent
-        if agent is None:
-            continue
-        still_placed = (
-            definition.agent_placement == "any_of_type"
-            and agent.provider_type == definition.provider_type
-        ) or (definition.agent_placement == "specific" and str(agent.id) in linked)
-        if not still_placed and inst.backend_status not in live:
-            session.delete(inst)
-            stale += 1
-    return stale
-
-
 def definition_dict(
     definition: ProviderDefinition,
     *,
@@ -375,7 +339,9 @@ def _get_definition(session: Session, definition_id: str) -> ProviderDefinition:
 
 @router.post("")
 async def create_definition(
-    body: DefinitionCreate, session: Session = Depends(get_session)
+    body: DefinitionCreate,
+    request: Request,
+    session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     # Phase 16: provider_type + backend_config are required; validate the
     # config against the type's committed schema before inserting.
@@ -407,6 +373,14 @@ async def create_definition(
     session.refresh(definition)
     # Warm the litellm alias registration before first use (checklist 4).
     alias_registry.ensure_registered(definition.alias)
+    # Phase 16 slice 5: a new definition is a placement change for every agent
+    # of its type — push the updated assignment set to the live ones (an
+    # any_of_type def now includes them; a specific def reaches only its links,
+    # the others reconcile to a no-op).
+    await assignments.push_agent_assignments_for_type(
+        definition.provider_type,
+        scheduler=getattr(request.app.state, "scheduler", None),
+    )
     logger.info("created definition %s (%s)", definition.alias, definition.id)
     return definition_dict(
         definition, instances=[], placement_agents=[str(a) for a in agent_ids]
@@ -445,6 +419,7 @@ def get_definition(
 async def patch_definition(
     definition_id: str,
     body: DefinitionPatch,
+    request: Request,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     definition = _get_definition(session, definition_id)
@@ -526,17 +501,31 @@ async def patch_definition(
             detail="alias already exists",
         ) from None
     session.refresh(definition)
-    # M2: placement changed → retire backend rows on agents that no longer
-    # place this definition (interim until slice 5's assignments push).
-    if resolved_agent_ids is not None:
-        pruned = _prune_stale_placement(session, definition)
-        if pruned:
-            session.commit()
-            logger.info(
-                "definition %s placement change pruned %d stale backend row(s)",
-                definition.alias,
-                pruned,
-            )
+    # Phase 16 slice 5: a placement-affecting change (agent_placement, agents
+    # links, enabled, alias) reconciles every agent of this type — creating
+    # backend rows on newly-placed connected agents, retiring de-placed ghosts
+    # busy-safe, and pushing agent.assignments.update to the live sockets. This
+    # replaces the slice-3 interim prune (which only ran on the next
+    # registration). A pure config/capacity change is NOT a placement trigger —
+    # it rides provider.config.update below; a newly-placed backend already
+    # carries the current config in its assignment entry.
+    placement_changed = (
+        resolved_agent_ids is not None
+        or "enabled" in changes
+        or "alias" in changes
+        or "provider_type" in changes  # L1: a retype (only allowed with zero
+        # attached rows) changes which agents should host it — push the new type.
+    )
+    if placement_changed:
+        provider_type = definition.provider_type
+        # End the route transaction before awaiting the (possibly slow) socket
+        # fan-out — same N-8 discipline as the config push below (never hold an
+        # idle-in-transaction connection across a network await).
+        session.commit()
+        await assignments.push_agent_assignments_for_type(
+            provider_type,
+            scheduler=getattr(request.app.state, "scheduler", None),
+        )
     alias_registry.ensure_registered(definition.alias)
 
     # The provider-visible state: the config (fingerprint) or a capacity
@@ -611,6 +600,13 @@ async def patch_definition(
 def delete_definition(
     definition_id: str, session: Session = Depends(get_session)
 ) -> dict[str, Any]:
+    # Phase 16 slice 5: DELETE needs no live agent.assignments.update push —
+    # the guard below refuses deletion while any hosting agent is connected, so
+    # at this point every remaining backend row belongs to a DISCONNECTED agent.
+    # Those rows cascade-delete with the definition; the (already offline) agent
+    # re-resolves an empty placement on its next registration. The live teardown
+    # path for a running backend is `enabled=false` (a PATCH), which pushes the
+    # removal to the connected agents.
     definition = _get_definition(session, definition_id)
     connected = session.exec(
         select(ProviderInstance)

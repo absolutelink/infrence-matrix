@@ -494,11 +494,42 @@ instance only** (connect-path background task + presence sweep, with a
 per-instance in-flight push guard). Full semantics in
 `docs/ws-protocol.md` §4 and `provider/README.md`.
 
-`agent.assignments.update` (**Phase 16**) is the agent-level counterpart:
-when a definition's placement changes (added to / removed from this agent),
-the admin pushes the new assignment set so the agent spins up or tears down
-the corresponding backend slot. Config edits to an already-assigned
+`agent.assignments.update` (**Phase 16 slice 5**, live) is the agent-level
+counterpart to `provider.config.update`: when a definition's placement changes
+(created / PATCHed `agent_placement`/`agents`/`enabled`/`alias`), the admin
+recomputes the agent's placed set, reconciles its `ProviderInstance` rows
+(create stopped rows for newly-placed defs at `base_port + next free offset`;
+retire de-placed rows **busy-safe** — a `running`/`in_use` row is left in place
+and reported refused, pruned only once it stops), and pushes the **full**
+current assignment set over the socket. Config edits to an already-assigned
 definition still ride `provider.config.update` (addressed by `instance_id`).
+
+Payload (admin → provider):
+
+```json
+{
+  "assignments": [
+    {"instance_id": "<uuid>", "provider_definition_id": "<uuid>",
+     "alias": "my-model", "backend_config": { }, "config_fingerprint": "<sha256>",
+     "port": 8081, "capacity": 1, "idle_timeout_seconds": 300,
+     "vram_required_bytes": 0}
+  ],
+  "max_running_backends": 0
+}
+```
+
+Ack (provider → admin): `{"ok": true, "added": ["<instance_id>"], "removed":
+["<instance_id>"], "refused": [{"instance_id": "<id>", "reason": "..."}]}`. The
+provider reconciles its `BackendRegistry` to the pushed set — add a lifecycle
+per new `instance_id` (via a package `make_handle` factory), and for each
+dropped `instance_id` stop the engine if idle else refuse (busy-safe, mirroring
+the admin) and keep it until it frees. A package that cannot host an additional
+backend (every real engine today — N-per-process is slice 6) supplies no
+factory and refuses the add rather than crashing. On a successful push that
+added backends the admin re-triggers the scheduler's proactive warm-up (the
+slice-4 seam) so the new backends boot within the VRAM + `max_running_backends`
+budget. A disconnected agent still gets its rows reconciled (ghosts pruned) but
+receives no frame — its next registration re-resolves authoritatively.
 
 Unknown event/command types are logged and ignored (forward compatible).
 

@@ -57,6 +57,7 @@ class FrameKind:
     BACKEND_RESTART = "backend.restart"
     PROVIDER_INITIALIZE = "provider.initialize"
     PROVIDER_CONFIG_UPDATE = "provider.config.update"
+    AGENT_ASSIGNMENTS_UPDATE = "agent.assignments.update"
     METRICS_ASSIGN = "metrics.assign"
     METRICS_UNASSIGN = "metrics.unassign"
     METRICS_CATEGORY_START = "metrics.category.start"
