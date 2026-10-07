@@ -185,11 +185,15 @@ def test_status_events_persist(client: TestClient, session: Session) -> None:
 
         # Entering the loaded set arms the idle-reaper clock at boot time.
         _wait_for(loaded_clock_stamped)
-        loaded_once = session.exec(
-            select(ProviderInstance).where(
-                ProviderInstance.id == uuid.UUID(instance_id)
+        loaded_once = (
+            session.exec(
+                select(ProviderInstance).where(
+                    ProviderInstance.id == uuid.UUID(instance_id)
+                )
             )
-        ).one().backend_loaded_at
+            .one()
+            .backend_loaded_at
+        )
 
         # in_use -> running (idle heartbeat after a slot release) must NOT
         # re-arm the clock: the backend has been loaded the whole time.
@@ -432,8 +436,10 @@ def test_disconnect_clears_and_reconnect_rearms_load_clock(
             ).to_json()
         )
         _wait_for(
-            lambda: row().backend_loaded_at is not None
-            and row().backend_loaded_at != loaded_first
+            lambda: (
+                row().backend_loaded_at is not None
+                and row().backend_loaded_at != loaded_first
+            )
         )
 
 

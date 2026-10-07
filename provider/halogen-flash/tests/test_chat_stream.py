@@ -60,7 +60,9 @@ async def test_chat_stream_relays_chunks_and_skips_done(
         if c["choices"] and c["choices"][0]["delta"].get("content") is not None
     )
     assert text == "".join(f"tok{i}" for i in range(8))
-    finish = [c for c in chunks if c["choices"] and c["choices"][0].get("finish_reason")]
+    finish = [
+        c for c in chunks if c["choices"] and c["choices"][0].get("finish_reason")
+    ]
     assert finish[-1]["choices"][0]["finish_reason"] == "stop"
     # Final usage chunk: OpenAI streaming shape (empty choices + usage).
     assert chunks[-1]["choices"] == []
