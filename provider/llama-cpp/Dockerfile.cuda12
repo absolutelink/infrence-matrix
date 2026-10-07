@@ -1,24 +1,72 @@
-# llama.cpp Inference Matrix provider — NVIDIA CUDA 12 build.
+# llama.cpp Inference Matrix provider — NVIDIA CUDA 12 build (driver baked in).
 #
-# Layers this provider package on top of the OFFICIAL llama.cpp CUDA image
-# instead of compiling llama.cpp; the llama-server binary ships in the
-# image at /app/llama-server.
+# Layers this provider package on top of the OFFICIAL llama.cpp CUDA image.
+# Unlike the toolkit-based recipe, this image CARRIES the NVIDIA userspace
+# driver (libcuda, NVML, PTX JIT compiler, nvidia-smi) copied from RPM Fusion,
+# so it runs on hosts WITHOUT the NVIDIA Container Toolkit (e.g. plain/rootful
+# Podman): just pass the /dev/nvidia* device nodes and it works.
+#
+# HARD CONSTRAINT: the baked userspace driver version MUST match the host's
+# kernel driver, or libcuda init fails. Defaults target the provider host
+# (580.178.04). Override at build time to match a different host:
+#   --build-arg NVIDIA_DRIVER_BRANCH=580 --build-arg NVIDIA_VERSION=580.178.04
 #
 # Build (context = repo root):
 #   docker build -f provider/llama-cpp/Dockerfile.cuda12 \
 #     -t matrix-provider-llama-cpp-cuda12 .
 #
-# RUNTIME (CUDA): requires the NVIDIA Container Toolkit on the host; run
-# with `--gpus all` (compose `gpus: all`) so the container sees the GPU.
-# Machine-metrics use nvidia-smi when present in the base image; if the
-# official flavor omits it (flavor-dependent), GPU telemetry is omitted
-# gracefully and VRAM admission falls back to the admin-configured
-# Machine.total_vram_bytes — the provider's behavior is unchanged either
-# way.
+# RUNTIME (CUDA, no container toolkit): expose the GPU device nodes:
+#   docker run --device /dev/nvidia0 --device /dev/nvidiactl \
+#     --device /dev/nvidia-uvm --device /dev/nvidia-uvm-tools ...
+#   # Podman (root) on the provider host — same flags:
+#   sudo podman run --device /dev/nvidia0 ... (etc.)
+# If the host DOES have the NVIDIA Container Toolkit, `--gpus all` also works
+# and its runtime-injected driver takes precedence over the baked one.
 #
 # The model artifacts live OUTSIDE the image: mount MODELS_DIR (e.g.
 # /models) and CACHE_DIR (e.g. /cache) as named volumes / host paths.
-FROM ghcr.io/ggml-org/llama.cpp:server-cuda12
+
+# ----------------------------------------------------------------------
+# Stage 1: NVIDIA userspace driver, pulled from RPM Fusion (Fedora).
+# ----------------------------------------------------------------------
+FROM registry.fedoraproject.org/fedora:44 AS nvidia
+
+# Driver branch (package suffix "580xx") and exact version must match the
+# host kernel driver. See the header note.
+ARG NVIDIA_DRIVER_BRANCH=580
+ARG NVIDIA_VERSION=580.178.04
+
+# Install the userspace CUDA + NVML libraries (no kernel/akmod deps), then
+# extract nvidia-smi from the core driver RPM WITHOUT installing it — the core
+# package pulls akmod/kernel-devel deps that fail to resolve inside a container
+# build, so rpm2cpio sidesteps dependency resolution entirely.
+RUN set -eux; \
+    dnf -y install \
+        https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-44.noarch.rpm \
+        https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-44.noarch.rpm \
+        dnf-plugins-core cpio; \
+    dnf -y install \
+        "xorg-x11-drv-nvidia-${NVIDIA_DRIVER_BRANCH}xx-libs-${NVIDIA_VERSION}" \
+        "xorg-x11-drv-nvidia-${NVIDIA_DRIVER_BRANCH}xx-cuda-libs-${NVIDIA_VERSION}"; \
+    mkdir -p /opt/nvidia-smi /tmp/nvdl; \
+    dnf download --destdir /tmp/nvdl \
+        "xorg-x11-drv-nvidia-${NVIDIA_DRIVER_BRANCH}xx-${NVIDIA_VERSION}"; \
+    rpm2cpio /tmp/nvdl/xorg-x11-drv-nvidia-${NVIDIA_DRIVER_BRANCH}xx-*.rpm \
+        | (cd /opt/nvidia-smi && cpio -idm --quiet); \
+    test -x /opt/nvidia-smi/usr/bin/nvidia-smi; \
+    dnf clean all; rm -rf /var/cache/dnf /tmp/nvdl
+
+# ----------------------------------------------------------------------
+# Stage 2: provider image on the official CUDA base.
+# ----------------------------------------------------------------------
+FROM ghcr.io/ggml-org/llama.cpp:full-cuda12
+
+# llama-server location in the base image. Fail fast (before the slow uv
+# sync) if the chosen flavor moves it; override with --build-arg.
+ARG LLAMA_SERVER_PATH=/app/llama-server
+RUN test -x "${LLAMA_SERVER_PATH}" \
+    || { echo "llama-server not found at ${LLAMA_SERVER_PATH}; candidates:"; \
+         ls -l /app /build/bin 2>/dev/null || true; exit 1; }
 
 WORKDIR /app
 
@@ -29,27 +77,39 @@ COPY pyproject.toml uv.lock /app/
 COPY provider/lib /app/provider/lib
 COPY provider/llama-cpp /app/provider/llama-cpp
 
-# The server-cuda12 base is a CUDA/Ubuntu build image with NO python, pip
-# or uv. Install uv via the standalone installer (no python needed); uv
-# then fetches its managed CPython 3.14 (the workspace requires >=3.14,
-# which this Ubuntu 24.04 base cannot provide via apt) and creates the
-# venv. Sync ONLY this provider package + provider_lib — never the admin
-# or the other provider packages.
+# The full-cuda12 base is an Ubuntu CUDA build image with NO python, pip or
+# uv. Install uv via the standalone installer (no python needed); uv then
+# fetches its managed CPython 3.14 (the workspace requires >=3.14, which this
+# Ubuntu base cannot provide via apt) and creates the venv. Sync ONLY this
+# provider package + provider_lib — never the admin or the other provider
+# packages.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && curl -LsSf https://astral.sh/uv/install.sh | env CARGO_HOME=/tmp UV_INSTALL_DIR=/usr/local/bin sh \
     && uv sync --frozen --package matrix-provider-llama-cpp
 
-ENV PATH="/app/.venv/bin:$PATH" \
+# Bake the NVIDIA userspace driver into the image (no container toolkit needed
+# at runtime): libcuda (driver API), libnvidia-ml (NVML — used by llama.cpp
+# and nvidia-smi), libnvidia-ptxjitcompiler (PTX JIT). nvidia-smi powers the
+# provider's vram/gpu_usage metrics; if it ever fails to run the sampler
+# degrades gracefully (category omitted).
+RUN mkdir -p /usr/local/nvidia/lib64 /usr/local/nvidia/bin
+COPY --from=nvidia /usr/lib64/libcuda.so*                  /usr/local/nvidia/lib64/
+COPY --from=nvidia /usr/lib64/libnvidia-ml.so*             /usr/local/nvidia/lib64/
+COPY --from=nvidia /usr/lib64/libnvidia-ptxjitcompiler.so* /usr/local/nvidia/lib64/
+COPY --from=nvidia /opt/nvidia-smi/usr/bin/nvidia-smi      /usr/local/nvidia/bin/nvidia-smi
+
+ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH} \
+    PATH="/app/.venv/bin:/usr/local/nvidia/bin:$PATH" \
     PROVIDER_PORT=8081 \
     # The official image's llama-server (NOT on PATH by default).
-    LLAMA_SERVER_PATH=/app/llama-server \
+    LLAMA_SERVER_PATH=${LLAMA_SERVER_PATH} \
     CACHE_DIR=/cache \
     MODELS_DIR=/models
 
 EXPOSE 8081
 
-# Override the base image's ENTRYPOINT (the ggml-org server images enter
-# straight into llama-server) so our shell command actually runs.
+# Override the base image's ENTRYPOINT (the ggml-org images enter straight
+# into llama-server) so our shell command actually runs.
 ENTRYPOINT ["sh", "-c", "exec python -m provider_llama_cpp.main"]

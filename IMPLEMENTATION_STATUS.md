@@ -70,9 +70,20 @@ Reproduce: `cd spike/litellm-fidelity && uv run python spike2.py`.
 - CI `build-and-push.yml` starts postgres 16 + redis 7 services and tests
   the admin. It also builds `matrix-app` and (added post-overhaul) the
   two **llama-cpp provider images** — Vulkan (official
-  `full-vulkan` base) and CUDA 12 (`server-cuda12` base) — via
+  `full-vulkan` base) and CUDA 12 (`full-cuda12` base) — via
   `provider/llama-cpp/{Dockerfile,Dockerfile.cuda12}`; `provider/llama-cpp`
   tests run in the `test-provider` job. No `:latest` tag is produced.
+  - **CUDA 12 driver-baked (2026-10-07):** `Dockerfile.cuda12` now copies the
+    NVIDIA userspace driver (`libcuda`, NVML `libnvidia-ml`,
+    `libnvidia-ptxjitcompiler`) and `nvidia-smi` from RPM Fusion (Fedora 44
+    builder stage) into `/usr/local/nvidia` and prepends it to
+    `LD_LIBRARY_PATH`, so the image runs **without the NVIDIA Container
+    Toolkit** — pass the `/dev/nvidia*` device nodes instead of `--gpus all`.
+    The baked driver version is pinned by build-args `NVIDIA_DRIVER_BRANCH`
+    (default `580`) / `NVIDIA_VERSION` (default `580.178.04`) and **must match
+    the host kernel driver**. The previously disabled
+    `build-provider-llama-cpp-cuda12` CI job is re-enabled with those
+    build-args. `nvidia-smi` in-image feeds the `vram`/`gpu_usage` metrics.
 - The pre-overhaul code was removed in the final cleanup; it lives in git
   history only — never restore patterns from it.
 

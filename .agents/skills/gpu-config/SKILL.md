@@ -114,8 +114,14 @@ docker compose exec redis redis-cli HGETALL im:vram:used:<machine_uid>
 Provider containers need the device nodes exposed:
 
 ```bash
-# NVIDIA
-docker run --gpus all ...        # or --device /dev/nvidia*
+# NVIDIA (container toolkit present)
+docker run --gpus all ...
+
+# NVIDIA (no container toolkit — the llama-cpp CUDA12 image bakes the
+# userspace driver, so just pass the device nodes; the baked driver version
+# must match the host kernel driver):
+podman run --device /dev/nvidia0 --device /dev/nvidiactl \
+  --device /dev/nvidia-uvm --device /dev/nvidia-uvm-tools ...
 
 # AMD (ROCm / halogen)
 podman run --device /dev/kfd --device /dev/dri ...
@@ -126,7 +132,8 @@ podman run --device /dev/dri ...
 
 `LD_LIBRARY_PATH` is defaulted to the `llama-server` binary's directory by
 the driver (`env.setdefault`) — Vulkan/ROCm containers may need it set
-explicitly for driver libs.
+explicitly for driver libs. The CUDA12 provider image sets
+`LD_LIBRARY_PATH=/usr/local/nvidia/lib64` (baked driver libs) in the image.
 
 ## Multi-GPU
 

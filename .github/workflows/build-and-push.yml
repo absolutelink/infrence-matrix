@@ -249,10 +249,11 @@ jobs:
             BUILDKIT_INLINE_CACHE=1
 
   build-provider-llama-cpp-cuda12:
-    # Disabled: CUDA12 image builds keep failing in GHA; re-enable once
-    # stable. The image is still buildable manually — see the comment in
-    # provider/llama-cpp/Dockerfile.cuda12.
-    if: false
+    # CUDA12 image bakes the NVIDIA userspace driver (RPM Fusion) into the
+    # image so it runs without the NVIDIA Container Toolkit. The baked driver
+    # version (NVIDIA_DRIVER_BRANCH / NVIDIA_VERSION) must match the provider
+    # host's kernel driver — bump these build-args when the host driver moves.
+    # See provider/llama-cpp/Dockerfile.cuda12.
     needs: [test-admin, test-provider]
     runs-on: ubuntu-24.04
     permissions:
@@ -298,6 +299,8 @@ jobs:
           platforms: linux/amd64
           build-args: |
             BUILDKIT_INLINE_CACHE=1
+            NVIDIA_DRIVER_BRANCH=580
+            NVIDIA_VERSION=580.178.04
 
   build-provider-halogen-flash:
     needs: [test-admin, test-provider]
@@ -348,9 +351,11 @@ jobs:
 
   # Per-provider-type images: llama-cpp and halogen-flash are built in CI.
   # Vulkan (ghcr.io/ggml-org/llama.cpp:full-vulkan) is built; CUDA 12
-  # (ghcr.io/ggml-org/llama.cpp:server-cuda12) builds layers the provider
-  # package on the official base the same way but its CI job is currently
-  # disabled (see build-provider-llama-cpp-cuda12). gufo /
+  # (ghcr.io/ggml-org/llama.cpp:full-cuda12) builds layers the provider
+  # package on the official base the same way and additionally bakes the
+  # NVIDIA userspace driver + nvidia-smi (RPM Fusion builder stage) so it
+  # runs without the Container Toolkit (see build-provider-llama-cpp-cuda12).
+  # gufo /
   # halogen gates on ROCm hardware and ships its binary out-of-band (see
   # provider/<type>/Dockerfile); its CI build lands with the real hardware
   # type. halogen-flash's provider image is hardware-independent; the

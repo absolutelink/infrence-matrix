@@ -123,12 +123,20 @@ services:
   #     admin:
   #       condition: service_healthy
   #
-  # provider-llama-cpp (NVIDIA CUDA 12) — same env as above; needs the
-  # NVIDIA Container Toolkit and `gpus: all` (compose `deploy` block or
-  # the CLI `--gpus all`):
+  # provider-llama-cpp (NVIDIA CUDA 12) — same env as above. The image bakes
+  # the NVIDIA userspace driver, so it needs NO Container Toolkit: expose the
+  # GPU device nodes instead of `gpus: all` (the baked driver version must
+  # match the host kernel driver — see provider/llama-cpp/Dockerfile.cuda12):
   #   build:
   #     context: .
   #     dockerfile: provider/llama-cpp/Dockerfile.cuda12
+  #   devices:
+  #     - /dev/nvidia0:/dev/nvidia0
+  #     - /dev/nvidiactl:/dev/nvidiactl
+  #     - /dev/nvidia-uvm:/dev/nvidia-uvm
+  #     - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
+  #   # If the host has the NVIDIA Container Toolkit, `gpus: all` also works
+  #   # (its injected driver takes precedence over the baked one).
   #
   # provider-gufo:
   #   build:

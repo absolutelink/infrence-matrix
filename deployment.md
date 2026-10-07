@@ -25,10 +25,15 @@ Deployment of the overhauled stack. Architecture:
     passthrough (`gpus: all` for NVIDIA, or `/dev/dri` + Vulkan ICDs for
     Mesa/AMD/Intel — see the commented compose example).
   - **CUDA 12** (`provider/llama-cpp/Dockerfile.cuda12`, base
-    `ghcr.io/ggml-org/llama.cpp:server-cuda12`) →
-    `ghcr.io/<owner>/provider-llama-cpp-cuda12`. Needs the NVIDIA
-    Container Toolkit; run with `gpus: all`. Machine metrics report via
-    in-image `nvidia-smi`.
+    `ghcr.io/ggml-org/llama.cpp:full-cuda12`) →
+    `ghcr.io/<owner>/provider-llama-cpp-cuda12`. **Bakes the NVIDIA
+    userspace driver** (libcuda/NVML/PTX-JIT + `nvidia-smi`, from RPM Fusion)
+    into the image, so it needs **no NVIDIA Container Toolkit** — expose the
+    GPU device nodes (`--device /dev/nvidia0 --device /dev/nvidiactl
+    --device /dev/nvidia-uvm --device /dev/nvidia-uvm-tools`). The baked
+    driver version (`NVIDIA_VERSION`, default `580.178.04`) **must match the
+    host kernel driver**; bump the build-arg per host. `nvidia-smi` in-image
+    feeds the `vram`/`gpu_usage` machine metrics.
 - **Other providers** (`gufo`, `halogen`, `halogen-flash`): built from
   `provider/<type>/Dockerfile` out-of-band — they gate on NPU/ROCm
   hardware and their backend binaries are not in CI.
@@ -94,7 +99,7 @@ METRICS_CATEGORIES="gpu_usage vram os_ram cpu storage"   # no 'inference'
 LLAMA_SERVER_PATH=...         # for llama-cpp; env-only, never in backend_config
 ```
 
-Example (podman):
+Example (podman, Vulkan):
 ```bash
 ssh core@10.100.2.111
 sudo podman pull ghcr.io/<owner>/provider-llama-cpp:<version>
@@ -107,6 +112,23 @@ sudo podman run -d --name provider-llama-cpp \
   -e CACHE_DIR=/cache -e MODELS_DIR=/models \
   -v provider_cache:/cache -v provider_models:/models \
   ghcr.io/<owner>/provider-llama-cpp:<version>
+```
+
+Example (podman, CUDA 12 — driver baked in, no Container Toolkit; the image
+`NVIDIA_VERSION` must match the host kernel driver):
+```bash
+ssh core@10.100.2.111
+sudo podman pull ghcr.io/<owner>/provider-llama-cpp-cuda12:<version>
+sudo podman run -d --name provider-llama-cpp-cuda12 \
+  --device /dev/nvidia0 --device /dev/nvidiactl \
+  --device /dev/nvidia-uvm --device /dev/nvidia-uvm-tools \
+  -e MACHINE_UID=matrix-1 \
+  -e PROVIDER_REGISTRATION_TOKEN=<token> \
+  -e ADMIN_BASE_URL=https://matrix.thelink.family \
+  -e PROVIDER_PORT=8081 \
+  -e CACHE_DIR=/cache -e MODELS_DIR=/models \
+  -v provider_cache:/cache -v provider_models:/models \
+  ghcr.io/<owner>/provider-llama-cpp-cuda12:<version>
 ```
 
 - The provider registers at startup, then **dials out** to
