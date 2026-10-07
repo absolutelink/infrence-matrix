@@ -650,10 +650,16 @@ def test_apply_registration_sets_instance_id(tmp_path) -> None:
     lifecycle = make_lifecycle(_StubClient(settings), {})
     result = RegistrationResult(
         {
-            "instance_id": "cafe-uuid",
-            "instance_secret": "s",
+            "agent_id": "aaaaaaaa-2222-3333-4444-555555555555",
+            "agent_secret": "s",
             "machine": {"uid": "u"},
-            "provider_definition": {"capacity": 1},
+            "backends": [
+                {
+                    "instance_id": "cafe-uuid",
+                    "port": 8081,
+                    "definition": {"capacity": 1},
+                }
+            ],
         }
     )
     apply_registration(lifecycle, result)

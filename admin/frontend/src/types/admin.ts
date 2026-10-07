@@ -38,7 +38,7 @@ export interface Machine {
 export interface InstanceSummary {
   id: string
   machine_uid: string | null
-  instance_status: string
+  agent_status: string
   backend_status: string
   websocket_connected: boolean
   config_fingerprint: string | null
@@ -58,15 +58,14 @@ export interface ConfigUpdateResult {
 export interface ProviderDefinition {
   id: string
   alias: string
-  /** Phase 14: null on a shell definition (type adopted at registration). */
-  provider_type: ProviderType | string | null
-  /** Phase 14: null = no config authored yet (shell); {} is a real config. */
-  backend_config: Record<string, unknown> | null
+  /** Phase 16: provider_type is required (no shells). */
+  provider_type: ProviderType | string
+  /** Phase 16: backend_config is required (no shells). */
+  backend_config: Record<string, unknown>
   config_fingerprint: string | null
   vram_required_bytes: number
   idle_timeout_seconds: number
   capacity: number
-  registration_token: string
   model_metadata: Record<string, unknown>
   enabled: boolean
   status: string
@@ -87,7 +86,7 @@ export interface ProviderInstance {
   provider_type: string | null
   port: number
   version: string
-  instance_status: string
+  agent_status: string
   backend_status: string
   websocket_connected: boolean
   epoch: number

@@ -47,13 +47,13 @@ export type DefinitionCreate = {
     /**
      * Provider Type
      */
-    provider_type?: string | null;
+    provider_type: string;
     /**
      * Backend Config
      */
     backend_config?: {
         [key: string]: unknown;
-    } | null;
+    };
     /**
      * Vram Required Bytes
      */
@@ -66,10 +66,6 @@ export type DefinitionCreate = {
      * Capacity
      */
     capacity?: number;
-    /**
-     * Registration Token
-     */
-    registration_token?: string | null;
     /**
      * Enabled
      */
@@ -114,10 +110,6 @@ export type DefinitionPatch = {
      * Capacity
      */
     capacity?: number | null;
-    /**
-     * Registration Token
-     */
-    registration_token?: string | null;
     /**
      * Enabled
      */
@@ -203,15 +195,13 @@ export type MachinePatch = {
  *
  * Body sent by provider_lib.admin_client.AdminClient.register().
  *
- * ``schema`` (Phase 12) is the provider package's committed
- * ``schema.json`` (JSON Schema 2020-12 for this type's
- * ``backend_config``). The admin derives the fingerprint itself; the
- * provider never sends it separately.
+ * ``schema`` (Phase 12) is the provider package's committed ``schema.json``
+ * (JSON Schema 2020-12 for this type's ``backend_config``). The admin
+ * derives the fingerprint itself; the provider never sends it separately.
  *
- * TRANSITION (Phase 12): ``schema`` is optional until every provider
- * package ships a real ``schema.json`` (Phase D) — an admin-first
- * deploy must not 422 the currently-deployed providers that don't send
- * it yet. See the schema-omitted path in ``register_provider``.
+ * Phase 16: ``machine_secret`` replaces ``registration_token``; ``agent_id``
+ * is the operator-supplied stable id (container ``AGENT_ID`` env) and
+ * ``base_port`` is the first backend port (backends get ``base_port + i``).
  */
 export type RegistrationRequest = {
     /**
@@ -219,9 +209,13 @@ export type RegistrationRequest = {
      */
     machine_uid: string;
     /**
-     * Registration Token
+     * Machine Secret
      */
-    registration_token: string;
+    machine_secret: string;
+    /**
+     * Agent Id
+     */
+    agent_id: string;
     /**
      * Provider Type
      */
@@ -237,9 +231,9 @@ export type RegistrationRequest = {
      */
     version: string;
     /**
-     * Port
+     * Base Port
      */
-    port?: number;
+    base_port?: number;
     /**
      * Hardware
      */

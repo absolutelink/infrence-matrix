@@ -65,7 +65,6 @@ from app.models import (
     ProviderDefinition,
     ResponseRecord,
     TokenUsageSample,
-    backend_config_is_authored,
 )
 from app.services.alias_registry import ensure_registered
 from app.services.scheduler import (
@@ -305,12 +304,6 @@ async def create_response(request: Request) -> Any:
         if not definition.enabled:
             raise HTTPException(
                 status_code=404, detail=f"model alias '{alias}' is disabled"
-            )
-        # Phase 14: shell definitions (no authored backend_config) are
-        # invisible to inference — same 404 as a disabled alias.
-        if not backend_config_is_authored(definition):
-            raise HTTPException(
-                status_code=404, detail=f"model alias '{alias}' is not configured"
             )
         definition_id = definition.id
         base_params: dict[str, Any] = {

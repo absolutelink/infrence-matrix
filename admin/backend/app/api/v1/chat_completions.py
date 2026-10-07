@@ -52,7 +52,7 @@ from app.api.v1.responses import (
     persist_turn_logged,
 )
 from app.core.db import engine
-from app.models import ProviderDefinition, backend_config_is_authored
+from app.models import ProviderDefinition
 from app.services.alias_registry import ensure_registered
 from app.services.scheduler import (
     Admission,
@@ -202,10 +202,6 @@ async def create_chat_completion(request: Request) -> Any:
         if not definition.enabled:
             raise HTTPException(
                 status_code=404, detail=f"model alias '{alias}' is disabled"
-            )
-        if not backend_config_is_authored(definition):
-            raise HTTPException(
-                status_code=404, detail=f"model alias '{alias}' is not configured"
             )
         definition_id = definition.id
         base_params: dict[str, Any] = {

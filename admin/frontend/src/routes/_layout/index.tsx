@@ -154,7 +154,7 @@ function DashboardContent() {
                       </TableCell>
                       <TableCell className="font-medium">{i.alias}</TableCell>
                       <TableCell>
-                        <StatusBadge status={i.instance_status} />
+                        <StatusBadge status={i.agent_status} />
                       </TableCell>
                       <TableCell>
                         <StatusBadge status={i.backend_status} />

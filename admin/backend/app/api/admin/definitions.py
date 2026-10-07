@@ -38,31 +38,19 @@ Config-change semantics (docs/ws-protocol.md §4):
   type and would keep running under a definition they no longer match
   (registration cross-checks provider_type, so the binding would be
   silently broken for the next reconnect).
-- ``DELETE`` is allowed only when **no instance is currently
-  websocket_connected**; otherwise 409 with a suggestion to disable.
-  When allowed, the definition's *offline* instance rows are deleted
-  with it (cascade to non-connected rows only).
+- ``DELETE`` is allowed only when **no attached backend's agent is
+  currently websocket_connected**; otherwise 409 with a suggestion to
+  disable. When allowed, the definition's *offline* backend rows are
+  deleted with it (cascade to non-connected rows only).
 
-Shell definitions (Phase 14):
-- Create may omit ``provider_type`` AND ``backend_config`` (a "shell").
-  A shell holds the alias + token + scheduler hints only; its type is
-  ADOPTED from the container's first registration and its config is
-  authored through a later PATCH (validated against the adopted type's
-  committed schema, then pushed via the Phase 9 flow). A shell is
-  never schedulable and never pushed — the scheduler, /v1/models and
-  the alias registry all exclude it (``backend_config_is_authored``).
-- Rules: a shell (type null) MUST NOT carry ``backend_config`` (422 —
-  there is no schema to validate against yet, so accepting it would
-  store unvalidatable config). A typed definition behaves exactly as
-  before (type resolved + config validated on every affected write).
-- Once a type/config has been set, explicit nulls are refused (422):
-  a definition cannot go back to being a shell. Setting the type on a
-  shell is allowed (operator repair path) subject to the usual
-  attached-instances refusal.
+Phase 16: ``provider_type`` and ``backend_config`` are required at create
+(the Phase 14 shell/``awaiting_config`` machinery is retired) and
+``registration_token`` is gone — agents authenticate with the shared
+``Machine.registration_secret`` and receive every definition placed on them
+(``agent_placement``).
 """
 
 import logging
-import secrets
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -71,7 +59,7 @@ import jsonschema
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from app.api.admin.providers import compute_config_fingerprint
 from app.api.admin.serializers import iso_utc
@@ -82,9 +70,9 @@ from app.models import (
     ProviderDefinition,
     ProviderInstance,
     ProviderType,
-    backend_config_is_authored,
 )
 from app.services import alias_registry, config_update
+from app.services.wire import BackendStatusValue
 
 logger = logging.getLogger("admin.definitions")
 
@@ -95,15 +83,13 @@ _VALID_PLACEMENTS = ("any_of_type", "specific")
 
 class DefinitionCreate(BaseModel):
     alias: str = Field(min_length=1, max_length=255)
-    # Phase 14: None = shell definition (type adopted at first registration).
-    provider_type: str | None = Field(default=None, min_length=1, max_length=64)
-    backend_config: dict[str, Any] | None = None
+    # Phase 16: required (no shells). provider_type must be in the registry
+    # and backend_config validates against its committed JSON Schema.
+    provider_type: str = Field(min_length=1, max_length=64)
+    backend_config: dict[str, Any] = Field(default_factory=dict)
     vram_required_bytes: int = Field(default=0, ge=0)
     idle_timeout_seconds: int = Field(default=300, ge=0)
     capacity: int = Field(default=1, ge=1)
-    # Auto-generated when omitted (trusted-LAN: the operator copies the
-    # issued token into the provider container env).
-    registration_token: str | None = Field(default=None, max_length=255)
     enabled: bool = True
     # Phase 16: placement. 'any_of_type' hosts on every agent of the type;
     # 'specific' hosts only on the listed agent ids (ProviderAgent.id).
@@ -118,7 +104,6 @@ class DefinitionPatch(BaseModel):
     vram_required_bytes: int | None = Field(default=None, ge=0)
     idle_timeout_seconds: int | None = Field(default=None, ge=0)
     capacity: int | None = Field(default=None, ge=1)
-    registration_token: str | None = Field(default=None, min_length=1, max_length=255)
     enabled: bool | None = None
     # Phase 16: placement (see DefinitionCreate).
     agent_placement: str | None = Field(default=None, max_length=32)
@@ -127,16 +112,15 @@ class DefinitionPatch(BaseModel):
 
 # Columns that are NOT NULL in the model: an explicit null in a PATCH
 # body is a client error, never a silent skip or a DB IntegrityError.
-# Phase 14: provider_type/backend_config leave this list (nullable on a
-# shell) but are instead guarded as "cannot return to null once set" —
-# see _check_no_unshell in patch_definition.
+# Phase 16: provider_type/backend_config are NOT NULL again (no shells).
 _NON_NULLABLE_FIELDS = frozenset(
     {
         "alias",
+        "provider_type",
+        "backend_config",
         "vram_required_bytes",
         "idle_timeout_seconds",
         "capacity",
-        "registration_token",
         "enabled",
         "agent_placement",
     }
@@ -213,13 +197,15 @@ def _validate_backend_config(
 
 
 def _resolve_placement_agents(
-    session: Session, placement: str, agents: list[str] | None
+    session: Session, placement: str, agents: list[str] | None, provider_type: str
 ) -> list[uuid.UUID]:
     """Validate ``agent_placement`` and resolve ``specific`` agent ids.
 
     Returns the list of ``ProviderAgent`` ids to link (empty for
     ``any_of_type``). Raises 422 on an unknown placement, an empty/absent
-    list for ``specific``, or an unknown/malformed agent id.
+    list for ``specific``, an unknown/malformed agent id, or an agent whose
+    ``provider_type`` does not match the definition's (M1: a llama-cpp agent
+    cannot host a gufo definition).
     """
     if placement not in _VALID_PLACEMENTS:
         raise HTTPException(
@@ -247,8 +233,17 @@ def _resolve_placement_agents(
             raise HTTPException(
                 status_code=422, detail=f"invalid agent id '{raw}'"
             ) from None
-        if session.get(ProviderAgent, agent_uuid) is None:
+        agent = session.get(ProviderAgent, agent_uuid)
+        if agent is None:
             raise HTTPException(status_code=422, detail=f"unknown agent '{raw}'")
+        if agent.provider_type != provider_type:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"agent '{raw}' has provider_type '{agent.provider_type}', "
+                    f"which does not match the definition's '{provider_type}'"
+                ),
+            )
         if agent_uuid not in seen:
             seen.add(agent_uuid)
             out.append(agent_uuid)
@@ -283,6 +278,41 @@ def _placement_agent_ids(session: Session, definition: ProviderDefinition) -> li
     ]
 
 
+def _prune_stale_placement(session: Session, definition: ProviderDefinition) -> int:
+    """M2: delete instances of this definition whose owning agent no longer
+    places it (interim until slice 5's assignments push).
+
+    A definition is placed on an agent when it is ``any_of_type`` and the
+    agent's provider_type matches, or it is ``specific`` and the agent is
+    linked. Any other agent hosting a row for this definition is a ghost.
+
+    MEDIUM (round 2): a still-``running``/``in_use`` backend is NOT deleted —
+    its engine holds VRAM and the scheduler's per-booted hold is keyed by the
+    instance id, so dropping the row would leak the hold and orphan the engine.
+    Those rows survive until they stop and a later registration/PATCH prunes
+    them.
+    """
+    linked = set(_placement_agent_ids(session, definition))
+    live = (BackendStatusValue.RUNNING, BackendStatusValue.IN_USE)
+    stale = 0
+    for inst in session.exec(
+        select(ProviderInstance).where(
+            ProviderInstance.provider_definition_id == definition.id
+        )
+    ).all():
+        agent = inst.agent
+        if agent is None:
+            continue
+        still_placed = (
+            definition.agent_placement == "any_of_type"
+            and agent.provider_type == definition.provider_type
+        ) or (definition.agent_placement == "specific" and str(agent.id) in linked)
+        if not still_placed and inst.backend_status not in live:
+            session.delete(inst)
+            stale += 1
+    return stale
+
+
 def definition_dict(
     definition: ProviderDefinition,
     *,
@@ -290,24 +320,15 @@ def definition_dict(
     config_update_results: list[dict[str, Any]] | None = None,
     placement_agents: list[str] | None = None,
 ) -> dict[str, Any]:
-    # Phase 14: a shell definition reports null type/config/fingerprint —
-    # an empty config must never masquerade as authored (the fingerprint
-    # of {} would look identical to a real permissive-schema config).
-    authored = backend_config_is_authored(definition)
     d: dict[str, Any] = {
         "id": str(definition.id),
         "alias": definition.alias,
         "provider_type": definition.provider_type,
-        "backend_config": definition.backend_config if authored else None,
-        "config_fingerprint": (
-            compute_config_fingerprint(definition.backend_config or {})
-            if authored
-            else None
-        ),
+        "backend_config": definition.backend_config,
+        "config_fingerprint": compute_config_fingerprint(definition.backend_config),
         "vram_required_bytes": definition.vram_required_bytes,
         "idle_timeout_seconds": definition.idle_timeout_seconds,
         "capacity": definition.capacity,
-        "registration_token": definition.registration_token,
         "model_metadata": definition.model_metadata,
         "enabled": definition.enabled,
         "status": definition.status,
@@ -322,18 +343,20 @@ def definition_dict(
         d["instances"] = [
             {
                 "id": str(i.id),
+                "agent_id": str(i.agent_id),
                 "machine_uid": i.machine.uid if i.machine else None,
-                "instance_status": i.instance_status,
+                "agent_status": i.agent.agent_status if i.agent else None,
                 "backend_status": i.backend_status,
-                "websocket_connected": i.websocket_connected,
+                "websocket_connected": (
+                    i.agent.websocket_connected if i.agent else False
+                ),
                 "config_fingerprint": i.config_fingerprint,
                 "port": i.port,
-                "version": i.version,
             }
             for i in instances
         ]
         d["connected_instance_count"] = sum(
-            1 for i in instances if i.websocket_connected
+            1 for i in instances if i.agent is not None and i.agent.websocket_connected
         )
     if config_update_results is not None:
         d["config_update_results"] = config_update_results
@@ -354,30 +377,17 @@ def _get_definition(session: Session, definition_id: str) -> ProviderDefinition:
 async def create_definition(
     body: DefinitionCreate, session: Session = Depends(get_session)
 ) -> dict[str, Any]:
-    # Phase 14: a Shell definition (provider_type null) must not carry a
-    # backend_config — there is no committed schema to validate it against.
-    if body.provider_type is None:
-        if body.backend_config is not None:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "backend_config cannot be set on a definition without "
-                    "provider_type: create the shell and let the provider "
-                    "registration adopt the type first"
-                ),
-            )
-        ptype = None
-    else:
-        ptype = _get_provider_type(session, body.provider_type)
-        _validate_backend_config(
-            ptype, body.backend_config if body.backend_config is not None else {}
-        )
+    # Phase 16: provider_type + backend_config are required; validate the
+    # config against the type's committed schema before inserting.
+    ptype = _get_provider_type(session, body.provider_type)
+    _validate_backend_config(ptype, body.backend_config)
     # Phase 16: validate placement + resolve specific agent ids (422 on an
     # unknown agent) BEFORE inserting, so a bad placement never persists.
-    agent_ids = _resolve_placement_agents(session, body.agent_placement, body.agents)
+    agent_ids = _resolve_placement_agents(
+        session, body.agent_placement, body.agents, body.provider_type
+    )
     definition = ProviderDefinition(
-        **body.model_dump(exclude={"registration_token", "agents"}),
-        registration_token=body.registration_token or secrets.token_urlsafe(24),
+        **body.model_dump(exclude={"agents"}),
     )
     session.add(definition)
     try:
@@ -392,14 +402,11 @@ async def create_definition(
         session.rollback()
         raise HTTPException(
             status_code=409,
-            detail=(f"alias or registration_token already exists ('{body.alias}')"),
+            detail=f"alias already exists ('{body.alias}')",
         ) from None
     session.refresh(definition)
-    # Warm the litellm alias registration before first use (checklist 4) —
-    # only for definitions that can actually serve (a shell never
-    # schedules; it is registered when the config lands instead).
-    if backend_config_is_authored(definition):
-        alias_registry.ensure_registered(definition.alias)
+    # Warm the litellm alias registration before first use (checklist 4).
+    alias_registry.ensure_registered(definition.alias)
     logger.info("created definition %s (%s)", definition.alias, definition.id)
     return definition_dict(
         definition, instances=[], placement_agents=[str(a) for a in agent_ids]
@@ -449,63 +456,36 @@ async def patch_definition(
     placement_agents_raw = changes.pop("agents", None)
     placement_touched = "agent_placement" in changes or placement_agents_raw is not None
     effective_placement = changes.get("agent_placement", definition.agent_placement)
+    effective_type = changes.get("provider_type", definition.provider_type)
     resolved_agent_ids: list[uuid.UUID] | None = None
     if placement_touched:
         if placement_agents_raw is not None or effective_placement == "specific":
             resolved_agent_ids = _resolve_placement_agents(
-                session, effective_placement, placement_agents_raw
+                session, effective_placement, placement_agents_raw, effective_type
             )
         else:
             resolved_agent_ids = []  # switching to any_of_type: clear links
 
     # SF-4: explicit null on a non-nullable column is a validation
     # error (422), not a DB IntegrityError dressed up as a 409 conflict.
+    # Phase 16: provider_type/backend_config are NOT NULL (no shells), so an
+    # explicit null on either is refused here.
     for key in changes:
         if changes[key] is None and key in _NON_NULLABLE_FIELDS:
             raise HTTPException(status_code=422, detail=f"field '{key}' cannot be null")
 
-    # Phase 14: a definition can never go BACK to being a shell. Explicit
-    # null on provider_type/backend_config *present in the body* is
-    # refused 422 (absent keys mean "unchanged").
-    for key in ("provider_type", "backend_config"):
-        if key in changes and changes[key] is None:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"field '{key}' cannot be unset: a definition never "
-                    "returns to the shell (provider_type/backend_config "
-                    "null) state"
-                ),
-            )
-
-    # M3: validate the EFFECTIVE config (post-change) against the
-    # EFFECTIVE type's committed schema — a retype without a config
-    # change must still satisfy the new schema. The type is resolved once
-    # up front so an unknown provider_type keeps its original 422-before-
-    # 409 ordering.
+    # M3: validate the EFFECTIVE config (post-change) against the EFFECTIVE
+    # type's committed schema — a retype without a config change must still
+    # satisfy the new schema. The type is resolved once up front so an
+    # unknown provider_type keeps its original 422-before-409 ordering.
     effective_type_name = changes.get("provider_type", definition.provider_type)
-    # Phase 14 shell rule: backend_config is settable only against a type.
-    # "backend_config" arriving on a still-untyped definition (type not
-    # touched by this PATCH and definition untyped) is rejected up front;
-    # _get_provider_type above would NPE on None otherwise.
-    if effective_type_name is None:
-        if "backend_config" in changes:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "backend_config cannot be set while the definition has "
-                    "no provider_type — set provider_type first"
-                ),
-            )
-        ptype = None
-    else:
-        ptype = _get_provider_type(session, effective_type_name)
-        if "backend_config" in changes:
-            _validate_backend_config(ptype, changes["backend_config"])
-        elif "provider_type" in changes and backend_config_is_authored(definition):
-            # Retype onto an existing config: validate the stored config
-            # against the new type's schema.
-            _validate_backend_config(ptype, definition.backend_config or {})
+    ptype = _get_provider_type(session, effective_type_name)
+    if "backend_config" in changes:
+        _validate_backend_config(ptype, changes["backend_config"])
+    elif "provider_type" in changes:
+        # Retype onto an existing config: validate the stored config against
+        # the new type's schema.
+        _validate_backend_config(ptype, definition.backend_config)
     if "provider_type" in changes and effective_type_name != definition.provider_type:
         attached = session.exec(
             select(ProviderInstance).where(
@@ -523,16 +503,9 @@ async def patch_definition(
                     "instead"
                 ),
             )
-    # Shell → typed transition with no config change is admin-side only
-    # (no push): the type follows the already-registered container.
 
-    old_fp: str | None = (
-        compute_config_fingerprint(definition.backend_config or {})
-        if backend_config_is_authored(definition)
-        else None
-    )
+    old_fp: str = compute_config_fingerprint(definition.backend_config)
     old_capacity = definition.capacity
-    was_shell = not backend_config_is_authored(definition)
     # NOTE (N-6): a rapid double-PATCH can transiently read a stale row
     # here and push the older config; the reconnect/sweep self-heal
     # converges it, so no locking is added.
@@ -550,23 +523,26 @@ async def patch_definition(
         session.rollback()
         raise HTTPException(
             status_code=409,
-            detail="alias or registration_token already exists",
+            detail="alias already exists",
         ) from None
     session.refresh(definition)
-    # Phase 14: a shell is never litellm-registered — the alias warms
-    # exactly when the config is authored (possibly in this PATCH).
-    if backend_config_is_authored(definition):
-        alias_registry.ensure_registered(definition.alias)
+    # M2: placement changed → retire backend rows on agents that no longer
+    # place this definition (interim until slice 5's assignments push).
+    if resolved_agent_ids is not None:
+        pruned = _prune_stale_placement(session, definition)
+        if pruned:
+            session.commit()
+            logger.info(
+                "definition %s placement change pruned %d stale backend row(s)",
+                definition.alias,
+                pruned,
+            )
+    alias_registry.ensure_registered(definition.alias)
 
-    # The provider-visible state: an authored config (fingerprint) or a
-    # capacity change. A type-only change on a typed definition with the
-    # SAME config is not a push trigger (fingerprint identical); a type
-    # adoption on a shell never pushes (nothing to apply yet).
-    new_fp: str | None = (
-        compute_config_fingerprint(definition.backend_config or {})
-        if backend_config_is_authored(definition)
-        else None
-    )
+    # The provider-visible state: the config (fingerprint) or a capacity
+    # change. A type-only change with the SAME config is not a push trigger
+    # (fingerprint identical).
+    new_fp: str = compute_config_fingerprint(definition.backend_config)
     # SF-2: push when the provider-visible fields changed — the
     # backend_config fingerprint (restart-worthy) or capacity (adopted
     # at the provider without restart). idle_timeout_seconds is not a
@@ -599,13 +575,11 @@ async def patch_definition(
         pushed = await config_update.push_config_update_by_id(definition_id)
         results = [r.to_dict() for r in pushed]
         logger.info(
-            "definition %s %s changed (%s -> %s; shell→configured=%s); "
-            "pushed to %d connected instance(s)",
+            "definition %s %s changed (%s -> %s); pushed to %d connected backend(s)",
             alias,
             "+".join(reasons),
             str(old_fp)[:8],
             str(new_fp)[:8],
-            was_shell,
             len(results),
         )
         # Re-bind the row post-push (model_metadata may have been
@@ -613,7 +587,6 @@ async def patch_definition(
         # another session).
         definition = session.get(ProviderDefinition, definition_id)
         if definition is None:  # pragma: no cover - deleted mid-push
-            instances = []
             return {
                 "id": str(definition_id),
                 "alias": alias,
@@ -640,9 +613,11 @@ def delete_definition(
 ) -> dict[str, Any]:
     definition = _get_definition(session, definition_id)
     connected = session.exec(
-        select(ProviderInstance).where(
+        select(ProviderInstance)
+        .join(ProviderAgent, col(ProviderInstance.agent_id) == col(ProviderAgent.id))
+        .where(
             ProviderInstance.provider_definition_id == definition.id,
-            ProviderInstance.websocket_connected == True,  # noqa: E712
+            ProviderAgent.websocket_connected == True,  # noqa: E712
         )
     ).all()
     if connected:

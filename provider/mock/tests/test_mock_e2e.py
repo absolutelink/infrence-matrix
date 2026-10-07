@@ -18,7 +18,8 @@ from provider_lib.config import ProviderSettings
 from provider_lib.wire import Frame
 
 INSTANCE_ID = "11111111-2222-3333-4444-555555555555"
-SECRET = "fake-instance-secret"
+AGENT_ID = "mock-agent"
+SECRET = "fake-agent-secret"
 
 WS_PORT_HOLDER: dict[str, int] = {}
 RECEIVED: list[Frame] = []
@@ -32,6 +33,10 @@ class _FakeAdminHTTP(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(length))
         assert body["provider_type"] == "mock"
         assert body["machine_uid"] == "mock-e2e"
+        # Phase 16: machine secret + agent id replace the per-def token.
+        assert body["machine_secret"] == "tok"
+        assert body["agent_id"] == AGENT_ID
+        assert body["base_port"] == 8081
         # Phase 12: registration must carry the shipped schema.json.
         schema = body.get("schema")
         assert isinstance(schema, dict), "register() must send schema in the body"
@@ -39,15 +44,23 @@ class _FakeAdminHTTP(BaseHTTPRequestHandler):
         assert "sampling" in schema.get("properties", {})
         payload = json.dumps(
             {
-                "instance_id": INSTANCE_ID,
-                "instance_secret": SECRET,
-                "machine": {"uid": body["machine_uid"]},
-                "provider_definition": {
-                    "alias": "mock-model",
-                    "provider_type": "mock",
-                    "config_fingerprint": "deadbeef",
+                "agent_id": "11111111-2222-3333-4444-555555555555",
+                "agent_secret": SECRET,
+                "machine": {
+                    "uid": body["machine_uid"],
                     "admin_ws_url": ADMIN_WS_URL_HOLDER["url"],
                 },
+                "backends": [
+                    {
+                        "instance_id": INSTANCE_ID,
+                        "port": 8081,
+                        "definition": {
+                            "alias": "mock-model",
+                            "provider_type": "mock",
+                            "config_fingerprint": "deadbeef",
+                        },
+                    }
+                ],
             }
         ).encode()
         self.send_response(200)
@@ -105,7 +118,8 @@ async def fake_admin():
 def _settings(base_url: str) -> ProviderSettings:
     return ProviderSettings(  # type: ignore[call-arg]
         MACHINE_UID="mock-e2e",
-        PROVIDER_REGISTRATION_TOKEN="tok",
+        MACHINE_SECRET="tok",
+        AGENT_ID=AGENT_ID,
         ADMIN_BASE_URL=base_url,
         PROVIDER_PORT=8081,
         CACHE_DIR="/tmp/mock_provider_test_cache",
@@ -132,6 +146,6 @@ async def test_mock_register_and_connect(fake_admin) -> None:
         status = RECEIVED[0]
         assert status.type == "provider.status"
         assert status.epoch == 7
-        assert status.payload["instance_status"] == "running"
+        assert status.payload["agent_status"] == "running"
     finally:
         await client.disconnect()

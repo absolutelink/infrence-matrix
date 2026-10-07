@@ -74,7 +74,8 @@ class EndpointDriver(BackendDriver):
 def _settings() -> ProviderSettings:
     return ProviderSettings(  # type: ignore[call-arg]
         MACHINE_UID="m-v1",
-        PROVIDER_REGISTRATION_TOKEN="tok",
+        MACHINE_SECRET="tok",
+        AGENT_ID="m-v1-agent",
         ADMIN_BASE_URL="http://admin:8000",
         CACHE_DIR="/tmp/prov_test_cache",
         MODELS_DIR="/tmp/prov_test_models",

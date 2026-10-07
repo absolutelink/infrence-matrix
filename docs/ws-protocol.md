@@ -1,5 +1,13 @@
 # Inference Matrix — Admin ⇄ Provider Wire Protocol
 
+> **STALE (pre-Phase-16).** This document predates the Phase 16 machine-scoped
+> provider-agent cutover. The **canonical** contract is now `ARCHITECTURE.md`
+> §5: registration authenticates with the machine's shared `MACHINE_SECRET` +
+> a stable `AGENT_ID` (no per-definition `registration_token`), the WS is
+> keyed by the `ProviderAgent` PK, and per-backend frames carry
+> `instance_id`. A full rewrite of this protocol doc is scheduled for slice 8.
+> Until then, trust `ARCHITECTURE.md` §5 over any conflicting text below.
+
 This document specifies the registration handshake and the provider
 WebSocket protocol between a **provider instance** (hardware-local
 container: `provider/mock`, `provider/llama-cpp`, `provider/halogen`,

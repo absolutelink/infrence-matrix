@@ -60,7 +60,8 @@ class RecordingDriver(BackendDriver):
 def _settings() -> ProviderSettings:
     return ProviderSettings(  # type: ignore[call-arg]
         MACHINE_UID="m-slot",
-        PROVIDER_REGISTRATION_TOKEN="tok",
+        MACHINE_SECRET="tok",
+        AGENT_ID="m-slot-agent",
         ADMIN_BASE_URL="http://admin:8000",
         CACHE_DIR="/tmp/prov_test_cache",
         MODELS_DIR="/tmp/prov_test_models",

@@ -29,14 +29,18 @@ from sqlmodel import Session, select
 
 from app.core.db import engine
 from app.models import (
-    Machine,
-    ProviderDefinition,
     ProviderInstance,
     ResponseRecord,
     TokenUsageSample,
 )
 from app.services.alias_registry import ensure_registered
 from app.services.scheduler import Admission
+from tests.helpers import (
+    get_or_create_machine,
+    make_agent,
+    make_definition,
+    make_instance,
+)
 
 CLIENT_ID_PREFIX = "chatcmpl-"
 UPSTREAM_ID = "chatcmpl-upstream000"
@@ -58,30 +62,17 @@ def seed_instance(
     enabled: bool = True,
     websocket_connected: bool = True,
 ) -> ProviderInstance:
-    machine = session.query(Machine).filter(Machine.uid == machine_uid).first()
-    if machine is None:
-        machine = Machine(uid=machine_uid, name=f"name-{machine_uid}", host="127.0.0.1")
-        session.add(machine)
-    definition = ProviderDefinition(
+    machine = get_or_create_machine(session, uid=machine_uid, host="127.0.0.1")
+    agent = make_agent(session, machine, connected=websocket_connected)
+    definition = make_definition(
+        session,
         alias=alias,
-        provider_type="mock",
-        registration_token=f"tok-{alias}",
         enabled=enabled,
         backend_config={"model": {"file": "m.gguf"}},
     )
-    session.add(definition)
-    session.commit()
-    instance = ProviderInstance(
-        machine_id=machine.id,
-        provider_definition_id=definition.id,
-        port=8081,
-        backend_status="running",
-        websocket_connected=websocket_connected,
+    return make_instance(
+        session, agent, definition, port=8081, backend_status="running"
     )
-    session.add(instance)
-    session.commit()
-    session.refresh(instance)
-    return instance
 
 
 def chat_chunk(
@@ -536,23 +527,12 @@ def test_disabled_alias_404(client: TestClient, session: Session) -> None:
 
 
 def test_no_connected_provider_503(client: TestClient, session: Session) -> None:
-    machine = Machine(uid="ct-np", name="ct-np", host="127.0.0.1")
-    definition = ProviderDefinition(
-        alias="ct-np",
-        provider_type="mock",
-        registration_token="tok-ct-np",
-        backend_config={"model": {"file": "m.gguf"}},
+    machine = get_or_create_machine(session, uid="ct-np", host="127.0.0.1")
+    agent = make_agent(session, machine, connected=False)
+    definition = make_definition(
+        session, alias="ct-np", backend_config={"model": {"file": "m.gguf"}}
     )
-    session.add_all([machine, definition])
-    session.commit()
-    instance = ProviderInstance(
-        machine_id=machine.id,
-        provider_definition_id=definition.id,
-        websocket_connected=False,
-        backend_status="stopped",
-    )
-    session.add(instance)
-    session.commit()
+    make_instance(session, agent, definition, backend_status="stopped")
     resp = client.post(
         "/v1/chat/completions",
         json={"model": "ct-np", "messages": [{"role": "user", "content": "x"}]},
@@ -711,33 +691,3 @@ async def test_non_stream_cancel_releases_slot(session, monkeypatch) -> None:
     assert scheduler.active_count("ct-nsx") == 0
     assert await aredis.smembers("im:sched:active:ct-nsx") == set()
     await aredis.aclose()
-
-
-def test_shell_alias_404_not_configured(client, session) -> None:
-    """Phase 14: an unconfigured (shell) definition is invisible to
-    inference — 404, mirroring the disabled-alias path (spec item F)."""
-    machine = Machine(uid="sh404c-m", name="sh404c", host="127.0.0.1")
-    definition = ProviderDefinition(
-        alias="sh404c-a",
-        provider_type=None,
-        registration_token="tok-sh404c",
-        backend_config=None,
-    )
-    session.add_all([machine, definition])
-    session.commit()
-    session.add(
-        ProviderInstance(
-            machine_id=machine.id,
-            provider_definition_id=definition.id,
-            websocket_connected=True,
-            backend_status="running",
-        )
-    )
-    session.commit()
-
-    resp = client.post(
-        "/v1/chat/completions",
-        json={"model": "sh404c-a", "messages": [{"role": "user", "content": "x"}]},
-    )
-    assert resp.status_code == 404
-    assert "not configured" in resp.json()["detail"]

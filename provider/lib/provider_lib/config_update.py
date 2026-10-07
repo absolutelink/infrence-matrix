@@ -53,6 +53,11 @@ from typing import Any
 from provider_lib.admin_client import AdminClient
 from provider_lib.backend import BackendBusy, BackendLifecycle
 from provider_lib.config import ProviderSettings
+from provider_lib.registry import (
+    BackendHandle,
+    BackendRegistry,
+    registry_from_lifecycle,
+)
 from provider_lib.wire import BackendStatusValue, Frame
 
 logger = logging.getLogger("provider.config_update")
@@ -233,7 +238,7 @@ def plan_prune(
 
 def install_config_handlers(
     client: AdminClient,
-    lifecycle: BackendLifecycle,
+    lifecycle_or_registry: BackendLifecycle | BackendRegistry,
     state: ConfigState,
     settings: ProviderSettings,
     *,
@@ -241,11 +246,24 @@ def install_config_handlers(
 ) -> None:
     """Wire the three Phase 9 admin commands on the provider client.
 
+    Accepts a single ``BackendLifecycle`` (with its ``ConfigState``) or a
+    ``BackendRegistry`` of several backends. Per-backend commands carry the
+    target ``instance_id``; the dispatcher routes to the correct lifecycle +
+    applied-config state (H3). A single-backend agent routes any command to
+    its one lifecycle; a multi-backend agent NAKs ``unknown_instance`` for an
+    id it does not host.
+
     ``extra_cache_dirs`` (a list or a zero-arg callable returning one)
     lets a provider add its engine-managed cache directories (e.g.
     gufo's per-instance ``--cache-disk`` dir) to the cleared set; the
     shared prompt-cache root is always included.
     """
+
+    registry = (
+        lifecycle_or_registry
+        if isinstance(lifecycle_or_registry, BackendRegistry)
+        else registry_from_lifecycle(lifecycle_or_registry, state)
+    )
 
     def extras() -> list[Path]:
         if extra_cache_dirs is None:
@@ -254,24 +272,29 @@ def install_config_handlers(
             return list(extra_cache_dirs())
         return list(extra_cache_dirs)
 
-    async def no_config_nak(_frame: Frame) -> dict[str, Any] | None:
-        """Phase 14 defense-in-depth: NAK ``backend.start`` when no
-        config has been applied (shell definition). Returns the NAK
-        payload, or ``None`` when a config exists (proceed normally).
+    def _resolve(frame: Frame) -> BackendHandle | None:
+        # H3 hardening: a named instance_id must match a hosted backend (by
+        # handle key or its live lifecycle.instance_id); a foreign id is NAK'd
+        # rather than applied to the sole backend. Absent id -> sole backend.
+        iid = (frame.payload or {}).get("instance_id")
+        return registry.resolve_target(str(iid) if iid is not None else None)
 
-        The admin never boots an unconfigured definition (scheduler +
-        routes gate on ``backend_config IS NOT NULL``); this NAK is the
-        second fence so a buggy admin or a hand-rolled command cannot
-        start a driver on defaults and pretend it serves the alias."""
-        if state.applied_fingerprint is None:
-            return {
-                "ok": False,
-                "error": "no_config",
-                "detail": {"step": _STEP_VALIDATE},
-            }
-        return None
+    def _unknown(frame: Frame, step: str) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "error": "unknown_instance",
+            "detail": {
+                "step": step,
+                "instance_id": (frame.payload or {}).get("instance_id"),
+            },
+        }
 
     async def on_config_update(frame: Frame) -> dict[str, Any]:
+        handle = _resolve(frame)
+        if handle is None:
+            return _unknown(frame, _STEP_VALIDATE)
+        lifecycle = handle.lifecycle
+        cfg_state = handle.config_state or state
         payload = frame.payload or {}
         new_fp = payload.get("config_fingerprint")
         backend_config = payload.get("backend_config")
@@ -308,7 +331,7 @@ def install_config_handlers(
 
         # 3. Fingerprint compare: nothing to do (a same-fp update is
         #    always safely ackable regardless of load — no stop needed).
-        if state.applied_fingerprint == new_fp:
+        if cfg_state.applied_fingerprint == new_fp:
             return {
                 "ok": True,
                 "detail": {
@@ -319,7 +342,7 @@ def install_config_handlers(
                 },
             }
 
-        old_fp = state.applied_fingerprint
+        old_fp = cfg_state.applied_fingerprint
         step = _STEP_DRAIN
         driver = lifecycle.driver
         # 4. Drain: atomically refuse to stop while a slot is held
@@ -381,7 +404,7 @@ def install_config_handlers(
             return {"ok": False, "error": str(exc), "detail": {"step": step}}
 
         # 10. Commit the applied fingerprint and ack.
-        state.applied_fingerprint = new_fp
+        cfg_state.applied_fingerprint = new_fp
         await client.send_event(
             "provider.status",
             {
@@ -407,6 +430,10 @@ def install_config_handlers(
         }
 
     async def on_cache_clear(frame: Frame) -> dict[str, Any]:
+        handle = _resolve(frame)
+        if handle is None:
+            return _unknown(frame, "drain")
+        lifecycle = handle.lifecycle
         payload = frame.payload or {}
         dry_run = bool(payload.get("dry_run", False))
         force = bool(payload.get("force", False))
@@ -453,6 +480,10 @@ def install_config_handlers(
         }
 
     async def on_prune_unused(frame: Frame) -> dict[str, Any]:
+        handle = _resolve(frame)
+        if handle is None:
+            return _unknown(frame, "validate")
+        lifecycle = handle.lifecycle
         payload = frame.payload or {}
         dry_run = bool(payload.get("dry_run", False))
         driver = lifecycle.driver
@@ -500,8 +531,3 @@ def install_config_handlers(
     client.on_command("provider.config.update", on_config_update)
     client.on_command("cache.clear", on_cache_clear)
     client.on_command("storage.prune_unused", on_prune_unused)
-    # Expose the shell-definition fence so every provider package's
-    # backend.start handler can consult it (one call per package). The
-    # attribute is declared on AdminClient; install_config_handlers owns
-    # its single assignment.
-    client.no_config_nak = no_config_nak

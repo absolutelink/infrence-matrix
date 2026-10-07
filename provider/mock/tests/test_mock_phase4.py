@@ -32,7 +32,8 @@ from provider_mock.main import (
 )
 
 INSTANCE_ID = "11111111-2222-3333-4444-555555555555"
-SECRET = "fake-instance-secret"
+AGENT_ID = "mock-agent"
+SECRET = "fake-agent-secret"
 CAPACITY = 2
 
 WS_PORT_HOLDER: dict[str, int] = {}
@@ -48,16 +49,24 @@ class _FakeAdminHTTP(BaseHTTPRequestHandler):
         assert body["provider_type"] == "mock"
         payload = json.dumps(
             {
-                "instance_id": INSTANCE_ID,
-                "instance_secret": SECRET,
-                "machine": {"uid": body["machine_uid"]},
-                "provider_definition": {
-                    "alias": "mock-alias-model",
-                    "provider_type": "mock",
-                    "config_fingerprint": "deadbeef",
-                    "capacity": CAPACITY,
+                "agent_id": "aaaaaaaa-2222-3333-4444-555555555555",
+                "agent_secret": SECRET,
+                "machine": {
+                    "uid": body["machine_uid"],
                     "admin_ws_url": ADMIN_WS_URL_HOLDER["url"],
                 },
+                "backends": [
+                    {
+                        "instance_id": INSTANCE_ID,
+                        "port": 8081,
+                        "definition": {
+                            "alias": "mock-alias-model",
+                            "provider_type": "mock",
+                            "config_fingerprint": "deadbeef",
+                            "capacity": CAPACITY,
+                        },
+                    }
+                ],
             }
         ).encode()
         self.send_response(200)
@@ -115,7 +124,8 @@ async def fake_admin():
 def _settings(base_url: str) -> ProviderSettings:
     return ProviderSettings(  # type: ignore[call-arg]
         MACHINE_UID="mock-e2e",
-        PROVIDER_REGISTRATION_TOKEN="tok",
+        MACHINE_SECRET="tok",
+        AGENT_ID=AGENT_ID,
         ADMIN_BASE_URL=base_url,
         PROVIDER_PORT=8081,
         CACHE_DIR="/tmp/mock_provider_test_cache",
@@ -176,7 +186,7 @@ async def test_admin_driven_boot_and_v1_streaming(fake_admin) -> None:
         assert lifecycle.backend_status == BackendStatusValue.RUNNING
 
         # /v1 through the SAME lifecycle instance.
-        app = build_app(lifecycle)
+        app = build_app(lifecycle, client.settings)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://provider"
         ) as v1:
@@ -214,7 +224,7 @@ async def test_v1_429_when_at_capacity(fake_admin) -> None:
     try:
         await register_and_connect(client, lifecycle)
         await lifecycle.start()
-        app = build_app(lifecycle)
+        app = build_app(lifecycle, client.settings)
         # Occupy one slot of two so a second concurrent request fits;
         # then fill both and expect 429.
         await lifecycle.acquire_slot()
@@ -238,7 +248,9 @@ def test_apply_registration_defaults() -> None:
     assert lifecycle.capacity == DEFAULT_CAPACITY
 
     class _R:
-        provider_definition: dict[str, Any] = {"alias": "zzz", "capacity": 3}
+        backends: list[dict[str, Any]] = [
+            {"instance_id": "i1", "definition": {"alias": "zzz", "capacity": 3}}
+        ]
 
     apply_registration(lifecycle, _R())  # type: ignore[arg-type]
     assert lifecycle.capacity == 3
@@ -257,7 +269,10 @@ async def test_v1_real_socket_streaming_and_disconnect(fake_admin) -> None:
         await register_and_connect(client, lifecycle)
         await lifecycle.start()
         config = uvicorn.Config(
-            build_app(lifecycle), host="127.0.0.1", port=0, log_level="warning"
+            build_app(lifecycle, client.settings),
+            host="127.0.0.1",
+            port=0,
+            log_level="warning",
         )
         server = uvicorn.Server(config)
         serve_task = asyncio.create_task(server.serve())

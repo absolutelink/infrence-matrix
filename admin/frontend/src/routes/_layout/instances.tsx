@@ -177,7 +177,7 @@ function InstancesPage() {
                   <TableCell className="font-medium">{i.alias}</TableCell>
                   <TableCell>
                     <div className="flex flex-wrap items-center gap-1">
-                      <StatusBadge status={i.instance_status} />
+                      <StatusBadge status={i.agent_status} />
                       {(() => {
                         const committed = i.provider_type
                           ? committedByType.get(i.provider_type)
@@ -484,10 +484,6 @@ function BackendActionMenu({
   onPick: (kind: BackendActionKind) => void
 }) {
   const offline = !instance.websocket_connected
-  // A shell definition (awaiting_config) has no authored backend_config:
-  // the admin refuses to boot it, but reinitializing is still the right
-  // move — that is how such an instance re-reads the admin's row.
-  const unconfigured = instance.instance_status === "awaiting_config"
   return (
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
@@ -502,12 +498,7 @@ function BackendActionMenu({
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         <DropdownMenuItem
-          disabled={unconfigured}
-          title={
-            unconfigured
-              ? "Author the definition's backend config first"
-              : BACKEND_ACTIONS.start.title
-          }
+          title={BACKEND_ACTIONS.start.title}
           onSelect={() => onPick("start")}
         >
           <Play /> Start
@@ -516,12 +507,7 @@ function BackendActionMenu({
           <Square /> Stop
         </DropdownMenuItem>
         <DropdownMenuItem
-          disabled={unconfigured}
-          title={
-            unconfigured
-              ? "Author the definition's backend config first"
-              : BACKEND_ACTIONS.restart.title
-          }
+          title={BACKEND_ACTIONS.restart.title}
           onSelect={() => onPick("restart")}
         >
           <RotateCw /> Restart

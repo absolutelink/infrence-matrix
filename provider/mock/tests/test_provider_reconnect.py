@@ -27,7 +27,8 @@ from provider_mock.main import (
 )
 
 INSTANCE_ID = "11111111-2222-3333-4444-555555555555"
-SECRET = "fake-instance-secret"
+AGENT_ID = "conf-agent"
+SECRET = "fake-agent-secret"
 
 RECEIVED: list[Frame] = []
 CONNECTIONS: list[int] = []
@@ -43,16 +44,24 @@ class _FakeAdminHTTP(BaseHTTPRequestHandler):
         assert self.path == "/admin/api/providers/register"
         payload = json.dumps(
             {
-                "instance_id": INSTANCE_ID,
-                "instance_secret": SECRET,
-                "machine": {"uid": "conf-machine"},
-                "provider_definition": {
-                    "alias": "mock-model",
-                    "provider_type": "mock",
-                    "config_fingerprint": "deadbeef",
-                    "capacity": 2,
+                "agent_id": "bbbbbbbb-2222-3333-4444-555555555555",
+                "agent_secret": SECRET,
+                "machine": {
+                    "uid": "conf-machine",
                     "admin_ws_url": ADMIN_WS_URL_HOLDER["url"],
                 },
+                "backends": [
+                    {
+                        "instance_id": INSTANCE_ID,
+                        "port": 8081,
+                        "definition": {
+                            "alias": "mock-model",
+                            "provider_type": "mock",
+                            "config_fingerprint": "deadbeef",
+                            "capacity": 2,
+                        },
+                    }
+                ],
             }
         ).encode()
         self.send_response(200)
@@ -134,7 +143,8 @@ async def fake_admin():
 def _settings(base_url: str) -> ProviderSettings:
     return ProviderSettings(  # type: ignore[call-arg]
         MACHINE_UID="conf-machine",
-        PROVIDER_REGISTRATION_TOKEN="tok",
+        MACHINE_SECRET="tok",
+        AGENT_ID=AGENT_ID,
         ADMIN_BASE_URL=base_url,
         PROVIDER_PORT=8081,
         CACHE_DIR="/tmp/mock_provider_reconnect_cache",
@@ -236,9 +246,7 @@ async def test_run_forever_retries_when_admin_unreachable(
     # Point at a dead port so the first attempts fail, then flip back.
     dead_url = client.registration.ws_url
     good_url = dead_url
-    client.registration.provider_definition["admin_ws_url"] = (
-        "ws://127.0.0.1:1/provider/ws"
-    )
+    client.registration.machine["admin_ws_url"] = "ws://127.0.0.1:1/provider/ws"
 
     connected: list[int] = []
 
@@ -248,7 +256,7 @@ async def test_run_forever_retries_when_admin_unreachable(
 
     async def restore_later() -> None:
         await asyncio.sleep(3.0)
-        client.registration.provider_definition["admin_ws_url"] = good_url
+        client.registration.machine["admin_ws_url"] = good_url
 
     ws_task = asyncio.create_task(client.run_forever(on_connected=on_connected))
     restore_task = asyncio.create_task(restore_later())

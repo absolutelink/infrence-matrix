@@ -35,7 +35,7 @@ export class AdminService {
     /**
      * Register Provider
      *
-     * Register (or re-register) a provider instance against its definition.
+     * Register (or re-register) a provider agent against its machine.
      */
     public static registerProvider<ThrowOnError extends boolean = true>(options: Options<adminRegisterProviderData, ThrowOnError>) {
         return (options.client ?? client).post<adminRegisterProviderResponses, adminRegisterProviderErrors, ThrowOnError>({
@@ -247,7 +247,7 @@ export class AdminService {
     /**
      * Start Backend
      *
-     * Boot this instance's backend by hand (no inference request needed).
+     * Boot this backend by hand (no inference request needed).
      *
      * 202 by default: the provider acks "accepted" and boots in the
      * background, heartbeating ``backend.status`` (`initializing` while the
@@ -308,18 +308,13 @@ export class AdminService {
      * Re-run the whole init lifecycle: re-register, adopt, boot, re-scrape.
      *
      * ``provider.initialize`` POSTs a fresh registration (re-checking the
-     * version + schema gates, re-adopting capacity/`backend_config`, minting a
-     * new instance secret for future reconnects and rewriting
+     * version + schema gates, re-adopting capacity/``backend_config``, minting
+     * a new agent secret for future reconnects and rewriting
      * ``provider_config.json``), then drain-stops, boots and publishes
      * ``backend.metadata`` from the running engine. The boot is asynchronous
-     * (202): a cold halogen-flash instance downloads its checkpoint plus
+     * (202): a cold halogen-flash backend downloads its checkpoint plus
      * companions before the API answers, which is far beyond an HTTP request's
      * patience. ``wait_for_running: true`` waits for the boot instead.
-     *
-     * Allowed on a shell definition (unlike start/restart) — refreshing the
-     * registration is exactly what an ``awaiting_config`` instance needs when
-     * a config push never landed; the provider still refuses to boot it on
-     * defaults and reports ``no_config`` in the ack.
      */
     public static initializeInstance<ThrowOnError extends boolean = true>(options: Options<adminInitializeInstanceData, ThrowOnError>) {
         return (options.client ?? client).post<adminInitializeInstanceResponses, adminInitializeInstanceErrors, ThrowOnError>({

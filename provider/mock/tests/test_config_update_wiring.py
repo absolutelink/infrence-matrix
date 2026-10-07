@@ -17,7 +17,8 @@ from provider_mock.main import install_command_handlers, make_lifecycle
 def _settings(tmp_path: Any) -> ProviderSettings:
     return ProviderSettings(  # type: ignore[call-arg]
         MACHINE_UID="mock-cu",
-        PROVIDER_REGISTRATION_TOKEN="tok",
+        MACHINE_SECRET="tok",
+        AGENT_ID="mock-cu-agent",
         ADMIN_BASE_URL="http://localhost:9999",
         CACHE_DIR=tmp_path / "cache",
         MODELS_DIR=tmp_path / "models",

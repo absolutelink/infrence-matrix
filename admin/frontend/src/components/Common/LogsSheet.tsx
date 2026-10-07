@@ -234,7 +234,7 @@ export function LogsSheet({
                     {instance.provider_type}
                   </Badge>
                 )}
-                <StatusBadge status={instance.instance_status} />
+                <StatusBadge status={instance.agent_status} />
                 <StatusBadge status={instance.backend_status} />
               </>
             )}

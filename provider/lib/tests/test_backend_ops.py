@@ -7,7 +7,7 @@ Covers the two contracts the admin UI depends on:
   request), while the default (true) keeps the scheduler's
   "acked == /v1 is live" contract.
 * `provider.initialize` re-registers first, then reboots and publishes
-  `backend.metadata`; it never boots an unconfigured (shell) definition.
+  `backend.metadata` (stamped with the owning `instance_id`).
 
 Uses a gated fake driver so "in flight" is deterministic.
 """
@@ -70,21 +70,11 @@ def _setup(
     *,
     gate: asyncio.Event | None = None,
     re_register: Any = None,
-    no_config: bool = False,
+    instance_id: str | None = None,
 ) -> tuple[RecordingClient, BackendLifecycle, GatedDriver, Any]:
     client = RecordingClient(ProviderSettings())
-    if no_config:
-
-        async def _nak(_frame: Any) -> dict[str, Any] | None:
-            return {
-                "ok": False,
-                "error": "no_config",
-                "detail": {"step": "validate"},
-            }
-
-        client.no_config_nak = _nak
     driver = GatedDriver(gate=gate)
-    lifecycle = BackendLifecycle(driver, capacity=2)
+    lifecycle = BackendLifecycle(driver, capacity=2, instance_id=instance_id)
     ops = install_backend_ops(
         client, lifecycle, backend_name="gated", re_register=re_register
     )
@@ -189,14 +179,75 @@ async def test_waiting_start_joins_an_in_flight_boot() -> None:
     assert lifecycle.backend_status == BackendStatusValue.RUNNING
 
 
-async def test_start_refused_for_unconfigured_shell_definition() -> None:
-    """Phase 14 fence lives in config_update; ops must honor it."""
-    client, _lifecycle, driver, _ops = _setup(no_config=True)
-    for payload in ({}, {"wait_for_running": False}):
-        ack = await client.dispatch("backend.start", payload)
-        assert ack["ok"] is False
-        assert ack["error"] == "no_config"
+async def test_backend_metadata_stamps_instance_id() -> None:
+    """H1: backend.metadata carries the owning instance_id so the admin keys
+    it to the right backend (frames without it are dropped)."""
+    client, _lifecycle, _driver, _ops = _setup(instance_id="inst-42")
+    await client.dispatch("backend.start", {"instance_id": "inst-42"})
+    assert (
+        "backend.metadata",
+        {"models": [{"id": "gated", "object": "model"}], "instance_id": "inst-42"},
+    ) in client.events
+
+
+async def test_multi_backend_dispatch_routes_by_instance_id() -> None:
+    """H3: a 2-backend agent boots the CORRECT backend by instance_id — a
+    start for backend #2 must not boot backend #1."""
+    from provider_lib.registry import BackendHandle, BackendRegistry
+
+    client = RecordingClient(ProviderSettings())
+    d1, d2 = GatedDriver(), GatedDriver()
+    lc1 = BackendLifecycle(d1, capacity=1, instance_id="inst-1")
+    lc2 = BackendLifecycle(d2, capacity=1, instance_id="inst-2")
+    registry = BackendRegistry()
+    registry.add(BackendHandle("inst-1", lc1))
+    registry.add(BackendHandle("inst-2", lc2))
+    install_backend_ops(client, registry, backend_name="gated")
+
+    ack = await client.dispatch("backend.start", {"instance_id": "inst-2"})
+    assert ack["ok"] is True
+    assert d2.start_calls == 1
+    assert d1.start_calls == 0  # the other backend was NOT booted
+
+    # An id this agent does not host is NAK'd, not silently mis-served.
+    ack = await client.dispatch("backend.start", {"instance_id": "inst-999"})
+    assert ack["ok"] is False
+    assert ack["error"] == "unknown_instance"
+
+    # A multi-backend agent cannot guess an id-less command.
+    ack = await client.dispatch("backend.stop", {})
+    assert ack["ok"] is False
+    assert ack["error"] == "unknown_instance"
+
+
+async def test_single_handle_rejects_foreign_instance_id() -> None:
+    """H3 hardening: a single-backend agent must NOT boot its one backend for
+    a command naming a DIFFERENT (foreign) instance_id — that would silently
+    mis-serve. Absent id still passes through; a matching id serves."""
+    from provider_lib.registry import BackendHandle, BackendRegistry
+
+    client = RecordingClient(ProviderSettings())
+    driver = GatedDriver()
+    lc = BackendLifecycle(driver, capacity=1, instance_id="mine")
+    registry = BackendRegistry()
+    registry.add(BackendHandle("", lc))  # key predates registration ("")
+    install_backend_ops(client, registry, backend_name="gated")
+
+    # Foreign id -> NAK, backend NOT booted.
+    ack = await client.dispatch("backend.start", {"instance_id": "someone-else"})
+    assert ack["ok"] is False
+    assert ack["error"] == "unknown_instance"
     assert driver.start_calls == 0
+
+    # The agent's own id (matched via the live lifecycle.instance_id) -> serves.
+    ack = await client.dispatch("backend.start", {"instance_id": "mine"})
+    assert ack["ok"] is True
+    assert driver.start_calls == 1
+
+    # No id at all -> single-backend convenience serves.
+    await client.dispatch("backend.stop", {})
+    ack = await client.dispatch("backend.start", {})
+    assert ack["ok"] is True
 
 
 async def test_stop_is_awaited_and_confirms_stopped() -> None:
@@ -271,19 +322,20 @@ async def test_initialize_re_registers_then_reboots_and_publishes_metadata() -> 
     )
 
 
-async def test_initialize_without_config_refreshes_but_never_boots() -> None:
-    """A shell definition may be refreshed (that is how it re-reads the
-    admin's row) but must NOT boot on defaults."""
+async def test_initialize_re_registers_and_boots() -> None:
+    """provider.initialize re-registers then boots in the background (the
+    Phase 14 shell/no-config fence is gone — a definition always has a
+    config now)."""
 
     async def re_register() -> dict[str, Any] | None:
-        return None  # still unconfigured
+        return {"backend_config": {"context": {"ctx": 8}}}
 
-    client, _lifecycle, driver, ops = _setup(re_register=re_register, no_config=True)
+    client, _lifecycle, driver, ops = _setup(re_register=re_register)
     ack = await client.dispatch("provider.initialize", {})
     assert ack["ok"] is True
-    assert ack["detail"]["no_config"] is True
+    assert ack["detail"]["accepted"] is True
     await ops.join()
-    assert driver.start_calls == 0
+    assert driver.start_calls == 1  # the initialize boot ran
 
 
 async def test_initialize_re_register_failure_is_a_nak() -> None:

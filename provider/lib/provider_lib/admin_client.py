@@ -66,19 +66,38 @@ def _schema_refusal_message(detail: dict[str, Any]) -> str:
 
 
 class RegistrationResult:
+    """Parsed ``POST /admin/api/providers/register`` response (Phase 16).
+
+    The admin returns the agent identity plus the list of backends placed on
+    this agent (one per assigned ``ProviderDefinition``). For the common
+    single-backend case the first backend is exposed directly via
+    :attr:`instance_id` / :attr:`provider_definition`.
+    """
+
     def __init__(self, data: dict[str, Any]) -> None:
         self.raw = data
-        self.instance_id: str = data["instance_id"]
-        self.instance_secret: str = data["instance_secret"]
+        self.agent_id: str = data["agent_id"]
+        self.agent_secret: str = data["agent_secret"]
         self.machine: dict[str, Any] = data.get("machine", {})
-        self.provider_definition: dict[str, Any] = data.get("provider_definition", {})
-        # Phase 14: True when THIS registration set the definition's
-        # provider_type from the container's report (shell → typed).
-        self.type_adopted: bool = bool(data.get("type_adopted"))
+        self.backends: list[dict[str, Any]] = list(data.get("backends") or [])
+
+    @property
+    def instance_id(self) -> str | None:
+        """The first backend's instance id (single-backend convenience)."""
+        if self.backends:
+            return self.backends[0].get("instance_id")
+        return None
+
+    @property
+    def provider_definition(self) -> dict[str, Any]:
+        """The first backend's definition dict (single-backend convenience)."""
+        if self.backends:
+            return self.backends[0].get("definition") or {}
+        return {}
 
     @property
     def ws_url(self) -> str:
-        base = self.provider_definition.get("admin_ws_url")
+        base = self.machine.get("admin_ws_url")
         if not base:
             # Derive from ADMIN_BASE_URL by swapping scheme and path.
             base = (
@@ -88,10 +107,10 @@ class RegistrationResult:
                 .rstrip("/")
                 + "/provider/ws"
             )
-        # The admin identifies the connection by instance_id (query param)
-        # and authenticates the Bearer secret against it.
+        # The admin identifies the connection by agent_id (query param) and
+        # authenticates the Bearer secret against it.
         sep = "&" if "?" in base else "?"
-        return f"{base}{sep}instance_id={self.instance_id}"
+        return f"{base}{sep}agent_id={self.agent_id}"
 
 
 class AdminClient:
@@ -105,12 +124,6 @@ class AdminClient:
     def __init__(self, settings: ProviderSettings) -> None:
         self.settings = settings
         self._registration: RegistrationResult | None = None
-        # Phase 14: the shell-definition fence; assigned by
-        # install_config_handlers (provider_lib.config_update) so
-        # backend.start handlers can NAK a boot with no applied config.
-        self.no_config_nak: (
-            Callable[[Frame], Awaitable[dict[str, Any] | None]] | None
-        ) = None
         self._ws: Any | None = None
         self._epoch: int = 0
         self._outgoing: asyncio.Queue[Frame] = asyncio.Queue()
@@ -131,16 +144,17 @@ class AdminClient:
         *,
         provider_type: str,
         version: str,
-        port: int,
+        base_port: int,
         hardware: dict[str, Any],
         schema: dict[str, Any] | None = None,
     ) -> RegistrationResult:
         body = {
             "machine_uid": self.settings.MACHINE_UID,
-            "registration_token": self.settings.PROVIDER_REGISTRATION_TOKEN,
+            "machine_secret": self.settings.MACHINE_SECRET,
+            "agent_id": self.settings.AGENT_ID,
             "provider_type": provider_type,
             "version": version,
-            "port": port,
+            "base_port": base_port,
             "hardware": hardware,
             "metrics_categories": sorted(self.settings.metrics_categories),
             "registered_at": now_iso(),
@@ -176,12 +190,9 @@ class AdminClient:
     def _persist_config(self, result: RegistrationResult) -> None:
         self.settings.CACHE_DIR.mkdir(parents=True, exist_ok=True)
         payload = {
-            "instance_id": result.instance_id,
+            "agent_id": result.agent_id,
             "machine": result.machine,
-            "provider_definition": result.provider_definition,
-            # Phase 14: null for a shell definition (no authored
-            # backend_config yet) — never coerced to the hash of {}.
-            "config_fingerprint": result.provider_definition.get("config_fingerprint"),
+            "backends": result.backends,
             "saved_at": now_iso(),
         }
         self.settings.provider_config_path.write_text(json.dumps(payload, indent=2))
@@ -199,6 +210,10 @@ class AdminClient:
         if self._registration is None:
             raise RuntimeError("not registered; call register() first")
         return self._registration
+
+    @property
+    def is_registered(self) -> bool:
+        return self._registration is not None
 
     @property
     def epoch(self) -> int:
@@ -220,7 +235,7 @@ class AdminClient:
             await self.disconnect()
         reg = self.registration
         url = reg.ws_url
-        headers = {"Authorization": f"Bearer {reg.instance_secret}"}
+        headers = {"Authorization": f"Bearer {reg.agent_secret}"}
         self._ws = await websockets.connect(url, additional_headers=headers)
         hello = json.loads(await self._ws.recv())
         self._epoch = int(hello.get("payload", {}).get("epoch", 0))

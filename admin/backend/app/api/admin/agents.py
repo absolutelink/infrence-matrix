@@ -6,8 +6,8 @@ triple). Backends (``ProviderInstance``) nest under their agent so the UI can
 show what each container hosts. Placement cherry-picking on definitions
 references these agent ids.
 
-Additive slice: agents are not yet created by registration (the registration
-cutover lands in a follow-on slice), so this reads whatever rows exist.
+Agents are created (and re-resolved) by ``POST /admin/api/providers/register``;
+this endpoint reads whatever rows exist.
 """
 
 import logging
@@ -60,11 +60,8 @@ def _agent_dict(
 
 def _backend_dicts(session: Session, agent_id: uuid.UUID) -> list[dict[str, Any]]:
     rows = session.exec(
-        select(ProviderInstance).where(ProviderInstance.machine_id == agent_id)
+        select(ProviderInstance).where(ProviderInstance.agent_id == agent_id)
     ).all()
-    # NOTE: ProviderInstance is still keyed by machine_id until the cutover
-    # slice re-keys it to agent_id; the placeholder query returns nothing
-    # meaningful yet and is finalized with the re-key.
     return [
         {
             "id": str(i.id),

@@ -18,7 +18,7 @@ import redis.asyncio as aioredis
 from sqlmodel import Session, select
 
 from app.core.db import engine
-from app.models import Machine, ProviderDefinition, ProviderInstance
+from app.models import Machine, ProviderAgent, ProviderDefinition, ProviderInstance
 from app.services import redis_keys
 from app.services.connection_manager import manager
 from app.services.scheduler import (
@@ -27,8 +27,31 @@ from app.services.scheduler import (
     QueueTimeout,
 )
 from app.services.wire import BackendStatusValue, Frame, FrameKind
+from tests.helpers import (
+    get_or_create_machine,
+    make_agent,
+    make_definition,
+    make_instance,
+)
 
 TEST_REDIS_URL = __import__("os").environ["TEST_REDIS_URL"]
+
+
+def _agent(
+    session: Session, machine: Machine, *, connected: bool = True
+) -> ProviderAgent:
+    """Get-or-create a connected agent for ``machine`` (one per machine)."""
+    existing = session.exec(
+        select(ProviderAgent).where(ProviderAgent.machine_id == machine.id)
+    ).first()
+    if existing is not None:
+        if existing.websocket_connected != connected:
+            existing.websocket_connected = connected
+            session.add(existing)
+            session.commit()
+            session.refresh(existing)
+        return existing
+    return make_agent(session, machine, connected=connected)
 
 
 def make_stack(
@@ -43,38 +66,23 @@ def make_stack(
     connected: bool = True,
     port: int = 8081,
 ) -> tuple[Machine, ProviderDefinition, ProviderInstance]:
-    existing = session.exec(select(Machine).where(Machine.uid == machine_uid)).first()
-    if existing is None:
-        existing = Machine(
-            uid=machine_uid, name=f"name-{machine_uid}", host="127.0.0.1"
-        )
-        session.add(existing)
-    existing.total_vram_bytes = total_vram
-    session.add(existing)
-    session.commit()
-    definition = ProviderDefinition(
+    machine = get_or_create_machine(session, uid=machine_uid, total_vram=total_vram)
+    agent = make_agent(session, machine, base_port=port, connected=connected)
+    definition = make_definition(
+        session,
         alias=alias,
-        provider_type="mock",
-        registration_token=f"tok-{alias}",
-        # Phase 14: backend_config defaults to None (shell) — these tests
-        # exercise the scheduled flows, which require an authored config.
-        backend_config={"model": {"file": "m.gguf"}},
-        vram_required_bytes=vram_required,
+        vram_required=vram_required,
         capacity=capacity,
+        backend_config={"model": {"file": "m.gguf"}},
     )
-    session.add(definition)
-    session.commit()
-    instance = ProviderInstance(
-        machine_id=existing.id,
-        provider_definition_id=definition.id,
+    instance = make_instance(
+        session,
+        agent,
+        definition,
         port=port,
         backend_status=backend_status,
-        websocket_connected=connected,
     )
-    session.add(instance)
-    session.commit()
-    session.refresh(instance)
-    return existing, definition, instance
+    return machine, definition, instance
 
 
 @pytest.fixture
@@ -86,11 +94,11 @@ async def aredis():
 
 @pytest.fixture
 def boot_calls(monkeypatch):
-    """Record backend.start commands and ack ok."""
+    """Record backend.start commands (keyed by target instance_id) and ack ok."""
     calls: list[tuple[str, str]] = []
 
-    async def fake_send_command(instance_id, type_, payload, timeout=30.0):  # noqa: ARG001
-        calls.append((instance_id, type_))
+    async def fake_send_command(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        calls.append((payload.get("instance_id", agent_id), type_))
         return Frame(type="ack", payload={"ok": True, "detail": {"capacity": 1}})
 
     monkeypatch.setattr(manager, "send_command", fake_send_command)
@@ -213,10 +221,11 @@ async def test_vram_second_alias_evicts_idle_first_alias(
     machine = Machine(uid="sch-vram", name="sch-vram", host="127.0.0.1")
     machine.total_vram_bytes = 100
     session.add(machine)
+    session.commit()
+    agent = make_agent(session, machine, connected=True)
     def_a = ProviderDefinition(
         alias="va",
         provider_type="mock",
-        registration_token="tok-va",
         vram_required_bytes=80,
         capacity=1,
         backend_config={"model": {"file": "m.gguf"}},
@@ -224,7 +233,6 @@ async def test_vram_second_alias_evicts_idle_first_alias(
     def_b = ProviderDefinition(
         alias="vb",
         provider_type="mock",
-        registration_token="tok-vb",
         vram_required_bytes=80,
         capacity=1,
         backend_config={"model": {"file": "m.gguf"}},
@@ -232,16 +240,14 @@ async def test_vram_second_alias_evicts_idle_first_alias(
     session.add_all([def_a, def_b])
     session.commit()
     inst_a = ProviderInstance(
-        machine_id=machine.id,
+        agent_id=agent.id,
         provider_definition_id=def_a.id,
         backend_status="running",
-        websocket_connected=True,
     )
     inst_b = ProviderInstance(
-        machine_id=machine.id,
+        agent_id=agent.id,
         provider_definition_id=def_b.id,
         backend_status="stopped",
-        websocket_connected=True,
     )
     session.add_all([inst_a, inst_b])
     session.commit()
@@ -294,14 +300,15 @@ def two_alias_machine(
     a_status: str = "running",
     a_last_request_at=None,
 ) -> tuple[ProviderInstance, ProviderInstance]:
-    """One machine, two aliases/instances; returns (inst_a, inst_b)."""
+    """One machine + one agent, two aliases/backends; returns (inst_a, inst_b)."""
     machine = Machine(uid=machine_uid, name=machine_uid, host="127.0.0.1")
     machine.total_vram_bytes = total_vram
     session.add(machine)
+    session.commit()
+    agent = make_agent(session, machine, connected=True)
     def_a = ProviderDefinition(
         alias=a_alias,
         provider_type="mock",
-        registration_token=f"tok-{a_alias}",
         vram_required_bytes=a_vram,
         capacity=1,
         backend_config={"model": {"file": "m.gguf"}},
@@ -309,7 +316,6 @@ def two_alias_machine(
     def_b = ProviderDefinition(
         alias=b_alias,
         provider_type="mock",
-        registration_token=f"tok-{b_alias}",
         vram_required_bytes=b_vram,
         capacity=1,
         backend_config={"model": {"file": "m.gguf"}},
@@ -317,17 +323,15 @@ def two_alias_machine(
     session.add_all([def_a, def_b])
     session.commit()
     inst_a = ProviderInstance(
-        machine_id=machine.id,
+        agent_id=agent.id,
         provider_definition_id=def_a.id,
         backend_status=a_status,
-        websocket_connected=True,
         last_request_at=a_last_request_at,
     )
     inst_b = ProviderInstance(
-        machine_id=machine.id,
+        agent_id=agent.id,
         provider_definition_id=def_b.id,
         backend_status="stopped",
-        websocket_connected=True,
     )
     session.add_all([inst_a, inst_b])
     session.commit()
@@ -375,7 +379,6 @@ async def test_evict_lru_order_oldest_first(
     def_c = ProviderDefinition(
         alias="luc",
         provider_type="mock",
-        registration_token="tok-luc",
         vram_required_bytes=50,
         capacity=1,
         backend_config={"model": {"file": "m.gguf"}},
@@ -383,10 +386,9 @@ async def test_evict_lru_order_oldest_first(
     session.add(def_c)
     session.commit()
     inst_c = ProviderInstance(
-        machine_id=inst_a.machine_id,
+        agent_id=inst_a.agent_id,
         provider_definition_id=def_c.id,
         backend_status="stopped",
-        websocket_connected=True,
     )
     session.add(inst_c)
     session.commit()
@@ -423,7 +425,6 @@ async def test_evict_only_different_alias_victims(session: Session, aredis) -> N
     def_a = ProviderDefinition(
         alias="dif-a",
         provider_type="mock",
-        registration_token="tok-dif-a",
         vram_required_bytes=40,
         capacity=1,
         backend_config={"model": {"file": "m.gguf"}},
@@ -431,7 +432,6 @@ async def test_evict_only_different_alias_victims(session: Session, aredis) -> N
     def_b = ProviderDefinition(
         alias="dif-b",
         provider_type="mock",
-        registration_token="tok-dif-b",
         vram_required_bytes=40,
         capacity=1,
         backend_config={"model": {"file": "m.gguf"}},
@@ -439,16 +439,14 @@ async def test_evict_only_different_alias_victims(session: Session, aredis) -> N
     session.add_all([def_a, def_b])
     session.commit()
     inst_a = ProviderInstance(
-        machine_id=machine.id,
+        agent_id=_agent(session, machine).id,
         provider_definition_id=def_a.id,
         backend_status="running",
-        websocket_connected=True,
     )
     inst_b = ProviderInstance(
-        machine_id=machine.id,
+        agent_id=_agent(session, machine).id,
         provider_definition_id=def_b.id,
         backend_status="running",
-        websocket_connected=True,
     )
     session.add_all([inst_a, inst_b])
     session.commit()
@@ -483,7 +481,6 @@ async def test_evict_victim_nak_tries_next_candidate(
     def_a = ProviderDefinition(
         alias="nka",
         provider_type="mock",
-        registration_token="tok-nka",
         vram_required_bytes=40,
         capacity=1,
         backend_config={"model": {"file": "m.gguf"}},
@@ -491,7 +488,6 @@ async def test_evict_victim_nak_tries_next_candidate(
     def_b = ProviderDefinition(
         alias="nkb",
         provider_type="mock",
-        registration_token="tok-nkb",
         vram_required_bytes=40,
         capacity=1,
         backend_config={"model": {"file": "m.gguf"}},
@@ -499,7 +495,6 @@ async def test_evict_victim_nak_tries_next_candidate(
     def_c = ProviderDefinition(
         alias="nkc",
         provider_type="mock",
-        registration_token="tok-nkc",
         vram_required_bytes=50,
         capacity=1,
         backend_config={"model": {"file": "m.gguf"}},
@@ -507,33 +502,30 @@ async def test_evict_victim_nak_tries_next_candidate(
     session.add_all([def_a, def_b, def_c])
     session.commit()
     inst_a = ProviderInstance(
-        machine_id=machine.id,
+        agent_id=_agent(session, machine).id,
         provider_definition_id=def_a.id,
         backend_status="running",
-        websocket_connected=True,
         last_request_at=datetime.now(UTC) - timedelta(seconds=200),
     )
     inst_b = ProviderInstance(
-        machine_id=machine.id,
+        agent_id=_agent(session, machine).id,
         provider_definition_id=def_b.id,
         backend_status="running",
-        websocket_connected=True,
         last_request_at=datetime.now(UTC) - timedelta(seconds=1),
     )
     inst_c = ProviderInstance(
-        machine_id=machine.id,
+        agent_id=_agent(session, machine).id,
         provider_definition_id=def_c.id,
         backend_status="stopped",
-        websocket_connected=True,
     )
     session.add_all([inst_a, inst_b, inst_c])
     session.commit()
 
     calls: list[tuple[str, str]] = []
 
-    async def fake_send_command(instance_id, type_, payload, timeout=30.0):  # noqa: ARG001
-        calls.append((instance_id, type_))
-        if type_ == "backend.stop" and instance_id == str(inst_a.id):
+    async def fake_send_command(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        calls.append((payload.get("instance_id", agent_id), type_))
+        if type_ == "backend.stop" and payload.get("instance_id") == str(inst_a.id):
             # A refuses (drain race); everything else succeeds.
             return Frame(type="ack", payload={"ok": False, "error": "backend_in_use"})
         return Frame(type="ack", payload={"ok": True})
@@ -564,7 +556,6 @@ async def test_evict_no_workable_victim_stays_queued(
     def_a = ProviderDefinition(
         alias="noa",
         provider_type="mock",
-        registration_token="tok-noa",
         vram_required_bytes=60,
         capacity=1,
         backend_config={"model": {"file": "m.gguf"}},
@@ -572,7 +563,6 @@ async def test_evict_no_workable_victim_stays_queued(
     def_b = ProviderDefinition(
         alias="nob",
         provider_type="mock",
-        registration_token="tok-nob",
         vram_required_bytes=60,
         capacity=1,
         backend_config={"model": {"file": "m.gguf"}},
@@ -580,21 +570,19 @@ async def test_evict_no_workable_victim_stays_queued(
     session.add_all([def_a, def_b])
     session.commit()
     inst_a = ProviderInstance(
-        machine_id=machine.id,
+        agent_id=_agent(session, machine).id,
         provider_definition_id=def_a.id,
         backend_status="running",
-        websocket_connected=True,
     )
     inst_b = ProviderInstance(
-        machine_id=machine.id,
+        agent_id=_agent(session, machine).id,
         provider_definition_id=def_b.id,
         backend_status="stopped",
-        websocket_connected=True,
     )
     session.add_all([inst_a, inst_b])
     session.commit()
 
-    async def refuse_stops(instance_id, type_, payload, timeout=30.0):  # noqa: ARG001
+    async def refuse_stops(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
         if type_ == "backend.stop":
             return Frame(type="ack", payload={"ok": False, "error": "backend_in_use"})
         return Frame(type="ack", payload={"ok": True})
@@ -618,7 +606,7 @@ async def test_boot_failure_does_not_admit_or_leak(
         session, machine_uid="sch-bootfail", alias="bf-a", capacity=1
     )
 
-    async def refuse_send_command(instance_id, type_, payload, timeout=30.0):  # noqa: ARG001
+    async def refuse_send_command(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
         return Frame(type="ack", payload={"ok": False, "error": "boot exploded"})
 
     monkeypatch.setattr(manager, "send_command", refuse_send_command)
@@ -631,7 +619,7 @@ async def test_boot_failure_does_not_admit_or_leak(
     assert await aredis.hgetall(redis_keys.vram_used_key("sch-bootfail")) == {}
 
     # A working boot afterwards still admits.
-    async def ok_send_command(instance_id, type_, payload, timeout=30.0):  # noqa: ARG001
+    async def ok_send_command(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
         return Frame(type="ack", payload={"ok": True})
 
     monkeypatch.setattr(manager, "send_command", ok_send_command)
@@ -659,17 +647,16 @@ async def test_boot_exception_falls_through_to_next_candidate(
         .first()
     )
     inst2 = ProviderInstance(
-        machine_id=machine2.id,
+        agent_id=_agent(session, machine2).id,
         provider_definition_id=definition.id,
         port=9091,
         backend_status="stopped",
-        websocket_connected=True,
     )
     session.add(inst2)
     session.commit()
 
-    async def flaky_send_command(instance_id, type_, payload, timeout=30.0):  # noqa: ARG001
-        if instance_id != str(inst2.id):
+    async def flaky_send_command(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        if payload.get("instance_id") != str(inst2.id):
             raise ConnectionError("socket gone")
         return Frame(type="ack", payload={"ok": True})
 
@@ -829,17 +816,15 @@ async def test_admission_uses_machine_reachable_preference(
     definition = ProviderDefinition(
         alias="ad-a",
         provider_type="mock",
-        registration_token="tok-ad-a",
         backend_config={"model": {"file": "m.gguf"}},
     )
     session.add(definition)
     session.commit()
     instance = ProviderInstance(
-        machine_id=machine.id,
+        agent_id=_agent(session, machine).id,
         provider_definition_id=definition.id,
         port=8081,
         backend_status="running",
-        websocket_connected=True,
     )
     session.add(instance)
     session.commit()
@@ -867,7 +852,6 @@ async def test_already_booted_target_admits_on_capacity_alone(
     definition = ProviderDefinition(
         alias="pb-a",
         provider_type="mock",
-        registration_token="tok-pb-a",
         vram_required_bytes=60,
         capacity=2,
         backend_config={"model": {"file": "m.gguf"}},
@@ -875,10 +859,9 @@ async def test_already_booted_target_admits_on_capacity_alone(
     session.add(definition)
     session.commit()
     instance = ProviderInstance(
-        machine_id=machine.id,
+        agent_id=_agent(session, machine).id,
         provider_definition_id=definition.id,
         backend_status="stopped",
-        websocket_connected=True,
     )
     session.add(instance)
     session.commit()
@@ -914,7 +897,7 @@ async def test_ledger_survives_release_and_redis_reflects_holds(
     held = await scheduler._machine_vram_held(
         instance.machine
         if instance.machine is not None
-        else session.get(Machine, instance.machine_id)
+        else session.get(Machine, instance.agent.machine_id)
     )
     assert held[str(instance.id)] == 70
     assert await aredis.hgetall(redis_keys.vram_used_key("sch-ledger")) == {
@@ -932,7 +915,6 @@ async def test_ledger_survives_release_and_redis_reflects_holds(
     def_small = ProviderDefinition(
         alias="lg-b",
         provider_type="mock",
-        registration_token="tok-lg-b",
         vram_required_bytes=30,
         capacity=1,
         backend_config={"model": {"file": "m.gguf"}},
@@ -940,10 +922,9 @@ async def test_ledger_survives_release_and_redis_reflects_holds(
     session.add(def_small)
     session.commit()
     inst_small = ProviderInstance(
-        machine_id=instance.machine_id,
+        agent_id=instance.agent_id,
         provider_definition_id=def_small.id,
         backend_status="stopped",
-        websocket_connected=True,
     )
     session.add(inst_small)
     session.commit()
@@ -976,7 +957,6 @@ def make_reap_target(
     definition = ProviderDefinition(
         alias=alias,
         provider_type="mock",
-        registration_token=f"tok-{alias}",
         idle_timeout_seconds=idle_timeout,
         vram_required_bytes=vram_required,
         capacity=1,
@@ -996,11 +976,11 @@ def make_reap_target(
         if backend_loaded_age_seconds is None
         else datetime.now(UTC) - timedelta(seconds=backend_loaded_age_seconds)
     )
+    ag = _agent(session, machine, connected=connected)
     instance = ProviderInstance(
-        machine_id=machine.id,
+        agent_id=ag.id,
         provider_definition_id=definition.id,
         backend_status=backend_status,
-        websocket_connected=connected,
         last_request_at=last,
         backend_loaded_at=loaded_at,
     )
@@ -1024,8 +1004,8 @@ async def test_reaper_stops_idle_loaded_instance(
     )
     calls: list[tuple[str, str]] = []
 
-    async def fake(instance_id, type_, payload, timeout=30.0):  # noqa: ARG001
-        calls.append((instance_id, type_))
+    async def fake(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        calls.append((payload.get("instance_id", agent_id), type_))
         return Frame(type="ack", payload={"ok": True})
 
     monkeypatch.setattr(manager, "send_command", fake)
@@ -1058,8 +1038,8 @@ async def test_reaper_does_not_stop_freshly_loaded_instance_with_stale_clock(
     )
     calls: list[tuple[str, str]] = []
 
-    async def fake(instance_id, type_, payload, timeout=30.0):  # noqa: ARG001
-        calls.append((instance_id, type_))
+    async def fake(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        calls.append((payload.get("instance_id", agent_id), type_))
         return Frame(type="ack", payload={"ok": True})
 
     monkeypatch.setattr(manager, "send_command", fake)
@@ -1088,8 +1068,8 @@ async def test_reaper_stops_never_served_instance_from_load_clock(
     )
     calls: list[tuple[str, str]] = []
 
-    async def fake(instance_id, type_, payload, timeout=30.0):  # noqa: ARG001
-        calls.append((instance_id, type_))
+    async def fake(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        calls.append((payload.get("instance_id", agent_id), type_))
         return Frame(type="ack", payload={"ok": True})
 
     monkeypatch.setattr(manager, "send_command", fake)
@@ -1116,8 +1096,8 @@ async def test_reaper_never_stops_zero_timeout(
     )
     calls: list[tuple[str, str]] = []
 
-    async def fake(instance_id, type_, payload, timeout=30.0):  # noqa: ARG001
-        calls.append((instance_id, type_))
+    async def fake(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        calls.append((payload.get("instance_id", agent_id), type_))
         return Frame(type="ack", payload={"ok": True})
 
     monkeypatch.setattr(manager, "send_command", fake)
@@ -1146,8 +1126,8 @@ async def test_reaper_skips_instance_with_active_slots(
     )
     calls: list[tuple[str, str]] = []
 
-    async def fake(instance_id, type_, payload, timeout=30.0):  # noqa: ARG001
-        calls.append((instance_id, type_))
+    async def fake(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        calls.append((payload.get("instance_id", agent_id), type_))
         return Frame(type="ack", payload={"ok": True})
 
     monkeypatch.setattr(manager, "send_command", fake)
@@ -1182,8 +1162,8 @@ async def test_reaper_skips_disconnected_instance(
     )
     calls: list[tuple[str, str]] = []
 
-    async def fake(instance_id, type_, payload, timeout=30.0):  # noqa: ARG001
-        calls.append((instance_id, type_))
+    async def fake(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        calls.append((payload.get("instance_id", agent_id), type_))
         return Frame(type="ack", payload={"ok": True})
 
     monkeypatch.setattr(manager, "send_command", fake)
@@ -1211,7 +1191,7 @@ async def test_reaper_survives_send_command_exception(
     )
     state = {"raised": False}
 
-    async def flaky(instance_id, type_, payload, timeout=30.0):  # noqa: ARG001
+    async def flaky(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
         if not state["raised"] and type_ == "backend.stop":
             state["raised"] = True
             raise ConnectionError("socket gone")
@@ -1301,7 +1281,6 @@ async def test_concurrent_acquire_not_admitted_onto_eviction_victim(
     def_a = ProviderDefinition(
         alias="va1",
         provider_type="mock",
-        registration_token="tok-va1",
         vram_required_bytes=80,
         capacity=1,
         backend_config={"model": {"file": "m.gguf"}},
@@ -1309,7 +1288,6 @@ async def test_concurrent_acquire_not_admitted_onto_eviction_victim(
     def_b = ProviderDefinition(
         alias="vb1",
         provider_type="mock",
-        registration_token="tok-vb1",
         vram_required_bytes=80,
         capacity=1,
         backend_config={"model": {"file": "m.gguf"}},
@@ -1317,16 +1295,14 @@ async def test_concurrent_acquire_not_admitted_onto_eviction_victim(
     session.add_all([def_a, def_b])
     session.commit()
     inst_v = ProviderInstance(  # the victim (alias va1, running, idle)
-        machine_id=machine.id,
+        agent_id=_agent(session, machine).id,
         provider_definition_id=def_a.id,
         backend_status="running",
-        websocket_connected=True,
     )
     inst_b = ProviderInstance(
-        machine_id=machine.id,
+        agent_id=_agent(session, machine).id,
         provider_definition_id=def_b.id,
         backend_status="stopped",
-        websocket_connected=True,
     )
     session.add_all([inst_v, inst_b])
     session.commit()
@@ -1334,9 +1310,9 @@ async def test_concurrent_acquire_not_admitted_onto_eviction_victim(
     stop_gate = asyncio.Event()
     calls: list[tuple[str, str]] = []
 
-    async def gated_send_command(instance_id, type_, payload, timeout=30.0):  # noqa: ARG001
-        calls.append((instance_id, type_))
-        if type_ == "backend.stop" and instance_id == str(inst_v.id):
+    async def gated_send_command(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        calls.append((payload.get("instance_id", agent_id), type_))
+        if type_ == "backend.stop" and payload.get("instance_id") == str(inst_v.id):
             await stop_gate.wait()  # hold the eviction window open
         return Frame(type="ack", payload={"ok": True})
 
@@ -1391,7 +1367,6 @@ async def test_eviction_can_reclaim_stopped_status_booted_instance(
     def_a = ProviderDefinition(
         alias="n2a",
         provider_type="mock",
-        registration_token="tok-n2a",
         vram_required_bytes=70,
         capacity=1,
         backend_config={"model": {"file": "m.gguf"}},
@@ -1399,7 +1374,6 @@ async def test_eviction_can_reclaim_stopped_status_booted_instance(
     def_b = ProviderDefinition(
         alias="n2b",
         provider_type="mock",
-        registration_token="tok-n2b",
         vram_required_bytes=70,
         capacity=1,
         backend_config={"model": {"file": "m.gguf"}},
@@ -1407,24 +1381,22 @@ async def test_eviction_can_reclaim_stopped_status_booted_instance(
     session.add_all([def_a, def_b])
     session.commit()
     inst_stale = ProviderInstance(  # booted in-process, DB says stopped
-        machine_id=machine.id,
+        agent_id=_agent(session, machine).id,
         provider_definition_id=def_a.id,
         backend_status="stopped",
-        websocket_connected=True,
     )
     inst_target = ProviderInstance(
-        machine_id=machine.id,
+        agent_id=_agent(session, machine).id,
         provider_definition_id=def_b.id,
         backend_status="stopped",
-        websocket_connected=True,
     )
     session.add_all([inst_stale, inst_target])
     session.commit()
 
     calls: list[tuple[str, str]] = []
 
-    async def fake(instance_id, type_, payload, timeout=30.0):  # noqa: ARG001
-        calls.append((instance_id, type_))
+    async def fake(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        calls.append((payload.get("instance_id", agent_id), type_))
         return Frame(type="ack", payload={"ok": True})
 
     monkeypatch.setattr(manager, "send_command", fake)
@@ -1448,10 +1420,14 @@ async def _deliver_backend_status(
     scheduler: InferenceScheduler, aredis, instance_id: str, backend_status: str
 ) -> None:
     """Push a backend.status frame through the real connection_manager
-    handler with a minimal fake app/state."""
+    handler with a minimal fake app/state (addressed to the owning agent)."""
     from types import SimpleNamespace
 
+    from app.models import ProviderInstance as _PI
     from app.services.connection_manager import ConnectionState
+
+    with Session(engine) as s:
+        agent_id = str(s.get(_PI, uuid.UUID(instance_id)).agent_id)
 
     class _FakeWS:
         def __init__(self, app):
@@ -1462,7 +1438,7 @@ async def _deliver_backend_status(
 
     app = SimpleNamespace(state=SimpleNamespace(redis=aredis, scheduler=scheduler))
     state = ConnectionState(
-        instance_id=instance_id,
+        agent_id=agent_id,
         websocket=_FakeWS(app),
         epoch=1,
         connection_token="tok",
@@ -1471,7 +1447,7 @@ async def _deliver_backend_status(
         type=FrameKind.BACKEND_STATUS,
         id="f-1",
         epoch=1,
-        payload={"backend_status": backend_status},
+        payload={"instance_id": instance_id, "backend_status": backend_status},
     )
     await manager.handle_inbound(app, state, frame)
 
@@ -1494,7 +1470,7 @@ async def test_external_stop_prunes_booted_hold_and_mirror(
     scheduler = InferenceScheduler(aredis)
     definition = scheduler._definition("s2a")
     await scheduler._mark_booted(str(instance.id), "sch-s2", definition)
-    machine = session.get(Machine, instance.machine_id)
+    machine = session.get(Machine, instance.agent.machine_id)
     assert (await scheduler._machine_vram_held(machine))[str(instance.id)] == 70
 
     await _deliver_backend_status(
@@ -1567,80 +1543,3 @@ async def test_reaper_refreshes_mirror_ttl(
     await scheduler._reap_idle_once()
     ttl = await aredis.ttl(redis_keys.vram_used_key("reap-ttl"))
     assert 0 < ttl <= redis_keys.VRAM_USED_TTL_SECONDS
-
-
-# ============================================================================
-# Phase 14 — shell definitions never schedule
-# ============================================================================
-
-
-def _mk_shell(
-    session: Session,
-    *,
-    machine_uid: str,
-    alias: str,
-    backend_status: str = "running",
-) -> tuple[Machine, ProviderDefinition, ProviderInstance]:
-    existing = session.exec(select(Machine).where(Machine.uid == machine_uid)).first()
-    if existing is None:
-        existing = Machine(
-            uid=machine_uid, name=f"name-{machine_uid}", host="127.0.0.1"
-        )
-        session.add(existing)
-    session.commit()
-    definition = ProviderDefinition(
-        alias=alias,
-        provider_type=None,  # shell (post-adoption shape: type may be set)
-        registration_token=f"tok-{alias}",
-        backend_config=None,
-        capacity=1,
-    )
-    session.add(definition)
-    session.commit()
-    instance = ProviderInstance(
-        machine_id=existing.id,
-        provider_definition_id=definition.id,
-        backend_status=backend_status,
-        websocket_connected=True,
-    )
-    session.add(instance)
-    session.commit()
-    session.refresh(instance)
-    return existing, definition, instance
-
-
-async def test_shell_connected_instance_never_admitted(session, aredis) -> None:
-    """A connected instance of an unconfigured definition is NOT a
-    candidate — acquire raises NoProviderAvailable."""
-    _mk_shell(session, machine_uid="sh-m", alias="sh-a")
-    scheduler = InferenceScheduler(aredis)
-    with pytest.raises(NoProviderAvailable):
-        await scheduler.acquire("sh-a", "req-shell")
-
-
-async def test_shell_not_in_candidates_query(session, aredis) -> None:
-    _mk_shell(session, machine_uid="sh-m2", alias="sh-b")
-    scheduler = InferenceScheduler(aredis)
-    assert scheduler._candidates("sh-b") == []
-    assert not scheduler.has_candidates("sh-b")
-
-
-def test_idle_reaper_skips_shells(session, aredis) -> None:
-    import datetime as dt
-
-    machine, definition, instance = _mk_shell(
-        session, machine_uid="sh-m3", alias="sh-c"
-    )
-    # Simulate an ancient last seen + a running backend (impossible for a
-    # shell, but the reaper must not crash / must not select it).
-    instance.backend_status = "running"
-    instance.websocket_connected = True
-    instance.last_request_at = dt.datetime.now(dt.UTC) - dt.timedelta(hours=1)
-    session.add(instance)
-    session.commit()
-
-    scheduler = InferenceScheduler(aredis)
-    now = dt.datetime.now(dt.UTC)
-    ids = [c["id"] for c in scheduler._idle_stop_candidates(now)]
-    assert str(instance.id) not in ids
-    _ = machine, definition

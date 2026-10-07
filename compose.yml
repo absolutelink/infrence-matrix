@@ -65,6 +65,9 @@ services:
 
   # Mock provider: full-path local development with no hardware.
   # The provider dials the admin WS; admin points litellm back at :8081.
+  # Phase 16: an agent authenticates with the machine's shared secret and a
+  # stable AGENT_ID; the definition is created TYPED (provider_type +
+  # backend_config) in the admin UI/API — there is no per-definition token.
   provider-mock:
     build:
       context: .
@@ -74,7 +77,8 @@ services:
       - "8081:8081"
     environment:
       - MACHINE_UID=${MOCK_MACHINE_UID:-mock-machine-1}
-      - PROVIDER_REGISTRATION_TOKEN=${MOCK_PROVIDER_TOKEN:-mock-registration-token}
+      - MACHINE_SECRET=${MOCK_MACHINE_SECRET:?set MOCK_MACHINE_SECRET to the machine's registration_secret}
+      - AGENT_ID=${MOCK_AGENT_ID:-mock-agent-1}
       - ADMIN_BASE_URL=http://admin:8000
       - PROVIDER_PORT=8081
       - CACHE_DIR=/cache
@@ -92,8 +96,8 @@ services:
   # Uncomment on a machine that provides the backend binary (see each
   # provider Dockerfile note: real-engine images layer the binary onto
   # this package image, or mount it and set <TYPE>_SERVER_PATH).
-  # Create the Machine (uid) + ProviderDefinition (with registration
-  # token) in the admin UI first; deploy admin before providers
+  # Create the Machine (uid) + a TYPED ProviderDefinition (provider_type
+  # + backend_config) in the admin UI first; deploy admin before providers
   # (version hard-fail).
   #
   # provider-llama-cpp (Vulkan):
@@ -105,7 +109,8 @@ services:
   #     - "8083:8081"
   #   environment:
   #     - MACHINE_UID=<machine-uid>
-  #     - PROVIDER_REGISTRATION_TOKEN=<llama-cpp-definition-token>
+  #     - MACHINE_SECRET=<machine-registration-secret>
+  #     - AGENT_ID=<llama-cpp-agent-1>
   #     - ADMIN_BASE_URL=http://admin:8000
   #     - PROVIDER_PORT=8081
   #     - CACHE_DIR=/cache
@@ -147,7 +152,8 @@ services:
   #     - "8082:8081"
   #   environment:
   #     - MACHINE_UID=strix-halo-1
-  #     - PROVIDER_REGISTRATION_TOKEN=<gufo-definition-token>
+  #     - MACHINE_SECRET=<machine-registration-secret>
+  #     - AGENT_ID=<gufo-agent-1>
   #     - ADMIN_BASE_URL=http://admin:8000
   #     - PROVIDER_PORT=8081
   #     - CACHE_DIR=/cache
@@ -170,7 +176,8 @@ services:
   #     - "8083:8081"
   #   environment:
   #     - MACHINE_UID=rocm-1
-  #     - PROVIDER_REGISTRATION_TOKEN=<halogen-definition-token>
+  #     - MACHINE_SECRET=<machine-registration-secret>
+  #     - AGENT_ID=<halogen-agent-1>
   #     - ADMIN_BASE_URL=http://admin:8000
   #     - PROVIDER_PORT=8081
   #     - CACHE_DIR=/cache
@@ -193,7 +200,8 @@ services:
   #     - "8084:8081"
   #   environment:
   #     - MACHINE_UID=ryzen-ai-1
-  #     - PROVIDER_REGISTRATION_TOKEN=<halogen-flash-definition-token>
+  #     - MACHINE_SECRET=<machine-registration-secret>
+  #     - AGENT_ID=<halogen-flash-agent-1>
   #     - ADMIN_BASE_URL=http://admin:8000
   #     - PROVIDER_PORT=8081
   #     - CACHE_DIR=/cache

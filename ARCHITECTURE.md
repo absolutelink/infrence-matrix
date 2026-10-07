@@ -12,13 +12,16 @@ machine.
 broker/agent design; the pre-overhaul code was removed in the final
 cleanup and lives in git history only.
 
-> **Phase 16 (machine-scoped agents) is the canonical target described below
-> and is NOT yet implemented** — see `IMPLEMENTATION_STATUS.md` Phase 16 for
-> the build plan. It replaces the Phase 1–15 model where a provider container
-> was bound to exactly one `ProviderDefinition` (one backend, one
-> `registration_token`). Until Phase 16 lands, the running code still reflects
-> the old one-definition-per-container binding; the architecture here is the
-> law the code must move to.
+> **Phase 16 (machine-scoped agents) is largely IMPLEMENTED** (slice 3: the
+> atomic cutover — `ProviderInstance` re-keyed onto `ProviderAgent`,
+> `registration_token`/shells retired, registration/WS/scheduler/config-push/
+> metrics/logs re-addressed at the agent level with per-backend
+> `instance_id`). Remaining Phase 16 slices: 4 (`max_running_backends`
+> hot-swap), 5 (`agent.assignments.update` push), 6 (real multi-backend-per-
+> process engine hosting), 7 (React Agents/placement UI), 8 (full protocol-doc
+> rewrite). See `IMPLEMENTATION_STATUS.md` Phase 16 for the exact state. The
+> architecture below is the law; where code still lags a slice, the code is
+> what must move.
 
 ---
 

@@ -1,6 +1,11 @@
 """Phase 13 admin log paths: WS ingest (connection_manager → Redis) and
 the GET /admin/api/instances/{id}/logs read endpoint (cursor, kind=all
-merge, cap, legacy payload tolerance, 404)."""
+merge, cap, legacy payload tolerance, 404).
+
+Phase 16: backend logs are keyed by ``instance_id`` (from the frame payload),
+provider logs by ``agent_id`` (the container), and both share the agent's
+monotonic ingest cursor so ``kind=all`` merges correctly.
+"""
 
 import json
 import os
@@ -52,10 +57,10 @@ def app_stub(aredis: aioredis.Redis) -> SimpleNamespace:
 
 
 async def _ingest(
-    app_stub, instance_id: str, frame_type: str, payload: dict, epoch: int = 1
+    app_stub, agent_id: str, frame_type: str, payload: dict, epoch: int = 1
 ) -> None:
     state = ConnectionState(
-        instance_id=instance_id,
+        agent_id=agent_id,
         websocket=FakeWebSocket(app_stub),
         epoch=epoch,
         connection_token="tok",
@@ -68,7 +73,8 @@ async def _ingest(
 async def test_handle_inbound_backend_logs_populates_redis(
     app_stub, aredis: aioredis.Redis
 ) -> None:
-    instance_id = str(uuid.uuid4())
+    # No instance_id in the payload: backend logs fall back to the agent key.
+    agent_id = str(uuid.uuid4())
     payload = {
         "lines": [
             {"ts": "2026-10-06T00:00:01+00:00", "stream": "stdout", "text": "a"},
@@ -76,9 +82,9 @@ async def test_handle_inbound_backend_logs_populates_redis(
         ],
         "dropped": 7,
     }
-    await _ingest(app_stub, instance_id, FrameKind.BACKEND_LOGS, payload)
+    await _ingest(app_stub, agent_id, FrameKind.BACKEND_LOGS, payload)
 
-    key = redis_keys.logs_backend_key(instance_id)
+    key = redis_keys.logs_backend_key(agent_id)
     raw = await aredis.lrange(key, 0, -1)
     assert len(raw) == 2
     entries = [json.loads(x) for x in raw]
@@ -88,23 +94,23 @@ async def test_handle_inbound_backend_logs_populates_redis(
     assert sorted(e["seq"] for e in entries) == [1, 2]
     ttl = await aredis.ttl(key)
     assert 0 < ttl <= redis_keys.LOGS_TTL_SECONDS
-    assert await aredis.get(redis_keys.logs_dropped_key(instance_id, "backend")) == "7"
+    assert await aredis.get(redis_keys.logs_dropped_key(agent_id, "backend")) == "7"
 
-    # provider.logs goes to the provider list.
+    # provider.logs goes to the provider list (keyed by agent_id).
     await _ingest(
         app_stub,
-        instance_id,
+        agent_id,
         FrameKind.PROVIDER_LOGS,
         {"lines": [{"ts": "t", "stream": "stdout", "text": "p"}], "dropped": 0},
     )
-    praw = await aredis.lrange(redis_keys.logs_provider_key(instance_id), 0, -1)
+    praw = await aredis.lrange(redis_keys.logs_provider_key(agent_id), 0, -1)
     assert len(praw) == 1
     assert json.loads(praw[0])["text"] == "p"
 
 
 @pytest.mark.asyncio
 async def test_ingest_caps_list(app_stub, aredis: aioredis.Redis) -> None:
-    instance_id = str(uuid.uuid4())
+    agent_id = str(uuid.uuid4())
     cap = redis_keys.LOGS_CAP
     # Two batches totaling cap + 100 lines.
     for batch in range(2):
@@ -114,11 +120,11 @@ async def test_ingest_caps_list(app_stub, aredis: aioredis.Redis) -> None:
         ]
         await _ingest(
             app_stub,
-            instance_id,
+            agent_id,
             FrameKind.BACKEND_LOGS,
             {"lines": lines, "dropped": 0},
         )
-    raw = await aredis.lrange(redis_keys.logs_backend_key(instance_id), 0, -1)
+    raw = await aredis.lrange(redis_keys.logs_backend_key(agent_id), 0, -1)
     assert len(raw) == cap
     # Newest kept: the very last line must be present at the head.
     assert json.loads(raw[0])["text"] == f"l{cap + 99}"
@@ -128,14 +134,14 @@ async def test_ingest_caps_list(app_stub, aredis: aioredis.Redis) -> None:
 async def test_ingest_tolerates_legacy_single_line(
     app_stub, aredis: aioredis.Redis
 ) -> None:
-    instance_id = str(uuid.uuid4())
+    agent_id = str(uuid.uuid4())
     await _ingest(
         app_stub,
-        instance_id,
+        agent_id,
         FrameKind.BACKEND_LOGS,
         {"stream": "stderr", "line": "legacy per-line"},
     )
-    raw = await aredis.lrange(redis_keys.logs_backend_key(instance_id), 0, -1)
+    raw = await aredis.lrange(redis_keys.logs_backend_key(agent_id), 0, -1)
     assert len(raw) == 1
     entry = json.loads(raw[0])
     assert entry["text"] == "legacy per-line"
@@ -144,7 +150,7 @@ async def test_ingest_tolerates_legacy_single_line(
 
 @pytest.mark.asyncio
 async def test_ingest_malformed_never_raises(app_stub, aredis: aioredis.Redis) -> None:
-    instance_id = str(uuid.uuid4())
+    agent_id = str(uuid.uuid4())
     for bad in (
         {},
         {"lines": "not-a-list"},
@@ -153,8 +159,8 @@ async def test_ingest_malformed_never_raises(app_stub, aredis: aioredis.Redis) -
         {"lines": [{"stream": "stdout", "text": ""}]},
         {"dropped": "nan"},
     ):
-        await _ingest(app_stub, instance_id, FrameKind.BACKEND_LOGS, bad)
-    assert await aredis.llen(redis_keys.logs_backend_key(instance_id)) == 0
+        await _ingest(app_stub, agent_id, FrameKind.BACKEND_LOGS, bad)
+    assert await aredis.llen(redis_keys.logs_backend_key(agent_id)) == 0
 
     # Direct normalize coverage for non-dict payloads too.
     from app.services.log_store import normalize_log_batch
@@ -169,9 +175,9 @@ async def test_ingest_malformed_never_raises(app_stub, aredis: aioredis.Redis) -
 
 @pytest.mark.asyncio
 async def test_stale_epoch_log_frame_dropped(app_stub, aredis: aioredis.Redis) -> None:
-    instance_id = str(uuid.uuid4())
+    agent_id = str(uuid.uuid4())
     state = ConnectionState(
-        instance_id=instance_id,
+        agent_id=agent_id,
         websocket=FakeWebSocket(app_stub),
         epoch=5,
         connection_token="tok",
@@ -183,7 +189,7 @@ async def test_stale_epoch_log_frame_dropped(app_stub, aredis: aioredis.Redis) -
         payload={"lines": [{"ts": "t", "stream": "stdout", "text": "stale"}]},
     )
     await manager.handle_inbound(app_stub, state, frame)
-    assert await aredis.llen(redis_keys.logs_backend_key(instance_id)) == 0
+    assert await aredis.llen(redis_keys.logs_backend_key(agent_id)) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -191,12 +197,13 @@ async def test_stale_epoch_log_frame_dropped(app_stub, aredis: aioredis.Redis) -
 # ---------------------------------------------------------------------------
 
 
-def _seed(client: TestClient, session: Session) -> str:
-    machine = Machine(uid="log-http-mach", name="m", host="10.0.0.1")
+def _seed(client: TestClient, session: Session) -> tuple[str, str]:
+    machine = Machine(
+        uid="log-http-mach", name="m", host="10.0.0.1", registration_secret="logtok"
+    )
     definition = ProviderDefinition(
         alias="log-http-model",
         provider_type="mock",
-        registration_token="tok",
         backend_config={},
     )
     session.add(machine)
@@ -206,41 +213,45 @@ def _seed(client: TestClient, session: Session) -> str:
         "/admin/api/providers/register",
         json={
             "machine_uid": "log-http-mach",
-            "registration_token": "tok",
+            "machine_secret": "logtok",
+            "agent_id": "log-agent",
             "provider_type": "mock",
             "schema": {"type": "object"},
             "version": settings.VERSION,
-            "port": 8081,
+            "base_port": 8081,
             "hardware": {"gpus": [], "total_vram_bytes": 1},
             "metrics_categories": [],
         },
     )
     assert resp.status_code == 200
-    return resp.json()["instance_id"]
+    body = resp.json()
+    return body["agent_id"], body["backends"][0]["instance_id"]
 
 
 def test_logs_endpoint_cursor_and_merge(client: TestClient, session: Session) -> None:
     import asyncio
 
-    instance_id = _seed(client, session)
+    agent_id, instance_id = _seed(client, session)
 
     async def seed_logs() -> None:
         r = aioredis.from_url(os.environ["TEST_REDIS_URL"], decode_responses=True)
         try:
             app = SimpleNamespace(state=SimpleNamespace(redis=r))
+            state = ConnectionState(
+                agent_id=agent_id,
+                websocket=FakeWebSocket(app),
+                epoch=1,
+                connection_token="t",
+            )
             await manager.handle_inbound(
                 app,
-                ConnectionState(
-                    instance_id=instance_id,
-                    websocket=FakeWebSocket(app),
-                    epoch=1,
-                    connection_token="t",
-                ),
+                state,
                 Frame(
                     type=FrameKind.BACKEND_LOGS,
                     id="f1",
                     epoch=1,
                     payload={
+                        "instance_id": instance_id,
                         "lines": [
                             {
                                 "ts": "2026-01-01T00:00:01+00:00",
@@ -259,12 +270,7 @@ def test_logs_endpoint_cursor_and_merge(client: TestClient, session: Session) ->
             )
             await manager.handle_inbound(
                 app,
-                ConnectionState(
-                    instance_id=instance_id,
-                    websocket=FakeWebSocket(app),
-                    epoch=1,
-                    connection_token="t",
-                ),
+                state,
                 Frame(
                     type=FrameKind.PROVIDER_LOGS,
                     id="f2",
@@ -322,14 +328,12 @@ def test_logs_endpoint_cursor_and_merge(client: TestClient, session: Session) ->
     assert resp.json()["entries"][0]["text"] == "p1"
 
 
-def test_logs_endpoint_unseen_total_pre_trim(
-    client: TestClient, session: Session
-) -> None:
+def test_logs_endpoint_unseen_total(client: TestClient, session: Session) -> None:
     """H1: unseen_total is the pre-trim count of entries with
     seq > since, so the UI can warn when >limit new lines arrived."""
     import asyncio
 
-    instance_id = _seed(client, session)
+    _agent_id, instance_id = _seed(client, session)
 
     async def seed() -> None:
         r = aioredis.from_url(os.environ["TEST_REDIS_URL"], decode_responses=True)
@@ -375,7 +379,7 @@ def test_logs_endpoint_unseen_total_pre_trim(
 
 
 def test_logs_endpoint_empty_not_error(client: TestClient, session: Session) -> None:
-    instance_id = _seed(client, session)
+    _agent_id, instance_id = _seed(client, session)
     resp = client.get(f"/admin/api/instances/{instance_id}/logs?kind=all")
     assert resp.status_code == 200
     assert resp.json() == {
@@ -396,7 +400,7 @@ def test_logs_endpoint_404_unknown_instance(client: TestClient) -> None:
 
 
 def test_logs_endpoint_bad_params(client: TestClient, session: Session) -> None:
-    instance_id = _seed(client, session)
+    _agent_id, instance_id = _seed(client, session)
     assert (
         client.get(f"/admin/api/instances/{instance_id}/logs?kind=nope").status_code
         == 422
@@ -418,7 +422,7 @@ def test_logs_endpoint_reports_eviction_gap(
     were LTRIM'd away), the response flags gap=True with oldest_seq."""
     import asyncio
 
-    instance_id = _seed(client, session)
+    _agent_id, instance_id = _seed(client, session)
 
     async def seed() -> None:
         r = aioredis.from_url(os.environ["TEST_REDIS_URL"], decode_responses=True)

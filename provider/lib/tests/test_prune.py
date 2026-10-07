@@ -16,7 +16,8 @@ from provider_lib.config_update import ConfigState, install_config_handlers
 def settings(tmp_path: Any) -> ProviderSettings:
     return ProviderSettings(  # type: ignore[call-arg]
         MACHINE_UID="prune-test",
-        PROVIDER_REGISTRATION_TOKEN="tok",
+        MACHINE_SECRET="tok",
+        AGENT_ID="prune-test-agent",
         ADMIN_BASE_URL="http://localhost:9999",
         CACHE_DIR=tmp_path / "cache",
         MODELS_DIR=tmp_path / "models",

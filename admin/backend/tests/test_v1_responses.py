@@ -21,7 +21,13 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
 from app.core.db import engine
-from app.models import Machine, ProviderDefinition, ProviderInstance, ResponseRecord
+from app.models import ProviderDefinition, ProviderInstance, ResponseRecord
+from tests.helpers import (
+    get_or_create_machine,
+    make_agent,
+    make_definition,
+    make_instance,
+)
 
 CLIENT_ID_PREFIX = "resp_"
 WRAPPED_ID = (
@@ -48,31 +54,19 @@ def seed_instance(
     vram_required: int = 0,
     enabled: bool = True,
 ) -> ProviderInstance:
-    machine = session.query(Machine).filter(Machine.uid == machine_uid).first()
-    if machine is None:
-        machine = Machine(uid=machine_uid, name=f"name-{machine_uid}", host="127.0.0.1")
-        session.add(machine)
-    definition = ProviderDefinition(
+    machine = get_or_create_machine(session, uid=machine_uid, host="127.0.0.1")
+    agent = make_agent(session, machine, connected=True)
+    definition = make_definition(
+        session,
         alias=alias,
-        provider_type="mock",
-        registration_token=f"tok-{alias}",
         capacity=capacity,
-        vram_required_bytes=vram_required,
+        vram_required=vram_required,
         enabled=enabled,
         backend_config={"model": {"file": "m.gguf"}},
     )
-    session.add(definition)
-    session.commit()
-    instance = ProviderInstance(
-        machine_id=machine.id,
-        provider_definition_id=definition.id,
-        port=8081,
-        backend_status=backend_status,
-        websocket_connected=True,
+    instance = make_instance(
+        session, agent, definition, port=8081, backend_status=backend_status
     )
-    session.add(instance)
-    session.commit()
-    session.refresh(instance)
     return instance
 
 
@@ -419,23 +413,12 @@ def test_disabled_alias_404(client: TestClient, session: Session) -> None:
 
 
 def test_no_connected_provider_503(client: TestClient, session: Session) -> None:
-    machine = Machine(uid="rt-np", name="rt-np", host="127.0.0.1")
-    definition = ProviderDefinition(
-        alias="rt-np",
-        provider_type="mock",
-        registration_token="tok-rt-np",
-        backend_config={"model": {"file": "m.gguf"}},
+    machine = get_or_create_machine(session, uid="rt-np", host="127.0.0.1")
+    agent = make_agent(session, machine, connected=False)
+    definition = make_definition(
+        session, alias="rt-np", backend_config={"model": {"file": "m.gguf"}}
     )
-    session.add_all([machine, definition])
-    session.commit()
-    instance = ProviderInstance(
-        machine_id=machine.id,
-        provider_definition_id=definition.id,
-        websocket_connected=False,
-        backend_status="stopped",
-    )
-    session.add(instance)
-    session.commit()
+    make_instance(session, agent, definition, backend_status="stopped")
     resp = client.post("/v1/responses", json={"model": "rt-np", "input": "x"})
     assert resp.status_code == 503
 
@@ -931,51 +914,13 @@ def test_stream_zero_candidates_precheck_is_http_503(
 ) -> None:
     """Streaming with zero connected candidates keeps the cheap pre-stream
     HTTP 503 (never opens a keepalive-only stream that can't respond)."""
-    machine = Machine(uid="sc503", name="sc503", host="127.0.0.1")
-    definition = ProviderDefinition(
-        alias="sc503",
-        provider_type="mock",
-        registration_token="tok-sc503",
-        backend_config={"model": {"file": "m.gguf"}},
+    machine = get_or_create_machine(session, uid="sc503", host="127.0.0.1")
+    agent = make_agent(session, machine, connected=False)
+    definition = make_definition(
+        session, alias="sc503", backend_config={"model": {"file": "m.gguf"}}
     )
-    session.add_all([machine, definition])
-    session.commit()
-    instance = ProviderInstance(
-        machine_id=machine.id,
-        provider_definition_id=definition.id,
-        websocket_connected=False,
-        backend_status="stopped",
-    )
-    session.add(instance)
-    session.commit()
+    make_instance(session, agent, definition, backend_status="stopped")
     resp = client.post(
         "/v1/responses", json={"model": "sc503", "input": "x", "stream": True}
     )
     assert resp.status_code == 503
-
-
-def test_shell_alias_404_not_configured(client, session) -> None:
-    """Phase 14: an unconfigured (shell) definition is invisible to
-    inference — 404, mirroring the disabled-alias path (spec item F)."""
-    machine = Machine(uid="sh404-m", name="sh404", host="127.0.0.1")
-    definition = ProviderDefinition(
-        alias="sh404-a",
-        provider_type=None,
-        registration_token="tok-sh404",
-        backend_config=None,
-    )
-    session.add_all([machine, definition])
-    session.commit()
-    session.add(
-        ProviderInstance(
-            machine_id=machine.id,
-            provider_definition_id=definition.id,
-            websocket_connected=True,
-            backend_status="running",
-        )
-    )
-    session.commit()
-
-    resp = client.post("/v1/responses", json={"model": "sh404-a", "input": "x"})
-    assert resp.status_code == 404
-    assert "not configured" in resp.json()["detail"]

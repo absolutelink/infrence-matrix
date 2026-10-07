@@ -223,7 +223,8 @@ def make_settings(
 ) -> ProviderSettings:
     base: dict[str, Any] = {
         "MACHINE_UID": "flash-test",
-        "PROVIDER_REGISTRATION_TOKEN": "tok",
+        "MACHINE_SECRET": "tok",
+        "AGENT_ID": "test-agent",
         "ADMIN_BASE_URL": "http://localhost:9999",
         "CACHE_DIR": tmp_path / "cache",
         "MODELS_DIR": tmp_path / "models",

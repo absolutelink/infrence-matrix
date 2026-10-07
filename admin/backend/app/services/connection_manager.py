@@ -1,15 +1,18 @@
 """Admin-side provider WebSocket connection manager.
 
-Tracks the live socket per provider instance so the admin (and later the
-scheduler) can push commands and receive events. Liveness is mirrored in
-Redis:
+Tracks the live socket per provider **agent** (Phase 16) so the admin (and
+the scheduler) can push commands and receive events. One agent holds one
+socket and multiplexes 1..N backends; per-backend frames carry an
+``instance_id`` in their payload. Liveness is mirrored in Redis:
 
-  - ``im:ws:presence:{instance_id}`` is refreshed (with TTL) on every
-    accepted inbound frame and on every outbound command; the stale sweep
-    task in the lifespan marks DB rows disconnected when it expires.
-  - ``im:ws:epoch:{instance_id}`` is a monotonic INCR counter; the value
-    assigned when a connection is accepted fences off frames from older,
-    dead sockets.
+  - ``im:ws:presence:{agent_id}`` is refreshed (with TTL) on every accepted
+    inbound frame and on every outbound command; the stale sweep task in the
+    lifespan marks the agent (and its backends) disconnected when it expires.
+  - ``im:ws:epoch:{agent_id}`` is a monotonic INCR counter; the value assigned
+    when a connection is accepted fences off frames from older, dead sockets.
+
+``agent_id`` here is the ProviderAgent primary key (a uuid string) handed back
+to the container at registration and presented on the WS query string.
 
 This module owns the auth check (Bearer secret vs Redis), the hello frame,
 frame dispatch/persistence, and the request/ack pattern for admin->provider
@@ -26,15 +29,15 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import WebSocket
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.core.db import engine
 from app.core.redis import get_redis_from_app
 from app.models import (
     Machine,
+    ProviderAgent,
     ProviderDefinition,
     ProviderInstance,
-    backend_config_is_authored,
 )
 from app.services import redis_keys
 from app.services.wire import (
@@ -42,7 +45,6 @@ from app.services.wire import (
     BackendStatusValue,
     Frame,
     FrameKind,
-    InstanceStatusValue,
     now_iso,
 )
 
@@ -81,9 +83,9 @@ COMMAND_TIMEOUT_SECONDS = 30.0
 
 @dataclass
 class ConnectionState:
-    """Live socket state for one accepted provider connection."""
+    """Live socket state for one accepted provider agent connection."""
 
-    instance_id: str
+    agent_id: str
     websocket: WebSocket
     epoch: int
     connection_token: str
@@ -93,7 +95,7 @@ class ConnectionState:
 
 
 class ConnectionManager:
-    """In-process registry of live provider WebSocket connections."""
+    """In-process registry of live provider agent WebSocket connections."""
 
     def __init__(self) -> None:
         self._connections: dict[str, ConnectionState] = {}
@@ -102,40 +104,40 @@ class ConnectionManager:
     # ------------------------------------------------------------------
     # Auth
     # ------------------------------------------------------------------
-    async def authenticate(self, websocket: WebSocket, instance_id: str) -> str | None:
-        """Verify the Bearer secret for ``instance_id`` against Redis.
+    async def authenticate(self, websocket: WebSocket, agent_id: str) -> str | None:
+        """Verify the Bearer secret for ``agent_id`` against Redis.
 
-        Returns the secret-compatible instance_id on success, or None if
-        auth fails (missing header, unknown secret, mismatch).
+        Returns the agent_id on success, or None if auth fails (missing
+        header, unknown secret, mismatch).
         """
         auth = websocket.headers.get("authorization", "")
         if not auth.lower().startswith("bearer "):
             return None
         presented = auth[len("bearer ") :].strip()
-        if not presented or not instance_id:
+        if not presented or not agent_id:
             return None
         redis_client = get_redis_from_app(websocket.app)
-        stored = await redis_client.get(redis_keys.secret_key(instance_id))
+        stored = await redis_client.get(redis_keys.secret_key(agent_id))
         if stored is None:
             return None
         if not secrets.compare_digest(str(stored), presented):
             return None
-        return instance_id
+        return agent_id
 
     # ------------------------------------------------------------------
     # Connection lifecycle
     # ------------------------------------------------------------------
     async def connect(
-        self, websocket: WebSocket, instance_id: str, epoch: int
+        self, websocket: WebSocket, agent_id: str, epoch: int
     ) -> ConnectionState:
         state = ConnectionState(
-            instance_id=instance_id,
+            agent_id=agent_id,
             websocket=websocket,
             epoch=epoch,
             connection_token=uuid.uuid4().hex,
         )
         async with self._lock:
-            previous = self._connections.get(instance_id)
+            previous = self._connections.get(agent_id)
             if previous is not None:
                 previous.closed = True
                 for fut in previous.pending.values():
@@ -143,28 +145,28 @@ class ConnectionManager:
                         fut.cancel()
                 with contextlib.suppress(Exception):
                     await previous.websocket.close(code=4409)
-            self._connections[instance_id] = state
+            self._connections[agent_id] = state
         return state
 
     async def disconnect(self, state: ConnectionState) -> bool:
         """Remove the connection from the registry if it is still current.
 
-        Returns True when ``state`` was the live connection for its instance
-        (so the caller may mark the DB row disconnected); False when a newer
-        connection already took over, in which case the caller must not
-        clobber the newer state.
+        Returns True when ``state`` was the live connection for its agent
+        (so the caller may mark the agent + its backends disconnected); False
+        when a newer connection already took over, in which case the caller
+        must not clobber the newer state.
         """
         async with self._lock:
-            current = self._connections.get(state.instance_id)
+            current = self._connections.get(state.agent_id)
             was_current = current is state
             if was_current:
-                self._connections.pop(state.instance_id, None)
+                self._connections.pop(state.agent_id, None)
                 redis_client = get_redis_from_app(state.websocket.app)
                 # Only clear ownership if we still own it (a newer connection
                 # may already have taken over).
-                owner = await redis_client.get(redis_keys.owner_key(state.instance_id))
+                owner = await redis_client.get(redis_keys.owner_key(state.agent_id))
                 if owner == state.connection_token:
-                    await redis_client.delete(redis_keys.owner_key(state.instance_id))
+                    await redis_client.delete(redis_keys.owner_key(state.agent_id))
             state.closed = True
             for fut in state.pending.values():
                 if not fut.done():
@@ -172,8 +174,8 @@ class ConnectionManager:
             state.pending.clear()
         return was_current
 
-    def get(self, instance_id: str) -> ConnectionState | None:
-        state = self._connections.get(instance_id)
+    def get(self, agent_id: str) -> ConnectionState | None:
+        state = self._connections.get(agent_id)
         if state is not None and not state.closed:
             return state
         return None
@@ -181,23 +183,23 @@ class ConnectionManager:
     # ------------------------------------------------------------------
     # Epoch / presence helpers
     # ------------------------------------------------------------------
-    async def bump_epoch(self, app: Any, instance_id: str) -> int:
+    async def bump_epoch(self, app: Any, agent_id: str) -> int:
         redis_client = get_redis_from_app(app)
-        epoch = int(await redis_client.incr(redis_keys.epoch_key(instance_id)))
+        epoch = int(await redis_client.incr(redis_keys.epoch_key(agent_id)))
         return epoch
 
     async def claim_ownership(self, app: Any, state: ConnectionState) -> None:
         redis_client = get_redis_from_app(app)
         await redis_client.set(
-            redis_keys.owner_key(state.instance_id),
+            redis_keys.owner_key(state.agent_id),
             state.connection_token,
         )
-        await self.refresh_presence(app, state.instance_id)
+        await self.refresh_presence(app, state.agent_id)
 
-    async def refresh_presence(self, app: Any, instance_id: str) -> None:
+    async def refresh_presence(self, app: Any, agent_id: str) -> None:
         redis_client = get_redis_from_app(app)
         await redis_client.set(
-            redis_keys.presence_key(instance_id),
+            redis_keys.presence_key(agent_id),
             now_iso(),
             ex=PRESENCE_TTL_SECONDS,
         )
@@ -211,24 +213,24 @@ class ConnectionManager:
         """Process one inbound provider frame with epoch fencing."""
         if frame.epoch < state.epoch:
             logger.warning(
-                "dropping stale frame type=%s epoch=%s < %s (instance %s)",
+                "dropping stale frame type=%s epoch=%s < %s (agent %s)",
                 frame.type,
                 frame.epoch,
                 state.epoch,
-                state.instance_id,
+                state.agent_id,
             )
             return
         if frame.epoch > state.epoch:
             logger.warning(
-                "dropping frame from future epoch type=%s epoch=%s > %s (instance %s)",
+                "dropping frame from future epoch type=%s epoch=%s > %s (agent %s)",
                 frame.type,
                 frame.epoch,
                 state.epoch,
-                state.instance_id,
+                state.agent_id,
             )
             return
 
-        await self.refresh_presence(app, state.instance_id)
+        await self.refresh_presence(app, state.agent_id)
 
         if frame.type == FrameKind.PING:
             await self.send_frame(
@@ -243,15 +245,13 @@ class ConnectionManager:
             return
 
         if frame.type == FrameKind.PROVIDER_STATUS:
-            machine_uid = self._persist_status(
-                state.instance_id,
-                instance_status=frame.payload.get("instance_status"),
-                backend_status=frame.payload.get("backend_status"),
+            # Container-level: updates the ProviderAgent row only.
+            self._persist_agent_status(
+                state.agent_id,
+                agent_status=frame.payload.get("agent_status")
+                or frame.payload.get("instance_status"),
                 error_message=frame.payload.get("error_message")
                 or frame.payload.get("error"),
-            )
-            await self._prune_stopped_vram(
-                app, state.instance_id, frame.payload.get("backend_status"), machine_uid
             )
             return
 
@@ -260,23 +260,29 @@ class ConnectionManager:
             from app.services import metrics_service
 
             await metrics_service.handle_machine_metrics(
-                app, state.instance_id, frame.payload
+                app, state.agent_id, frame.payload
             )
             return
 
         if frame.type == FrameKind.BACKEND_STATUS:
+            instance_id = frame.payload.get("instance_id")
+            if not instance_id:
+                logger.warning(
+                    "backend.status without instance_id (agent %s); ignored",
+                    state.agent_id,
+                )
+                return
             reported = frame.payload.get("backend_status") or frame.payload.get(
                 "status"
             )
-            machine_uid = self._persist_status(
-                state.instance_id,
+            machine_uid = self._persist_backend_status(
+                instance_id,
+                agent_id=state.agent_id,
                 backend_status=reported,
                 error_message=frame.payload.get("error_message")
                 or frame.payload.get("error"),
             )
-            await self._prune_stopped_vram(
-                app, state.instance_id, reported, machine_uid
-            )
+            await self._prune_stopped_vram(app, instance_id, reported, machine_uid)
             return
 
         if frame.type == FrameKind.BACKEND_METADATA:
@@ -284,27 +290,35 @@ class ConnectionManager:
             # actually loaded. Same column and shape as the
             # provider.config.update ack echo (`{"models": [...]}`), so both
             # paths keep ProviderDefinition.model_metadata current.
-            self._persist_model_metadata(state.instance_id, frame.payload)
+            instance_id = frame.payload.get("instance_id")
+            if instance_id:
+                self._persist_model_metadata(
+                    instance_id, frame.payload, agent_id=state.agent_id
+                )
             return
 
         if frame.type in (FrameKind.BACKEND_LOGS, FrameKind.PROVIDER_LOGS):
             # Phase 13: batched log tail ingest into Redis. Best-effort —
             # never let a malformed log frame break the WS read loop.
+            # Backend logs are per-backend (keyed by instance_id); provider
+            # logs are per-container (keyed by agent_id). Both share the
+            # agent's monotonic ingest cursor so kind=all merges correctly.
             from app.services import log_store
 
-            kind = (
-                log_store.KIND_BACKEND
-                if frame.type == FrameKind.BACKEND_LOGS
-                else log_store.KIND_PROVIDER
-            )
+            if frame.type == FrameKind.BACKEND_LOGS:
+                source_id = frame.payload.get("instance_id") or state.agent_id
+                await_kind = log_store.KIND_BACKEND
+            else:
+                source_id = state.agent_id
+                await_kind = log_store.KIND_PROVIDER
             try:
                 await log_store.ingest_log_batch(
-                    app, state.instance_id, kind, frame.payload
+                    app, source_id, await_kind, frame.payload, seq_id=state.agent_id
                 )
             except Exception:  # noqa: BLE001
                 logger.debug(
-                    "log ingest failed for instance %s",
-                    state.instance_id,
+                    "log ingest failed for %s",
+                    source_id,
                     exc_info=True,
                 )
             return
@@ -317,45 +331,67 @@ class ConnectionManager:
             return
 
         logger.debug(
-            "ignoring unhandled inbound frame type=%s (instance %s)",
+            "ignoring unhandled inbound frame type=%s (agent %s)",
             frame.type,
-            state.instance_id,
+            state.agent_id,
         )
 
-    def _persist_status(
+    def _persist_agent_status(
+        self,
+        agent_id: str,
+        *,
+        agent_status: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        """Persist a provider.status frame onto the ProviderAgent row.
+
+        Phase 16: container-level status lives on the agent; per-backend
+        status arrives separately on backend.status.
+        """
+        with Session(engine) as session:
+            agent = session.exec(
+                select(ProviderAgent).where(ProviderAgent.id == _to_uuid(agent_id))
+            ).first()
+            if agent is None:
+                logger.warning("status event for unknown agent %s; ignored", agent_id)
+                return
+            if agent_status:
+                agent.agent_status = agent_status
+            if error_message is not None:
+                agent.error_message = error_message
+            agent.last_seen = datetime.now(UTC)
+            agent.updated_at = datetime.now(UTC)
+            session.add(agent)
+            session.commit()
+
+    def _persist_backend_status(
         self,
         instance_id: str,
         *,
-        instance_status: str | None = None,
+        agent_id: str,
         backend_status: str | None = None,
         error_message: str | None = None,
     ) -> str | None:
-        """Persist a status frame to the DB; returns the instance's
-        machine uid (when the row exists) for VRAM-ledger pruning.
-
-        Phase 14: while the definition is unconfigured (a shell), a
-        provider-reported ``running``/``initializing`` instance_status is
-        coerced to ``awaiting_config`` — the provider does not know about
-        the admin-owned pre-state and would otherwise clobber it. Error
-        and unhealthy reports stay honest (they are more urgent than the
-        pre-state)."""
+        """Persist a backend.status frame onto the ProviderInstance row;
+        returns the owning machine uid (when the row exists) for VRAM-ledger
+        pruning.
+        """
         with Session(engine) as session:
             inst = session.get(ProviderInstance, _to_uuid(instance_id))
             if inst is None:
                 logger.warning(
-                    "status event for unknown instance %s; ignored", instance_id
+                    "backend status for unknown instance %s; ignored", instance_id
                 )
                 return None
-            if instance_status:
-                if not backend_config_is_authored(
-                    inst.provider_definition
-                ) and instance_status in (
-                    InstanceStatusValue.RUNNING,
-                    InstanceStatusValue.INITIALIZING,
-                    InstanceStatusValue.REGISTERING,
-                ):
-                    instance_status = InstanceStatusValue.AWAITING_CONFIG
-                inst.instance_status = instance_status
+            # Cross-agent guard: a frame may only mutate a backend this
+            # connected agent owns.
+            if str(inst.agent_id) != agent_id:
+                logger.warning(
+                    "backend.status for instance %s from non-owning agent %s; ignored",
+                    instance_id,
+                    agent_id,
+                )
+                return None
             if backend_status:
                 # Idle-reaper clock: a backend entering a loaded state
                 # starts a fresh idle window *now* — not at the last
@@ -378,14 +414,18 @@ class ConnectionManager:
                 inst.backend_status = backend_status
             if error_message is not None:
                 inst.error_message = error_message
-            inst.last_seen = datetime.now(UTC)
             inst.updated_at = datetime.now(UTC)
             session.add(inst)
             session.commit()
-            machine = session.get(Machine, inst.machine_id)
+            agent = session.get(ProviderAgent, inst.agent_id)
+            if agent is None:
+                return None
+            machine = session.get(Machine, agent.machine_id)
             return machine.uid if machine is not None else None
 
-    def _persist_model_metadata(self, instance_id: str, payload: dict) -> None:
+    def _persist_model_metadata(
+        self, instance_id: str, payload: dict, *, agent_id: str
+    ) -> None:
         """Store a `backend.metadata` event on the instance's definition.
 
         `{"models": [...]}` — the same shape `provider.config.update` echoes
@@ -402,6 +442,16 @@ class ConnectionManager:
             if inst is None:
                 logger.warning(
                     "backend.metadata for unknown instance %s; ignored", instance_id
+                )
+                return
+            # Cross-agent guard: a frame may only mutate a backend this
+            # connected agent owns.
+            if str(inst.agent_id) != agent_id:
+                logger.warning(
+                    "backend.metadata for instance %s from non-owning agent %s; "
+                    "ignored",
+                    instance_id,
+                    agent_id,
                 )
                 return
             definition = session.get(ProviderDefinition, inst.provider_definition_id)
@@ -456,11 +506,11 @@ class ConnectionManager:
         await state.websocket.send_text(frame.to_json())
 
     async def send_event(
-        self, instance_id: str, type_: str, payload: dict[str, Any]
+        self, agent_id: str, type_: str, payload: dict[str, Any]
     ) -> None:
-        state = self.get(instance_id)
+        state = self.get(agent_id)
         if state is None:
-            raise ConnectionError(f"no live connection for instance {instance_id}")
+            raise ConnectionError(f"no live connection for agent {agent_id}")
         await self.send_frame(
             state,
             Frame(
@@ -473,15 +523,19 @@ class ConnectionManager:
 
     async def send_command(
         self,
-        instance_id: str,
+        agent_id: str,
         type_: str,
         payload: dict[str, Any],
         timeout: float = COMMAND_TIMEOUT_SECONDS,
     ) -> Frame:
-        """Send an admin->provider command and await its ack frame."""
-        state = self.get(instance_id)
+        """Send an admin->provider command and await its ack frame.
+
+        Per-backend commands put the target ``instance_id`` in ``payload``;
+        the agent socket is addressed by ``agent_id``.
+        """
+        state = self.get(agent_id)
         if state is None:
-            raise ConnectionError(f"no live connection for instance {instance_id}")
+            raise ConnectionError(f"no live connection for agent {agent_id}")
         frame = Frame(
             type=type_,
             id=str(uuid.uuid4()),
@@ -498,12 +552,12 @@ class ConnectionManager:
 
     async def send_command_ack_ok(
         self,
-        instance_id: str,
+        agent_id: str,
         type_: str,
         payload: dict[str, Any],
         timeout: float = COMMAND_TIMEOUT_SECONDS,
     ) -> Ack:
-        reply = await self.send_command(instance_id, type_, payload, timeout)
+        reply = await self.send_command(agent_id, type_, payload, timeout)
         return Ack.model_validate(reply.payload)
 
 

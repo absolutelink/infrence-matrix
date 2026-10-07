@@ -6,7 +6,7 @@ provider backend lifecycle + /v1 translation surface (Phase 4).
 
 Startup sequence (see ``run_async``):
   1. Register with the admin (POST /admin/api/providers/register) using
-     MACHINE_UID + PROVIDER_REGISTRATION_TOKEN from the environment.
+     MACHINE_UID + MACHINE_SECRET + AGENT_ID from the environment.
   2. Build a `BackendLifecycle` around a `MockBackend`, with capacity
      from the registration response (`provider_definition.capacity`).
   3. Install command handlers (backend.start / backend.stop) that drive
@@ -34,6 +34,7 @@ from provider_lib.config import ProviderSettings
 from provider_lib.config_update import ConfigState, install_config_handlers
 from provider_lib.log_stream import install_log_streaming
 from provider_lib.ops import install_backend_ops
+from provider_lib.registry import BackendHandle, BackendRegistry
 from provider_lib.wire import InstanceStatusValue
 
 from provider_mock.backend import SCHEMA, MockBackend
@@ -60,29 +61,70 @@ FAKE_HARDWARE: dict[str, Any] = {
 }
 
 
-def make_lifecycle(client: AdminClient, **stream_kwargs: Any) -> BackendLifecycle:
-    """Build the mock's lifecycle with status events routed to the admin."""
+def make_lifecycle(
+    client: AdminClient, *, instance_id: str | None = None, **stream_kwargs: Any
+) -> BackendLifecycle:
+    """Build a mock lifecycle with status events routed to the admin.
+
+    Phase 16: ``backend.status`` is per-backend and must carry the owning
+    ``instance_id``. When built from a registration backend the id is passed
+    in directly; otherwise it is read lazily from the registration (single-
+    backend convenience). ``provider.status`` is agent-level.
+    """
+
+    def _iid() -> str | None:
+        if instance_id is not None:
+            return instance_id
+        reg = client.registration if client.is_registered else None
+        return reg.instance_id if reg is not None else None
 
     async def emit(status: str, reason: str | None) -> None:
-        await client.send_event(
-            "backend.status",
-            {
-                "backend_status": status,
-                "instance_status": InstanceStatusValue.RUNNING,
-                "reason": reason,
-            },
-        )
+        payload: dict[str, Any] = {
+            "backend_status": status,
+            "agent_status": InstanceStatusValue.RUNNING,
+            "reason": reason,
+        }
+        iid = _iid()
+        if iid is not None:
+            payload["instance_id"] = iid
+        await client.send_event("backend.status", payload)
 
     driver = MockBackend(model=DEFAULT_MODEL, **stream_kwargs)
-    return BackendLifecycle(driver, capacity=DEFAULT_CAPACITY, status_callback=emit)
+    return BackendLifecycle(
+        driver, capacity=DEFAULT_CAPACITY, status_callback=emit, instance_id=_iid()
+    )
+
+
+def build_registry(client: AdminClient, result: RegistrationResult) -> BackendRegistry:
+    """Host one lifecycle per backend the admin placed on this agent (H3).
+
+    A single-backend registration yields a one-handle registry (transparent
+    pass-through dispatch); a multi-backend registration yields N handles so
+    per-backend commands route to the correct lifecycle by ``instance_id``.
+    """
+    registry = BackendRegistry()
+    for backend in result.backends:
+        iid = backend.get("instance_id")
+        if iid is None:  # pragma: no cover - admin always assigns an id
+            continue
+        lifecycle = make_lifecycle(client, instance_id=iid)
+        config_state = ConfigState()
+        _apply_backend(lifecycle, backend, config_state)
+        registry.add(BackendHandle(str(iid), lifecycle, config_state))
+    return registry
 
 
 def install_command_handlers(
     client: AdminClient,
-    lifecycle: BackendLifecycle,
+    target: BackendLifecycle | BackendRegistry,
     config_state: ConfigState | None = None,
 ) -> None:
-    """Register admin->provider command handlers on the client."""
+    """Register admin->provider command handlers on the client.
+
+    ``target`` is a single lifecycle (single-backend) or a
+    :class:`BackendRegistry` (multi-backend). Per-backend commands are routed
+    to the correct lifecycle by ``instance_id`` (H3).
+    """
     resolved_state = config_state if config_state is not None else ConfigState()
 
     async def re_register() -> dict[str, Any] | None:
@@ -90,18 +132,25 @@ def install_command_handlers(
 
         Called by `provider.initialize` (provider_lib.ops): a fresh
         `/register` re-checks the version + schema gates, re-adopts the
-        definition, rewrites `provider_config.json` and mints a new instance
+        definition(s), rewrites `provider_config.json` and mints a new agent
         secret for future reconnects. The live socket stays up — it is what
         carries the status events the operator is watching.
         """
         result = await client.register(
             provider_type=PROVIDER_TYPE,
             version=VERSION,
-            port=client.settings.PROVIDER_PORT,
+            base_port=client.settings.PROVIDER_PORT,
             hardware=FAKE_HARDWARE,
             schema=SCHEMA,
         )
-        apply_registration(lifecycle, result, resolved_state)
+        if isinstance(target, BackendRegistry):
+            by_id = {h.instance_id: h for h in target.handles()}
+            for backend in result.backends:
+                handle = by_id.get(str(backend.get("instance_id")))
+                if handle is not None:
+                    _apply_backend(handle.lifecycle, backend, handle.config_state)
+        else:
+            apply_registration(target, result, resolved_state)
         return result.provider_definition
 
     # backend.start / stop / restart + provider.initialize come from
@@ -109,18 +158,22 @@ def install_command_handlers(
     # runs in the background (`wait_for_running: false`) so a slow engine
     # never blocks the admin's request.
     install_backend_ops(
-        client, lifecycle, backend_name=PROVIDER_TYPE, re_register=re_register
+        client, target, backend_name=PROVIDER_TYPE, re_register=re_register
     )
-    install_config_handlers(client, lifecycle, resolved_state, client.settings)
+    install_config_handlers(client, target, resolved_state, client.settings)
 
 
-def apply_registration(
+def _apply_backend(
     lifecycle: BackendLifecycle,
-    result: RegistrationResult,
+    backend: dict[str, Any],
     config_state: ConfigState | None = None,
 ) -> None:
-    """Adopt capacity and model alias from the registration response."""
-    definition = result.provider_definition
+    """Adopt capacity + model alias + config from ONE backend dict."""
+    definition = backend.get("definition") or {}
+    iid = backend.get("instance_id")
+    if iid is not None:
+        # H1/H2: key this lifecycle to its backend id.
+        lifecycle.instance_id = str(iid)
     capacity = definition.get("capacity")
     if isinstance(capacity, int) and capacity >= 1:
         lifecycle.capacity = capacity
@@ -131,20 +184,31 @@ def apply_registration(
     if isinstance(backend_config, dict):
         lifecycle.driver.apply_config(backend_config)
     if config_state is not None:
-        # Phase 14: null fingerprint (shell) stays None — never coerced
-        # to a hash of {} (that would let the no_config fence pass).
         fp = definition.get("config_fingerprint")
         config_state.applied_fingerprint = fp if isinstance(fp, str) else None
+
+
+def apply_registration(
+    lifecycle: BackendLifecycle,
+    result: RegistrationResult,
+    config_state: ConfigState | None = None,
+) -> None:
+    """Adopt capacity and model alias from the (first) backend of the
+    registration response — single-backend convenience."""
+    backend = result.backends[0] if result.backends else {"definition": {}}
+    _apply_backend(lifecycle, backend, config_state)
 
 
 async def emit_provider_status(
     client: AdminClient, lifecycle: BackendLifecycle
 ) -> None:
-    """Announce current instance/backend state to the admin."""
+    """Announce current agent/backend state to the admin (Phase 16:
+    ``provider.status`` is agent-level; ``backend.status`` carries the
+    per-backend ``instance_id`` and is emitted by the lifecycle callback)."""
     await client.send_event(
         "provider.status",
         {
-            "instance_status": InstanceStatusValue.RUNNING,
+            "agent_status": InstanceStatusValue.RUNNING,
             "backend_status": lifecycle.backend_status,
             "provider_type": PROVIDER_TYPE,
             "version": VERSION,
@@ -157,25 +221,44 @@ async def register_provider(
 ) -> tuple[RegistrationResult, BackendLifecycle]:
     """Install command handlers, register over HTTP, adopt the response.
 
+    When ``lifecycle`` is supplied (single-backend tests) it is used directly.
+    Otherwise the agent hosts one lifecycle per placed backend (H3): the
+    registration response's ``backends`` drive a :class:`BackendRegistry`, and
+    the first backend's lifecycle is returned as the primary for the caller's
+    log-streaming / app-serving wiring.
+
     Does NOT dial the WS — see AdminClient.run_forever for the persistent
     connection with reconnect/backoff.
     """
-    if lifecycle is None:
-        lifecycle = make_lifecycle(client)
-    config_state = ConfigState()
-    install_command_handlers(client, lifecycle, config_state)
+    if lifecycle is not None:
+        config_state = ConfigState()
+        install_command_handlers(client, lifecycle, config_state)
+        result = await client.register(
+            provider_type=PROVIDER_TYPE,
+            version=VERSION,
+            base_port=client.settings.PROVIDER_PORT,
+            hardware=FAKE_HARDWARE,
+            schema=SCHEMA,
+        )
+        apply_registration(lifecycle, result, config_state)
+        return result, lifecycle
+
     result = await client.register(
         provider_type=PROVIDER_TYPE,
         version=VERSION,
-        port=client.settings.PROVIDER_PORT,
+        base_port=client.settings.PROVIDER_PORT,
         hardware=FAKE_HARDWARE,
         # Single shared load (provider_mock.backend.SCHEMA) so the schema
         # registered with the admin and the schema the driver validates
         # against are provably the same object.
         schema=SCHEMA,
     )
-    apply_registration(lifecycle, result, config_state)
-    return result, lifecycle
+    registry = build_registry(client, result)
+    install_command_handlers(client, registry)
+    primary = (
+        registry.handles()[0].lifecycle if len(registry) else make_lifecycle(client)
+    )
+    return result, primary
 
 
 async def register_and_connect(
@@ -193,8 +276,11 @@ async def register_and_connect(
     return result
 
 
-def build_app(lifecycle: BackendLifecycle | None = None):
-    settings = ProviderSettings()
+def build_app(
+    lifecycle: BackendLifecycle | None = None,
+    settings: ProviderSettings | None = None,
+):
+    settings = settings or ProviderSettings()
     overrides = BackendOverrides(
         provider_type=PROVIDER_TYPE,
         version=VERSION,
@@ -206,8 +292,9 @@ def build_app(lifecycle: BackendLifecycle | None = None):
 async def run_async() -> None:
     settings = ProviderSettings()
     client = AdminClient(settings)
-    lifecycle = make_lifecycle(client)
-    await register_provider(client, lifecycle)
+    # Host one lifecycle per placed backend (H3); `lifecycle` is the primary
+    # (first) backend used for log streaming + the served /v1 surface.
+    _result, lifecycle = await register_provider(client)
     # Phase 13: provider.logs streaming + backend.logs.get handler (the
     # mock driver has no subprocess ring, so only provider.logs flows).
     log_bundle = install_log_streaming(client, lifecycle)
@@ -236,8 +323,13 @@ async def run_async() -> None:
             on_disconnected=log_bundle.stop,
         )
     )
+    # NOTE (slice 6): the agent may host N backends (see build_registry), but
+    # this serves only the PRIMARY backend's app on PROVIDER_PORT. Real
+    # per-backend-port serving (one uvicorn listener per placed backend at
+    # base_port + offset) is deferred to slice 6 — do not assume the extra
+    # backends are reachable over HTTP here.
     config = uvicorn.Config(
-        build_app(lifecycle),
+        build_app(lifecycle, settings),
         host="0.0.0.0",
         port=settings.PROVIDER_PORT,
         log_level="info",

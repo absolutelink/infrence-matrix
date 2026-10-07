@@ -77,9 +77,9 @@ from app.core.config import settings
 from app.core.db import engine
 from app.models import (
     Machine,
+    ProviderAgent,
     ProviderDefinition,
     ProviderInstance,
-    backend_config_is_authored,
 )
 from app.services import redis_keys
 from app.services.connection_manager import manager
@@ -319,12 +319,6 @@ class InferenceScheduler:
         definition = self._definition(alias)
         if definition is None or not definition.enabled:
             raise NoProviderAvailable(f"alias '{alias}' has no enabled definition")
-        if not backend_config_is_authored(definition):
-            # Phase 14: a shell definition can register an instance but
-            # never serves — nothing has been configured to boot.
-            raise NoProviderAvailable(
-                f"alias '{alias}' is not configured yet (awaiting backend_config)"
-            )
         instances = self._candidates(alias)
         if not instances:
             raise NoProviderAvailable(
@@ -397,7 +391,7 @@ class InferenceScheduler:
                             free,
                         )
                         continue
-                    if not await self._boot(instance_id):
+                    if not await self._boot(str(instance.agent_id), instance_id):
                         continue
                 finally:
                     await self._release_admission_lock(alias, lock_token)
@@ -420,8 +414,9 @@ class InferenceScheduler:
             )
         return None
 
-    async def _boot(self, instance_id: str) -> bool:
-        """backend.start the instance; True when the provider acks ok.
+    async def _boot(self, agent_id: str, instance_id: str) -> bool:
+        """backend.start the instance over its agent's socket; True when the
+        provider acks ok.
 
         The provider acks only after its lifecycle reaches running, so a
         successful return means /v1 is live. The ack window is the BOOT
@@ -435,9 +430,9 @@ class InferenceScheduler:
         """
         try:
             reply = await manager.send_command(
-                instance_id,
+                agent_id,
                 "backend.start",
-                {"wait_for_running": True},
+                {"instance_id": instance_id, "wait_for_running": True},
                 timeout=settings.BACKEND_BOOT_TIMEOUT_SECONDS,
             )
         except Exception as exc:  # noqa: BLE001 - any delivery failure means no boot
@@ -562,16 +557,19 @@ class InferenceScheduler:
             await self._mark_stopped(instance_id, machine_uid)
 
     async def _stop_instance(
-        self, instance_id: str, machine_uid: str, reason: str
+        self, agent_id: str, instance_id: str, machine_uid: str, reason: str
     ) -> bool:
-        """backend.stop an instance and clear its VRAM hold on success.
+        """backend.stop an instance (over its agent's socket) and clear its
+        VRAM hold on success.
 
         Returns True when the provider acked ok. NAKs/exceptions are
         logged and surfaced as False — the caller decides what to do (try
         the next eviction candidate, retry the reaper next tick).
         """
         try:
-            reply = await manager.send_command(instance_id, "backend.stop", {})
+            reply = await manager.send_command(
+                agent_id, "backend.stop", {"instance_id": instance_id}
+            )
         except Exception as exc:  # noqa: BLE001 - delivery failure = not stopped
             logger.warning(
                 "backend.stop (%s) failed for instance %s: %s", reason, instance_id, exc
@@ -652,7 +650,10 @@ class InferenceScheduler:
             self._evicting.add(victim_id)
             try:
                 stopped = await self._stop_instance(
-                    victim_id, machine.uid, f"eviction for alias '{requesting_alias}'"
+                    victim["agent_id"],
+                    victim_id,
+                    machine.uid,
+                    f"eviction for alias '{requesting_alias}'",
                 )
             finally:
                 self._evicting.discard(victim_id)
@@ -709,7 +710,11 @@ class InferenceScheduler:
                     col(ProviderInstance.provider_definition_id)
                     == col(ProviderDefinition.id),
                 )
-                .join(Machine, col(ProviderInstance.machine_id) == col(Machine.id))
+                .join(
+                    ProviderAgent,
+                    col(ProviderInstance.agent_id) == col(ProviderAgent.id),
+                )
+                .join(Machine, col(ProviderAgent.machine_id) == col(Machine.id))
                 .where(
                     Machine.uid == machine_uid,
                     ProviderDefinition.alias != requesting_alias,
@@ -730,6 +735,7 @@ class InferenceScheduler:
                 out.append(
                     {
                         "id": instance_id,
+                        "agent_id": str(inst.agent_id),
                         "alias": definition.alias,
                         "vram_bytes": vram_bytes,
                         "last_request_at": inst.last_request_at,
@@ -776,8 +782,8 @@ class InferenceScheduler:
     # ------------------------------------------------------------------
     def _candidates(self, alias: str) -> list[ProviderInstance]:
         with Session(engine) as session:
-            # Phase 14: shell definitions (backend_config NULL) are never
-            # schedulable — the definition must have an authored config.
+            # Phase 16: an instance is schedulable when its owning agent's
+            # socket is connected and its definition is enabled.
             rows = session.exec(
                 select(ProviderInstance)
                 .join(
@@ -785,11 +791,14 @@ class InferenceScheduler:
                     col(ProviderInstance.provider_definition_id)
                     == col(ProviderDefinition.id),
                 )
+                .join(
+                    ProviderAgent,
+                    col(ProviderInstance.agent_id) == col(ProviderAgent.id),
+                )
                 .where(
                     ProviderDefinition.alias == alias,
                     col(ProviderDefinition.enabled) == True,  # noqa: E712
-                    col(ProviderInstance.websocket_connected) == True,  # noqa: E712
-                    col(ProviderDefinition.backend_config).is_not(None),
+                    col(ProviderAgent.websocket_connected) == True,  # noqa: E712
                 )
             ).all()
             for row in rows:
@@ -866,10 +875,14 @@ class InferenceScheduler:
                     col(ProviderInstance.provider_definition_id)
                     == col(ProviderDefinition.id),
                 )
-                .join(Machine, col(ProviderInstance.machine_id) == col(Machine.id))
+                .join(
+                    ProviderAgent,
+                    col(ProviderInstance.agent_id) == col(ProviderAgent.id),
+                )
+                .join(Machine, col(ProviderAgent.machine_id) == col(Machine.id))
                 .where(
                     Machine.uid == machine_uid,
-                    col(ProviderInstance.websocket_connected) == True,  # noqa: E712
+                    col(ProviderAgent.websocket_connected) == True,  # noqa: E712
                     col(ProviderInstance.backend_status).in_(RUNNING_BACKEND_STATUSES),
                 )
             ).all()
@@ -986,7 +999,7 @@ class InferenceScheduler:
             self._evicting.add(instance_id)
             try:
                 stopped_ok = await self._stop_instance(
-                    instance_id, machine_uid, "idle timeout"
+                    candidate["agent_id"], instance_id, machine_uid, "idle timeout"
                 )
             finally:
                 self._evicting.discard(instance_id)
@@ -1027,12 +1040,14 @@ class InferenceScheduler:
                     col(ProviderInstance.provider_definition_id)
                     == col(ProviderDefinition.id),
                 )
-                .join(Machine, col(ProviderInstance.machine_id) == col(Machine.id))
+                .join(
+                    ProviderAgent,
+                    col(ProviderInstance.agent_id) == col(ProviderAgent.id),
+                )
+                .join(Machine, col(ProviderAgent.machine_id) == col(Machine.id))
                 .where(
-                    col(ProviderInstance.websocket_connected) == True,  # noqa: E712
+                    col(ProviderAgent.websocket_connected) == True,  # noqa: E712
                     col(ProviderInstance.backend_status).in_(RUNNING_BACKEND_STATUSES),
-                    # Phase 14: a shell never boots, so never idle-stops.
-                    col(ProviderDefinition.backend_config).is_not(None),
                 )
             ).all()
             out: list[dict] = []
@@ -1068,6 +1083,7 @@ class InferenceScheduler:
                 out.append(
                     {
                         "id": str(inst.id),
+                        "agent_id": str(inst.agent_id),
                         "alias": definition.alias,
                         "machine_uid": machine.uid,
                         "idle_seconds": idle_seconds,

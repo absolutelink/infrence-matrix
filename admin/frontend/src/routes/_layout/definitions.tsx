@@ -4,13 +4,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { createFileRoute, Link } from "@tanstack/react-router"
 import {
   AlertTriangle,
-  Check,
   ChevronDown,
   ChevronRight,
   Code2,
-  Copy,
-  Eye,
-  EyeOff,
   FormInput,
   Pencil,
   Plus,
@@ -115,7 +111,6 @@ const definitionSchema = z.object({
     .refine((t) => Number.isInteger(Number(t)) && Number(t) >= 0, {
       message: "must be an integer ≥ 0",
     }),
-  registration_token: z.string().max(255).optional(),
   enabled: z.boolean(),
 })
 
@@ -320,43 +315,6 @@ function DefinitionRow({
   )
 }
 
-function CopyButton({ value, label }: { value: string; label?: string }) {
-  const [copied, setCopied] = useState(false)
-  const [revealed, setRevealed] = useState(false)
-  const display = revealed ? value : "•".repeat(Math.min(value.length, 28))
-  return (
-    <div className="flex items-center gap-2">
-      <code className="rounded bg-muted px-2 py-1 font-mono text-xs break-all">
-        {display}
-      </code>
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        onClick={() => setRevealed(!revealed)}
-        aria-label={revealed ? "Hide" : "Reveal"}
-      >
-        {revealed ? <EyeOff /> : <Eye />}
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        onClick={async () => {
-          try {
-            await navigator.clipboard.writeText(value)
-            setCopied(true)
-            setTimeout(() => setCopied(false), 2000)
-          } catch {
-            /* clipboard unavailable */
-          }
-        }}
-        aria-label={label ?? "Copy to clipboard"}
-      >
-        {copied ? <Check className="text-emerald-500" /> : <Copy />}
-      </Button>
-    </div>
-  )
-}
-
 function DefinitionDetail({
   definition: d,
 }: {
@@ -386,12 +344,7 @@ function DefinitionDetail({
   return (
     <div className="grid gap-6 md:grid-cols-2">
       <div>
-        <h4 className="mb-2 text-sm font-semibold">Registration token</h4>
-        <p className="mb-1 text-xs text-muted-foreground">
-          Set as PROVIDER_REGISTRATION_TOKEN in the provider container env.
-        </p>
-        <CopyButton value={d.registration_token} />
-        <h4 className="mt-4 mb-2 text-sm font-semibold">Config fingerprint</h4>
+        <h4 className="mb-2 text-sm font-semibold">Config fingerprint</h4>
         <code className="rounded bg-muted px-2 py-1 font-mono text-xs">
           {d.config_fingerprint === null
             ? "null — no config authored yet"
@@ -445,7 +398,7 @@ function DefinitionDetail({
                   >
                     {i.machine_uid ?? i.id.slice(0, 8)}
                   </Link>
-                  <StatusBadge status={i.instance_status} />
+                  <StatusBadge status={i.agent_status} />
                   <StatusBadge status={i.backend_status} />
                   <span className="font-mono text-muted-foreground">
                     :{i.port} · v{i.version}
@@ -491,7 +444,6 @@ function DefinitionFormDialog({
       capacity: String(definition?.capacity ?? 1),
       vram_required_bytes: String(definition?.vram_required_bytes ?? 0),
       idle_timeout_seconds: String(definition?.idle_timeout_seconds ?? 300),
-      registration_token: definition?.registration_token ?? "",
       enabled: definition?.enabled ?? true,
     },
   })
@@ -700,24 +652,18 @@ function DefinitionFormDialog({
         if ((patch as { backend_config?: unknown }).backend_config === null) {
           delete (patch as { backend_config?: unknown }).backend_config
         }
-        if (
-          values.registration_token &&
-          values.registration_token !== definition.registration_token
-        ) {
-          patch.registration_token = values.registration_token
-        }
         return await AdminService.patchDefinition({
           path: { definition_id: definition.id },
           body: patch,
         })
       }
-      const createBody: DefinitionCreate = { ...body }
+      const createBody: DefinitionCreate = {
+        ...body,
+        provider_type: values.provider_type,
+      }
       // Phase 14: a shell create omits backend_config entirely.
       if (shellCreate) {
         delete (createBody as { backend_config?: unknown }).backend_config
-      }
-      if (values.registration_token) {
-        createBody.registration_token = values.registration_token
       }
       return await AdminService.createDefinition({ body: createBody })
     },
@@ -985,32 +931,6 @@ function DefinitionFormDialog({
                 />
               )}
             </div>
-
-            <FormField
-              control={form.control}
-              name="registration_token"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Registration token</FormLabel>
-                  <FormControl>
-                    <Input
-                      {...field}
-                      placeholder={
-                        isEdit
-                          ? "(unchanged — clear and type to rotate)"
-                          : "leave empty to auto-generate"
-                      }
-                    />
-                  </FormControl>
-                  <FormDescription>
-                    {isEdit
-                      ? "Keep as-is to retain the current token; the current value is shown on the row detail with copy."
-                      : "Auto-generated when empty. Copy it into the provider container env after creating."}
-                  </FormDescription>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
 
             <FormField
               control={form.control}

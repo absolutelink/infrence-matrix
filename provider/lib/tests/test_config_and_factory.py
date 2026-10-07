@@ -4,7 +4,8 @@ from provider_lib.config import ProviderSettings
 def _settings(**overrides: object) -> ProviderSettings:
     base = {
         "MACHINE_UID": "m-test",
-        "PROVIDER_REGISTRATION_TOKEN": "tok",
+        "MACHINE_SECRET": "tok",
+        "AGENT_ID": "m-test-agent",
         "ADMIN_BASE_URL": "http://admin:8000",
         "CACHE_DIR": "/tmp/prov_test_cache",
         "MODELS_DIR": "/tmp/prov_test_models",
@@ -12,6 +13,21 @@ def _settings(**overrides: object) -> ProviderSettings:
     }
     base.update(overrides)
     return ProviderSettings(**base)  # type: ignore[call-arg]
+
+
+def test_phase16_required_fields() -> None:
+    """Phase 16: MACHINE_SECRET + AGENT_ID are required fields; the old
+    PROVIDER_REGISTRATION_TOKEN field is gone (extra='ignore' drops it)."""
+    fields = ProviderSettings.model_fields
+    assert "MACHINE_SECRET" in fields
+    assert "AGENT_ID" in fields
+    assert "PROVIDER_REGISTRATION_TOKEN" not in fields
+    # Required (no default) on the mandatory wiring.
+    assert fields["MACHINE_SECRET"].is_required()
+    assert fields["AGENT_ID"].is_required()
+    s = _settings()
+    assert s.MACHINE_SECRET == "tok"
+    assert s.AGENT_ID == "m-test-agent"
 
 
 def test_metrics_categories_excludes_inference() -> None:

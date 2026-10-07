@@ -145,10 +145,17 @@ class BackendLifecycle:
         *,
         capacity: int = 1,
         status_callback: StatusCallback | None = None,
+        instance_id: str | None = None,
     ) -> None:
         self._driver = driver
         self.capacity = max(1, capacity)
         self._status_callback = status_callback
+        # Phase 16 (H3): the ProviderInstance id this lifecycle serves. An
+        # agent may host several backends; per-backend commands and events
+        # (backend.status / backend.metadata / backend.logs) are addressed by
+        # this id so the right lifecycle is driven and the admin keys state
+        # correctly.
+        self.instance_id = instance_id
         self._status = BackendStatusValue.STOPPED
         self._in_flight = 0
         self._lock = asyncio.Lock()

@@ -37,7 +37,6 @@ def _definition(session: Session, **kw) -> ProviderDefinition:
     data = {
         "alias": "model-" + uuid.uuid4().hex[:8],
         "provider_type": "llama-cpp",
-        "registration_token": "tok-" + uuid.uuid4().hex[:12],
         "backend_config": {"model": {"file": "x.gguf"}},
         "vram_required_bytes": 8 * 1024**3,
     }
@@ -47,6 +46,22 @@ def _definition(session: Session, **kw) -> ProviderDefinition:
     session.commit()
     session.refresh(d)
     return d
+
+
+def _agent(session: Session, m: Machine, **kw) -> ProviderAgent:
+    data = {
+        "machine_id": m.id,
+        "provider_type": "llama-cpp",
+        "agent_id": "agent-" + uuid.uuid4().hex[:8],
+        "base_port": 8081,
+        "version": "dev",
+    }
+    data.update(kw)
+    a = ProviderAgent(**data)
+    session.add(a)
+    session.commit()
+    session.refresh(a)
+    return a
 
 
 def test_machine_reachable_address_prefers_dns() -> None:
@@ -60,12 +75,12 @@ def test_machine_reachable_address_prefers_dns() -> None:
 
 def test_provider_instance_roundtrip(session: Session) -> None:
     m = _machine(session)
+    a = _agent(session, m)
     d = _definition(session)
     inst = ProviderInstance(
-        machine_id=m.id,
+        agent_id=a.id,
         provider_definition_id=d.id,
         port=8081,
-        instance_status="running",
         backend_status="running",
         config_fingerprint="abc123",
         assigned_gpus=["gpu-uuid-1"],
@@ -75,19 +90,19 @@ def test_provider_instance_roundtrip(session: Session) -> None:
     session.refresh(inst)
 
     assert inst.machine.uid == m.uid
+    assert inst.agent.id == a.id
     assert inst.provider_definition.alias == d.alias
     assert inst.assigned_gpus == ["gpu-uuid-1"]
-    assert inst.epoch == 0
-    assert inst.websocket_connected is False
 
 
-def test_duplicate_machine_definition_instance_rejected(session: Session) -> None:
+def test_duplicate_agent_definition_instance_rejected(session: Session) -> None:
     m = _machine(session)
+    a = _agent(session, m)
     d = _definition(session)
-    session.add(ProviderInstance(machine_id=m.id, provider_definition_id=d.id))
+    session.add(ProviderInstance(agent_id=a.id, provider_definition_id=d.id))
     session.commit()
     with pytest.raises(IntegrityError):
-        session.add(ProviderInstance(machine_id=m.id, provider_definition_id=d.id))
+        session.add(ProviderInstance(agent_id=a.id, provider_definition_id=d.id))
         session.commit()
 
 

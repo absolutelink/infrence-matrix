@@ -1,45 +1,48 @@
-"""Phase 9 config-update flow: push ``provider.config.update`` to
-connected provider instances and self-heal stale fingerprints.
+"""Phase 9 config-update flow: push ``provider.config.update`` to connected
+provider backends and self-heal stale fingerprints.
 
 When a ``ProviderDefinition``'s ``backend_config`` changes (admin PATCH)
-— or when an instance reconnects carrying an older
-``config_fingerprint`` than the definition's current one — the admin
-pushes the new config over the provider WS and waits for the provider to
-apply it (drain → stop → cache clear → apply → start → metadata
-scrape; see ``provider_lib.config_update`` and docs/ws-protocol.md).
+— or when an agent reconnects carrying an older ``config_fingerprint`` on
+one of its backends than the definition's current one — the admin pushes
+the new config over the agent WS and waits for the provider to apply it
+(drain → stop → cache clear → apply → start → metadata scrape; see
+``provider_lib.config_update`` and docs/ws-protocol.md).
+
+Phase 16: the socket is agent-level, so a per-backend push addresses the
+owning agent and carries the target ``instance_id`` in its payload.
 
 Retry policy (documented choice):
 - The command uses a generous timeout (``CONFIG_UPDATE_TIMEOUT_SECONDS``,
   default 300s) because a backend drain + artifact download + boot can
-  take minutes. Instances are pushed concurrently (``asyncio.gather``).
+  take minutes. Backends are pushed concurrently (``asyncio.gather``).
 - A NAK with ``error == "backend_in_use"`` (drain refused) is retried up
   to ``CONFIG_UPDATE_RETRIES`` total attempts with
   ``CONFIG_UPDATE_RETRY_DELAY`` seconds between them. Any other failure
-  (or timeout) is reported per-instance immediately — it is visible in
-  the PATCH response but not fatal to the admin row; the operator can
-  re-PATCH or let the reconnect self-heal retry.
+  (or timeout) is reported per-backend immediately — it is visible in the
+  PATCH response but not fatal to the admin row; the operator can re-PATCH
+  or let the reconnect self-heal retry.
 
-The instance's ``config_fingerprint`` in Postgres is updated only when
-the provider acks ok and echoes the new fingerprint back in its ack
-detail, so the DB never claims a config the provider didn't apply.
+The backend's ``config_fingerprint`` in Postgres is updated only when the
+provider acks ok and echoes the new fingerprint back in its ack detail, so
+the DB never claims a config the provider didn't apply.
 
 Two distinct entry points:
 
 - :func:`push_config_update` (PATCH-driven, operator changed the
-  definition): fans out to **every** connected instance of the
-  definition — each instance needs the new config.
-- :func:`heal_stale_fingerprint` (self-heal, connect path + presence
-  sweep): pushes to the **single stale instance only**, never the whole
-  definition fan-out (a stale sibling must not disturb current ones).
+  definition): fans out to **every** connected backend of the definition —
+  each needs the new config.
+- :func:`heal_agent_stale_fingerprints` (self-heal, connect path + presence
+  sweep): pushes only to the **stale backends of one agent**, never the
+  whole definition fan-out (a stale sibling must not disturb current ones).
 
-Per-instance in-flight guard: a module-level ``set`` of instance ids
+Per-backend in-flight guard: a module-level ``set`` of instance ids
 currently being pushed. The admin runs a single uvicorn worker, so an
 in-process set is sufficient (and simpler than a Redis NX lease); it is
 always cleared in a ``finally``, even on exception/cancel. A push that
-arrives while another for the same instance is in flight is skipped
-(heal returns False; the sweep retries on the next pass), which stops a
-slow (300s) apply from being re-pushed every 30s sweep into the same
-provider's command queue.
+arrives while another for the same backend is in flight is skipped (heal
+returns False; the sweep retries on the next pass), which stops a slow
+(300s) apply from being re-pushed every 30s sweep into the same provider's
+command queue.
 """
 
 import asyncio
@@ -54,9 +57,9 @@ from sqlmodel import Session, col, select
 from app.core.config import settings
 from app.core.db import engine
 from app.models import (
+    ProviderAgent,
     ProviderDefinition,
     ProviderInstance,
-    backend_config_is_authored,
 )
 from app.services.connection_manager import manager
 
@@ -82,14 +85,11 @@ def _build_payload(definition: ProviderDefinition, new_fp: str) -> dict[str, Any
     and ``capacity`` (adopted at the provider without restart).
     ``idle_timeout_seconds`` is carried for observability only — the idle
     reaper is admin-side (``InferenceScheduler._idle_reaper``); the
-    provider does not adopt it.
-
-    Phase 14: never call this for a shell definition — callers must gate
-    (a shell would otherwise push a fabricated ``{}``-config with the
-    hash of empty space as its fingerprint).
+    provider does not adopt it. The target ``instance_id`` is added by the
+    caller (per-backend addressing).
     """
     return {
-        "backend_config": definition.backend_config or {},
+        "backend_config": definition.backend_config,
         "config_fingerprint": new_fp,
         "idle_timeout_seconds": definition.idle_timeout_seconds,
         "capacity": definition.capacity,
@@ -122,16 +122,17 @@ class UpdateResult:
 def _instance_fingerprint(definition: ProviderDefinition) -> str:
     from app.api.admin.providers import compute_config_fingerprint
 
-    return compute_config_fingerprint(definition.backend_config or {})
+    return compute_config_fingerprint(definition.backend_config)
 
 
-def _connected_instances(
-    session: Session, definition_id: Any
-) -> list[ProviderInstance]:
+def _connected_backends(session: Session, definition_id: Any) -> list[ProviderInstance]:
+    """Backends of ``definition_id`` whose owning agent socket is connected."""
     rows = session.exec(
-        select(ProviderInstance).where(
+        select(ProviderInstance)
+        .join(ProviderAgent, col(ProviderInstance.agent_id) == col(ProviderAgent.id))
+        .where(
             col(ProviderInstance.provider_definition_id) == definition_id,
-            col(ProviderInstance.websocket_connected) == True,  # noqa: E712
+            col(ProviderAgent.websocket_connected) == True,  # noqa: E712
         )
     ).all()
     result = []
@@ -141,15 +142,19 @@ def _connected_instances(
     return result
 
 
-async def _push_one(instance_id: str, payload: dict[str, Any]) -> UpdateResult:
-    """Send config.update to one instance with the drain-refused retry loop."""
+async def _push_one(
+    agent_id: str, instance_id: str, payload: dict[str, Any]
+) -> UpdateResult:
+    """Send config.update to one backend (over its agent socket) with the
+    drain-refused retry loop."""
+    body = {**payload, "instance_id": instance_id}
     last: UpdateResult | None = None
     for attempt in range(1, CONFIG_UPDATE_RETRIES + 1):
         try:
             reply = await manager.send_command(
-                instance_id,
+                agent_id,
                 "provider.config.update",
-                payload,
+                body,
                 timeout=CONFIG_UPDATE_TIMEOUT_SECONDS,
             )
         except Exception as exc:  # noqa: BLE001 - delivery failure
@@ -220,11 +225,11 @@ def _record_success(definition_id: Any, results: list[UpdateResult]) -> None:
 
 
 async def _push_guarded(
-    instance_id: str, payload: dict[str, Any]
+    agent_id: str, instance_id: str, payload: dict[str, Any]
 ) -> UpdateResult | None:
-    """Push config.update to one instance under the in-flight guard.
+    """Push config.update to one backend under the in-flight guard.
 
-    Returns ``None`` when a push to this instance is already in flight
+    Returns ``None`` when a push to this backend is already in flight
     (the caller skips — never duplicates a push onto the same socket).
     The guard is always released, even on exception/cancellation.
     """
@@ -236,7 +241,7 @@ async def _push_guarded(
         return None
     _push_in_flight.add(instance_id)
     try:
-        return await _push_one(instance_id, payload)
+        return await _push_one(agent_id, instance_id, payload)
     finally:
         _push_in_flight.discard(instance_id)
 
@@ -264,28 +269,28 @@ async def push_config_update_by_id(definition_id: Any) -> list[UpdateResult]:
 
 async def push_config_update(definition: ProviderDefinition) -> list[UpdateResult]:
     """Push the definition's current backend_config to every connected
-    instance; returns per-instance results (never raises for a failed
+    backend; returns per-instance results (never raises for a failed
     provider — failures are reported, not fatal).
 
     This is the original fan-out entry point (used by the by-id wrapper
-    and tests). Instances with another push already in flight are
-    skipped (omitted from the results) rather than queued behind it.
+    and tests). Backends with another push already in flight are skipped
+    (omitted from the results) rather than queued behind it.
     """
     from app.api.admin.providers import compute_config_fingerprint
 
-    # Phase 14: shells are never pushed (nothing authored to apply).
-    if not backend_config_is_authored(definition):
-        return []
-    new_fp = compute_config_fingerprint(definition.backend_config or {})
+    new_fp = compute_config_fingerprint(definition.backend_config)
     with Session(engine) as session:
-        instances = _connected_instances(session, definition.id)
+        instances = _connected_backends(session, definition.id)
 
     if not instances:
         return []
 
     payload = _build_payload(definition, new_fp)
     pushed = await asyncio.gather(
-        *(_push_guarded(str(inst.id), payload) for inst in instances)
+        *(
+            _push_guarded(str(inst.agent_id), str(inst.id), payload)
+            for inst in instances
+        )
     )
     results = [r for r in pushed if r is not None]
     _record_success(definition.id, results)
@@ -293,33 +298,30 @@ async def push_config_update(definition: ProviderDefinition) -> list[UpdateResul
 
 
 async def heal_stale_fingerprint(instance_id: str) -> bool:
-    """Self-heal one (re)connected instance whose stored fingerprint is
-    stale w.r.t. its definition's current backend_config.
+    """Self-heal one backend whose stored fingerprint is stale w.r.t. its
+    definition's current backend_config.
 
-    Pushes to the **stale instance only** (never the definition-wide
-    fan-out — sibling instances with a current fingerprint must not get
-    churned by a heal). Cheap: one DB read; the push only happens when
-    connected and mismatched. Returns True when a config.update was
-    pushed (not when it was a no-op fingerprint match or a push to this
-    instance was already in flight). Used from the WS connect path
-    (background task) and the presence sweep.
+    Pushes to the **stale backend only** (never the definition-wide
+    fan-out — sibling backends with a current fingerprint must not get
+    churned by a heal). Cheap: one DB read; the push only happens when the
+    owning agent is connected and the fingerprint mismatches. Returns True
+    when a config.update was pushed (not when it was a no-op fingerprint
+    match or a push to this backend was already in flight).
     """
-
     with Session(engine) as session:
         inst = session.get(ProviderInstance, uuid.UUID(str(instance_id)))
-        if inst is None or not inst.websocket_connected:
+        if inst is None:
+            return False
+        agent = session.get(ProviderAgent, inst.agent_id)
+        if agent is None or not agent.websocket_connected:
             return False
         definition = session.get(ProviderDefinition, inst.provider_definition_id)
         if definition is None:
             return False
-        # Phase 14: a shell definition never heals — there is no config
-        # whose fingerprint could be stale (and fabricating `{}`'s hash
-        # would push an empty config that the provider must not adopt).
-        if not backend_config_is_authored(definition):
-            return False
         current_fp = _instance_fingerprint(definition)
         if inst.config_fingerprint == current_fp:
             return False
+        agent_id = str(agent.id)
         payload = _build_payload(definition, current_fp)
 
     logger.info(
@@ -328,11 +330,51 @@ async def heal_stale_fingerprint(instance_id: str) -> bool:
         inst.config_fingerprint,
         current_fp,
     )
-    result = await _push_guarded(instance_id, payload)
+    result = await _push_guarded(agent_id, instance_id, payload)
     if result is None:
         return False
     _record_success(definition.id, [result])
     return True
+
+
+async def heal_agent_stale_fingerprints(agent_id: str) -> int:
+    """Self-heal every stale backend of one (re)connected agent.
+
+    Called from the WS connect path (background task) with the agent id.
+    Returns the number of backends that received a config.update push.
+    """
+    with Session(engine) as session:
+        instances = session.exec(
+            select(ProviderInstance).where(
+                col(ProviderInstance.agent_id) == uuid.UUID(str(agent_id))
+            )
+        ).all()
+        stale: list[tuple[str, dict[str, Any]]] = []
+        for inst in instances:
+            definition = session.get(ProviderDefinition, inst.provider_definition_id)
+            if definition is None:
+                continue
+            current_fp = _instance_fingerprint(definition)
+            if inst.config_fingerprint == current_fp:
+                continue
+            stale.append((str(inst.id), _build_payload(definition, current_fp)))
+
+    healed = 0
+    for instance_id, payload in stale:
+        result = await _push_guarded(agent_id, instance_id, payload)
+        if result is not None:
+            _record_success(
+                _definition_id_for(instance_id),
+                [result],
+            )
+            healed += 1
+    return healed
+
+
+def _definition_id_for(instance_id: str) -> Any:
+    with Session(engine) as session:
+        inst = session.get(ProviderInstance, uuid.UUID(instance_id))
+        return inst.provider_definition_id if inst is not None else None
 
 
 async def heal_stale_fingerprint_safe(instance_id: str) -> None:

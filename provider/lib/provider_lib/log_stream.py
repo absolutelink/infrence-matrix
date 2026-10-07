@@ -68,11 +68,16 @@ class LogStreamer:
         *,
         interval: float = DEFAULT_FLUSH_INTERVAL_SECONDS,
         max_lines_per_frame: int = DEFAULT_MAX_LINES_PER_FRAME,
+        backend_instance_id: Callable[[], str | None] | None = None,
     ) -> None:
         self._client = client
         self._rings = rings
         self._interval = interval
         self._max_lines = max_lines_per_frame
+        # H2: backend.logs frames must carry the owning instance_id so the
+        # admin keys them under im:logs:backend:{instance_id} (where the REST
+        # log tail reads them), not the agent id.
+        self._backend_instance_id = backend_instance_id
         self._cursors: dict[str, int] = dict.fromkeys(rings, 0)
         self._task: asyncio.Task[None] | None = None
 
@@ -127,6 +132,10 @@ class LogStreamer:
                     ],
                     "dropped": dropped,
                 }
+                if name == "backend" and self._backend_instance_id is not None:
+                    iid = self._backend_instance_id()
+                    if iid is not None:
+                        payload["instance_id"] = iid
                 await self._client.send_event(event_type, payload)
                 self._cursors[name] = entries[-1].seq + 1
                 sent += 1
@@ -290,6 +299,7 @@ def install_log_streaming(
         {"backend": backend_ring_getter, "provider": lambda: provider_ring},
         interval=interval,
         max_lines_per_frame=max_lines_per_frame,
+        backend_instance_id=lambda: getattr(lifecycle, "instance_id", None),
     )
     bundle = LogStreamingBundle(streamer, provider_ring, backend_ring_getter)
     client.on_command("backend.logs.get", bundle.handle_logs_get)

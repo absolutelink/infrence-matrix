@@ -35,7 +35,7 @@ def test_create_get_list_patch_delete(client: TestClient, session: Session) -> N
     created = _create(client)
     assert created["uid"] == "m1"
     assert created["total_vram_bytes"] == 12345
-    assert created["instance_count"] == 0
+    assert created["agent_count"] == 0
 
     got = client.get(f"/admin/api/machines/{created['id']}")
     assert got.status_code == 200
@@ -76,29 +76,23 @@ def test_name_uniqueness_conflict(client: TestClient) -> None:
     assert resp.status_code == 409
 
 
-def test_delete_refused_with_instances_attached(
+def test_delete_refused_with_agents_attached(
     client: TestClient, session: Session
 ) -> None:
-    from app.models import ProviderDefinition, ProviderInstance
+    from app.models import ProviderAgent
 
     created = _create(client, uid="busy", name="busy-machine")
-    definition = ProviderDefinition(
-        alias="busy-model",
-        provider_type="mock",
-        registration_token="busy-tok",
-    )
-    session.add(definition)
-    session.commit()
-    instance = ProviderInstance(
+    agent = ProviderAgent(
         machine_id=uuid.UUID(created["id"]),
-        provider_definition_id=definition.id,
+        provider_type="mock",
+        agent_id="busy-agent",
     )
-    session.add(instance)
+    session.add(agent)
     session.commit()
 
     resp = client.delete(f"/admin/api/machines/{created['id']}")
     assert resp.status_code == 409
-    assert "instance" in resp.json()["detail"]
+    assert "agent" in resp.json()["detail"]
     # Machine still there.
     assert client.get(f"/admin/api/machines/{created['id']}").status_code == 200
 

@@ -139,7 +139,8 @@ class FakeLifecycle:
 async def test_emitter_runs_only_while_started(tmp_path) -> None:
     settings = ProviderSettings(  # type: ignore[call-arg]
         MACHINE_UID="m1",
-        PROVIDER_REGISTRATION_TOKEN="t",
+        MACHINE_SECRET="t",
+        AGENT_ID="m1-agent",
         ADMIN_BASE_URL="http://x",
         CACHE_DIR=tmp_path,
         MODELS_DIR=tmp_path,

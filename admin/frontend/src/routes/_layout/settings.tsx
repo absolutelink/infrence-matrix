@@ -76,15 +76,16 @@ function SettingsPage() {
         </CardHeader>
         <CardContent className="space-y-3 text-sm text-muted-foreground">
           <p>
-            Each provider instance is a hardware-local container that owns
-            exactly one backend. It needs no database — everything comes from
-            env:
+            Each provider agent is a hardware-local container bound to a
+            machine + one backend type; it may host one or more backends of that
+            type. It needs no database — everything comes from env:
           </p>
           <pre className="overflow-auto rounded-md bg-muted p-3 font-mono text-xs">
             {`MACHINE_UID=<machine uid created here>
-PROVIDER_REGISTRATION_TOKEN=<definition token, copy from Definitions>
+MACHINE_SECRET=<the machine's registration_secret, shown on Machines>
+AGENT_ID=<stable id for this agent, e.g. agent-1>
 ADMIN_BASE_URL=http://<admin-host>:8000
-PROVIDER_PORT=8081            # optional
+PROVIDER_PORT=8081            # optional; base port for this agent's backends
 CACHE_DIR=/cache
 MODELS_DIR=/models
 METRICS_CATEGORIES="gpu_usage vram os_ram cpu storage"   # optional, space-delimited; never 'inference'`}

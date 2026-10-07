@@ -14,10 +14,16 @@ from provider_lib.admin_client import (
 from provider_lib.config import ProviderSettings
 
 OK_BODY = {
-    "instance_id": "11111111-2222-3333-4444-555555555555",
-    "instance_secret": "s3cret",
+    "agent_id": "aaaaaaaa-2222-3333-4444-555555555555",
+    "agent_secret": "s3cret",
     "machine": {"uid": "m1"},
-    "provider_definition": {"alias": "a1", "config_fingerprint": "fp"},
+    "backends": [
+        {
+            "instance_id": "11111111-2222-3333-4444-555555555555",
+            "port": 8081,
+            "definition": {"alias": "a1", "config_fingerprint": "fp"},
+        }
+    ],
 }
 
 SCHEMA = {
@@ -63,7 +69,8 @@ class _FakeAsyncClient:
 def client(tmp_path: Any, monkeypatch: Any) -> AdminClient:
     settings = ProviderSettings(  # type: ignore[call-arg]
         MACHINE_UID="m1",
-        PROVIDER_REGISTRATION_TOKEN="tok",
+        MACHINE_SECRET="tok",
+        AGENT_ID="m1-agent",
         ADMIN_BASE_URL="http://admin:8000",
         CACHE_DIR=tmp_path / "cache",
         MODELS_DIR=tmp_path / "models",
@@ -78,7 +85,7 @@ async def _register(client: AdminClient, **kwargs: Any) -> Any:
     return await client.register(
         provider_type="mock",
         version="dev",
-        port=8081,
+        base_port=8081,
         hardware={},
         **kwargs,
     )
@@ -86,10 +93,14 @@ async def _register(client: AdminClient, **kwargs: Any) -> Any:
 
 async def test_register_includes_schema_in_body(client: AdminClient) -> None:
     result = await _register(client, schema=SCHEMA)
-    assert result.instance_id == OK_BODY["instance_id"]
+    assert result.instance_id == OK_BODY["backends"][0]["instance_id"]
+    assert result.agent_id == OK_BODY["agent_id"]
     body = _FakeAsyncClient.last["body"]
     assert body["schema"] == SCHEMA
     assert body["provider_type"] == "mock"
+    assert body["machine_secret"] == "tok"
+    assert body["agent_id"] == "m1-agent"
+    assert body["base_port"] == 8081
 
 
 async def test_register_omits_schema_when_none(client: AdminClient) -> None:

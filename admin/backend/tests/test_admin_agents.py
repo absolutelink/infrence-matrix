@@ -33,7 +33,6 @@ def _definition(session: Session) -> ProviderDefinition:
     d = ProviderDefinition(
         alias="model-" + uuid.uuid4().hex[:8],
         provider_type="llama-cpp",
-        registration_token="tok-" + uuid.uuid4().hex[:12],
         backend_config={"model": {"file": "x.gguf"}},
     )
     session.add(d)

@@ -93,10 +93,10 @@ class BackendStatusValue:
 
 
 class InstanceStatusValue:
-    # Phase 14: admin-owned pre-state (a definition with no authored
-    # backend_config). Kept in this mirror for the drift test; the
-    # provider never emits it (like `disconnected`, admin-only).
-    AWAITING_CONFIG = "awaiting_config"
+    # Phase 16: container-level agent status. The Phase 14
+    # ``awaiting_config`` pre-state is retired (no shells). Kept in this
+    # mirror for the drift test; the provider never emits the admin-only
+    # states (like ``disconnected``).
     REGISTERING = "registering"
     INITIALIZING = "initializing"
     RUNNING = "running"

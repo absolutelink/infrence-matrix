@@ -1,5 +1,5 @@
-"""Provider WebSocket endpoint: auth, hello/epoch, ping/pong, status
-persistence, epoch fencing, and disconnect handling."""
+"""Provider agent WebSocket endpoint: auth, hello/epoch, ping/pong, status
+persistence, epoch fencing, and disconnect handling (Phase 16)."""
 
 import asyncio
 import os
@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
 from app.core.config import settings
-from app.models import Machine, ProviderDefinition, ProviderInstance
+from app.models import Machine, ProviderAgent, ProviderDefinition, ProviderInstance
 from app.services import redis_keys
 from app.services.connection_manager import (
     ConnectionState,
@@ -32,11 +32,15 @@ def client() -> TestClient:
 
 
 def _register(client: TestClient, session: Session) -> dict:
-    machine = Machine(uid="ws-mach", name="ws-machine", host="10.0.0.9")
+    machine = Machine(
+        uid="ws-mach",
+        name="ws-machine",
+        host="10.0.0.9",
+        registration_secret="ws-secret",
+    )
     definition = ProviderDefinition(
         alias="ws-model",
         provider_type="mock",
-        registration_token="ws-token",
         backend_config={"model": {"file": "x.gguf"}},
     )
     session.add(machine)
@@ -46,17 +50,22 @@ def _register(client: TestClient, session: Session) -> dict:
         "/admin/api/providers/register",
         json={
             "machine_uid": "ws-mach",
-            "registration_token": "ws-token",
+            "machine_secret": "ws-secret",
+            "agent_id": "ws-agent",
             "provider_type": "mock",
             "schema": {"type": "object"},
             "version": settings.VERSION,
-            "port": 8081,
+            "base_port": 8081,
             "hardware": {"gpus": [], "total_vram_bytes": 1000},
             "metrics_categories": [],
         },
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 200, resp.text
     return resp.json()
+
+
+def _instance_id(reg: dict) -> str:
+    return reg["backends"][0]["instance_id"]
 
 
 def _ws_headers(secret: str) -> dict[str, str]:
@@ -78,11 +87,11 @@ def _wait_for(predicate, timeout: float = 2.0) -> None:
 
 def test_connect_hello_epoch_and_db_state(client: TestClient, session: Session) -> None:
     reg = _register(client, session)
-    instance_id = reg["instance_id"]
+    agent_id = reg["agent_id"]
 
     with client.websocket_connect(
-        f"/provider/ws?instance_id={instance_id}",
-        headers=_ws_headers(reg["instance_secret"]),
+        f"/provider/ws?agent_id={agent_id}",
+        headers=_ws_headers(reg["agent_secret"]),
     ) as ws:
         hello = _recv_frame(ws)
         assert hello.type == FrameKind.PROVIDER_HELLO
@@ -93,24 +102,20 @@ def test_connect_hello_epoch_and_db_state(client: TestClient, session: Session) 
         def connected() -> bool:
             session.expire_all()
             row = session.exec(
-                select(ProviderInstance).where(
-                    ProviderInstance.id == uuid.UUID(instance_id)
-                )
+                select(ProviderAgent).where(ProviderAgent.id == uuid.UUID(agent_id))
             ).one()
             return row.websocket_connected is True and row.epoch == 1
 
         _wait_for(connected)
 
-    # After disconnect the row is marked disconnected.
+    # After disconnect the agent is marked disconnected.
     def disconnected() -> bool:
         session.expire_all()
         row = session.exec(
-            select(ProviderInstance).where(
-                ProviderInstance.id == uuid.UUID(instance_id)
-            )
+            select(ProviderAgent).where(ProviderAgent.id == uuid.UUID(agent_id))
         ).one()
         return row.websocket_connected is False and (
-            row.instance_status == InstanceStatusValue.DISCONNECTED
+            row.agent_status == InstanceStatusValue.DISCONNECTED
         )
 
     _wait_for(disconnected)
@@ -119,8 +124,8 @@ def test_connect_hello_epoch_and_db_state(client: TestClient, session: Session) 
 def test_ping_pong(client: TestClient, session: Session) -> None:
     reg = _register(client, session)
     with client.websocket_connect(
-        f"/provider/ws?instance_id={reg['instance_id']}",
-        headers=_ws_headers(reg["instance_secret"]),
+        f"/provider/ws?agent_id={reg['agent_id']}",
+        headers=_ws_headers(reg["agent_secret"]),
     ) as ws:
         hello = _recv_frame(ws)
         epoch = hello.epoch
@@ -135,23 +140,21 @@ def test_ping_pong(client: TestClient, session: Session) -> None:
 
 def test_status_events_persist(client: TestClient, session: Session) -> None:
     reg = _register(client, session)
-    instance_id = reg["instance_id"]
+    instance_id = _instance_id(reg)
     with client.websocket_connect(
-        f"/provider/ws?instance_id={instance_id}",
-        headers=_ws_headers(reg["instance_secret"]),
+        f"/provider/ws?agent_id={reg['agent_id']}",
+        headers=_ws_headers(reg["agent_secret"]),
     ) as ws:
         hello = _recv_frame(ws)
         epoch = hello.epoch
 
+        # provider.status -> agent_status; backend.status -> instance.
         ws.send_text(
             Frame(
                 type="provider.status",
                 id="ev-1",
                 epoch=epoch,
-                payload={
-                    "instance_status": "running",
-                    "backend_status": "starting",
-                },
+                payload={"agent_status": "running"},
             ).to_json()
         )
         ws.send_text(
@@ -159,41 +162,32 @@ def test_status_events_persist(client: TestClient, session: Session) -> None:
                 type="backend.status",
                 id="ev-2",
                 epoch=epoch,
-                payload={"backend_status": "running"},
+                payload={"instance_id": instance_id, "backend_status": "running"},
             ).to_json()
         )
 
         def running() -> bool:
             session.expire_all()
-            row = session.exec(
-                select(ProviderInstance).where(
-                    ProviderInstance.id == uuid.UUID(instance_id)
+            agent = session.exec(
+                select(ProviderAgent).where(
+                    ProviderAgent.id == uuid.UUID(reg["agent_id"])
                 )
             ).one()
-            return row.instance_status == "running" and row.backend_status == "running"
+            row = session.get(ProviderInstance, uuid.UUID(instance_id))
+            return agent.agent_status == "running" and row.backend_status == "running"
 
         _wait_for(running)
 
         def loaded_clock_stamped() -> bool:
             session.expire_all()
-            row = session.exec(
-                select(ProviderInstance).where(
-                    ProviderInstance.id == uuid.UUID(instance_id)
-                )
-            ).one()
+            row = session.get(ProviderInstance, uuid.UUID(instance_id))
             return row.backend_loaded_at is not None
 
         # Entering the loaded set arms the idle-reaper clock at boot time.
         _wait_for(loaded_clock_stamped)
-        loaded_once = (
-            session.exec(
-                select(ProviderInstance).where(
-                    ProviderInstance.id == uuid.UUID(instance_id)
-                )
-            )
-            .one()
-            .backend_loaded_at
-        )
+        loaded_once = session.get(
+            ProviderInstance, uuid.UUID(instance_id)
+        ).backend_loaded_at
 
         # in_use -> running (idle heartbeat after a slot release) must NOT
         # re-arm the clock: the backend has been loaded the whole time.
@@ -202,7 +196,7 @@ def test_status_events_persist(client: TestClient, session: Session) -> None:
                 type="backend.status",
                 id="ev-3",
                 epoch=epoch,
-                payload={"backend_status": "in_use"},
+                payload={"instance_id": instance_id, "backend_status": "in_use"},
             ).to_json()
         )
         ws.send_text(
@@ -210,25 +204,17 @@ def test_status_events_persist(client: TestClient, session: Session) -> None:
                 type="backend.status",
                 id="ev-4",
                 epoch=epoch,
-                payload={"backend_status": "running"},
+                payload={"instance_id": instance_id, "backend_status": "running"},
             ).to_json()
         )
 
         def back_to_running() -> bool:
             session.expire_all()
-            row = session.exec(
-                select(ProviderInstance).where(
-                    ProviderInstance.id == uuid.UUID(instance_id)
-                )
-            ).one()
+            row = session.get(ProviderInstance, uuid.UUID(instance_id))
             return row.backend_status == "running"
 
         _wait_for(back_to_running)
-        row = session.exec(
-            select(ProviderInstance).where(
-                ProviderInstance.id == uuid.UUID(instance_id)
-            )
-        ).one()
+        row = session.get(ProviderInstance, uuid.UUID(instance_id))
         assert row.backend_loaded_at == loaded_once
 
         # Leaving the loaded set clears the clock; the next boot re-arms it.
@@ -237,28 +223,83 @@ def test_status_events_persist(client: TestClient, session: Session) -> None:
                 type="backend.status",
                 id="ev-5",
                 epoch=epoch,
-                payload={"backend_status": "stopped"},
+                payload={"instance_id": instance_id, "backend_status": "stopped"},
             ).to_json()
         )
 
         def stopped() -> bool:
             session.expire_all()
-            row = session.exec(
-                select(ProviderInstance).where(
-                    ProviderInstance.id == uuid.UUID(instance_id)
-                )
-            ).one()
+            row = session.get(ProviderInstance, uuid.UUID(instance_id))
             return row.backend_status == "stopped" and row.backend_loaded_at is None
 
         _wait_for(stopped)
 
 
+def test_cross_agent_backend_status_ignored(client: TestClient, session: Session) -> None:
+    """LOW (round 2): a backend.status/metadata frame naming an instance owned
+    by a DIFFERENT agent is ignored — an agent may only mutate its own
+    backends."""
+    reg = _register(client, session)
+    # Build a second agent + backend on the same machine, owned by another
+    # agent id (not the one we connect as).
+    machine = session.exec(select(Machine).where(Machine.uid == "ws-mach")).one()
+    definition = session.exec(
+        select(ProviderDefinition).where(ProviderDefinition.alias == "ws-model")
+    ).one()
+    other_agent = ProviderAgent(
+        machine_id=machine.id,
+        provider_type="mock",
+        agent_id="ws-agent-other",
+        base_port=8091,
+    )
+    session.add(other_agent)
+    session.commit()
+    other_inst = ProviderInstance(
+        agent_id=other_agent.id,
+        provider_definition_id=definition.id,
+        port=8091,
+        backend_status="stopped",
+    )
+    session.add(other_inst)
+    session.commit()
+    other_id = str(other_inst.id)
+
+    with client.websocket_connect(
+        f"/provider/ws?agent_id={reg['agent_id']}",
+        headers=_ws_headers(reg["agent_secret"]),
+    ) as ws:
+        epoch = _recv_frame(ws).epoch
+        ws.send_text(
+            Frame(
+                type="backend.status",
+                id="x-1",
+                epoch=epoch,
+                payload={"instance_id": other_id, "backend_status": "running"},
+            ).to_json()
+        )
+        ws.send_text(
+            Frame(
+                type="backend.metadata",
+                id="x-2",
+                epoch=epoch,
+                payload={"instance_id": other_id, "models": [{"id": "m", "object": "model"}]},
+            ).to_json()
+        )
+        # Sync on a frame we own so the server has processed the prior two.
+        ws.send_text(Frame(type="ping", id="sync", epoch=epoch).to_json())
+        _recv_frame(ws)
+
+    session.expire_all()
+    row = session.get(ProviderInstance, uuid.UUID(other_id))
+    assert row.backend_status == "stopped"  # never mutated by the other agent
+
+
 def test_epoch_fencing_drops_stale_frames(client: TestClient, session: Session) -> None:
     reg = _register(client, session)
-    instance_id = reg["instance_id"]
+    agent_id = reg["agent_id"]
     with client.websocket_connect(
-        f"/provider/ws?instance_id={instance_id}",
-        headers=_ws_headers(reg["instance_secret"]),
+        f"/provider/ws?agent_id={agent_id}",
+        headers=_ws_headers(reg["agent_secret"]),
     ) as ws:
         hello = _recv_frame(ws)
         epoch = hello.epoch
@@ -269,7 +310,7 @@ def test_epoch_fencing_drops_stale_frames(client: TestClient, session: Session) 
                 type="provider.status",
                 id="stale-1",
                 epoch=epoch - 1,
-                payload={"instance_status": "error"},
+                payload={"agent_status": "error"},
             ).to_json()
         )
         # Future epoch must also be dropped.
@@ -278,7 +319,7 @@ def test_epoch_fencing_drops_stale_frames(client: TestClient, session: Session) 
                 type="provider.status",
                 id="future-1",
                 epoch=epoch + 7,
-                payload={"instance_status": "error"},
+                payload={"agent_status": "error"},
             ).to_json()
         )
         # Valid epoch goes through.
@@ -287,7 +328,7 @@ def test_epoch_fencing_drops_stale_frames(client: TestClient, session: Session) 
                 type="provider.status",
                 id="good-1",
                 epoch=epoch,
-                payload={"instance_status": "running"},
+                payload={"agent_status": "running"},
             ).to_json()
         )
         # Keep the socket busy so the pongs/processing order is deterministic,
@@ -299,20 +340,16 @@ def test_epoch_fencing_drops_stale_frames(client: TestClient, session: Session) 
         def running() -> bool:
             session.expire_all()
             row = session.exec(
-                select(ProviderInstance).where(
-                    ProviderInstance.id == uuid.UUID(instance_id)
-                )
+                select(ProviderAgent).where(ProviderAgent.id == uuid.UUID(agent_id))
             ).one()
-            return row.instance_status == "running"
+            return row.agent_status == "running"
 
         _wait_for(running)
         session.expire_all()
         row = session.exec(
-            select(ProviderInstance).where(
-                ProviderInstance.id == uuid.UUID(instance_id)
-            )
+            select(ProviderAgent).where(ProviderAgent.id == uuid.UUID(agent_id))
         ).one()
-        assert row.instance_status != "error"
+        assert row.agent_status != "error"
 
 
 def test_wrong_secret_rejected(client: TestClient, session: Session) -> None:
@@ -321,31 +358,31 @@ def test_wrong_secret_rejected(client: TestClient, session: Session) -> None:
     reg = _register(client, session)
     with pytest.raises(WebSocketDisconnect) as exc:
         with client.websocket_connect(
-            f"/provider/ws?instance_id={reg['instance_id']}",
+            f"/provider/ws?agent_id={reg['agent_id']}",
             headers=_ws_headers("not-the-secret"),
         ) as ws:
             ws.receive_text()
     assert exc.value.code == 4401
 
 
-def test_missing_instance_id_rejected(client: TestClient, session: Session) -> None:
+def test_missing_agent_id_rejected(client: TestClient, session: Session) -> None:
     from starlette.websockets import WebSocketDisconnect
 
     reg = _register(client, session)
     with pytest.raises(WebSocketDisconnect) as exc:
         with client.websocket_connect(
-            "/provider/ws", headers=_ws_headers(reg["instance_secret"])
+            "/provider/ws", headers=_ws_headers(reg["agent_secret"])
         ) as ws:
             ws.receive_text()
     assert exc.value.code == 4401
 
 
-def test_unknown_instance_id_rejected(client: TestClient) -> None:
+def test_unknown_agent_id_rejected(client: TestClient) -> None:
     from starlette.websockets import WebSocketDisconnect
 
     with pytest.raises(WebSocketDisconnect) as exc:
         with client.websocket_connect(
-            f"/provider/ws?instance_id={uuid.uuid4()}",
+            f"/provider/ws?agent_id={uuid.uuid4()}",
             headers=_ws_headers("whatever"),
         ) as ws:
             ws.receive_text()
@@ -354,18 +391,18 @@ def test_unknown_instance_id_rejected(client: TestClient) -> None:
 
 def test_reconnect_bumps_epoch(client: TestClient, session: Session) -> None:
     reg = _register(client, session)
-    instance_id = reg["instance_id"]
+    agent_id = reg["agent_id"]
 
     with client.websocket_connect(
-        f"/provider/ws?instance_id={instance_id}",
-        headers=_ws_headers(reg["instance_secret"]),
+        f"/provider/ws?agent_id={agent_id}",
+        headers=_ws_headers(reg["agent_secret"]),
     ) as ws:
         first = _recv_frame(ws)
         assert first.epoch == 1
 
     with client.websocket_connect(
-        f"/provider/ws?instance_id={instance_id}",
-        headers=_ws_headers(reg["instance_secret"]),
+        f"/provider/ws?agent_id={agent_id}",
+        headers=_ws_headers(reg["agent_secret"]),
     ) as ws:
         second = _recv_frame(ws)
         assert second.epoch == 2
@@ -373,9 +410,7 @@ def test_reconnect_bumps_epoch(client: TestClient, session: Session) -> None:
     def final_state() -> bool:
         session.expire_all()
         row = session.exec(
-            select(ProviderInstance).where(
-                ProviderInstance.id == uuid.UUID(instance_id)
-            )
+            select(ProviderAgent).where(ProviderAgent.id == uuid.UUID(agent_id))
         ).one()
         return row.epoch == 2 and row.websocket_connected is False
 
@@ -390,19 +425,16 @@ def test_disconnect_clears_and_reconnect_rearms_load_clock(
     socket re-arms the idle-reaper window at the real (re)boot time —
     never against the previous boot's stamp."""
     reg = _register(client, session)
-    instance_id = reg["instance_id"]
+    agent_id = reg["agent_id"]
+    instance_id = _instance_id(reg)
 
     def row() -> ProviderInstance:
         session.expire_all()
-        return session.exec(
-            select(ProviderInstance).where(
-                ProviderInstance.id == uuid.UUID(instance_id)
-            )
-        ).one()
+        return session.get(ProviderInstance, uuid.UUID(instance_id))
 
     with client.websocket_connect(
-        f"/provider/ws?instance_id={instance_id}",
-        headers=_ws_headers(reg["instance_secret"]),
+        f"/provider/ws?agent_id={agent_id}",
+        headers=_ws_headers(reg["agent_secret"]),
     ) as ws:
         hello = _recv_frame(ws)
         ws.send_text(
@@ -410,7 +442,7 @@ def test_disconnect_clears_and_reconnect_rearms_load_clock(
                 type="backend.status",
                 id="clock-1",
                 epoch=hello.epoch,
-                payload={"backend_status": "running"},
+                payload={"instance_id": instance_id, "backend_status": "running"},
             ).to_json()
         )
         _wait_for(lambda: row().backend_loaded_at is not None)
@@ -420,8 +452,8 @@ def test_disconnect_clears_and_reconnect_rearms_load_clock(
     _wait_for(lambda: row().backend_loaded_at is None)
 
     with client.websocket_connect(
-        f"/provider/ws?instance_id={instance_id}",
-        headers=_ws_headers(reg["instance_secret"]),
+        f"/provider/ws?agent_id={agent_id}",
+        headers=_ws_headers(reg["agent_secret"]),
     ) as ws:
         hello2 = _recv_frame(ws)
         # The provider re-reports the CURRENT (still-running-in-the-new-
@@ -432,7 +464,7 @@ def test_disconnect_clears_and_reconnect_rearms_load_clock(
                 type="backend.status",
                 id="clock-2",
                 epoch=hello2.epoch,
-                payload={"backend_status": "running"},
+                payload={"instance_id": instance_id, "backend_status": "running"},
             ).to_json()
         )
         _wait_for(
@@ -465,17 +497,19 @@ async def test_send_command_awaits_ack() -> None:
     aredis = aioredis.from_url(os.environ["TEST_REDIS_URL"], decode_responses=True)
     app_stub = SimpleNamespace(state=SimpleNamespace(redis=aredis))
     ws = FakeWebSocket(app_stub)
-    instance_id = str(uuid.uuid4())
+    agent_id = str(uuid.uuid4())
     state = ConnectionState(
-        instance_id=instance_id,
+        agent_id=agent_id,
         websocket=ws,
         epoch=5,
         connection_token="tok-1",
     )
-    manager._connections[instance_id] = state
+    manager._connections[agent_id] = state
     try:
         task = asyncio.create_task(
-            manager.send_command(instance_id, "backend.start", {"x": 1}, timeout=2.0)
+            manager.send_command(
+                agent_id, "backend.start", {"instance_id": "i1", "x": 1}, timeout=2.0
+            )
         )
         while not ws.sent:
             await asyncio.sleep(0.01)
@@ -496,7 +530,7 @@ async def test_send_command_awaits_ack() -> None:
         assert reply.payload["ok"] is True
         assert state.pending == {}
     finally:
-        manager._connections.pop(instance_id, None)
+        manager._connections.pop(agent_id, None)
         await aredis.aclose()
 
 
@@ -504,20 +538,22 @@ async def test_send_command_timeout_without_ack() -> None:
     aredis = aioredis.from_url(os.environ["TEST_REDIS_URL"], decode_responses=True)
     app_stub = SimpleNamespace(state=SimpleNamespace(redis=aredis))
     ws = FakeWebSocket(app_stub)
-    instance_id = str(uuid.uuid4())
+    agent_id = str(uuid.uuid4())
     state = ConnectionState(
-        instance_id=instance_id,
+        agent_id=agent_id,
         websocket=ws,
         epoch=1,
         connection_token="tok-2",
     )
-    manager._connections[instance_id] = state
+    manager._connections[agent_id] = state
     try:
         with pytest.raises(asyncio.TimeoutError):
-            await manager.send_command(instance_id, "backend.stop", {}, timeout=0.1)
+            await manager.send_command(
+                agent_id, "backend.stop", {"instance_id": "i1"}, timeout=0.1
+            )
         assert state.pending == {}
     finally:
-        manager._connections.pop(instance_id, None)
+        manager._connections.pop(agent_id, None)
         await aredis.aclose()
 
 
@@ -528,31 +564,37 @@ async def test_sweep_marks_presence_expired(session: Session) -> None:
         definition = ProviderDefinition(
             alias="sweep-model",
             provider_type="mock",
-            registration_token="sweep-token",
             backend_config={"model": {"file": "m.gguf"}},
         )
-        definition2 = ProviderDefinition(
-            alias="sweep-model-2",
-            provider_type="mock",
-            registration_token="sweep-token-2",
-            backend_config={"model": {"file": "m.gguf"}},
-        )
-        session.add_all([machine, definition, definition2])
+        session.add_all([machine, definition])
         session.commit()
 
-        live = ProviderInstance(
+        live = ProviderAgent(
             machine_id=machine.id,
-            provider_definition_id=definition.id,
+            provider_type="mock",
+            agent_id="live-agent",
             websocket_connected=True,
-            instance_status="running",
+            agent_status="running",
         )
-        stale = ProviderInstance(
+        stale = ProviderAgent(
             machine_id=machine.id,
-            provider_definition_id=definition2.id,
+            provider_type="mock",
+            agent_id="stale-agent",
             websocket_connected=True,
-            instance_status="running",
+            agent_status="running",
         )
         session.add_all([live, stale])
+        session.commit()
+        # one backend under the stale agent, to confirm its clock clears
+        stale_inst = ProviderInstance(
+            agent_id=stale.id,
+            provider_definition_id=definition.id,
+            backend_status="running",
+        )
+        stale_inst.backend_loaded_at = __import__("datetime").datetime.now(
+            __import__("datetime").UTC
+        )
+        session.add(stale_inst)
         session.commit()
 
         # `live` has a presence key; `stale` does not.
@@ -562,143 +604,12 @@ async def test_sweep_marks_presence_expired(session: Session) -> None:
         assert marked == [str(stale.id)]
 
         session.expire_all()
-        live_row = session.get(ProviderInstance, live.id)
-        stale_row = session.get(ProviderInstance, stale.id)
+        live_row = session.get(ProviderAgent, live.id)
+        stale_row = session.get(ProviderAgent, stale.id)
         assert live_row.websocket_connected is True
         assert stale_row.websocket_connected is False
-        assert stale_row.instance_status == InstanceStatusValue.DISCONNECTED
+        assert stale_row.agent_status == InstanceStatusValue.DISCONNECTED
+        inst_row = session.get(ProviderInstance, stale_inst.id)
+        assert inst_row.backend_loaded_at is None
     finally:
         await aredis.aclose()
-
-
-# ============================================================================
-# Phase 14 — awaiting_config
-# ============================================================================
-
-
-def _register_shell(client: TestClient, session: Session) -> dict:
-    machine = Machine(uid="sh-ws-mach", name="sh-ws-machine", host="10.0.0.9")
-    definition = ProviderDefinition(
-        alias="sh-ws-model",
-        provider_type=None,  # shell
-        registration_token="sh-ws-token",
-        backend_config=None,
-    )
-    session.add(machine)
-    session.add(definition)
-    session.commit()
-    resp = client.post(
-        "/admin/api/providers/register",
-        json={
-            "machine_uid": "sh-ws-mach",
-            "registration_token": "sh-ws-token",
-            "provider_type": "mock",
-            "schema": {"type": "object"},
-            "version": settings.VERSION,
-            "port": 8081,
-            "hardware": {},
-            "metrics_categories": [],
-        },
-    )
-    assert resp.status_code == 200
-    return resp.json()
-
-
-def test_shell_instance_reports_awaiting_config(
-    client: TestClient, session: Session
-) -> None:
-    """After connect, an unconfigured definition's instance is
-    `awaiting_config` (admin-owned), and a provider running-status frame
-    does NOT clobber it."""
-    reg = _register_shell(client, session)
-    instance_id = reg["instance_id"]
-
-    with client.websocket_connect(
-        f"/provider/ws?instance_id={instance_id}",
-        headers=_ws_headers(reg["instance_secret"]),
-    ) as ws:
-        _recv_frame(ws)  # hello
-        epoch = 1
-
-        # Provider (ignorant of the pre-state) claims running.
-        ws.send_text(
-            Frame(
-                type=FrameKind.PROVIDER_STATUS,
-                id="ev-sh-1",
-                epoch=epoch,
-                payload={
-                    "instance_status": InstanceStatusValue.RUNNING,
-                    "backend_status": "running",
-                },
-            ).to_json()
-        )
-
-        def stayed_awaiting() -> bool:
-            session.expire_all()
-            row = session.get(ProviderInstance, uuid.UUID(instance_id))
-            return (
-                row.instance_status == InstanceStatusValue.AWAITING_CONFIG
-                and row.backend_status == "running"
-            )
-
-        _wait_for(stayed_awaiting)
-
-        # An error payload stays honest (not coerced).
-        ws.send_text(
-            Frame(
-                type=FrameKind.PROVIDER_STATUS,
-                id="ev-sh-2",
-                epoch=epoch,
-                payload={"instance_status": InstanceStatusValue.ERROR},
-            ).to_json()
-        )
-
-        def honest_error() -> bool:
-            session.expire_all()
-            row = session.get(ProviderInstance, uuid.UUID(instance_id))
-            return row.instance_status == InstanceStatusValue.ERROR
-
-        _wait_for(honest_error)
-
-    session.expunge_all()
-
-
-def test_configured_instance_connect_does_not_show_awaiting_config(
-    client: TestClient, session: Session
-) -> None:
-    """Today's behavior unchanged: a configured definition's instance goes
-    registering → running via provider.status with no coercion."""
-    reg = _register(client, session)
-    instance_id = reg["instance_id"]
-
-    with client.websocket_connect(
-        f"/provider/ws?instance_id={instance_id}",
-        headers=_ws_headers(reg["instance_secret"]),
-    ) as ws:
-        hello = _recv_frame(ws)
-        epoch = hello.epoch
-
-        def connecting() -> bool:
-            session.expire_all()
-            row = session.get(ProviderInstance, uuid.UUID(instance_id))
-            return row.websocket_connected is True and (
-                row.instance_status != InstanceStatusValue.AWAITING_CONFIG
-            )
-
-        _wait_for(connecting)
-
-        ws.send_text(
-            Frame(
-                type=FrameKind.PROVIDER_STATUS,
-                id="ev-cfg-1",
-                epoch=epoch,
-                payload={"instance_status": InstanceStatusValue.RUNNING},
-            ).to_json()
-        )
-
-        def running() -> bool:
-            session.expire_all()
-            row = session.get(ProviderInstance, uuid.UUID(instance_id))
-            return row.instance_status == InstanceStatusValue.RUNNING
-
-        _wait_for(running)

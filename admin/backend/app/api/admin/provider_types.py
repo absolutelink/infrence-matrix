@@ -22,7 +22,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
-from app.api.admin.providers import type_instances_of
+from app.api.admin.providers import type_agents_of
 from app.core.db import get_session
 from app.models import ProviderType
 
@@ -40,19 +40,19 @@ def _get_type(session: Session, name: str) -> ProviderType:
 
 def _consensus_dict(session: Session, ptype: ProviderType) -> dict[str, Any]:
     voters = [str(v) for v in (ptype.pending_voters or [])]
-    instances = type_instances_of(session, ptype.name)
-    universe = [str(inst.id) for inst in instances]
+    agents = type_agents_of(session, ptype.name)
+    universe = [str(agent.id) for agent in agents]
     summary: dict[str, Any] = {
         "status": ptype.status,
         "committed_fingerprint": ptype.schema_fingerprint,
         "universe": universe,
         "universe_count": len(universe),
-        # Instances currently on the committed schema, per their last
+        # Agents currently on the committed schema, per their last
         # registration report.
         "on_committed": sum(
             1
-            for inst in instances
-            if inst.reported_schema_fingerprint == ptype.schema_fingerprint
+            for agent in agents
+            if agent.reported_schema_fingerprint == ptype.schema_fingerprint
         ),
     }
     if ptype.pending_fingerprint is not None:

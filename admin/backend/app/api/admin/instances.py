@@ -1,10 +1,17 @@
-"""Admin provider-instance reads + actions (Phase 9 / Phase 10 UI).
+"""Admin provider-backend (instance) reads + actions (Phase 9 / Phase 10 UI).
+
+Phase 16: a ``ProviderInstance`` is one backend hosted by a ``ProviderAgent``.
+The agent holds the single WebSocket, so every per-backend action addresses
+the owning agent's socket and carries the target ``instance_id`` in its
+payload. Container-level state (liveness, version, agent_status, epoch,
+reported schema fingerprint) lives on the agent and is denormalized here for
+the tables.
 
 Reads (Phase 10 UI):
 
-- ``GET /admin/api/instances`` — every provider instance with its
-  machine uid and definition alias denormalized for tables.
-- ``GET /admin/api/instances/{id}`` — single instance.
+- ``GET /admin/api/instances`` — every backend with its machine uid and
+  definition alias denormalized for tables.
+- ``GET /admin/api/instances/{id}`` — single backend.
 
 Actions over the provider WS:
 
@@ -24,16 +31,12 @@ Actions over the provider WS:
   heartbeats + ``running``/``error`` land over the WS) and the log tail.
   Pass ``{"wait_for_running": true}`` to block until the backend reports
   running (bounded by ``BACKEND_BOOT_TIMEOUT_SECONDS``). ``stop`` always
-  awaits — it is quick. ``initialize`` re-registers (fresh instance secret +
+  awaits — it is quick. ``initialize`` re-registers (fresh agent secret +
   definition config), then reboots and re-publishes model metadata.
 
-Every action except ``stop`` refuses (409) while the definition has no
-authored ``backend_config`` — the same Phase 14 fence the provider applies
-to ``backend.start``; a shell must never boot on defaults.
-
-All actions require the instance's WebSocket to be connected; otherwise
-409. The provider's ack detail is returned verbatim (deleted paths,
-bytes freed, capacity, ports, accepted/backend_status).
+All actions require the backend's agent WebSocket to be connected; otherwise
+409. The provider's ack detail is returned verbatim (deleted paths, bytes
+freed, capacity, ports, accepted/backend_status).
 """
 
 import logging
@@ -49,7 +52,7 @@ from app.api.admin.serializers import iso_utc
 from app.core.config import settings
 from app.core.db import get_session
 from app.core.redis import get_redis
-from app.models import ProviderInstance, backend_config_is_authored
+from app.models import ProviderInstance
 from app.services import log_store
 from app.services.connection_manager import manager
 
@@ -84,30 +87,34 @@ class BackendActionBody(BaseModel):
 
 
 def instance_dict(inst: ProviderInstance) -> dict[str, Any]:
+    agent = inst.agent
+    machine = inst.machine
     return {
         "id": str(inst.id),
-        "machine_id": str(inst.machine_id),
-        "machine_uid": inst.machine.uid if inst.machine else None,
-        "machine_name": inst.machine.name if inst.machine else None,
+        "agent_id": str(inst.agent_id),
+        "machine_id": str(agent.machine_id) if agent else None,
+        "machine_uid": machine.uid if machine else None,
+        "machine_name": machine.name if machine else None,
         "provider_definition_id": str(inst.provider_definition_id),
         "alias": (inst.provider_definition.alias if inst.provider_definition else None),
         "provider_type": (
             inst.provider_definition.provider_type if inst.provider_definition else None
         ),
         "port": inst.port,
-        "version": inst.version,
-        "instance_status": inst.instance_status,
+        # Container-level state (denormalized from the owning agent).
+        "version": agent.version if agent else None,
+        "agent_status": agent.agent_status if agent else None,
+        "websocket_connected": agent.websocket_connected if agent else False,
+        "epoch": agent.epoch if agent else 0,
+        "last_seen": iso_utc(agent.last_seen) if agent else None,
+        "reported_schema_fingerprint": (
+            agent.reported_schema_fingerprint if agent else None
+        ),
         "backend_status": inst.backend_status,
-        "websocket_connected": inst.websocket_connected,
-        "epoch": inst.epoch,
-        "last_seen": iso_utc(inst.last_seen),
         "last_request_at": iso_utc(inst.last_request_at),
         # Idle-reaper load clock: when this backend entered running/in_use.
         "backend_loaded_at": iso_utc(inst.backend_loaded_at),
         "config_fingerprint": inst.config_fingerprint,
-        # Phase 12 E6: drives the waiting_schema badge (the instance's
-        # last-reported schema fingerprint vs the type's committed one).
-        "reported_schema_fingerprint": inst.reported_schema_fingerprint,
         "assigned_gpus": inst.assigned_gpus,
         "error_message": inst.error_message,
         "created_at": iso_utc(inst.created_at),
@@ -142,7 +149,7 @@ def _get_connected_instance(session: Session, instance_id: str) -> ProviderInsta
         raise HTTPException(status_code=404, detail="instance not found") from None
     if inst is None:
         raise HTTPException(status_code=404, detail="instance not found")
-    if not inst.websocket_connected:
+    if inst.agent is None or not inst.agent.websocket_connected:
         raise HTTPException(
             status_code=409,
             detail=f"instance {instance_id} has no live websocket connection",
@@ -151,14 +158,17 @@ def _get_connected_instance(session: Session, instance_id: str) -> ProviderInsta
 
 
 async def _send_action(
-    instance_id: str,
+    inst: ProviderInstance,
     command: str,
     payload: dict[str, Any],
     timeout: float = ACTION_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
+    """Send a per-backend command over the owning agent's socket, tagging the
+    payload with the target ``instance_id``."""
+    body = {**payload, "instance_id": str(inst.id)}
     try:
         reply = await manager.send_command(
-            instance_id, command, payload, timeout=timeout
+            str(inst.agent_id), command, body, timeout=timeout
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(
@@ -189,7 +199,7 @@ async def clear_cache(
     dry_run = bool(body and body.dry_run)
     force = bool(body and body.force)
     detail = await _send_action(
-        str(inst.id), "cache.clear", {"dry_run": dry_run, "force": force}
+        inst, "cache.clear", {"dry_run": dry_run, "force": force}
     )
     logger.info(
         "cache.clear on instance %s: freed %s bytes (dry_run=%s)",
@@ -209,7 +219,7 @@ async def prune_storage(
     inst = _get_connected_instance(session, instance_id)
     dry_run = bool(body and body.dry_run)
     detail = await _send_action(
-        str(inst.id),
+        inst,
         "storage.prune_unused",
         {"dry_run": dry_run},
         timeout=PRUNE_TIMEOUT_SECONDS,
@@ -223,31 +233,13 @@ async def prune_storage(
     return {"ok": True, "instance_id": instance_id, **detail}
 
 
-def _require_bootable(inst: ProviderInstance) -> None:
-    """Phase 14 fence: refuse to boot a definition with no authored config.
-
-    Mirrors the provider's ``no_config`` NAK so the operator gets a clear
-    409 instead of a 502 from the far end. ``{}`` counts as authored (it is
-    a real, schema-valid config); only SQL NULL is a shell.
-    """
-    definition = inst.provider_definition
-    if definition is not None and not backend_config_is_authored(definition):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"definition '{definition.alias}' has no backend_config "
-                "(awaiting_config): author it before starting the backend"
-            ),
-        )
-
-
 @router.post("/{instance_id}/backend/start", status_code=202)
 async def start_backend(
     instance_id: str,
     body: BackendActionBody | None = None,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    """Boot this instance's backend by hand (no inference request needed).
+    """Boot this backend by hand (no inference request needed).
 
     202 by default: the provider acks "accepted" and boots in the
     background, heartbeating ``backend.status`` (`initializing` while the
@@ -256,10 +248,9 @@ async def start_backend(
     to block until it is up.
     """
     inst = _get_connected_instance(session, instance_id)
-    _require_bootable(inst)
     wait = bool(body and body.wait_for_running)
     detail = await _send_action(
-        str(inst.id),
+        inst,
         "backend.start",
         {"wait_for_running": wait},
         timeout=(
@@ -289,7 +280,7 @@ async def stop_backend(
     """
     inst = _get_connected_instance(session, instance_id)
     detail = await _send_action(
-        str(inst.id),
+        inst,
         "backend.stop",
         {},
         timeout=settings.BACKEND_STOP_TIMEOUT_SECONDS,
@@ -306,10 +297,9 @@ async def restart_backend(
 ) -> dict[str, Any]:
     """Stop then start the backend (config re-applied by the driver)."""
     inst = _get_connected_instance(session, instance_id)
-    _require_bootable(inst)
     wait = bool(body and body.wait_for_running)
     detail = await _send_action(
-        str(inst.id),
+        inst,
         "backend.restart",
         {"wait_for_running": wait},
         timeout=(
@@ -334,23 +324,18 @@ async def initialize_instance(
     """Re-run the whole init lifecycle: re-register, adopt, boot, re-scrape.
 
     ``provider.initialize`` POSTs a fresh registration (re-checking the
-    version + schema gates, re-adopting capacity/`backend_config`, minting a
-    new instance secret for future reconnects and rewriting
+    version + schema gates, re-adopting capacity/``backend_config``, minting
+    a new agent secret for future reconnects and rewriting
     ``provider_config.json``), then drain-stops, boots and publishes
     ``backend.metadata`` from the running engine. The boot is asynchronous
-    (202): a cold halogen-flash instance downloads its checkpoint plus
+    (202): a cold halogen-flash backend downloads its checkpoint plus
     companions before the API answers, which is far beyond an HTTP request's
     patience. ``wait_for_running: true`` waits for the boot instead.
-
-    Allowed on a shell definition (unlike start/restart) — refreshing the
-    registration is exactly what an ``awaiting_config`` instance needs when
-    a config push never landed; the provider still refuses to boot it on
-    defaults and reports ``no_config`` in the ack.
     """
     inst = _get_connected_instance(session, instance_id)
     wait = bool(body and body.wait_for_running)
     detail = await _send_action(
-        str(inst.id),
+        inst,
         "provider.initialize",
         {"wait_for_running": wait},
         timeout=(
@@ -383,11 +368,16 @@ async def get_instance_logs(
     holds nothing yet; 404 only when the instance is unknown.
     """
     try:
-        exists = session.get(ProviderInstance, uuid.UUID(instance_id)) is not None
+        inst = session.get(ProviderInstance, uuid.UUID(instance_id))
     except ValueError:
-        exists = False
-    if not exists:
+        inst = None
+    if inst is None:
         raise HTTPException(status_code=404, detail="instance not found")
     return await log_store.read_logs(
-        redis_client, instance_id, kind=kind, since=since, limit=limit
+        redis_client,
+        instance_id,
+        kind=kind,
+        since=since,
+        limit=limit,
+        provider_id=str(inst.agent_id),
     )

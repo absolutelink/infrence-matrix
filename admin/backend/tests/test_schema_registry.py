@@ -15,8 +15,8 @@ from sqlmodel import Session, select
 from app.core.config import settings
 from app.models import (
     Machine,
+    ProviderAgent,
     ProviderDefinition,
-    ProviderInstance,
     ProviderType,
 )
 from app.services.hashing import canonical_json_sha256
@@ -55,20 +55,19 @@ def client() -> TestClient:
 
 
 def _machine(session: Session, uid: str) -> Machine:
-    m = Machine(uid=uid, name=f"name-{uid}", host="10.0.0.5")
+    m = Machine(
+        uid=uid, name=f"name-{uid}", host="10.0.0.5", registration_secret="mach-secret"
+    )
     session.add(m)
     session.commit()
     session.refresh(m)
     return m
 
 
-def _definition(
-    session: Session, *, token: str, alias: str | None = None
-) -> ProviderDefinition:
+def _definition(session: Session, *, alias: str | None = None) -> ProviderDefinition:
     d = ProviderDefinition(
         alias=alias or f"alias-{uuid.uuid4().hex[:8]}",
         provider_type=TYPE_NAME,
-        registration_token=token,
         backend_config={"delta_count": 3},
     )
     session.add(d)
@@ -80,17 +79,17 @@ def _definition(
 def _register(
     client: TestClient,
     machine_uid: str,
-    token: str,
     schema: dict | None,
     **overrides,
 ):
     body = {
         "machine_uid": machine_uid,
-        "registration_token": token,
+        "machine_secret": "mach-secret",
+        "agent_id": "agent-1",
         "provider_type": TYPE_NAME,
         "schema": schema,
         "version": settings.VERSION,
-        "port": 8081,
+        "base_port": 8081,
         "hardware": {"gpus": [], "total_vram_bytes": 1},
         "metrics_categories": [],
     }
@@ -116,11 +115,11 @@ def test_unknown_type_bootstraps_and_commits(
     client: TestClient, session: Session
 ) -> None:
     _machine(session, "boot-m")
-    _definition(session, token="boot-tok")
+    _definition(session)
 
-    resp = _register(client, "boot-m", "boot-tok", SCHEMA_V1)
+    resp = _register(client, "boot-m", SCHEMA_V1)
     assert resp.status_code == 200, resp.text
-    instance_id = resp.json()["instance_id"]
+    instance_id = resp.json()["agent_id"]
 
     ptype = _get_type(session)
     assert ptype.name == TYPE_NAME
@@ -129,21 +128,21 @@ def test_unknown_type_bootstraps_and_commits(
     assert ptype.status == "active"
     assert ptype.pending_fingerprint is None
 
-    inst = session.get(ProviderInstance, uuid.UUID(instance_id))
-    assert inst.reported_schema_fingerprint == FP_V1
+    agent = session.get(ProviderAgent, uuid.UUID(instance_id))
+    assert agent.reported_schema_fingerprint == FP_V1
 
 
 def test_matching_committed_fingerprint_registers(
     client: TestClient, session: Session
 ) -> None:
     _machine(session, "match-m")
-    _definition(session, token="match-tok")
-    assert _register(client, "match-m", "match-tok", SCHEMA_V1).status_code == 200
+    _definition(session)
+    assert _register(client, "match-m", SCHEMA_V1).status_code == 200
 
     # A second instance of the same type on the committed schema.
     _machine(session, "match-m2")
-    _definition(session, token="match-tok2")
-    resp = _register(client, "match-m2", "match-tok2", SCHEMA_V1)
+    _definition(session)
+    resp = _register(client, "match-m2", SCHEMA_V1)
     assert resp.status_code == 200
     assert _get_type(session).status == "active"
 
@@ -152,19 +151,19 @@ def test_mismatch_stages_pending_and_refuses(
     client: TestClient, session: Session
 ) -> None:
     _machine(session, "stage-a")
-    _definition(session, token="stage-ta")
-    a_id = _register(client, "stage-a", "stage-ta", SCHEMA_V1).json()["instance_id"]
+    _definition(session)
+    a_id = _register(client, "stage-a", SCHEMA_V1).json()["agent_id"]
 
     _machine(session, "stage-b")
-    _definition(session, token="stage-tb")
-    resp = _register(client, "stage-b", "stage-tb", SCHEMA_V2)
+    _definition(session)
+    resp = _register(client, "stage-b", SCHEMA_V2)
     assert resp.status_code == 409
     detail = resp.json()["detail"]
     assert detail["error"] == "schema_pending"
     assert detail["provider_type"] == TYPE_NAME
     assert detail["committed_fingerprint"] == FP_V1
     assert detail["pending_fingerprint"] == FP_V2
-    b_id = _register_type_instance_id(session, "stage-b")
+    b_id = _register_type_agent_id(session, "stage-b")
     assert detail["voted"] == [b_id]
     assert detail["waiting_on"] == [a_id]
 
@@ -189,45 +188,43 @@ def test_mismatch_stages_pending_and_refuses(
         r.close()
 
     # ... but the reported fingerprint IS persisted on the 409 path.
-    inst = session.get(ProviderInstance, uuid.UUID(b_id))
-    session.refresh(inst)
-    assert inst.reported_schema_fingerprint == FP_V2
+    agent = session.get(ProviderAgent, uuid.UUID(b_id))
+    session.refresh(agent)
+    assert agent.reported_schema_fingerprint == FP_V2
 
 
-def _register_type_instance_id(session: Session, machine_uid: str) -> str:
-    inst = session.exec(
-        select(ProviderInstance)
-        .join(Machine, ProviderInstance.machine_id == Machine.id)
+def _register_type_agent_id(session: Session, machine_uid: str) -> str:
+    agent = session.exec(
+        select(ProviderAgent)
+        .join(Machine, ProviderAgent.machine_id == Machine.id)
         .where(Machine.uid == machine_uid)
     ).one()
-    return str(inst.id)
+    return str(agent.id)
 
 
 def test_pending_vote_incomplete_keeps_refusing(
     client: TestClient, session: Session
 ) -> None:
     _machine(session, "inc-a")
-    _definition(session, token="inc-ta")
-    a_id = _register(client, "inc-a", "inc-ta", SCHEMA_V1).json()["instance_id"]
+    _definition(session)
+    a_id = _register(client, "inc-a", SCHEMA_V1).json()["agent_id"]
 
     _machine(session, "inc-b")
-    _definition(session, token="inc-tb")
-    _register(client, "inc-b", "inc-tb", SCHEMA_V2)  # stage, 409
-    b_id = _register_type_instance_id(session, "inc-b")
+    _definition(session)
+    _register(client, "inc-b", SCHEMA_V2)  # stage, 409
+    b_id = _register_type_agent_id(session, "inc-b")
 
     _machine(session, "inc-c")
-    _definition(session, token="inc-tc")
-    resp = _register(
-        client, "inc-c", "inc-tc", SCHEMA_V2
-    )  # second vote, still incomplete
+    _definition(session)
+    resp = _register(client, "inc-c", SCHEMA_V2)  # second vote, still incomplete
     assert resp.status_code == 409
     detail = resp.json()["detail"]
-    c_id = _register_type_instance_id(session, "inc-c")
+    c_id = _register_type_agent_id(session, "inc-c")
     assert set(detail["voted"]) == {b_id, c_id}
     assert detail["waiting_on"] == [a_id]
 
     # Repeat vote from B is deduped (voter list unchanged in size).
-    resp = _register(client, "inc-b", "inc-tb", SCHEMA_V2)
+    resp = _register(client, "inc-b", SCHEMA_V2)
     assert resp.status_code == 409
     assert len(resp.json()["detail"]["voted"]) == 2
     assert _get_type(session).pending_voters.count(b_id) == 1
@@ -235,17 +232,17 @@ def test_pending_vote_incomplete_keeps_refusing(
 
 def test_last_vote_commits_pending(client: TestClient, session: Session) -> None:
     _machine(session, "fin-a")
-    _definition(session, token="fin-ta")
-    _register(client, "fin-a", "fin-ta", SCHEMA_V1)
+    _definition(session)
+    _register(client, "fin-a", SCHEMA_V1)
 
     _machine(session, "fin-b")
-    _definition(session, token="fin-tb")
-    assert _register(client, "fin-b", "fin-tb", SCHEMA_V2).status_code == 409
+    _definition(session)
+    assert _register(client, "fin-b", SCHEMA_V2).status_code == 409
 
     # A (the last outstanding voter) now presents the pending schema.
-    resp = _register(client, "fin-a", "fin-ta", SCHEMA_V2)
+    resp = _register(client, "fin-a", SCHEMA_V2)
     assert resp.status_code == 200, resp.text
-    assert resp.json()["instance_secret"]  # registration completed
+    assert resp.json()["agent_secret"]  # registration completed
 
     ptype = _get_type(session)
     assert ptype.schema == SCHEMA_V2
@@ -258,14 +255,14 @@ def test_last_vote_commits_pending(client: TestClient, session: Session) -> None
 
 def test_third_fingerprint_conflicts(client: TestClient, session: Session) -> None:
     _machine(session, "cf-a")
-    _definition(session, token="cf-ta")
-    _register(client, "cf-a", "cf-ta", SCHEMA_V1)
+    _definition(session)
+    _register(client, "cf-a", SCHEMA_V1)
 
     _machine(session, "cf-b")
-    _definition(session, token="cf-tb")
-    assert _register(client, "cf-b", "cf-tb", SCHEMA_V2).status_code == 409
+    _definition(session)
+    assert _register(client, "cf-b", SCHEMA_V2).status_code == 409
 
-    resp = _register(client, "cf-a", "cf-ta", SCHEMA_V3)
+    resp = _register(client, "cf-a", SCHEMA_V3)
     assert resp.status_code == 409
     detail = resp.json()["detail"]
     assert detail["error"] == "schema_conflict"
@@ -279,14 +276,14 @@ def test_third_fingerprint_conflicts(client: TestClient, session: Session) -> No
     assert ptype.schema == SCHEMA_V1
     # Reported fingerprint written on the conflict path too.
     a = session.exec(
-        select(ProviderInstance)
-        .join(Machine, ProviderInstance.machine_id == Machine.id)
+        select(ProviderAgent)
+        .join(Machine, ProviderAgent.machine_id == Machine.id)
         .where(Machine.uid == "cf-a")
     ).one()
     assert a.reported_schema_fingerprint == FP_V3
     b = session.exec(
-        select(ProviderInstance)
-        .join(Machine, ProviderInstance.machine_id == Machine.id)
+        select(ProviderAgent)
+        .join(Machine, ProviderAgent.machine_id == Machine.id)
         .where(Machine.uid == "cf-b")
     ).one()
     assert b.reported_schema_fingerprint == FP_V2
@@ -294,8 +291,8 @@ def test_third_fingerprint_conflicts(client: TestClient, session: Session) -> No
 
 def test_malformed_schema_rejected_422(client: TestClient, session: Session) -> None:
     _machine(session, "bad-m")
-    _definition(session, token="bad-tok")
-    resp = _register(client, "bad-m", "bad-tok", {"type": "not-a-real-schema-type"})
+    _definition(session)
+    resp = _register(client, "bad-m", {"type": "not-a-real-schema-type"})
     assert resp.status_code == 422
     assert "invalid JSON Schema" in resp.json()["detail"]
     # No type row created for a malformed schema.
@@ -309,8 +306,8 @@ def test_malformed_schema_rejected_422(client: TestClient, session: Session) -> 
 
 def test_list_provider_types(client: TestClient, session: Session) -> None:
     _machine(session, "lt-m")
-    _definition(session, token="lt-tok")
-    _register(client, "lt-m", "lt-tok", SCHEMA_V1)
+    _definition(session)
+    _register(client, "lt-m", SCHEMA_V1)
 
     resp = client.get("/admin/api/provider-types")
     assert resp.status_code == 200
@@ -325,8 +322,8 @@ def test_list_provider_types(client: TestClient, session: Session) -> None:
 
 def test_get_provider_type_full_schema(client: TestClient, session: Session) -> None:
     _machine(session, "gt-m")
-    _definition(session, token="gt-tok")
-    _register(client, "gt-m", "gt-tok", SCHEMA_V1)
+    _definition(session)
+    _register(client, "gt-m", SCHEMA_V1)
 
     resp = client.get(f"/admin/api/provider-types/{TYPE_NAME}")
     assert resp.status_code == 200
@@ -341,11 +338,11 @@ def test_get_provider_type_full_schema(client: TestClient, session: Session) -> 
 
 def test_force_commit_pending(client: TestClient, session: Session) -> None:
     _machine(session, "fc-a")
-    _definition(session, token="fc-ta")
-    _register(client, "fc-a", "fc-ta", SCHEMA_V1)
+    _definition(session)
+    _register(client, "fc-a", SCHEMA_V1)
     _machine(session, "fc-b")
-    _definition(session, token="fc-tb")
-    assert _register(client, "fc-b", "fc-tb", SCHEMA_V2).status_code == 409
+    _definition(session)
+    assert _register(client, "fc-b", SCHEMA_V2).status_code == 409
 
     resp = client.post(f"/admin/api/provider-types/{TYPE_NAME}/pending/commit")
     assert resp.status_code == 200, resp.text
@@ -358,17 +355,17 @@ def test_force_commit_pending(client: TestClient, session: Session) -> None:
 
     # Future registrations on V2 now succeed.
     _machine(session, "fc-c")
-    _definition(session, token="fc-tc")
-    assert _register(client, "fc-c", "fc-tc", SCHEMA_V2).status_code == 200
+    _definition(session)
+    assert _register(client, "fc-c", SCHEMA_V2).status_code == 200
 
 
 def test_dismiss_pending(client: TestClient, session: Session) -> None:
     _machine(session, "dp-a")
-    _definition(session, token="dp-ta")
-    _register(client, "dp-a", "dp-ta", SCHEMA_V1)
+    _definition(session)
+    _register(client, "dp-a", SCHEMA_V1)
     _machine(session, "dp-b")
-    _definition(session, token="dp-tb")
-    assert _register(client, "dp-b", "dp-tb", SCHEMA_V2).status_code == 409
+    _definition(session)
+    assert _register(client, "dp-b", SCHEMA_V2).status_code == 409
 
     resp = client.post(f"/admin/api/provider-types/{TYPE_NAME}/pending/dismiss")
     assert resp.status_code == 200
@@ -384,8 +381,8 @@ def test_commit_and_dismiss_without_pending_409(
     client: TestClient, session: Session
 ) -> None:
     _machine(session, "np-m")
-    _definition(session, token="np-tok")
-    _register(client, "np-m", "np-tok", SCHEMA_V1)
+    _definition(session)
+    _register(client, "np-m", SCHEMA_V1)
 
     for action in ("commit", "dismiss"):
         resp = client.post(f"/admin/api/provider-types/{TYPE_NAME}/pending/{action}")
@@ -408,8 +405,8 @@ def test_commit_and_dismiss_without_pending_409(
 
 def test_definition_valid_config_passes(client: TestClient, session: Session) -> None:
     _machine(session, "dv-m")
-    _definition(session, token="dv-tok")
-    _register(client, "dv-m", "dv-tok", SCHEMA_V1)  # commits SCHEMA_V1
+    _definition(session)
+    _register(client, "dv-m", SCHEMA_V1)  # commits SCHEMA_V1
 
     resp = client.post(
         "/admin/api/definitions",
@@ -426,8 +423,8 @@ def test_definition_invalid_config_rejected_with_field_errors(
     client: TestClient, session: Session
 ) -> None:
     _machine(session, "di-m")
-    _definition(session, token="di-tok")
-    _register(client, "di-m", "di-tok", SCHEMA_V1)
+    _definition(session)
+    _register(client, "di-m", SCHEMA_V1)
 
     resp = client.post(
         "/admin/api/definitions",
@@ -468,8 +465,8 @@ def test_definition_patch_validates_against_committed_schema(
     client: TestClient, session: Session
 ) -> None:
     _machine(session, "pv-m")
-    _definition(session, token="pv-tok")
-    _register(client, "pv-m", "pv-tok", SCHEMA_V1)
+    _definition(session)
+    _register(client, "pv-m", SCHEMA_V1)
     created = client.post(
         "/admin/api/definitions",
         json={
@@ -535,7 +532,6 @@ def test_schema_report_flags_bad_existing_config(session: Session, caplog) -> No
     bad = ProviderDefinition(
         alias="report-bad",
         provider_type="report-type",
-        registration_token="report-bad-tok",
         backend_config={"delta_count": "wrong"},
     )
     session.add(bad)
@@ -596,11 +592,11 @@ def _redis_get(key: str) -> str | None:
 def test_conflict_path_mints_no_secret(client: TestClient, session: Session) -> None:
     """Reviewer: no-secret-mint on the schema_conflict path."""
     _machine(session, "cs-a")
-    _definition(session, token="cs-ta")
-    a_id = _register(client, "cs-a", "cs-ta", SCHEMA_V1).json()["instance_id"]
+    _definition(session)
+    a_id = _register(client, "cs-a", SCHEMA_V1).json()["agent_id"]
     _machine(session, "cs-b")
-    _definition(session, token="cs-tb")
-    assert _register(client, "cs-b", "cs-tb", SCHEMA_V2).status_code == 409
+    _definition(session)
+    assert _register(client, "cs-b", SCHEMA_V2).status_code == 409
 
     # Drop A's secret from its successful first registration so the
     # conflict attempt's mint (or lack thereof) is observable.
@@ -612,11 +608,11 @@ def test_conflict_path_mints_no_secret(client: TestClient, session: Session) -> 
     r.delete(f"im:ws:secret:{a_id}")
     r.close()
 
-    resp = _register(client, "cs-a", "cs-ta", SCHEMA_V3)
+    resp = _register(client, "cs-a", SCHEMA_V3)
     assert resp.status_code == 409
     assert resp.json()["detail"]["error"] == "schema_conflict"
     assert _redis_get(f"im:ws:secret:{a_id}") is None
-    b_id = _register_type_instance_id(session, "cs-b")
+    b_id = _register_type_agent_id(session, "cs-b")
     assert _redis_get(f"im:ws:secret:{b_id}") is None
 
 
@@ -626,19 +622,18 @@ def test_hardware_merged_on_schema_pending_409(
     """M1: a schema-refused registration still refreshes the machine's
     hardware report (the box is real regardless of schema state)."""
     _machine(session, "hw-a")
-    _definition(session, token="hw-ta")
+    _definition(session)
     _register(
         client,
         "hw-a",
-        "hw-ta",
         SCHEMA_V1,
         hardware={"gpus": [{"uuid": "g1"}], "total_vram_bytes": 111},
     )
 
     machine_b = _machine(session, "hw-b")
-    _definition(session, token="hw-tb")
+    _definition(session)
     new_hw = {"gpus": [{"uuid": "g2"}], "total_vram_bytes": 222}
-    resp = _register(client, "hw-b", "hw-tb", SCHEMA_V2, hardware=new_hw)
+    resp = _register(client, "hw-b", SCHEMA_V2, hardware=new_hw)
     assert resp.status_code == 409
     assert resp.json()["detail"]["error"] == "schema_pending"
 
@@ -653,22 +648,22 @@ def test_second_vote_409_carries_committed_fingerprint(
 ) -> None:
     """Reviewer: committed_fingerprint present in the second-vote detail."""
     _machine(session, "sf-a")
-    _definition(session, token="sf-ta")
-    _register(client, "sf-a", "sf-ta", SCHEMA_V1)
+    _definition(session)
+    _register(client, "sf-a", SCHEMA_V1)
     _machine(session, "sf-b")
-    _definition(session, token="sf-tb")
-    assert _register(client, "sf-b", "sf-tb", SCHEMA_V2).status_code == 409
+    _definition(session)
+    assert _register(client, "sf-b", SCHEMA_V2).status_code == 409
 
     _machine(session, "sf-c")
-    _definition(session, token="sf-tc")
-    resp = _register(client, "sf-c", "sf-tc", SCHEMA_V2)
+    _definition(session)
+    resp = _register(client, "sf-c", SCHEMA_V2)
     assert resp.status_code == 409
     detail = resp.json()["detail"]
     assert detail["error"] == "schema_pending"
     assert detail["committed_fingerprint"] == FP_V1
     assert detail["pending_fingerprint"] == FP_V2
     assert len(detail["voted"]) == 2
-    assert detail["waiting_on"] == [_register_type_instance_id(session, "sf-a")]
+    assert detail["waiting_on"] == [_register_type_agent_id(session, "sf-a")]
 
 
 def test_solo_first_vote_of_new_schema_commits_immediately(
@@ -677,10 +672,10 @@ def test_solo_first_vote_of_new_schema_commits_immediately(
     """L1: when the voter universe is just this instance, a new-schema
     registration is unanimous -> commit, no 409."""
     _machine(session, "solo-m")
-    _definition(session, token="solo-tok")
-    assert _register(client, "solo-m", "solo-tok", SCHEMA_V1).status_code == 200
+    _definition(session)
+    assert _register(client, "solo-m", SCHEMA_V1).status_code == 200
 
-    resp = _register(client, "solo-m", "solo-tok", SCHEMA_V2)
+    resp = _register(client, "solo-m", SCHEMA_V2)
     assert resp.status_code == 200, resp.text
     ptype = _get_type(session)
     assert ptype.schema == SCHEMA_V2
@@ -696,17 +691,17 @@ def test_committed_match_clears_stale_conflict(
     stale conflict (only when nothing is pending — a live pending vote is
     never cleared by it)."""
     _machine(session, "cl-a")
-    _definition(session, token="cl-ta")
-    _register(client, "cl-a", "cl-ta", SCHEMA_V1)
+    _definition(session)
+    _register(client, "cl-a", SCHEMA_V1)
     _machine(session, "cl-b")
-    _definition(session, token="cl-tb")
-    assert _register(client, "cl-b", "cl-tb", SCHEMA_V2).status_code == 409
-    assert _register(client, "cl-a", "cl-ta", SCHEMA_V3).status_code == 409
+    _definition(session)
+    assert _register(client, "cl-b", SCHEMA_V2).status_code == 409
+    assert _register(client, "cl-a", SCHEMA_V3).status_code == 409
     assert _get_type(session).status == "conflict"
 
     # Committed-match with pending still staged: allowed, but the pending
     # vote (and the conflict flag) survive.
-    assert _register(client, "cl-a", "cl-ta", SCHEMA_V1).status_code == 200
+    assert _register(client, "cl-a", SCHEMA_V1).status_code == 200
     ptype = _get_type(session)
     assert ptype.pending_fingerprint == FP_V2
     assert ptype.status == "conflict"
@@ -720,7 +715,7 @@ def test_committed_match_clears_stale_conflict(
     ptype.status = "conflict"
     session.add(ptype)
     session.commit()
-    assert _register(client, "cl-a", "cl-ta", SCHEMA_V1).status_code == 200
+    assert _register(client, "cl-a", SCHEMA_V1).status_code == 200
     assert _get_type(session).status == "active"
 
 
@@ -733,38 +728,40 @@ def test_omitted_schema_unknown_type_bootstraps_permissive(
     client: TestClient, session: Session
 ) -> None:
     _machine(session, "om-a")
-    _definition(session, token="om-ta")
-    resp = _register(client, "om-a", "om-ta", None)
+    _definition(session)
+    resp = _register(client, "om-a", None)
     assert resp.status_code == 200, resp.text
-    instance_id = resp.json()["instance_id"]
+    instance_id = resp.json()["agent_id"]
 
     ptype = _get_type(session)
     assert ptype.schema == {"type": "object"}
     assert ptype.schema_fingerprint == canonical_json_sha256({"type": "object"})
     assert ptype.status == "active"
 
-    inst = session.get(ProviderInstance, uuid.UUID(instance_id))
-    assert inst.reported_schema_fingerprint == canonical_json_sha256({"type": "object"})
+    agent = session.get(ProviderAgent, uuid.UUID(instance_id))
+    assert agent.reported_schema_fingerprint == canonical_json_sha256(
+        {"type": "object"}
+    )
 
 
 def test_omitted_schema_known_type_skips_gate(
     client: TestClient, session: Session
 ) -> None:
     _machine(session, "om2-a")
-    _definition(session, token="om2-ta")
-    assert _register(client, "om2-a", "om2-ta", SCHEMA_V1).status_code == 200
+    _definition(session)
+    assert _register(client, "om2-a", SCHEMA_V1).status_code == 200
 
     # Old provider (no schema) against a type with a strict committed
     # schema: gate skipped, registration proceeds; reported fp is None
     # (the instance never proved which schema it runs).
     _machine(session, "om2-b")
-    _definition(session, token="om2-tb")
-    resp = _register(client, "om2-b", "om2-tb", None)
+    _definition(session)
+    resp = _register(client, "om2-b", None)
     assert resp.status_code == 200, resp.text
-    b_id = _register_type_instance_id(session, "om2-b")
-    inst = session.get(ProviderInstance, uuid.UUID(b_id))
-    session.refresh(inst)
-    assert inst.reported_schema_fingerprint is None
+    b_id = _register_type_agent_id(session, "om2-b")
+    agent = session.get(ProviderAgent, uuid.UUID(b_id))
+    session.refresh(agent)
+    assert agent.reported_schema_fingerprint is None
 
     # Consensus state untouched.
     ptype = _get_type(session)
@@ -777,28 +774,28 @@ def test_omitted_schema_does_not_disturb_pending_vote(
     client: TestClient, session: Session
 ) -> None:
     _machine(session, "om3-a")
-    _definition(session, token="om3-ta")
-    _register(client, "om3-a", "om3-ta", SCHEMA_V1)
+    _definition(session)
+    _register(client, "om3-a", SCHEMA_V1)
     _machine(session, "om3-b")
-    _definition(session, token="om3-tb")
-    assert _register(client, "om3-b", "om3-tb", SCHEMA_V2).status_code == 409
+    _definition(session)
+    assert _register(client, "om3-b", SCHEMA_V2).status_code == 409
 
     # An old-schema-less provider registers fine mid-consensus...
     _machine(session, "om3-c")
-    _definition(session, token="om3-tc")
-    assert _register(client, "om3-c", "om3-tc", None).status_code == 200
+    _definition(session)
+    assert _register(client, "om3-c", None).status_code == 200
 
     # ... but does NOT vote: the pending roster still holds only B.
     ptype = _get_type(session)
     assert ptype.status == "consensus_pending"
     assert ptype.pending_fingerprint == FP_V2
-    assert ptype.pending_voters == [_register_type_instance_id(session, "om3-b")]
+    assert ptype.pending_voters == [_register_type_agent_id(session, "om3-b")]
 
     # A completing its V2 vote now also needs C? No — C is in the
     # universe, so consensus is NOT complete until C presents V2 too.
-    resp = _register(client, "om3-a", "om3-ta", SCHEMA_V2)
+    resp = _register(client, "om3-a", SCHEMA_V2)
     assert resp.status_code == 409  # still waiting on C
-    assert _register(client, "om3-c", "om3-tc", SCHEMA_V2).status_code == 200
+    assert _register(client, "om3-c", SCHEMA_V2).status_code == 200
     assert _get_type(session).schema == SCHEMA_V2
 
 
@@ -911,8 +908,8 @@ def test_patch_retype_validates_existing_config(
     }
     # Bootstrap the permissive "mock" committed schema via a registration.
     _machine(session, "rt-m")
-    _definition(session, token="rt-tok")
-    assert _register(client, "rt-m", "rt-tok", SCHEMA_V1).status_code == 200
+    _definition(session)
+    assert _register(client, "rt-m", SCHEMA_V1).status_code == 200
 
     resp = client.post(
         "/admin/api/definitions",

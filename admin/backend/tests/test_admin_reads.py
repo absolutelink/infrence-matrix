@@ -24,6 +24,7 @@ from app.core.config import settings
 from app.core.redis import get_redis
 from app.models import (
     Machine,
+    ProviderAgent,
     ProviderDefinition,
     ProviderInstance,
     ResponseRecord,
@@ -54,11 +55,15 @@ def _assert_utc_iso(value: str) -> datetime:
 
 
 def _stack(session: Session, *, alias: str = "read-model", enabled: bool = True):
-    machine = Machine(uid=f"rd-{alias}", name=f"rd-{alias}-machine", host="10.0.0.1")
+    machine = Machine(
+        uid=f"rd-{alias}",
+        name=f"rd-{alias}-machine",
+        host="10.0.0.1",
+        registration_secret=f"tok-{alias}",
+    )
     definition = ProviderDefinition(
         alias=alias,
         provider_type="mock",
-        registration_token=f"tok-{alias}",
         backend_config={"delta_count": 1},
         enabled=enabled,
     )
@@ -78,29 +83,37 @@ def _instance(
     backend_status: str = "stopped",
     created_at: datetime | None = None,
 ) -> ProviderInstance:
-    # (machine_id, provider_definition_id) is UNIQUE: one backend per
-    # instance per machine+definition. Stack a fresh machine per call so
-    # tests can create several instances of one definition.
+    # One backend per agent; stack a fresh machine + agent per call so tests
+    # can create several instances of one definition (Phase 16: liveness,
+    # version, epoch and last_seen live on the agent).
     tag = uuid.uuid4().hex[:6]
     extra = Machine(
         uid=f"{machine.uid}-x{tag}",
         name=f"{machine.name}-x{tag}",
         host=machine.host,
+        registration_secret="s",
     )
     session.add(extra)
     session.commit()
     session.refresh(extra)
-    machine = extra
-    inst = ProviderInstance(
-        machine_id=machine.id,
-        provider_definition_id=definition.id,
-        port=8081,
+    agent = ProviderAgent(
+        machine_id=extra.id,
+        provider_type="mock",
+        agent_id=f"ag-{tag}",
         version="dev",
-        instance_status="running" if connected else "disconnected",
-        backend_status=backend_status,
+        agent_status="running" if connected else "disconnected",
         websocket_connected=connected,
         epoch=1 if connected else 0,
         last_seen=BASE,
+    )
+    session.add(agent)
+    session.commit()
+    session.refresh(agent)
+    inst = ProviderInstance(
+        agent_id=agent.id,
+        provider_definition_id=definition.id,
+        port=8081,
+        backend_status=backend_status,
         last_request_at=BASE + timedelta(seconds=5),
         config_fingerprint="fp",
     )
@@ -149,7 +162,7 @@ def test_list_instances_shape_and_ordering(
     assert item["machine_name"].startswith(f"{machine.name}-x")
     assert item["alias"] == definition.alias
     assert item["provider_type"] == "mock"
-    assert item["instance_status"] == "running"
+    assert item["agent_status"] == "running"
     assert item["backend_status"] == "running"
     assert item["websocket_connected"] is True
     assert item["epoch"] == 1
@@ -450,18 +463,19 @@ def test_live_websocket_reflected_in_reads(
         "/admin/api/providers/register",
         json={
             "machine_uid": machine.uid,
-            "registration_token": "tok-ov-live",
+            "machine_secret": "tok-ov-live",
+            "agent_id": "ov-live-agent",
             "provider_type": "mock",
             "schema": {"type": "object"},
             "version": settings.VERSION,
-            "port": 8081,
+            "base_port": 8081,
             "hardware": {"gpus": [], "total_vram_bytes": 1},
             "metrics_categories": [],
         },
     )
     assert resp.status_code == 200
     reg = resp.json()
-    instance_id = reg["instance_id"]
+    instance_id = reg["backends"][0]["instance_id"]
 
     assert (
         client.get(f"/admin/api/instances/{instance_id}").json()["websocket_connected"]
@@ -469,8 +483,8 @@ def test_live_websocket_reflected_in_reads(
     )
 
     with client.websocket_connect(
-        f"/provider/ws?instance_id={instance_id}",
-        headers={"Authorization": f"Bearer {reg['instance_secret']}"},
+        f"/provider/ws?agent_id={reg['agent_id']}",
+        headers={"Authorization": f"Bearer {reg['agent_secret']}"},
     ) as ws:
         hello = Frame.model_validate_json(ws.receive_text())
         assert hello.type == "provider.hello"

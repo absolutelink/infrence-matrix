@@ -79,14 +79,14 @@ def make_lifecycle(client: AdminClient, backend_config: dict[str, Any] | None = 
     settings = client.settings
 
     async def emit(status: str, reason: str | None) -> None:
-        await client.send_event(
-            "backend.status",
-            {
-                "backend_status": status,
-                "instance_status": InstanceStatusValue.RUNNING,
-                "reason": reason,
-            },
-        )
+        payload: dict[str, Any] = {
+            "backend_status": status,
+            "agent_status": InstanceStatusValue.RUNNING,
+            "reason": reason,
+        }
+        if client.is_registered and client.registration.instance_id is not None:
+            payload["instance_id"] = client.registration.instance_id
+        await client.send_event("backend.status", payload)
 
     driver = make_driver(settings, backend_config or {}, client=client)
     return BackendLifecycle(driver, capacity=DEFAULT_CAPACITY, status_callback=emit)
@@ -117,7 +117,7 @@ def install_command_handlers(
         result = await client.register(
             provider_type=PROVIDER_TYPE,
             version=VERSION,
-            port=settings.PROVIDER_PORT,
+            base_port=settings.PROVIDER_PORT,
             hardware=hardware,
             schema=SCHEMA,
         )
@@ -156,6 +156,10 @@ def apply_registration(
 ) -> None:
     """Adopt capacity and the backend_config from the registration response."""
     definition = result.provider_definition
+    if result.instance_id is not None:
+        # H1/H2: the lifecycle must know its own instance_id so backend.status /
+        # backend.metadata / backend.logs frames are keyed to the right backend.
+        lifecycle.instance_id = result.instance_id
     capacity = definition.get("capacity")
     if isinstance(capacity, int) and capacity >= 1:
         lifecycle.capacity = capacity
@@ -175,7 +179,7 @@ async def emit_provider_status(
     await client.send_event(
         "provider.status",
         {
-            "instance_status": InstanceStatusValue.RUNNING,
+            "agent_status": InstanceStatusValue.RUNNING,
             "backend_status": lifecycle.backend_status,
             "provider_type": PROVIDER_TYPE,
             "version": VERSION,
@@ -200,7 +204,7 @@ async def register_provider(
     result = await client.register(
         provider_type=PROVIDER_TYPE,
         version=VERSION,
-        port=settings.PROVIDER_PORT,
+        base_port=settings.PROVIDER_PORT,
         hardware=hardware,
         # Single shared load (provider_halogen.driver.SCHEMA) so the
         # schema registered with the admin and the schema the driver
@@ -238,8 +242,11 @@ async def register_and_connect(
     return result, lifecycle, emitter, log_bundle
 
 
-def build_app(lifecycle: BackendLifecycle | None = None):
-    settings = ProviderSettings()
+def build_app(
+    lifecycle: BackendLifecycle | None = None,
+    settings: ProviderSettings | None = None,
+):
+    settings = settings or ProviderSettings()
     overrides = BackendOverrides(
         provider_type=PROVIDER_TYPE,
         version=VERSION,
@@ -278,7 +285,7 @@ async def run_async() -> None:
         )
     )
     config = uvicorn.Config(
-        build_app(lifecycle),
+        build_app(lifecycle, settings),
         host="0.0.0.0",
         port=settings.PROVIDER_PORT,
         log_level="info",

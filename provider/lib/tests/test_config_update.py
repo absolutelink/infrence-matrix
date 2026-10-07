@@ -19,7 +19,8 @@ from provider_lib.wire import BackendStatusValue
 def settings(tmp_path: Any) -> ProviderSettings:
     return ProviderSettings(  # type: ignore[call-arg]
         MACHINE_UID="cu-test",
-        PROVIDER_REGISTRATION_TOKEN="tok",
+        MACHINE_SECRET="tok",
+        AGENT_ID="cu-test-agent",
         ADMIN_BASE_URL="http://localhost:9999",
         CACHE_DIR=tmp_path / "cache",
         MODELS_DIR=tmp_path / "models",

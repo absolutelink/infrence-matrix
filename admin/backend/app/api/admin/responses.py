@@ -28,6 +28,7 @@ from app.core.db import get_session
 from app.core.redis import get_redis
 from app.models import (
     Machine,
+    ProviderAgent,
     ProviderDefinition,
     ProviderInstance,
     ResponseRecord,
@@ -160,7 +161,8 @@ async def overview_stats(
     connected_count = session.exec(
         select(func.count())
         .select_from(ProviderInstance)
-        .where(ProviderInstance.websocket_connected == True)  # noqa: E712
+        .join(ProviderAgent, ProviderInstance.agent_id == ProviderAgent.id)
+        .where(ProviderAgent.websocket_connected == True)  # noqa: E712
     ).one()
     backend_running = session.exec(
         select(func.count())

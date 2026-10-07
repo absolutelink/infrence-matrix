@@ -1,12 +1,12 @@
-"""Phase 9 config-update flow over a real provider WebSocket.
+"""Phase 9 config-update flow over a real provider agent WebSocket (Phase 16).
 
 The test plays the provider side with ``client.websocket_connect``: after
 registering + connecting, a definition PATCH must deliver a
-``provider.config.update`` frame with the new backend_config +
-fingerprint; the ack sent back drives the DB updates (fingerprint on
-ok, per-instance error on failure, fingerprint untouched on failure).
-Also covers the stale-fingerprint reconnect self-heal and the sweep
-heal helper.
+``provider.config.update`` frame (addressed to the agent, carrying the target
+``instance_id``) with the new backend_config + fingerprint; the ack sent back
+drives the DB updates (fingerprint on ok, per-instance error on failure,
+fingerprint untouched on failure). Also covers the stale-fingerprint reconnect
+self-heal and the sweep heal helper.
 """
 
 import threading
@@ -20,7 +20,7 @@ from sqlmodel import Session
 from app.api.admin.providers import compute_config_fingerprint
 from app.core.config import settings
 from app.core.db import engine
-from app.models import Machine, ProviderDefinition, ProviderInstance
+from app.models import Machine, ProviderAgent, ProviderDefinition, ProviderInstance
 from app.services.wire import Frame
 
 
@@ -42,11 +42,15 @@ def _wait_for(predicate, timeout: float = 3.0) -> None:
 
 
 def _make_stack(session: Session, *, backend_config: dict) -> None:
-    machine = Machine(uid="flow-mach", name="flow-machine", host="127.0.0.1")
+    machine = Machine(
+        uid="flow-mach",
+        name="flow-machine",
+        host="127.0.0.1",
+        registration_secret="flow-secret",
+    )
     definition = ProviderDefinition(
         alias="flow-model",
         provider_type="mock",
-        registration_token="flow-token",
         backend_config=backend_config,
     )
     session.add_all([machine, definition])
@@ -58,17 +62,22 @@ def _register(client: TestClient) -> dict:
         "/admin/api/providers/register",
         json={
             "machine_uid": "flow-mach",
-            "registration_token": "flow-token",
+            "machine_secret": "flow-secret",
+            "agent_id": "flow-agent",
             "provider_type": "mock",
             "schema": {"type": "object"},
             "version": settings.VERSION,
-            "port": 8081,
+            "base_port": 8081,
             "hardware": {"gpus": [], "total_vram_bytes": 1},
             "metrics_categories": [],
         },
     )
     assert resp.status_code == 200, resp.text
     return resp.json()
+
+
+def _backend(reg: dict) -> dict:
+    return reg["backends"][0]
 
 
 def _patch_in_thread(client: TestClient, definition_id: str, body: dict):
@@ -86,12 +95,11 @@ def _patch_in_thread(client: TestClient, definition_id: str, body: dict):
     return t, result
 
 
-def _set_instance_state(instance_id: str, **changes) -> None:
+def _set_agent_connected(agent_id: str, connected: bool) -> None:
     with Session(engine) as s:
-        inst = s.get(ProviderInstance, uuid.UUID(instance_id))
-        for key, value in changes.items():
-            setattr(inst, key, value)
-        s.add(inst)
+        agent = s.get(ProviderAgent, uuid.UUID(agent_id))
+        agent.websocket_connected = connected
+        s.add(agent)
         s.commit()
 
 
@@ -100,13 +108,13 @@ def test_patch_pushes_config_update_and_acks(
 ) -> None:
     _make_stack(session, backend_config={"delta_count": 3})
     reg = _register(client)
-    instance_id = reg["instance_id"]
-    definition_id = reg["provider_definition"]["id"]
-    old_fp = reg["provider_definition"]["config_fingerprint"]
+    instance_id = _backend(reg)["instance_id"]
+    definition_id = _backend(reg)["definition"]["id"]
+    old_fp = _backend(reg)["definition"]["config_fingerprint"]
 
     with client.websocket_connect(
-        f"/provider/ws?instance_id={instance_id}",
-        headers={"Authorization": f"Bearer {reg['instance_secret']}"},
+        f"/provider/ws?agent_id={reg['agent_id']}",
+        headers={"Authorization": f"Bearer {reg['agent_secret']}"},
     ) as ws:
         hello = Frame.model_validate_json(ws.receive_text())
         assert hello.type == "provider.hello"
@@ -117,6 +125,7 @@ def test_patch_pushes_config_update_and_acks(
         frame = Frame.model_validate_json(ws.receive_text())
         assert frame.type == "provider.config.update"
         new_fp = compute_config_fingerprint({"delta_count": 7})
+        assert frame.payload["instance_id"] == instance_id
         assert frame.payload["backend_config"] == {"delta_count": 7}
         assert frame.payload["config_fingerprint"] == new_fp
         assert frame.payload["capacity"] == 1
@@ -163,13 +172,13 @@ def test_patch_reports_provider_failure_without_touching_fingerprint(
 ) -> None:
     _make_stack(session, backend_config={"delta_count": 3})
     reg = _register(client)
-    instance_id = reg["instance_id"]
-    definition_id = reg["provider_definition"]["id"]
-    old_fp = reg["provider_definition"]["config_fingerprint"]
+    instance_id = _backend(reg)["instance_id"]
+    definition_id = _backend(reg)["definition"]["id"]
+    old_fp = _backend(reg)["definition"]["config_fingerprint"]
 
     with client.websocket_connect(
-        f"/provider/ws?instance_id={instance_id}",
-        headers={"Authorization": f"Bearer {reg['instance_secret']}"},
+        f"/provider/ws?agent_id={reg['agent_id']}",
+        headers={"Authorization": f"Bearer {reg['agent_secret']}"},
     ) as ws:
         hello = Frame.model_validate_json(ws.receive_text())
 
@@ -215,12 +224,12 @@ def test_drain_refused_is_retried_then_reported(
 
     _make_stack(session, backend_config={"delta_count": 3})
     reg = _register(client)
-    instance_id = reg["instance_id"]
-    definition_id = reg["provider_definition"]["id"]
+    instance_id = _backend(reg)["instance_id"]
+    definition_id = _backend(reg)["definition"]["id"]
 
     with client.websocket_connect(
-        f"/provider/ws?instance_id={instance_id}",
-        headers={"Authorization": f"Bearer {reg['instance_secret']}"},
+        f"/provider/ws?agent_id={reg['agent_id']}",
+        headers={"Authorization": f"Bearer {reg['agent_secret']}"},
     ) as ws:
         hello = Frame.model_validate_json(ws.receive_text())
 
@@ -269,11 +278,12 @@ def test_reconnect_with_stale_fingerprint_self_heals(
 ) -> None:
     _make_stack(session, backend_config={"delta_count": 3})
     reg = _register(client)
-    instance_id = reg["instance_id"]
-    definition_id = reg["provider_definition"]["id"]
+    instance_id = _backend(reg)["instance_id"]
+    definition_id = _backend(reg)["definition"]["id"]
     stale_fp = compute_config_fingerprint({"delta_count": 3})
 
-    # Admin PATCHes while the instance is NOT connected: no push happens.
+    # Admin PATCHes while the agent is NOT connected: no push happens.
+    _set_agent_connected(reg["agent_id"], False)
     resp = client.patch(
         f"/admin/api/definitions/{definition_id}",
         json={"backend_config": {"delta_count": 4}},
@@ -284,13 +294,15 @@ def test_reconnect_with_stale_fingerprint_self_heals(
 
     # The provider "reconnects" still carrying the stale fingerprint
     # (it missed the update while disconnected).
-    _set_instance_state(
-        instance_id, config_fingerprint=stale_fp, websocket_connected=False
-    )
+    with Session(engine) as s:
+        inst = s.get(ProviderInstance, uuid.UUID(instance_id))
+        inst.config_fingerprint = stale_fp
+        s.add(inst)
+        s.commit()
 
     with client.websocket_connect(
-        f"/provider/ws?instance_id={instance_id}",
-        headers={"Authorization": f"Bearer {reg['instance_secret']}"},
+        f"/provider/ws?agent_id={reg['agent_id']}",
+        headers={"Authorization": f"Bearer {reg['agent_secret']}"},
     ) as ws:
         hello = Frame.model_validate_json(ws.receive_text())
         # The connect-path background heal pushes the update unprompted.
@@ -314,6 +326,33 @@ def test_reconnect_with_stale_fingerprint_self_heals(
         _wait_for(healed)
 
 
+def _seed_agent_instance(session: Session, *, uid: str, config: dict, connected: bool):
+    """Create machine + agent + definition + one backend; returns
+    (agent_id, instance_id, definition_id)."""
+    machine = Machine(uid=uid, name=f"name-{uid}", registration_secret="s")
+    definition = ProviderDefinition(
+        alias=f"model-{uid}", provider_type="mock", backend_config=config
+    )
+    session.add_all([machine, definition])
+    session.commit()
+    agent = ProviderAgent(
+        machine_id=machine.id,
+        provider_type="mock",
+        agent_id=f"agent-{uid}",
+        websocket_connected=connected,
+    )
+    session.add(agent)
+    session.commit()
+    inst = ProviderInstance(
+        agent_id=agent.id,
+        provider_definition_id=definition.id,
+        config_fingerprint=compute_config_fingerprint(config),
+    )
+    session.add(inst)
+    session.commit()
+    return str(agent.id), str(inst.id), definition.id
+
+
 def test_heal_helper_pushes_only_when_stale(monkeypatch) -> None:
     """Unit-level: the sweep/connect heal helper is cheap on a match and
     pushes on a mismatch (no live socket needed; send_command stubbed)."""
@@ -321,31 +360,21 @@ def test_heal_helper_pushes_only_when_stale(monkeypatch) -> None:
 
     from app.services import config_update as cu
 
-    machine = Machine(uid="heal-m", name="heal-machine")
-    definition = ProviderDefinition(
-        alias="heal-model",
-        provider_type="mock",
-        registration_token="heal-token",
-        backend_config={"delta_count": 1},
-    )
     with Session(engine) as s:
-        s.add_all([machine, definition])
-        s.commit()
-        definition_id = definition.id
-        inst = ProviderInstance(
-            machine_id=machine.id,
-            provider_definition_id=definition_id,
-            websocket_connected=True,
-            config_fingerprint=compute_config_fingerprint({"delta_count": 1}),
+        _agent_id, instance_id, _def_id = _seed_agent_instance(
+            s, uid="heal-m", config={"delta_count": 1}, connected=True
         )
-        s.add(inst)
-        s.commit()
-        instance_id = str(inst.id)
 
     calls: list[dict] = []
 
-    async def fake_send_command(inst_id, type_, payload, timeout=30.0):  # noqa: ARG001
-        calls.append({"instance": inst_id, "type": type_, "payload": dict(payload)})
+    async def fake_send_command(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        calls.append(
+            {
+                "instance": payload.get("instance_id"),
+                "type": type_,
+                "payload": dict(payload),
+            }
+        )
         return Frame(
             type="ack",
             payload={
@@ -374,58 +403,54 @@ def test_heal_helper_pushes_only_when_stale(monkeypatch) -> None:
             row = s.get(ProviderInstance, uuid.UUID(instance_id))
             assert row.config_fingerprint != "stale"
 
-        # Disconnected instance -> never pushed.
-        with Session(engine) as s:
-            row = s.get(ProviderInstance, uuid.UUID(instance_id))
-            row.config_fingerprint = "stale"
-            row.websocket_connected = False
-            s.add(row)
-            s.commit()
-        assert await cu.heal_stale_fingerprint(instance_id) is False
-        assert len(calls) == 1
-
     asyncio.run(run())
 
 
 def test_heal_targets_stale_instance_only(monkeypatch) -> None:
-    """SF-3: a heal pushes to the single stale instance, never the whole
+    """SF-3: a heal pushes to the single stale backend, never the whole
     definition fan-out (a current sibling must not be churned)."""
     import asyncio
 
     from app.services import config_update as cu
 
-    machine = Machine(uid="fan-m", name="fan-machine")
-    other = Machine(uid="fan-m2", name="fan-machine-2")
-    definition = ProviderDefinition(
-        alias="fan-model",
-        provider_type="mock",
-        registration_token="fan-token",
-        backend_config={"delta_count": 2},
-    )
     with Session(engine) as s:
-        s.add_all([machine, other, definition])
-        s.commit()
-        current_fp = compute_config_fingerprint({"delta_count": 2})
-        stale = ProviderInstance(
+        _a1, stale_id, _d1 = _seed_agent_instance(
+            s, uid="fan-m", config={"delta_count": 2}, connected=True
+        )
+    with Session(engine) as s:
+        # a second agent/backend on the SAME definition, current fingerprint
+        definition = (
+            s.query(ProviderDefinition)
+            .filter(ProviderDefinition.alias == "model-fan-m")
+            .first()
+        )
+        machine = s.query(Machine).filter(Machine.uid == "fan-m").first()
+        agent2 = ProviderAgent(
             machine_id=machine.id,
-            provider_definition_id=definition.id,
+            provider_type="mock",
+            agent_id="agent-fan-m-2",
             websocket_connected=True,
-            config_fingerprint="stale-fp",
         )
-        fresh = ProviderInstance(
-            machine_id=other.id,
-            provider_definition_id=definition.id,
-            websocket_connected=True,
-            config_fingerprint=current_fp,
-        )
-        s.add_all([stale, fresh])
+        s.add(agent2)
         s.commit()
-        stale_id, fresh_id = str(stale.id), str(fresh.id)
+        fresh = ProviderInstance(
+            agent_id=agent2.id,
+            provider_definition_id=definition.id,
+            config_fingerprint=compute_config_fingerprint({"delta_count": 2}),
+        )
+        s.add(fresh)
+        s.commit()
+        fresh_id = str(fresh.id)
+        # make the first backend stale
+        row = s.get(ProviderInstance, uuid.UUID(stale_id))
+        row.config_fingerprint = "stale-fp"
+        s.add(row)
+        s.commit()
 
     calls: list[str] = []
 
-    async def fake_send_command(inst_id, type_, payload, timeout=30.0):  # noqa: ARG001
-        calls.append(inst_id)
+    async def fake_send_command(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        calls.append(payload.get("instance_id"))
         return Frame(
             type="ack",
             payload={
@@ -438,7 +463,7 @@ def test_heal_targets_stale_instance_only(monkeypatch) -> None:
 
     async def run() -> None:
         assert await cu.heal_stale_fingerprint(stale_id) is True
-        # Only the stale instance got the push; the current sibling did not.
+        # Only the stale backend got the push; the current sibling did not.
         assert calls == [stale_id]
         # The now-current sibling heals to a no-op.
         assert await cu.heal_stale_fingerprint(fresh_id) is False
@@ -454,32 +479,21 @@ def test_heal_in_flight_guard_skips_duplicates(monkeypatch) -> None:
 
     from app.services import config_update as cu
 
-    machine = Machine(uid="g-m", name="guard-machine")
-    definition = ProviderDefinition(
-        alias="guard-model",
-        provider_type="mock",
-        registration_token="guard-token",
-        backend_config={"delta_count": 2},
-    )
     with Session(engine) as s:
-        s.add_all([machine, definition])
-        s.commit()
-        inst = ProviderInstance(
-            machine_id=machine.id,
-            provider_definition_id=definition.id,
-            websocket_connected=True,
-            config_fingerprint="stale-fp",
+        _agent_id, instance_id, _def_id = _seed_agent_instance(
+            s, uid="g-m", config={"delta_count": 2}, connected=True
         )
-        s.add(inst)
+        row = s.get(ProviderInstance, uuid.UUID(instance_id))
+        row.config_fingerprint = "stale-fp"
+        s.add(row)
         s.commit()
-        instance_id = str(inst.id)
 
     calls: list[str] = []
     release = asyncio.Event()
     first_started = asyncio.Event()
 
-    async def slow_send_command(inst_id, type_, payload, timeout=30.0):  # noqa: ARG001
-        calls.append(inst_id)
+    async def slow_send_command(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
+        calls.append(payload.get("instance_id"))
         first_started.set()
         await release.wait()
         return Frame(
@@ -495,7 +509,7 @@ def test_heal_in_flight_guard_skips_duplicates(monkeypatch) -> None:
     async def run() -> None:
         first = asyncio.create_task(cu.heal_stale_fingerprint(instance_id))
         await first_started.wait()
-        # Concurrent heal for the same instance: skipped by the guard.
+        # Concurrent heal for the same backend: skipped by the guard.
         assert await cu.heal_stale_fingerprint(instance_id) is False
         assert calls == [instance_id]  # exactly one push delivered
         release.set()
@@ -520,27 +534,16 @@ def test_heal_guard_cleared_on_exception(monkeypatch) -> None:
 
     from app.services import config_update as cu
 
-    machine = Machine(uid="x-m", name="x-machine")
-    definition = ProviderDefinition(
-        alias="x-model",
-        provider_type="mock",
-        registration_token="x-token",
-        backend_config={"delta_count": 2},
-    )
     with Session(engine) as s:
-        s.add_all([machine, definition])
-        s.commit()
-        inst = ProviderInstance(
-            machine_id=machine.id,
-            provider_definition_id=definition.id,
-            websocket_connected=True,
-            config_fingerprint="stale-fp",
+        _agent_id, instance_id, _def_id = _seed_agent_instance(
+            s, uid="x-m", config={"delta_count": 2}, connected=True
         )
-        s.add(inst)
+        row = s.get(ProviderInstance, uuid.UUID(instance_id))
+        row.config_fingerprint = "stale-fp"
+        s.add(row)
         s.commit()
-        instance_id = str(inst.id)
 
-    async def boom_send_command(inst_id, type_, payload, timeout=30.0):  # noqa: ARG001
+    async def boom_send_command(agent_id, type_, payload, timeout=30.0):  # noqa: ARG001
         raise RuntimeError("socket died mid-push")
 
     monkeypatch.setattr(cu.manager, "send_command", boom_send_command)
@@ -562,11 +565,7 @@ def test_patch_push_slower_than_idle_tx_timeout_still_200(
     Postgres killed the connection. The route now ends its transaction
     before awaiting (push_config_update_by_id) and re-reads after, so a
     slow push yields a correct 200 even when the underlying connection
-    dies mid-push.
-
-    Simulated by making the push abort this test process's route-side
-    pooled connections (connection-killing monkeypatch, mirroring the
-    server-side termination) while the provider acks ok."""
+    dies mid-push."""
     import asyncio
 
     from sqlmodel import select
@@ -577,32 +576,26 @@ def test_patch_push_slower_than_idle_tx_timeout_still_200(
     from app.services import config_update as cu
     from app.services.wire import Frame
 
-    # _make_stack seeds the machine + definition (token flow-token);
-    # _register then bootstraps the mock ProviderType (permissive schema)
-    # and leaves a CONNECTED instance — exactly what the push fans out to.
     _make_stack(session, backend_config={"delta_count": 3})
     reg = _register(client)
-    from sqlmodel import select as _select
-
     definition = session.exec(
-        _select(ProviderDefinition).where(
-            ProviderDefinition.id == uuid.UUID(reg["provider_definition"]["id"])
+        select(ProviderDefinition).where(
+            ProviderDefinition.id == uuid.UUID(_backend(reg)["definition"]["id"])
         )
     ).one()
-    # No real WS is opened here (send_command is monkeypatched below);
-    # mark the registered instance connected so the fan-out has a target.
-    instance = session.exec(
-        _select(ProviderInstance).where(
-            ProviderInstance.provider_definition_id == definition.id
-        )
+    # The registered agent is connected (WS connect happened in _register?
+    # No — registration marks registering; connect sets it). Mark the agent
+    # connected so the fan-out has a target.
+    agent = session.exec(
+        select(ProviderAgent).where(ProviderAgent.id == uuid.UUID(reg["agent_id"]))
     ).one()
-    instance.websocket_connected = True
-    session.add(instance)
+    agent.websocket_connected = True
+    session.add(agent)
     session.commit()
 
     slow_gate = asyncio.Event()
 
-    async def slow_send(instance_id, kind, payload, timeout=None):  # noqa: ARG001
+    async def slow_send(agent_id, kind, payload, timeout=None):  # noqa: ARG001
         # Simulate a >15s provider apply: hold the push while the
         # route's open transaction would idle out.
         await asyncio.wait_for(slow_gate.wait(), timeout=5)
@@ -633,8 +626,6 @@ def test_patch_push_slower_than_idle_tx_timeout_still_200(
 
     app.dependency_overrides[get_session] = killing_get_session
     try:
-        # Fire the PATCH in a thread; release the gate shortly after the
-        # push begins.
         import threading
 
         results_box: dict = {}
@@ -647,7 +638,6 @@ def test_patch_push_slower_than_idle_tx_timeout_still_200(
 
         t = threading.Thread(target=do_patch)
         t.start()
-        # Wait until the slow push is in flight, then let it proceed.
         in_flight = False
         for _ in range(100):
             if cu._push_in_flight:
@@ -659,7 +649,6 @@ def test_patch_push_slower_than_idle_tx_timeout_still_200(
         t.join(timeout=30)
         resp = results_box.get("resp")
         if resp is not None and resp.status_code != 200:
-            # Debug visibility: why did the PATCH fail?
             print("PATCH-DEBUG", resp.status_code, resp.text[:400])  # noqa: T201
 
     finally:
@@ -671,8 +660,6 @@ def test_patch_push_slower_than_idle_tx_timeout_still_200(
     expected = compute_config_fingerprint({"delta_count": 7})
     assert body["config_fingerprint"] == expected
     assert body["config_update_results"][0]["ok"] is True
-    # The ack-echoed fingerprint was persisted despite the killed route
-    # connection.
     session.expunge_all()
     inst = session.exec(
         select(ProviderInstance).where(

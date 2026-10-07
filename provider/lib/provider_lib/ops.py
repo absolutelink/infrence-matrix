@@ -18,19 +18,25 @@ drive a backend by hand instead of waiting for the scheduler to boot it:
   ``backend.restart``
       Drain-checked stop + start, honoring the same wait flag.
   ``provider.initialize``
-      The full re-provision: re-register over HTTP (fresh instance secret +
+      The full re-provision: re-register over HTTP (fresh agent secret +
       definition config), adopt the response, then drain-stop, boot
       (waiting through any engine download) and scrape ``list_models()``
       into a ``backend.metadata`` event. The slow part always runs in the
-      background. Re-registering is also how a Phase 14 shell definition
-      (``awaiting_config``) picks up an authored config when no
-      ``provider.config.update`` push ever landed.
+      background.
 
-Concurrency: one operator-driven transition at a time per instance. A
-second start/restart/initialize while one is in flight either JOINS it (a
-waiting scheduler boot must not fail because an operator clicked Start
-first) or NAKs ``boot_in_progress``, so a click is never silently
-duplicated into a redundant spawn.
+Phase 16 (H3): an agent may host several backends. ``install_backend_ops``
+accepts either a single ``BackendLifecycle`` (every package today) or a
+``BackendRegistry`` of them. Per-backend commands carry the target
+``instance_id``; the installed dispatcher resolves it to the correct hosted
+lifecycle. A single-backend agent routes any per-backend command to its one
+lifecycle; a multi-backend agent NAKs ``unknown_instance`` for an id it does
+not own rather than mis-serving a different backend.
+
+Concurrency: one operator-driven transition at a time per backend. A second
+start/restart/initialize while one is in flight either JOINS it (a waiting
+scheduler boot must not fail because an operator clicked Start first) or NAKs
+``boot_in_progress``, so a click is never silently duplicated into a redundant
+spawn.
 """
 
 from __future__ import annotations
@@ -43,6 +49,7 @@ from typing import Any
 from provider_lib.admin_client import AdminClient
 from provider_lib.backend import BackendLifecycle
 from provider_lib.config_update import RETRY_AFTER_SECONDS
+from provider_lib.registry import BackendRegistry, registry_from_lifecycle
 from provider_lib.wire import BackendStatusValue, Frame, InstanceStatusValue
 
 logger = logging.getLogger("provider.ops")
@@ -65,7 +72,8 @@ ReRegister = Callable[[], Awaitable["dict[str, Any] | None"]]
 
 
 class BackendOps:
-    """`backend.start` / `stop` / `restart` + `provider.initialize`."""
+    """`backend.start` / `stop` / `restart` + `provider.initialize` for ONE
+    backend lifecycle."""
 
     def __init__(
         self,
@@ -100,9 +108,6 @@ class BackendOps:
     async def on_start(self, frame: Frame) -> dict[str, Any]:
         """`backend.start` — blocking for the scheduler, accept-style for
         an operator (``wait_for_running: false``)."""
-        nak = await self._config_fence(frame)
-        if nak is not None:
-            return nak
         wait = bool((frame.payload or {}).get("wait_for_running", True))
         if self.busy:
             # Someone (operator or another boot) is already bringing the
@@ -137,9 +142,6 @@ class BackendOps:
 
     async def on_restart(self, frame: Frame) -> dict[str, Any]:
         """`backend.restart` — drain-checked stop + start."""
-        nak = await self._config_fence(frame)
-        if nak is not None:
-            return nak
         if self.busy:
             return self._nak("boot_in_progress", "restart")
         busy_nak = self._in_use_nak("restart")
@@ -183,14 +185,6 @@ class BackendOps:
         busy_nak = self._in_use_nak("initialize")
         if busy_nak is not None:
             return busy_nak
-        # A definition with no authored config stays put: the provider must
-        # never boot on defaults (the same Phase 14 fence as backend.start,
-        # reported as a successful no-op because refreshing the
-        # registration was still the right thing to do).
-        if await self._no_applied_config():
-            detail = self._detail()
-            detail.update({"accepted": True, "no_config": True})
-            return {"ok": True, "detail": detail}
         self._spawn("provider.initialize", self._stop_then_boot)
         if bool((frame.payload or {}).get("wait_for_running", False)):
             # The operator chose to wait for the whole re-provision
@@ -237,6 +231,8 @@ class BackendOps:
             "capacity": self._lifecycle.capacity,
             "backend_status": self._lifecycle.backend_status,
         }
+        if self._lifecycle.instance_id is not None:
+            detail["instance_id"] = self._lifecycle.instance_id
         for attr in _DETAIL_ATTRS:
             value = getattr(driver, attr, None)
             if value is not None:
@@ -285,21 +281,6 @@ class BackendOps:
             return self._nak("backend_in_use", step, in_flight=in_flight)
         return None
 
-    async def _no_applied_config(self) -> bool:
-        """True when the Phase 14 fence would NAK a boot (no config applied)."""
-        fence = getattr(self._client, "no_config_nak", None)
-        if fence is None:
-            return False
-        probe = Frame(type="backend.start", id="ops-fence-probe")
-        return (await fence(probe)) is not None
-
-    async def _config_fence(self, frame: Frame) -> dict[str, Any] | None:
-        """Phase 14: NAK a boot with no applied config (delegated)."""
-        fence = getattr(self._client, "no_config_nak", None)
-        if fence is None:
-            return None
-        return await fence(frame)
-
     # ------------------------------------------------------------------
     # Events
     # ------------------------------------------------------------------
@@ -309,7 +290,9 @@ class BackendOps:
         Best-effort: discovery must never fail a boot that already
         succeeded (mirrors `provider.config.update` step 9). The payload is
         the DB shape (`{"models": [...]}`) so the admin can store it
-        verbatim.
+        verbatim. Phase 16 (H1): stamp the owning ``instance_id`` so the
+        admin keys the metadata to the right backend (frames without it are
+        dropped).
         """
         list_models = getattr(self._lifecycle.driver, "list_models", None)
         if list_models is None:
@@ -321,7 +304,10 @@ class BackendOps:
             return
         if not models:
             return
-        await self._client.send_event("backend.metadata", {"models": models})
+        payload: dict[str, Any] = {"models": models}
+        if self._lifecycle.instance_id is not None:
+            payload["instance_id"] = self._lifecycle.instance_id
+        await self._client.send_event("backend.metadata", payload)
 
     async def _emit_provider_status(
         self, instance_status: str, reason: str | None = None
@@ -335,38 +321,83 @@ class BackendOps:
         await self._client.send_event("provider.status", payload)
 
 
+def _unknown_instance_nak(frame: Frame, step: str) -> dict[str, Any]:
+    iid = (frame.payload or {}).get("instance_id")
+    return {
+        "ok": False,
+        "error": "unknown_instance",
+        "detail": {"step": step, "instance_id": iid},
+    }
+
+
 def install_backend_ops(
     client: AdminClient,
-    lifecycle: BackendLifecycle,
+    lifecycle_or_registry: BackendLifecycle | BackendRegistry,
     *,
     backend_name: str,
     re_register: ReRegister | None = None,
-) -> BackendOps:
+) -> BackendOps | None:
     """Register the operator-driven lifecycle commands on `client`.
+
+    Accepts a single ``BackendLifecycle`` (the common case) or a
+    ``BackendRegistry`` of several. The installed dispatcher routes each
+    per-backend command to the correct lifecycle by ``instance_id`` (H3).
 
     `re_register` is provider-supplied — only the provider package knows
     its type, version, port, hardware report and schema. It must POST
-    `/admin/api/providers/register` (which mints a fresh instance secret
-    and rewrites `CACHE_DIR/provider_config.json`) and adopt the response
-    into the lifecycle/driver (capacity + `backend_config` + applied
+    `/admin/api/providers/register` (which mints a fresh agent secret and
+    rewrites `CACHE_DIR/provider_config.json`) and adopt the response into
+    the lifecycle/driver (capacity + `backend_config` + applied
     fingerprint), returning the response's `provider_definition` or None.
     The live WebSocket is deliberately NOT recycled: the new secret is for
     future reconnects, while this socket — already authenticated, still at
     the current epoch — keeps carrying the status events the operator is
     watching.
 
-    The Phase 14 shell fence is read off the client per command (installed
-    by `provider_lib.config_update.install_config_handlers`), so install
-    order does not matter.
+    Returns the single ``BackendOps`` when exactly one backend is hosted
+    (backward-compat for callers that await `.busy` / `.join()`), else None.
     """
-    ops = BackendOps(
-        client, lifecycle, backend_name=backend_name, re_register=re_register
+    registry = (
+        lifecycle_or_registry
+        if isinstance(lifecycle_or_registry, BackendRegistry)
+        else registry_from_lifecycle(lifecycle_or_registry)
     )
-    client.on_command("backend.start", ops.on_start)
-    client.on_command("backend.stop", ops.on_stop)
-    client.on_command("backend.restart", ops.on_restart)
-    client.on_command("provider.initialize", ops.on_initialize)
-    return ops
+    ops_by_handle: dict[int, BackendOps] = {}
+    for handle in registry.handles():
+        ops_by_handle[id(handle)] = BackendOps(
+            client,
+            handle.lifecycle,
+            backend_name=backend_name,
+            re_register=re_register,
+        )
+
+    def _target(frame: Frame) -> BackendOps | None:
+        # H3 hardening: a named instance_id must match a backend this agent
+        # actually hosts (by handle key or its live lifecycle.instance_id).
+        # A foreign id is NOT passed through to the sole backend — that would
+        # silently mis-serve. Absent id -> the sole backend (single-agent
+        # convenience); ambiguous on multi-backend -> None -> NAK.
+        iid = (frame.payload or {}).get("instance_id")
+        handle = registry.resolve_target(str(iid) if iid is not None else None)
+        return ops_by_handle.get(id(handle)) if handle is not None else None
+
+    async def _dispatch(frame: Frame, method: str, step: str) -> dict[str, Any]:
+        ops = _target(frame)
+        if ops is None:
+            return _unknown_instance_nak(frame, step)
+        return await getattr(ops, method)(frame)
+
+    client.on_command("backend.start", lambda f: _dispatch(f, "on_start", "start"))
+    client.on_command("backend.stop", lambda f: _dispatch(f, "on_stop", "stop"))
+    client.on_command(
+        "backend.restart", lambda f: _dispatch(f, "on_restart", "restart")
+    )
+    client.on_command(
+        "provider.initialize", lambda f: _dispatch(f, "on_initialize", "initialize")
+    )
+    if len(ops_by_handle) == 1:
+        return next(iter(ops_by_handle.values()))
+    return None
 
 
 __all__ = ["BackendOps", "install_backend_ops"]

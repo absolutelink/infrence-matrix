@@ -1,16 +1,19 @@
 """Phase 13 log ingest + read store (Redis-only).
 
 Consumes batched ``backend.logs`` / ``provider.logs`` events from the
-provider WS and appends them to capped Redis lists:
+provider WS and appends them to capped Redis lists (Phase 16: backend logs
+are per-backend, keyed by ``instance_id``; provider logs are per-container,
+keyed by ``agent_id``; the shared ingest cursor is keyed by ``agent_id`` so a
+single ``kind=all`` merge orders correctly across both lists):
 
   im:logs:backend:{instance_id}   List of JSON entries, newest LEFT
-  im:logs:provider:{instance_id}  same shape
-  im:logs:seq:{instance_id}       shared monotonic ingest counter (INCR)
+  im:logs:provider:{agent_id}     same shape
+  im:logs:seq:{agent_id}          shared monotonic ingest counter (INCR)
   im:logs:dropped:{kind}:{id}     latest provider-reported drop counter
 
 Entry shape (stored JSON): ``{"seq": int, "ts": iso, "stream": str,
 "text": str}``. ``seq`` is assigned at ingest via ``INCR
-im:logs:seq:{instance_id}`` — shared across both kinds — so a single
+im:logs:seq:{agent_id}`` — shared across both kinds on one agent — so a single
 cursor orders ``kind=all`` merges correctly across LPUSH lists (list
 index would not survive interleaving between the two lists).
 
@@ -95,25 +98,36 @@ def normalize_log_batch(payload: Any) -> tuple[list[dict[str, Any]], int]:
     return [e for e in normalized if e["text"]], dropped
 
 
-async def ingest_log_batch(app: Any, instance_id: str, kind: str, payload: Any) -> None:
-    """Append one batched log event to the instance's Redis list.
+async def ingest_log_batch(
+    app: Any,
+    source_id: str,
+    kind: str,
+    payload: Any,
+    *,
+    seq_id: str | None = None,
+) -> None:
+    """Append one batched log event to the source's Redis list.
 
-    ``kind`` is ``"backend"`` or ``"provider"``. Best-effort: Redis
-    errors are logged (at the admin's own logger, never re-ingested)
-    and swallowed.
+    ``kind`` is ``"backend"`` or ``"provider"``. ``source_id`` keys the list
+    (``instance_id`` for backend logs, ``agent_id`` for provider logs);
+    ``seq_id`` keys the shared monotonic cursor and defaults to ``source_id``
+    (the caller passes the ``agent_id`` so backend + provider logs on one
+    container interleave under a single cursor). Best-effort: Redis errors are
+    logged (at the admin's own logger, never re-ingested) and swallowed.
     """
     entries, dropped = normalize_log_batch(payload)
     if kind not in (KIND_BACKEND, KIND_PROVIDER):
         return
+    seq_id = seq_id or source_id
     try:
         redis_client = get_redis_from_app(app)
         list_key = (
-            redis_keys.logs_backend_key(instance_id)
+            redis_keys.logs_backend_key(source_id)
             if kind == KIND_BACKEND
-            else redis_keys.logs_provider_key(instance_id)
+            else redis_keys.logs_provider_key(source_id)
         )
         if entries:
-            seq_key = redis_keys.logs_seq_key(instance_id)
+            seq_key = redis_keys.logs_seq_key(seq_id)
             start = await redis_client.incrby(seq_key, len(entries))
             # 1-based seq: `since=0` (the default) means "everything".
             base = start - len(entries)
@@ -125,7 +139,7 @@ async def ingest_log_batch(app: Any, instance_id: str, kind: str, payload: Any) 
             pipe.expire(list_key, redis_keys.LOGS_TTL_SECONDS)
             if dropped:
                 pipe.set(
-                    redis_keys.logs_dropped_key(instance_id, kind),
+                    redis_keys.logs_dropped_key(source_id, kind),
                     dropped,
                     ex=redis_keys.LOGS_TTL_SECONDS,
                 )
@@ -134,13 +148,13 @@ async def ingest_log_batch(app: Any, instance_id: str, kind: str, payload: Any) 
             await pipe.execute()
         elif dropped:
             await redis_client.set(
-                redis_keys.logs_dropped_key(instance_id, kind),
+                redis_keys.logs_dropped_key(source_id, kind),
                 dropped,
                 ex=redis_keys.LOGS_TTL_SECONDS,
             )
     except Exception:  # noqa: BLE001 - logs are best-effort
         logger.warning(
-            "log ingest failed (kind=%s instance=%s)", kind, instance_id, exc_info=True
+            "log ingest failed (kind=%s source=%s)", kind, source_id, exc_info=True
         )
 
 
@@ -151,8 +165,12 @@ async def read_logs(
     kind: str = KIND_BACKEND,
     since: int = 0,
     limit: int = 500,
+    provider_id: str | None = None,
 ) -> dict[str, Any]:
     """Read the tail for a kind with the monotonic-seq cursor.
+
+    ``instance_id`` keys the backend list; ``provider_id`` (the owning
+    ``agent_id``) keys the provider list and defaults to ``instance_id``.
 
     Returns ``{"entries": [ {seq, ts, stream, text} ... ] (newest
     first), "cursor": int, "dropped": int, "gap": bool, "oldest_seq":
@@ -173,20 +191,34 @@ async def read_logs(
     ack (assigned by the provider's shared ``SeqCounter``). Clients must
     never mix the two cursors.
     """
-    list_keys: list[str] = []
-    dropped_kinds: list[str] = []
+    provider_id = provider_id or instance_id
+    # (list_key, dropped_key) pairs per requested kind.
+    key_pairs: list[tuple[str, str]] = []
     if kind == KIND_ALL:
-        list_keys = [
-            redis_keys.logs_backend_key(instance_id),
-            redis_keys.logs_provider_key(instance_id),
+        key_pairs = [
+            (
+                redis_keys.logs_backend_key(instance_id),
+                redis_keys.logs_dropped_key(instance_id, KIND_BACKEND),
+            ),
+            (
+                redis_keys.logs_provider_key(provider_id),
+                redis_keys.logs_dropped_key(provider_id, KIND_PROVIDER),
+            ),
         ]
-        dropped_kinds = [KIND_BACKEND, KIND_PROVIDER]
     elif kind == KIND_BACKEND:
-        list_keys = [redis_keys.logs_backend_key(instance_id)]
-        dropped_kinds = [KIND_BACKEND]
+        key_pairs = [
+            (
+                redis_keys.logs_backend_key(instance_id),
+                redis_keys.logs_dropped_key(instance_id, KIND_BACKEND),
+            )
+        ]
     elif kind == KIND_PROVIDER:
-        list_keys = [redis_keys.logs_provider_key(instance_id)]
-        dropped_kinds = [KIND_PROVIDER]
+        key_pairs = [
+            (
+                redis_keys.logs_provider_key(provider_id),
+                redis_keys.logs_dropped_key(provider_id, KIND_PROVIDER),
+            )
+        ]
     else:
         raise ValueError(f"unknown log kind: {kind!r}")
 
@@ -194,17 +226,18 @@ async def read_logs(
     # ``unseen_total`` is the honest count of everything with
     # seq > since, not just what fits a narrow over-fetch window.
     pipe = redis_client.pipeline()
-    for key in list_keys:
-        pipe.lrange(key, 0, -1)
+    for list_key, _dropped_key in key_pairs:
+        pipe.lrange(list_key, 0, -1)
         # Tail of the list = oldest retained entry (for gap detection).
-        pipe.lrange(key, -1, -1)
-    for dk in dropped_kinds:
-        pipe.get(redis_keys.logs_dropped_key(instance_id, dk))
+        pipe.lrange(list_key, -1, -1)
+    for _list_key, dropped_key in key_pairs:
+        pipe.get(dropped_key)
     results = await pipe.execute()
 
-    raw_lists = results[0 : len(list_keys) * 2 : 2]
-    oldest_raws = results[1 : len(list_keys) * 2 : 2]
-    dropped_values = results[len(list_keys) * 2 :]
+    n = len(key_pairs)
+    raw_lists = results[0 : n * 2 : 2]
+    oldest_raws = results[1 : n * 2 : 2]
+    dropped_values = results[n * 2 :]
     dropped = sum(int(v) for v in dropped_values if v is not None)
 
     oldest_seqs: list[int] = []

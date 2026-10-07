@@ -6,6 +6,10 @@ JSON Schema. The autouse fixture below seeds the known types with a
 permissive schema so the Phase 9 push/CRUD semantics stay the focus of
 these tests; the schema-validation specifics are covered in
 ``test_provider_types.py``.
+
+Phase 16: shells and ``registration_token`` are gone — ``provider_type`` +
+``backend_config`` are required at create, and a config push addresses the
+owning **agent** socket carrying the target ``instance_id``.
 """
 
 import uuid
@@ -20,6 +24,7 @@ from app.models import (
     Machine,
     ProviderAgent,
     ProviderDefinition,
+    ProviderInstance,
     ProviderType,
 )
 from app.services.hashing import canonical_json_sha256
@@ -67,19 +72,49 @@ def _create(client: TestClient, **overrides) -> dict:
     return resp.json()
 
 
-def test_create_returns_fingerprint_and_token(client: TestClient) -> None:
+def _connected_backend(
+    session: Session, definition_id: str, *, connected: bool = True
+) -> tuple[str, str]:
+    """Attach an agent + one backend to a definition; returns
+    (agent_id, instance_id)."""
+    machine = Machine(
+        uid=f"m-{uuid.uuid4().hex[:8]}",
+        name=f"m-{uuid.uuid4().hex[:8]}",
+        registration_secret="s",
+    )
+    session.add(machine)
+    session.commit()
+    agent = ProviderAgent(
+        machine_id=machine.id,
+        provider_type="mock",
+        agent_id=f"ag-{uuid.uuid4().hex[:8]}",
+        websocket_connected=connected,
+    )
+    session.add(agent)
+    session.commit()
+    instance = ProviderInstance(
+        agent_id=agent.id,
+        provider_definition_id=uuid.UUID(definition_id),
+        config_fingerprint=compute_config_fingerprint({"delta_count": 3}),
+    )
+    session.add(instance)
+    session.commit()
+    return str(agent.id), str(instance.id)
+
+
+def test_create_returns_fingerprint(client: TestClient) -> None:
     created = _create(client)
     assert created["alias"] == "def-model"
     assert created["config_fingerprint"] == compute_config_fingerprint(
         {"delta_count": 3}
     )
-    # Auto-generated registration token (copyable into provider env).
-    assert len(created["registration_token"]) >= 16
+    assert created["provider_type"] == "mock"
 
 
-def test_create_explicit_registration_token(client: TestClient) -> None:
-    created = _create(client, registration_token="my-token")
-    assert created["registration_token"] == "my-token"
+def test_create_requires_provider_type(client: TestClient) -> None:
+    """Phase 16: no shells — provider_type is required at create."""
+    resp = client.post("/admin/api/definitions", json={"alias": "x"})
+    assert resp.status_code == 422
 
 
 def test_create_rejects_unknown_provider_type(client: TestClient) -> None:
@@ -109,7 +144,8 @@ def test_create_rejects_negative_vram(client: TestClient) -> None:
 def test_create_alias_conflict(client: TestClient) -> None:
     _create(client, alias="taken")
     resp = client.post(
-        "/admin/api/definitions", json={"alias": "taken", "provider_type": "mock"}
+        "/admin/api/definitions",
+        json={"alias": "taken", "provider_type": "mock", "backend_config": {}},
     )
     assert resp.status_code == 409
 
@@ -146,30 +182,20 @@ def test_get_list_and_delete(client: TestClient, session: Session) -> None:
 def test_patch_backend_config_triggers_push(
     client: TestClient, session: Session, monkeypatch
 ) -> None:
-    """backend_config change pushes provider.config.update to connected
-    instances and the DB fingerprint updates on the ok ack."""
-    from app.models import Machine, ProviderInstance
+    """backend_config change pushes provider.config.update to the connected
+    backend (addressed to its agent) and the DB fingerprint updates on the
+    ok ack."""
     from app.services import config_update as cu
     from app.services.wire import Frame
 
-    machine = Machine(uid="cu-mach", name="cu-machine")
-    session.add(machine)
     created = _create(client, alias="push-model")
     definition_id = created["id"]
-    instance = ProviderInstance(
-        machine_id=machine.id,
-        provider_definition_id=uuid.UUID(definition_id),
-        websocket_connected=True,
-        config_fingerprint=created["config_fingerprint"],
-    )
-    session.add(instance)
-    session.commit()
-    instance_id = str(instance.id)
+    agent_id, instance_id = _connected_backend(session, definition_id)
 
     sent: list[tuple[str, dict]] = []
 
-    async def fake_send_command(inst_id, type_, payload, timeout=30.0):  # noqa: ARG001
-        sent.append((inst_id, dict(payload)))
+    async def fake_send_command(aid, type_, payload, timeout=30.0):  # noqa: ARG001
+        sent.append((aid, dict(payload)))
         return Frame(
             type="ack",
             payload={
@@ -193,7 +219,8 @@ def test_patch_backend_config_triggers_push(
     new_fp = compute_config_fingerprint({"delta_count": 9})
     assert body["config_fingerprint"] == new_fp
     assert len(sent) == 1
-    assert sent[0][0] == instance_id
+    assert sent[0][0] == agent_id
+    assert sent[0][1]["instance_id"] == instance_id
     assert sent[0][1]["backend_config"] == {"delta_count": 9}
     assert sent[0][1]["config_fingerprint"] == new_fp
     assert sent[0][1]["capacity"] == 1
@@ -215,20 +242,10 @@ def test_patch_backend_config_triggers_push(
 def test_patch_non_config_fields_do_not_push(
     client: TestClient, session: Session, monkeypatch
 ) -> None:
-    from app.models import Machine, ProviderInstance
     from app.services import config_update as cu
 
-    machine = Machine(uid="nc-mach", name="nc-machine")
-    session.add(machine)
     created = _create(client, alias="nc-model")
-    instance = ProviderInstance(
-        machine_id=machine.id,
-        provider_definition_id=uuid.UUID(created["id"]),
-        websocket_connected=True,
-        config_fingerprint=created["config_fingerprint"],
-    )
-    session.add(instance)
-    session.commit()
+    _connected_backend(session, created["id"])
 
     calls: list = []
 
@@ -256,27 +273,16 @@ def test_patch_capacity_only_triggers_push(
 ) -> None:
     """SF-2: capacity is enforced at the provider, so a capacity-only
     PATCH (fingerprint unchanged) must push config.update."""
-    from app.models import Machine, ProviderInstance
     from app.services import config_update as cu
     from app.services.wire import Frame
 
-    machine = Machine(uid="cap-mach", name="cap-machine")
-    session.add(machine)
     created = _create(client, alias="cap-model", capacity=1)
-    instance = ProviderInstance(
-        machine_id=machine.id,
-        provider_definition_id=uuid.UUID(created["id"]),
-        websocket_connected=True,
-        config_fingerprint=created["config_fingerprint"],
-    )
-    session.add(instance)
-    session.commit()
-    instance_id = str(instance.id)
+    agent_id, instance_id = _connected_backend(session, created["id"])
 
     sent: list[tuple[str, dict]] = []
 
-    async def fake_send_command(inst_id, type_, payload, timeout=30.0):  # noqa: ARG001
-        sent.append((inst_id, dict(payload)))
+    async def fake_send_command(aid, type_, payload, timeout=30.0):  # noqa: ARG001
+        sent.append((aid, dict(payload)))
         return Frame(
             type="ack",
             payload={
@@ -300,7 +306,8 @@ def test_patch_capacity_only_triggers_push(
     body = resp.json()
     assert body["capacity"] == 4
     assert len(sent) == 1
-    assert sent[0][0] == instance_id
+    assert sent[0][0] == agent_id
+    assert sent[0][1]["instance_id"] == instance_id
     # Same fingerprint, new capacity in the pushed payload.
     assert sent[0][1]["config_fingerprint"] == created["config_fingerprint"]
     assert sent[0][1]["capacity"] == 4
@@ -311,9 +318,8 @@ def test_patch_capacity_only_triggers_push(
 def test_patch_explicit_null_on_required_fields_is_422(
     client: TestClient, session: Session, monkeypatch
 ) -> None:
-    """SF-4 + Phase 14: explicit null on a NOT NULL column or on the
-    shell-nullable fields (once set) -> clear 422, never a 409
-    IntegrityError or a crash."""
+    """SF-4 + Phase 16: explicit null on a NOT NULL column -> clear 422,
+    never a 409 IntegrityError or a crash."""
     from app.services import config_update as cu
 
     created = _create(client, alias="null-model")
@@ -323,15 +329,15 @@ def test_patch_explicit_null_on_required_fields_is_422(
 
     monkeypatch.setattr(cu.manager, "send_command", no_send)
 
-    for field in ("alias", "registration_token", "capacity"):
+    for field in ("alias", "capacity"):
         resp = client.patch(
             f"/admin/api/definitions/{created['id']}", json={field: None}
         )
         assert resp.status_code == 422, (field, resp.text)
         assert "cannot be null" in str(resp.json()["detail"]), field
 
-    # Phase 14: provider_type/backend_config are nullable columns, but a
-    # definition never returns to the shell state → the same 422.
+    # Phase 16: provider_type/backend_config are NOT NULL (no shells) → the
+    # same 422.
     for field in ("provider_type", "backend_config"):
         resp = client.patch(
             f"/admin/api/definitions/{created['id']}", json={field: None}
@@ -352,18 +358,8 @@ def test_patch_provider_type_refused_with_instances_attached(
 ) -> None:
     """N-3: changing provider_type while instances are attached breaks
     their binding -> 409."""
-    from app.models import Machine, ProviderInstance
-
-    machine = Machine(uid="pt-mach", name="pt-machine")
-    session.add(machine)
     created = _create(client, alias="pt-model", provider_type="mock")
-    instance = ProviderInstance(
-        machine_id=machine.id,
-        provider_definition_id=uuid.UUID(created["id"]),
-        websocket_connected=False,
-    )
-    session.add(instance)
-    session.commit()
+    _connected_backend(session, created["id"], connected=False)
 
     resp = client.patch(
         f"/admin/api/definitions/{created['id']}",
@@ -425,173 +421,22 @@ def test_backend_config_serialization_validation(session: Session) -> None:
 def test_delete_refused_when_connected_instance(
     client: TestClient, session: Session
 ) -> None:
-    from app.models import Machine, ProviderInstance
-
-    machine = Machine(uid="dl-mach", name="dl-machine")
-    session.add(machine)
     created = _create(client, alias="dl-model")
-    instance = ProviderInstance(
-        machine_id=machine.id,
-        provider_definition_id=uuid.UUID(created["id"]),
-        websocket_connected=True,
-    )
-    session.add(instance)
-    session.commit()
+    agent_id, instance_id = _connected_backend(session, created["id"], connected=True)
 
     resp = client.delete(f"/admin/api/definitions/{created['id']}")
     assert resp.status_code == 409
     assert "enabled=false" in resp.json()["detail"]
 
-    # Disconnect the instance -> delete allowed.
-    instance.websocket_connected = False
-    session.add(instance)
+    # Disconnect the agent -> delete allowed.
+    agent = session.get(ProviderAgent, uuid.UUID(agent_id))
+    agent.websocket_connected = False
+    session.add(agent)
     session.commit()
     resp = client.delete(f"/admin/api/definitions/{created['id']}")
     assert resp.status_code == 200
-
-
-# ============================================================================
-# Phase 14 — shell definitions
-# ============================================================================
-
-
-def test_create_shell_definition(client: TestClient) -> None:
-    """A definition with no provider_type/backend_config is a shell: null
-    type/config/fingerprint, schedulable machinery untouched."""
-    resp = client.post(
-        "/admin/api/definitions", json={"alias": "shell-model", "capacity": 2}
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["provider_type"] is None
-    assert body["backend_config"] is None
-    assert body["config_fingerprint"] is None
-    assert len(body["registration_token"]) >= 16
-
-
-def test_create_shell_with_backend_config_is_422(client: TestClient) -> None:
-    """No type → no schema to validate against → refuse config (never
-    store unvalidatable config)."""
-    resp = client.post(
-        "/admin/api/definitions",
-        json={"alias": "sh-cfg", "backend_config": {"delta_count": 3}},
-    )
-    assert resp.status_code == 422
-    assert "backend_config" in str(resp.json()["detail"])
-
-
-def test_create_shell_with_provider_type_wants_type_registered(
-    client: TestClient,
-) -> None:
-    resp = client.post(
-        "/admin/api/definitions", json={"alias": "sh-bad", "provider_type": "ghost"}
-    )
-    assert resp.status_code == 422
-    assert "unknown provider_type" in str(resp.json()["detail"])
-
-
-def test_patch_config_onto_shell_validates_and_pushes(
-    client: TestClient, monkeypatch
-) -> None:
-    """shell → configured: the PATCH validates against the (adopted or
-    set) type's committed schema and fires the standard push; config may
-    not be written while the definition is still untyped."""
-    from app.services import config_update as cu
-
-    created = client.post("/admin/api/definitions", json={"alias": "shell-push"}).json()
-
-    async def no_send(*args, **kwargs):  # noqa: ARG001
-        raise AssertionError("must not push without a type")
-
-    monkeypatch.setattr(cu.manager, "send_command", no_send)
-    resp = client.patch(
-        f"/admin/api/definitions/{created['id']}",
-        json={"backend_config": {"delta_count": 3}},
-    )
-    assert resp.status_code == 422
-
-    # Set the type first (operator path; no instances attached), then
-    # config validates + pushes (no connected instances → empty results).
-    resp = client.patch(
-        f"/admin/api/definitions/{created['id']}",
-        json={"provider_type": "mock"},
-    )
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["provider_type"] == "mock"
-
-    async def ok_send(instance_id, kind, payload, timeout=None):  # noqa: ARG001
-        from app.services.wire import Frame
-
-        return Frame(
-            type="ack",
-            payload={
-                "ok": True,
-                "detail": {
-                    "config_fingerprint": compute_config_fingerprint({"delta_count": 3})
-                },
-            },
-        )
-
-    monkeypatch.setattr(cu.manager, "send_command", ok_send)
-    resp = client.patch(
-        f"/admin/api/definitions/{created['id']}",
-        json={"backend_config": {"delta_count": 3}},
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["backend_config"] == {"delta_count": 3}
-    assert body["config_fingerprint"] == compute_config_fingerprint({"delta_count": 3})
-
-    # No going back: explicit nulls are refused once set.
-    for field in ("provider_type", "backend_config"):
-        resp = client.patch(
-            f"/admin/api/definitions/{created['id']}", json={field: None}
-        )
-        assert resp.status_code == 422
-
-
-def test_shell_type_only_patch_never_pushes(
-    client: TestClient, monkeypatch, session: Session
-) -> None:
-    """A capacity-only PATCH on a still-shell definition (type set, config
-    still null) must NOT fabricate a push with the hash of {}."""
-    from app.services import config_update as cu
-
-    created = client.post("/admin/api/definitions", json={"alias": "shell-cap"}).json()
     session.expunge_all()
-    row = session.get(ProviderDefinition, uuid.UUID(created["id"]))
-    row.provider_type = "mock"
-    session.add(row)
-    session.commit()
-
-    async def no_send(*args, **kwargs):  # noqa: ARG001
-        raise AssertionError("shell must not be pushed")
-
-    monkeypatch.setattr(cu.manager, "send_command", no_send)
-    resp = client.patch(f"/admin/api/definitions/{created['id']}", json={"capacity": 3})
-    assert resp.status_code == 200
-    assert resp.json()["config_fingerprint"] is None
-
-
-def test_patch_shell_type_and_config_same_request(
-    client: TestClient,
-) -> None:
-    """Phase 14 spec item B: a single PATCH may both type the shell and
-    author the config (validated against that newly-set type's schema,
-    then pushed)."""
-    created = client.post(
-        "/admin/api/definitions", json={"alias": "shell-one-shot"}
-    ).json()
-
-    resp = client.patch(
-        f"/admin/api/definitions/{created['id']}",
-        json={"provider_type": "mock", "backend_config": {"delta_count": 3}},
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["provider_type"] == "mock"
-    assert body["backend_config"] == {"delta_count": 3}
-    assert body["config_fingerprint"] == compute_config_fingerprint({"delta_count": 3})
+    assert session.get(ProviderInstance, uuid.UUID(instance_id)) is None
 
 
 # --- Phase 16: definition placement (additive) -----------------------------
@@ -732,3 +577,73 @@ def test_patch_placement_to_specific_then_back(
         )
     ).all()
     assert links == []
+
+
+# --- Phase 16 review: placement type-match (M1) + stale prune (M2) ----------
+
+
+def test_create_specific_agent_type_mismatch_422(
+    client: TestClient, session: Session
+) -> None:
+    """M1: a llama-cpp agent cannot host a mock definition (create)."""
+    gufo_agent = _seed_agent(session, provider_type="gufo")
+    resp = client.post(
+        "/admin/api/definitions",
+        json={
+            "alias": "mismatch-create",
+            "provider_type": "mock",
+            "backend_config": {"delta_count": 1},
+            "agent_placement": "specific",
+            "agents": [str(gufo_agent.id)],
+        },
+    )
+    assert resp.status_code == 422
+    assert "does not match" in resp.json()["detail"]
+
+
+def test_patch_specific_agent_type_mismatch_422(
+    client: TestClient, session: Session
+) -> None:
+    """M1: the same guard applies on PATCH."""
+    created = _create(client, alias="mismatch-patch")
+    gufo_agent = _seed_agent(session, provider_type="gufo")
+    resp = client.patch(
+        f"/admin/api/definitions/{created['id']}",
+        json={"agent_placement": "specific", "agents": [str(gufo_agent.id)]},
+    )
+    assert resp.status_code == 422
+    assert "does not match" in resp.json()["detail"]
+
+
+def test_patch_placement_prunes_stale_backend(
+    client: TestClient, session: Session
+) -> None:
+    """M2: moving a definition's specific placement off agent A deletes A's
+    now-ghost backend row."""
+    created = _create(client, alias="prune-me")
+    def_id = uuid.UUID(created["id"])
+    agent_a = _seed_agent(session)
+    agent_b = _seed_agent(session)
+    ghost = ProviderInstance(
+        agent_id=agent_a.id,
+        provider_definition_id=def_id,
+        port=agent_a.base_port,
+    )
+    session.add(ghost)
+    session.commit()
+    ghost_id = ghost.id
+
+    resp = client.patch(
+        f"/admin/api/definitions/{created['id']}",
+        json={"agent_placement": "specific", "agents": [str(agent_b.id)]},
+    )
+    assert resp.status_code == 200, resp.text
+    session.expire_all()
+    assert session.get(ProviderInstance, ghost_id) is None
+    # agent B has no instance yet (it never registered) — nothing created.
+    remaining = session.exec(
+        select(ProviderInstance).where(
+            ProviderInstance.provider_definition_id == def_id
+        )
+    ).all()
+    assert remaining == []

@@ -1,18 +1,26 @@
-"""Admin provider registration API.
+"""Admin provider **agent** registration API (Phase 16).
 
 POST /admin/api/providers/register
 
-A provider container calls this at startup with its machine uid and the
-registration token of the ProviderDefinition it serves. The admin validates
-the binding (token -> definition -> provider_type, machine pre-created by
-the operator, exact version match) and upserts the ProviderInstance row.
+A provider agent container calls this at startup. It authenticates with the
+shared ``Machine.registration_secret`` (no per-definition token any more) and
+identifies itself as a ``(machine_uid, provider_type, agent_id)`` triple. The
+admin:
 
-The per-instance WebSocket secret is returned exactly once here and stored
-in Redis under ``im:ws:secret:{instance_id}`` (trusted-LAN design: the
-plaintext secret deliberately does NOT go into Postgres). The provider then
-dials /provider/ws with ``Authorization: Bearer <secret>``.
+  * validates the machine secret and the exact version match,
+  * upserts the ``ProviderAgent`` row (container-level state),
+  * runs the Phase 12 schema-consensus gate against the fleet of agents of
+    this type,
+  * resolves the definitions *placed* on this agent (``agent_placement``:
+    every enabled definition of the type for ``any_of_type``, or the
+    cherry-picked set for ``specific``) and upserts one ``ProviderInstance``
+    per placed definition, assigning each a port ``base_port + offset``,
+  * mints a single per-agent WebSocket secret (stored in Redis under
+    ``im:ws:secret:{agent_id}``) that authorizes the one socket the agent
+    multiplexes all its backends over.
 
-See docs/ws-protocol.md for the full handshake.
+The response returns the agent id/secret plus the list of backends (instance
+id + definition + port) the agent is responsible for. See docs/ws-protocol.md.
 """
 
 import json
@@ -33,42 +41,43 @@ from app.core.db import get_session
 from app.core.redis import get_redis
 from app.models import (
     Machine,
+    ProviderAgent,
     ProviderDefinition,
     ProviderInstance,
     ProviderType,
 )
 from app.services import redis_keys
 from app.services.hashing import canonical_json_sha256
+from app.services.wire import BackendStatusValue
 
 logger = logging.getLogger("admin.providers")
 
 router = APIRouter(prefix="/admin/api/providers", tags=["admin"])
 
-# Instance secrets live in Redis until the provider connects and rotates;
-# a long TTL keeps orphans from accumulating forever.
+# Agent secrets live in Redis until the agent connects and rotates; a long TTL
+# keeps orphans from accumulating forever.
 SECRET_TTL_SECONDS = 30 * 24 * 3600
 
 
 class RegistrationRequest(BaseModel):
     """Body sent by provider_lib.admin_client.AdminClient.register().
 
-    ``schema`` (Phase 12) is the provider package's committed
-    ``schema.json`` (JSON Schema 2020-12 for this type's
-    ``backend_config``). The admin derives the fingerprint itself; the
-    provider never sends it separately.
+    ``schema`` (Phase 12) is the provider package's committed ``schema.json``
+    (JSON Schema 2020-12 for this type's ``backend_config``). The admin
+    derives the fingerprint itself; the provider never sends it separately.
 
-    TRANSITION (Phase 12): ``schema`` is optional until every provider
-    package ships a real ``schema.json`` (Phase D) — an admin-first
-    deploy must not 422 the currently-deployed providers that don't send
-    it yet. See the schema-omitted path in ``register_provider``.
+    Phase 16: ``machine_secret`` replaces ``registration_token``; ``agent_id``
+    is the operator-supplied stable id (container ``AGENT_ID`` env) and
+    ``base_port`` is the first backend port (backends get ``base_port + i``).
     """
 
-    machine_uid: str
-    registration_token: str
-    provider_type: str
+    machine_uid: str = Field(max_length=255)
+    machine_secret: str
+    agent_id: str = Field(max_length=255)
+    provider_type: str = Field(max_length=64)
     schema: dict[str, Any] | None = None
     version: str
-    port: int = 8081
+    base_port: int = 8081
     hardware: dict[str, Any] = Field(default_factory=dict)
     metrics_categories: list[str] = Field(default_factory=list)
     registered_at: str | None = None
@@ -94,14 +103,11 @@ def _machine_dict(machine: Machine) -> dict[str, Any]:
 def _definition_dict(
     definition: ProviderDefinition, config_fingerprint: str | None
 ) -> dict[str, Any]:
-    # Phase 14: shells carry null backend_config/fingerprint (never the
-    # hash of {}); provider_lib persists and re-reads both forms.
-    authored = definition.backend_config is not None
     return {
         "id": str(definition.id),
         "alias": definition.alias,
         "provider_type": definition.provider_type,
-        "backend_config": definition.backend_config if authored else None,
+        "backend_config": definition.backend_config,
         "config_fingerprint": config_fingerprint,
         "idle_timeout_seconds": definition.idle_timeout_seconds,
         "capacity": definition.capacity,
@@ -120,7 +126,7 @@ def _schema_refusal_detail(
 ) -> dict[str, Any]:
     """Structured 409 detail per docs/ws-protocol.md §2 (Phase 12).
 
-    ``voted`` / ``waiting_on`` values are ProviderInstance id UUID strings.
+    ``voted`` / ``waiting_on`` values are ProviderAgent id UUID strings.
     """
     return {
         "error": error,
@@ -132,18 +138,12 @@ def _schema_refusal_detail(
     }
 
 
-def type_instances_of(session: Session, provider_type: str) -> list[ProviderInstance]:
-    """Voter universe: every ProviderInstance row whose definition is of
-    this provider type, regardless of connection state
-    (docs/ws-protocol.md §2)."""
+def type_agents_of(session: Session, provider_type: str) -> list[ProviderAgent]:
+    """Voter universe: every ProviderAgent row of this provider type,
+    regardless of connection state (docs/ws-protocol.md §2)."""
     return list(
         session.exec(
-            select(ProviderInstance)
-            .join(
-                ProviderDefinition,
-                ProviderInstance.provider_definition_id == ProviderDefinition.id,
-            )
-            .where(ProviderDefinition.provider_type == provider_type)
+            select(ProviderAgent).where(ProviderAgent.provider_type == provider_type)
         ).all()
     )
 
@@ -161,13 +161,13 @@ def _gate_existing_type(
     ptype: ProviderType,
     provider_type: str,
     schema: dict[str, Any],
-    instance_id: uuid.UUID,
+    agent_id: uuid.UUID,
     fp: str,
 ) -> dict[str, Any] | None:
     """Consensus decision for an already-registered type. Mutates ``ptype``
     in the caller's session; returns None to allow the registration or
     the structured 409 detail to refuse it."""
-    sid = str(instance_id)
+    sid = str(agent_id)
 
     if fp == ptype.schema_fingerprint:
         # L2: a match against committed resolves any stale conflict as
@@ -176,19 +176,19 @@ def _gate_existing_type(
             ptype.status = "active"
         return None
 
-    universe = [str(i.id) for i in type_instances_of(session, provider_type)]
+    universe = [str(a.id) for a in type_agents_of(session, provider_type)]
 
     if ptype.pending_fingerprint is None:
         waiting_on = [uid for uid in universe if uid != sid]
         if not waiting_on:
-            # L1: this instance is the only member of the voter universe,
-            # so its vote is unanimous — commit immediately instead of
-            # staging a pending that nobody else can ever complete.
+            # L1: this agent is the only member of the voter universe, so
+            # its vote is unanimous — commit immediately instead of staging
+            # a pending that nobody else can ever complete.
             ptype.schema = schema
             ptype.schema_fingerprint = fp
             ptype.status = "active"
             return None
-        # Stage the new schema; this instance is the first voter.
+        # Stage the new schema; this agent is the first voter.
         ptype.pending_schema = schema
         ptype.pending_fingerprint = fp
         ptype.pending_voters = [sid]
@@ -242,72 +242,20 @@ def _gate_existing_type(
     )
 
 
-def _reject_port_clash(
-    session: Session, machine_id: object, definition_id: object, port: int
-) -> None:
-    """409 when another CONNECTED instance on this machine holds `port`.
-
-    See the call site: the admin addresses instances by
-    machine address + instance port, so a clash silently misroutes one
-    alias's traffic into another provider's engine.
-    """
-    peer = session.exec(
-        select(ProviderInstance, ProviderDefinition)
-        .join(
-            ProviderDefinition,
-            ProviderInstance.provider_definition_id == ProviderDefinition.id,
-        )
-        .where(
-            ProviderInstance.machine_id == machine_id,
-            ProviderInstance.port == port,
-            ProviderInstance.provider_definition_id != definition_id,
-            ProviderInstance.websocket_connected == True,  # noqa: E712
-        )
-    ).first()
-    if peer is None:
-        return
-    _, peer_definition = peer
-    raise HTTPException(
-        status_code=409,
-        detail={
-            "error": "port_conflict",
-            "message": (
-                f"machine already has a connected instance of definition "
-                f"'{peer_definition.alias}' on port {port}; the admin could "
-                "not tell the two apart. Give this provider a distinct "
-                "PROVIDER_PORT and publish that same host port."
-            ),
-            "port": port,
-            "conflicting_definition": peer_definition.alias,
-            "conflicting_instance_id": str(peer[0].id),
-        },
-    )
-
-
 def _schema_gate(
     session: Session,
     provider_type: str,
     schema: dict[str, Any] | None,
-    instance_id: uuid.UUID,
+    agent_id: uuid.UUID,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """Run the Phase 12 schema consensus gate.
+    """Run the Phase 12 schema consensus gate (voters are agents).
 
     Mutates the ProviderType row (create/commit/stage/conflict) in the
     caller's session — the caller commits on both paths. Returns
-    ``(None, reported_fingerprint)`` when registration may proceed (type
-    bootstrapped, fingerprint matches committed, or this vote completed
-    consensus), or ``(409 detail, reported_fingerprint)`` when the
-    registration must be refused. The caller persists
-    ``reported_fingerprint`` on ProviderInstance.reported_schema_fingerprint.
-
-    TRANSITION (Phase 12): schema-omitted path; remove once all providers
-    ship schema.json (Phase D). When ``schema`` is None:
-    - unknown type -> bootstrap with the permissive ``{"type":
-      "object"}`` schema committed (reported fp = permissive fp), so the
-      type exists for definition validation;
-    - known type -> the consensus gate is skipped entirely (reported fp =
-      None: the instance did not report a schema, and the UI must not
-      show it as on-committed when it never proved so).
+    ``(None, reported_fingerprint)`` when registration may proceed, or
+    ``(409 detail, reported_fingerprint)`` when it must be refused. The
+    caller persists ``reported_fingerprint`` on
+    ``ProviderAgent.reported_schema_fingerprint``.
     """
     if schema is None:
         ptype = session.exec(
@@ -332,12 +280,10 @@ def _schema_gate(
         if ptype.schema_fingerprint == fp:
             return None, fp
         return _gate_existing_type(
-            session, ptype, provider_type, schema, instance_id, fp
+            session, ptype, provider_type, schema, agent_id, fp
         ), fp
 
-    return _gate_existing_type(
-        session, ptype, provider_type, schema, instance_id, fp
-    ), fp
+    return _gate_existing_type(session, ptype, provider_type, schema, agent_id, fp), fp
 
 
 def _bootstrap_type(
@@ -366,48 +312,130 @@ def _bootstrap_type(
     return ptype
 
 
+def _placed_definitions(
+    session: Session, agent: ProviderAgent
+) -> list[ProviderDefinition]:
+    """Definitions this agent is responsible for, per placement policy
+    (ARCHITECTURE.md §5).
+
+    The placed set is the UNION of:
+
+    * every enabled ``any_of_type`` definition whose ``provider_type``
+      matches this agent's type — such a definition targets every agent of
+      the type implicitly; and
+    * every enabled ``specific`` definition explicitly linked to THIS agent
+      via ``definition_agents``.
+
+    A ``specific`` definition placed on some OTHER agent must never leak onto
+    this one, and an ``any_of_type`` definition must still apply even when the
+    agent also carries ``specific`` links. Sorted by alias so port offsets are
+    stable across registrations.
+    """
+    placed: dict[uuid.UUID, ProviderDefinition] = {}
+    # any_of_type defs of this agent's provider_type.
+    for d in session.exec(
+        select(ProviderDefinition).where(
+            ProviderDefinition.provider_type == agent.provider_type,
+            ProviderDefinition.agent_placement == "any_of_type",
+            ProviderDefinition.enabled == True,  # noqa: E712
+        )
+    ).all():
+        placed[d.id] = d
+    # specific defs explicitly linked to this agent.
+    for d in agent.definitions:
+        if d.enabled and d.agent_placement == "specific":
+            placed[d.id] = d
+    return sorted(placed.values(), key=lambda d: d.alias)
+
+
+def prune_unplaced_backends(
+    session: Session, agent: ProviderAgent, placed: list[ProviderDefinition]
+) -> int:
+    """Delete ``ProviderInstance`` rows this agent hosts that are no longer in
+    its resolved placement (M2).
+
+    Interim cleanup until slice 5's ``agent.assignments.update`` push lets the
+    admin actively retire a de-placed backend: without this, a definition
+    un-linked from an agent (or flipped to ``specific`` elsewhere) leaves a
+    schedulable ghost row that the scheduler could still boot.
+
+    MEDIUM (round 2): a backend that is still ``running``/``in_use`` is NOT
+    deleted — its engine holds VRAM and the scheduler's per-booted-instance
+    hold is keyed by the instance id, so dropping the row would leak the hold
+    and orphan the engine until restart. Those rows are left in place and get
+    pruned on a later registration/PATCH once they have stopped. Returns the
+    number of rows deleted.
+    """
+    keep = {d.id for d in placed}
+    live = (BackendStatusValue.RUNNING, BackendStatusValue.IN_USE)
+    ghosts = [
+        inst
+        for inst in session.exec(
+            select(ProviderInstance).where(ProviderInstance.agent_id == agent.id)
+        ).all()
+        if inst.provider_definition_id not in keep and inst.backend_status not in live
+    ]
+    for inst in ghosts:
+        session.delete(inst)
+    return len(ghosts)
+
+
+def _reject_port_clash(
+    session: Session, agent: ProviderAgent, ports: list[int]
+) -> None:
+    """409 when a CONNECTED instance on another agent of this machine already
+    holds one of the ports this agent is about to claim.
+
+    The admin dials litellm at ``http://{machine address}:{instance.port}``,
+    so a collision silently misroutes one alias's traffic into another
+    provider's engine. Only a connected peer holds the port: refusing on a
+    stale row would make it impossible to bring a replacement online, and the
+    presence sweep clears those within its TTL.
+    """
+    if not ports:
+        return
+    peer = session.exec(
+        select(ProviderInstance, ProviderDefinition)
+        .join(
+            ProviderDefinition,
+            ProviderInstance.provider_definition_id == ProviderDefinition.id,
+        )
+        .join(ProviderAgent, ProviderInstance.agent_id == ProviderAgent.id)
+        .where(
+            ProviderAgent.machine_id == agent.machine_id,
+            ProviderInstance.agent_id != agent.id,
+            ProviderInstance.port.in_(ports),  # type: ignore[attr-defined]
+            ProviderAgent.websocket_connected == True,  # noqa: E712
+        )
+    ).first()
+    if peer is None:
+        return
+    inst, peer_definition = peer
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "error": "port_conflict",
+            "message": (
+                f"machine already has a connected backend of definition "
+                f"'{peer_definition.alias}' on port {inst.port}; the admin "
+                "could not tell the two apart. Give this agent a distinct "
+                "PROVIDER_PORT/base_port and publish that same host port."
+            ),
+            "port": inst.port,
+            "conflicting_definition": peer_definition.alias,
+            "conflicting_instance_id": str(inst.id),
+        },
+    )
+
+
 @router.post("/register")
 async def register_provider(
     body: RegistrationRequest,
     session: Session = Depends(get_session),
     redis_client: aioredis.Redis = Depends(get_redis),
 ) -> dict[str, Any]:
-    """Register (or re-register) a provider instance against its definition."""
-    # 1. Registration token -> provider definition.
-    definition = session.exec(
-        select(ProviderDefinition).where(
-            ProviderDefinition.registration_token == body.registration_token
-        )
-    ).first()
-    if definition is None:
-        raise HTTPException(status_code=401, detail="unknown registration token")
-    if not definition.enabled:
-        raise HTTPException(
-            status_code=403,
-            detail=f"provider definition '{definition.alias}' is disabled",
-        )
-
-    # 2. Provider type must match the definition. Phase 14: an untyped
-    #    (shell) definition ADOPTS the container's reported type instead —
-    #    the container is authoritative for a definition it registers
-    #    against first (the registration log + type_adopted response flag
-    #    make the adoption visible; an operator PATCH can repair a typo
-    #    while no instance is attached).
-    type_adopted = False
-    if definition.provider_type is None:
-        definition.provider_type = body.provider_type
-        session.add(definition)
-        type_adopted = True
-    elif body.provider_type != definition.provider_type:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"provider type mismatch: container reports '{body.provider_type}', "
-                f"definition '{definition.alias}' requires '{definition.provider_type}'"
-            ),
-        )
-
-    # 3. Machine must be pre-registered in the UI.
+    """Register (or re-register) a provider agent against its machine."""
+    # 1. Machine must be pre-registered and the shared secret must match.
     machine = session.exec(
         select(Machine).where(Machine.uid == body.machine_uid)
     ).first()
@@ -416,8 +444,12 @@ async def register_provider(
             status_code=404,
             detail=f"unknown machine_uid '{body.machine_uid}'",
         )
+    if not machine.registration_secret or not secrets.compare_digest(
+        machine.registration_secret, body.machine_secret
+    ):
+        raise HTTPException(status_code=401, detail="invalid machine secret")
 
-    # 4. Version gate: exact match required (trusted-LAN, lockstep deploy).
+    # 2. Version gate: exact match required (trusted-LAN, lockstep deploy).
     if body.version != settings.VERSION:
         raise HTTPException(
             status_code=409,
@@ -427,10 +459,9 @@ async def register_provider(
             ),
         )
 
-    # 5. Schema must parse as JSON Schema 2020-12 (docs/ws-protocol.md §2
+    # 3. Schema must parse as JSON Schema 2020-12 (docs/ws-protocol.md §2
     #    rule 6) — checked before any mutation so a malformed schema never
-    #    touches the registry. An omitted schema is the transition path
-    #    (see _schema_gate).
+    #    touches the registry. An omitted schema is the transition path.
     if body.schema is not None:
         try:
             jsonschema.Draft202012Validator.check_schema(body.schema)
@@ -443,115 +474,133 @@ async def register_provider(
                 ),
             ) from exc
 
-    # 5b. Port clash: two DIFFERENT instances on one machine may not claim
-    #     the same port. The admin dials litellm at
-    #     http://{machine address}:{instance.port}, so a collision is not a
-    #     cosmetic problem — the losing alias silently serves the other
-    #     provider's model (a real deployment routed halogen-flash traffic
-    #     to the llama.cpp container this way, and every /v1 request "worked"
-    #     against the wrong engine). Only a CONNECTED peer holds the port:
-    #     refusing on a stale row would make it impossible to bring a
-    #     replacement instance online, and the presence sweep clears those
-    #     within its TTL. Re-registering the same definition (the
-    #     provider.initialize path) is never a clash.
-    _reject_port_clash(session, machine.id, definition.id, body.port)
-
-    # 6. Upsert the instance for (machine, definition). The instance id
-    #    is assigned here (default_factory=uuid4, known pre-flush) so it
-    #    can be recorded as a schema voter even when the gate refuses the
-    #    registration below.
-    instance = session.exec(
-        select(ProviderInstance).where(
-            ProviderInstance.machine_id == machine.id,
-            ProviderInstance.provider_definition_id == definition.id,
+    # 4. Upsert the ProviderAgent for (machine, provider_type, agent_id). The
+    #    id is assigned here (default_factory=uuid4, known pre-flush) so it can
+    #    be recorded as a schema voter even when the gate refuses below.
+    agent = session.exec(
+        select(ProviderAgent).where(
+            ProviderAgent.machine_id == machine.id,
+            ProviderAgent.provider_type == body.provider_type,
+            ProviderAgent.agent_id == body.agent_id,
         )
     ).first()
-    if instance is None:
-        instance = ProviderInstance(
+    if agent is None:
+        agent = ProviderAgent(
             machine_id=machine.id,
-            provider_definition_id=definition.id,
+            provider_type=body.provider_type,
+            agent_id=body.agent_id,
         )
-    instance.port = body.port
-    instance.version = body.version
-    instance.instance_status = "registering"
-    # Phase 14: a shell definition has no config yet → no fingerprint
-    # (None, not the hash of {}). The config push/heal flows rely on the
-    # null-config distinction via models.backend_config_is_authored.
-    instance.config_fingerprint = (
-        compute_config_fingerprint(definition.backend_config)
-        if definition.backend_config is not None
-        else None
-    )
-    session.add(instance)
+    agent.base_port = body.base_port
+    agent.version = body.version
+    agent.agent_status = "registering"
+    gpus = body.hardware.get("gpus")
+    if isinstance(gpus, list):
+        # L5: store the structured GPU descriptors (dicts), not str(dict).
+        agent.assigned_gpus = gpus
+    session.add(agent)
     # L3: flush so the voter-universe query inside the gate sees this row
     # even with autoflush disabled (the id itself is known pre-flush).
     session.flush()
 
-    # 7. Merge the hardware report into the machine (latest report wins).
-    #    M1: done BEFORE the gate and inside the same commit — the box is
-    #    real and its hardware report is valid regardless of the schema
-    #    consensus outcome, so a refused registration still refreshes it.
-    machine.hardware = body.hardware
+    # 5. Merge the hardware report into the machine (latest report wins per
+    #    key — ARCHITECTURE.md §4). Done BEFORE the gate and inside the same
+    #    commit — the box is real and its hardware report is valid regardless
+    #    of the schema consensus outcome, so a refused registration still
+    #    refreshes it. A UNION (not a replace) so a partial report from one
+    #    agent never erases keys another agent contributed.
+    merged = dict(machine.hardware or {})
+    merged.update(body.hardware)
+    machine.hardware = merged
     reported_total = body.hardware.get("total_vram_bytes")
     if isinstance(reported_total, int):
         machine.total_vram_bytes = reported_total
     session.add(machine)
 
-    # 8. Schema consensus gate (Phase 12). Runs before the secret mint: a
+    # 6. Schema consensus gate (Phase 12). Runs before the secret mint: a
     #    refusal must not complete the registration. All DB side effects
-    #    (instance upsert, hardware merge, gate state, reported
-    #    fingerprint) commit atomically here, on BOTH the accept and the
-    #    refuse path.
+    #    (agent upsert, hardware merge, gate state, reported fingerprint)
+    #    commit atomically here, on BOTH the accept and the refuse path.
     refusal, reported_schema_fingerprint = _schema_gate(
-        session, body.provider_type, body.schema, instance.id
+        session, body.provider_type, body.schema, agent.id
     )
-    # Reported fingerprint is written on EVERY attempt (success or 409)
-    # so the UI can show who is on what schema (None when the provider
-    # omitted its schema — transition path).
-    instance.reported_schema_fingerprint = reported_schema_fingerprint
-    session.add(instance)
-    # Single atomic commit of the whole registration side-effect set.
+    agent.reported_schema_fingerprint = reported_schema_fingerprint
+    session.add(agent)
     session.commit()
-    session.refresh(instance)
+    session.refresh(agent)
 
     if refusal is not None:
         logger.info(
-            "registration refused by schema gate for instance %s (type %s): %s",
-            instance.id,
+            "registration refused by schema gate for agent %s (type %s): %s",
+            agent.id,
             body.provider_type,
             refusal["error"],
         )
         raise HTTPException(status_code=409, detail=refusal)
 
-    # 9. Mint a fresh per-instance secret; store in Redis only (never Postgres).
-    config_fingerprint = instance.config_fingerprint
-    instance_secret = secrets.token_urlsafe(32)
+    # 7. Resolve placed definitions and upsert one ProviderInstance each,
+    #    assigning stable ports base_port + offset (sorted by alias).
+    placed = _placed_definitions(session, agent)
+    ports = [agent.base_port + i for i in range(len(placed))]
+    _reject_port_clash(session, agent, ports)
+
+    backends: list[dict[str, Any]] = []
+    for offset, definition in zip(range(len(placed)), placed, strict=True):
+        port = agent.base_port + offset
+        instance = session.exec(
+            select(ProviderInstance).where(
+                ProviderInstance.agent_id == agent.id,
+                ProviderInstance.provider_definition_id == definition.id,
+            )
+        ).first()
+        if instance is None:
+            instance = ProviderInstance(
+                agent_id=agent.id,
+                provider_definition_id=definition.id,
+            )
+        instance.port = port
+        instance.config_fingerprint = compute_config_fingerprint(
+            definition.backend_config
+        )
+        session.add(instance)
+        backends.append(
+            {
+                "instance_id": str(instance.id),
+                "port": port,
+                "definition": _definition_dict(definition, instance.config_fingerprint),
+            }
+        )
+    # M2: retire backends this agent no longer hosts (de-placed since its last
+    # registration) so no schedulable ghost survives the re-key.
+    pruned = prune_unplaced_backends(session, agent, placed)
+    session.commit()
+
+    # 8. Mint a fresh per-agent secret; store in Redis only (never Postgres).
+    agent_secret = secrets.token_urlsafe(32)
     await redis_client.set(
-        redis_keys.secret_key(str(instance.id)), instance_secret, ex=SECRET_TTL_SECONDS
+        redis_keys.secret_key(str(agent.id)), agent_secret, ex=SECRET_TTL_SECONDS
     )
 
-    # 10. Persist the declared machine-metrics categories so the metrics
-    #     ownership service can read them back at WS-connect time.
+    # 9. Persist the declared machine-metrics categories so the metrics
+    #    ownership service can read them back at WS-connect time.
     await redis_client.set(
-        redis_keys.metrics_cats_key(str(instance.id)),
+        redis_keys.metrics_cats_key(str(agent.id)),
         json.dumps(sorted(set(body.metrics_categories))),
     )
 
     logger.info(
-        "registered instance %s for definition %s on machine %s (port %s)%s",
-        instance.id,
-        definition.alias,
+        "registered agent %s (type %s) on machine %s: %d backend(s), base_port %s"
+        + (", pruned %d ghost(s)" if pruned else ""),
+        agent.id,
+        body.provider_type,
         machine.uid,
-        body.port,
-        f" (adopted provider type '{body.provider_type}')" if type_adopted else "",
+        len(backends),
+        agent.base_port,
+        *([pruned] if pruned else []),
     )
 
     return {
-        "instance_id": str(instance.id),
-        "instance_secret": instance_secret,
+        "agent_id": str(agent.id),
+        "agent_secret": agent_secret,
         "machine": _machine_dict(machine),
-        "provider_definition": _definition_dict(definition, config_fingerprint),
-        # Phase 14: set when THIS registration set the definition's
-        # provider_type from the container's report (shell → typed).
-        "type_adopted": type_adopted,
+        "backends": backends,
     }

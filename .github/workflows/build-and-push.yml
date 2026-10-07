@@ -117,7 +117,8 @@ jobs:
       - name: Run provider-lib tests
         env:
           MACHINE_UID: test-machine
-          PROVIDER_REGISTRATION_TOKEN: test-token
+          MACHINE_SECRET: test-secret
+          AGENT_ID: test-agent
           ADMIN_BASE_URL: http://localhost:8000
           CACHE_DIR: /tmp/cache
           MODELS_DIR: /tmp/models
@@ -127,7 +128,8 @@ jobs:
       - name: Run mock provider tests
         env:
           MACHINE_UID: test-machine
-          PROVIDER_REGISTRATION_TOKEN: test-token
+          MACHINE_SECRET: test-secret
+          AGENT_ID: test-agent
           ADMIN_BASE_URL: http://localhost:8000
           CACHE_DIR: /tmp/cache
           MODELS_DIR: /tmp/models
@@ -137,7 +139,8 @@ jobs:
       - name: Run llama-cpp provider tests
         env:
           MACHINE_UID: test-machine
-          PROVIDER_REGISTRATION_TOKEN: test-token
+          MACHINE_SECRET: test-secret
+          AGENT_ID: test-agent
           ADMIN_BASE_URL: http://localhost:8000
           CACHE_DIR: /tmp/cache
           MODELS_DIR: /tmp/models
@@ -147,7 +150,8 @@ jobs:
       - name: Run halogen-flash provider tests
         env:
           MACHINE_UID: test-machine
-          PROVIDER_REGISTRATION_TOKEN: test-token
+          MACHINE_SECRET: test-secret
+          AGENT_ID: test-agent
           ADMIN_BASE_URL: http://localhost:8000
           CACHE_DIR: /tmp/cache
           MODELS_DIR: /tmp/models

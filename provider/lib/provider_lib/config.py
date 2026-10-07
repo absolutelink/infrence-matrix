@@ -1,8 +1,14 @@
-"""Provider instance configuration, derived entirely from environment.
+"""Provider **agent** configuration, derived entirely from environment.
 
-A provider instance has no database of its own; everything comes from these
+A provider agent has no database of its own; everything comes from these
 variables plus the registration response the admin returns (persisted to
 CACHE_DIR/provider_config.json).
+
+Phase 16: an agent is a ``(machine, provider_type, agent_id)`` triple that
+owns 1..N backends. It authenticates registration with the shared
+``MACHINE_SECRET`` (``Machine.registration_secret``) — the old per-definition
+``PROVIDER_REGISTRATION_TOKEN`` is gone — and presents its stable ``AGENT_ID``
+so several agents can share a machine + type.
 """
 
 from pathlib import Path
@@ -13,13 +19,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class ProviderSettings(BaseSettings):
     model_config = SettingsConfigDict(env_ignore_empty=True, extra="ignore")
 
-    # Mandatory wiring
+    # Mandatory wiring (Phase 16).
     MACHINE_UID: str
-    PROVIDER_REGISTRATION_TOKEN: str
+    MACHINE_SECRET: str
     ADMIN_BASE_URL: str
+    # Stable operator-supplied id discriminating multiple agents that share a
+    # (machine, provider_type). Presented on registration and the WS query.
+    AGENT_ID: str
 
-    # The port this provider instance serves its OpenAI-compatible API on.
-    # Admin points litellm at http://<machine host>:<this port>/v1.
+    # Base port for this agent's backends. The first backend serves its
+    # OpenAI-compatible API here; additional backends increment
+    # (``base_port + offset``). Admin points litellm at
+    # http://<machine host>:<backend port>/v1.
     PROVIDER_PORT: int = 8081
 
     # Storage
@@ -88,6 +99,6 @@ class ProviderSettings(BaseSettings):
 
 
 # Provider type this container implements. Set by each provider package
-# (never from the environment) and validated against the registration
-# token's definition on the admin side.
+# (never from the environment) and reported on registration, where the admin
+# matches it against the agent's placed definitions.
 PROVIDER_TYPE: str = ""

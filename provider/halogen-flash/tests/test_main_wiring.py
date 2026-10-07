@@ -43,17 +43,25 @@ class _FakeAdminHTTP(BaseHTTPRequestHandler):
         REGISTRATIONS.append(body)
         payload = json.dumps(
             {
-                "instance_id": INSTANCE_ID,
-                "instance_secret": SECRET,
-                "machine": {"uid": body["machine_uid"]},
-                "provider_definition": {
-                    "alias": "flash-alias",
-                    "provider_type": PROVIDER_TYPE,
-                    "config_fingerprint": "cafe",
-                    "capacity": CAPACITY,
-                    "backend_config": BACKEND_CONFIG,
+                "agent_id": "aaaaaaaa-2222-3333-4444-555555555555",
+                "agent_secret": SECRET,
+                "machine": {
+                    "uid": body["machine_uid"],
                     "admin_ws_url": ADMIN_WS_URL_HOLDER["url"],
                 },
+                "backends": [
+                    {
+                        "instance_id": INSTANCE_ID,
+                        "port": 8081,
+                        "definition": {
+                            "alias": "flash-alias",
+                            "provider_type": PROVIDER_TYPE,
+                            "config_fingerprint": "cafe",
+                            "capacity": CAPACITY,
+                            "backend_config": BACKEND_CONFIG,
+                        },
+                    }
+                ],
             }
         ).encode()
         self.send_response(200)
@@ -269,10 +277,8 @@ async def test_initialize_re_registers_and_reprovisions(
         assert acks[0].payload["ok"] is True
         assert acks[0].payload["detail"]["accepted"] is True
         assert len(REGISTRATIONS) == 2, "initialize must re-register"
-        assert (
-            REGISTRATIONS[1]["registration_token"]
-            == settings.PROVIDER_REGISTRATION_TOKEN
-        )
+        assert REGISTRATIONS[1]["machine_secret"] == settings.MACHINE_SECRET
+        assert REGISTRATIONS[1]["agent_id"] == settings.AGENT_ID
 
         await _await_frames(
             lambda f: (
@@ -299,6 +305,7 @@ def test_apply_registration_adopts_capacity(tmp_path, fake_flash_binary) -> None
     lifecycle = make_lifecycle(client, {})
 
     class _R:
+        instance_id = None
         provider_definition = {
             "capacity": 7,
             "backend_config": {"context": {"kv_slots": 7}},

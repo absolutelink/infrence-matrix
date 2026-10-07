@@ -1,4 +1,4 @@
-"""Registration endpoint validation and upsert behavior."""
+"""Agent registration endpoint validation and upsert behavior (Phase 16)."""
 
 import hashlib
 import json
@@ -10,12 +10,20 @@ from sqlmodel import Session, select
 
 from app.api.admin.providers import compute_config_fingerprint
 from app.core.config import settings
-from app.models import Machine, ProviderDefinition, ProviderInstance
+from app.models import Machine, ProviderAgent, ProviderDefinition, ProviderInstance
 from app.services import redis_keys
 
 
-def _machine(session: Session, uid: str = "mach-1") -> Machine:
-    m = Machine(uid=uid, name=f"name-{uid}", host="10.0.0.5", dns="box.local")
+def _machine(
+    session: Session, uid: str = "mach-1", secret: str = "mach-secret"
+) -> Machine:
+    m = Machine(
+        uid=uid,
+        name=f"name-{uid}",
+        host="10.0.0.5",
+        dns="box.local",
+        registration_secret=secret,
+    )
     session.add(m)
     session.commit()
     session.refresh(m)
@@ -25,21 +33,16 @@ def _machine(session: Session, uid: str = "mach-1") -> Machine:
 def _definition(
     session: Session,
     *,
-    token: str = "reg-token-1",
-    provider_type: str | None = "mock",
+    provider_type: str = "mock",
     enabled: bool = True,
     backend_config: dict | None = None,
+    alias: str | None = None,
 ) -> ProviderDefinition:
-    # Phase 14: an explicit backend_config=None request means a SHELL —
-    # pass the None through (never `or { ... }`, which would swallow it).
-    shell = backend_config is None and provider_type is None
     d = ProviderDefinition(
-        alias=f"alias-{uuid.uuid4().hex[:8]}",
+        alias=alias or f"alias-{uuid.uuid4().hex[:8]}",
         provider_type=provider_type,
-        registration_token=token,
         backend_config=backend_config
-        if shell
-        else (backend_config or {"model": {"file": "m.gguf"}, "args": {"ctx": 4096}}),
+        or {"model": {"file": "m.gguf"}, "args": {"ctx": 4096}},
         vram_required_bytes=8 * 1024**3,
         idle_timeout_seconds=123,
         capacity=2,
@@ -54,11 +57,12 @@ def _definition(
 def _body(**overrides) -> dict:
     body = {
         "machine_uid": "mach-1",
-        "registration_token": "reg-token-1",
+        "machine_secret": "mach-secret",
+        "agent_id": "agent-1",
         "provider_type": "mock",
         "schema": {"type": "object"},
         "version": settings.VERSION,
-        "port": 8081,
+        "base_port": 8081,
         "hardware": {
             "gpus": [{"uuid": "gpu-1", "total_vram_bytes": 24 * 1024**3}],
             "total_vram_bytes": 24 * 1024**3,
@@ -86,77 +90,213 @@ def test_register_success(client: TestClient, session: Session, clean_redis) -> 
     assert resp.status_code == 200, resp.text
     data = resp.json()
 
-    assert data["instance_id"]
-    assert len(data["instance_secret"]) >= 32
+    assert data["agent_id"]
+    assert len(data["agent_secret"]) >= 32
     assert data["machine"]["uid"] == machine.uid
-    assert data["provider_definition"]["alias"] == definition.alias
-    assert data["provider_definition"]["provider_type"] == "mock"
-    assert data["provider_definition"]["idle_timeout_seconds"] == 123
-    assert data["provider_definition"]["capacity"] == 2
-    assert data["provider_definition"]["vram_required_bytes"] == 8 * 1024**3
+    assert len(data["backends"]) == 1
+    backend = data["backends"][0]
+    assert backend["definition"]["alias"] == definition.alias
+    assert backend["definition"]["provider_type"] == "mock"
+    assert backend["definition"]["idle_timeout_seconds"] == 123
+    assert backend["definition"]["capacity"] == 2
+    assert backend["definition"]["vram_required_bytes"] == 8 * 1024**3
+    assert backend["port"] == 8081
 
     expected_fp = hashlib.sha256(
         json.dumps(
             definition.backend_config, sort_keys=True, separators=(",", ":")
         ).encode()
     ).hexdigest()
-    assert data["provider_definition"]["config_fingerprint"] == expected_fp
+    assert backend["definition"]["config_fingerprint"] == expected_fp
     assert compute_config_fingerprint(definition.backend_config) == expected_fp
 
+    agent = session.exec(select(ProviderAgent)).one()
+    assert str(agent.id) == data["agent_id"]
+    assert agent.machine_id == machine.id
+    assert agent.provider_type == "mock"
+    assert agent.agent_id == "agent-1"
+    assert agent.base_port == 8081
+    assert agent.version == settings.VERSION
+    assert agent.agent_status == "registering"
+
     inst = session.exec(select(ProviderInstance)).one()
-    assert str(inst.id) == data["instance_id"]
-    assert inst.machine_id == machine.id
+    assert str(inst.id) == backend["instance_id"]
+    assert inst.agent_id == agent.id
     assert inst.provider_definition_id == definition.id
     assert inst.port == 8081
-    assert inst.version == settings.VERSION
-    assert inst.instance_status == "registering"
     assert inst.config_fingerprint == expected_fp
 
-    # Secret lives in Redis, not Postgres.
-    stored = clean_redis.get(redis_keys.secret_key(data["instance_id"]))
-    assert stored == data["instance_secret"]
+    # Secret lives in Redis (keyed by agent id), not Postgres.
+    stored = clean_redis.get(redis_keys.secret_key(data["agent_id"]))
+    assert stored == data["agent_secret"]
 
     session.refresh(machine)
     assert machine.hardware == _body()["hardware"]
     assert machine.total_vram_bytes == 24 * 1024**3
 
 
-def test_register_reregister_reuses_instance_row(
-    client: TestClient, session: Session
-) -> None:
+def test_register_reregister_reuses_rows(client: TestClient, session: Session) -> None:
     _machine(session)
     _definition(session)
 
-    first = client.post("/admin/api/providers/register", json=_body(port=9000)).json()
-    second = client.post("/admin/api/providers/register", json=_body(port=9100)).json()
+    first = client.post(
+        "/admin/api/providers/register", json=_body(base_port=9000)
+    ).json()
+    second = client.post(
+        "/admin/api/providers/register", json=_body(base_port=9100)
+    ).json()
 
-    assert first["instance_id"] == second["instance_id"]
-    assert first["instance_secret"] != second["instance_secret"]
+    assert first["agent_id"] == second["agent_id"]
+    assert first["agent_secret"] != second["agent_secret"]
+    assert len(session.exec(select(ProviderAgent)).all()) == 1
     assert len(session.exec(select(ProviderInstance)).all()) == 1
     inst = session.exec(select(ProviderInstance)).one()
     assert inst.port == 9100
 
 
-def test_register_unknown_token(client: TestClient, session: Session) -> None:
+def test_register_hosts_all_enabled_definitions_of_type(
+    client: TestClient, session: Session
+) -> None:
     _machine(session)
-    _definition(session, token="other-token")
+    _definition(session, alias="a1")
+    _definition(session, alias="a2")
+    _definition(session, alias="a3", enabled=False)
+    _definition(session, alias="other", provider_type="llama-cpp")
+
     resp = client.post("/admin/api/providers/register", json=_body())
+    assert resp.status_code == 200
+    data = resp.json()
+    aliases = sorted(b["definition"]["alias"] for b in data["backends"])
+    assert aliases == ["a1", "a2"]
+    # Ports are base_port + stable offset (sorted by alias).
+    ports = {b["definition"]["alias"]: b["port"] for b in data["backends"]}
+    assert ports["a1"] == 8081
+    assert ports["a2"] == 8082
+
+
+def test_register_mixed_placement_union(
+    client: TestClient, session: Session
+) -> None:
+    """B2: an agent's placed set = (all enabled any_of_type of its type) ∪
+    (enabled specific defs linked to THIS agent). A def placed specifically
+    on agent A must not leak onto agent B."""
+    from app.models import DefinitionAgent
+
+    _machine(session)
+    any_def = _definition(session, alias="any-of-type")
+    spec_def = _definition(session, alias="specific-on-a")
+
+    # Agent A registers first (creates its ProviderAgent row).
+    a = client.post(
+        "/admin/api/providers/register", json=_body(agent_id="agent-A")
+    ).json()
+    agent_a_id = uuid.UUID(a["agent_id"])
+    # Place spec_def specifically on agent A.
+    session.add(
+        DefinitionAgent(provider_definition_id=spec_def.id, agent_id=agent_a_id)
+    )
+    spec_def.agent_placement = "specific"
+    session.add(spec_def)
+    session.commit()
+
+    # Re-register A: gets BOTH the any_of_type def and its specific def.
+    a2 = client.post(
+        "/admin/api/providers/register", json=_body(agent_id="agent-A")
+    ).json()
+    a_aliases = sorted(b["definition"]["alias"] for b in a2["backends"])
+    assert a_aliases == ["any-of-type", "specific-on-a"]
+
+    # Agent B (same type, no links): gets ONLY the any_of_type def — the
+    # def placed specifically on A must not leak here.
+    b = client.post(
+        "/admin/api/providers/register", json=_body(agent_id="agent-B")
+    ).json()
+    b_aliases = [b_["definition"]["alias"] for b_ in b["backends"]]
+    assert b_aliases == ["any-of-type"]
+    assert "specific-on-a" not in b_aliases
+
+
+def test_register_prunes_deplaced_backend(
+    client: TestClient, session: Session
+) -> None:
+    """M2: when a definition is no longer placed on an agent, re-registration
+    deletes the ghost ProviderInstance row so it can never be scheduled."""
+    _machine(session)
+    d = _definition(session, alias="ghost-me")
+
+    first = client.post(
+        "/admin/api/providers/register", json=_body(agent_id="agent-A")
+    ).json()
+    assert len(first["backends"]) == 1
+    inst_id = uuid.UUID(first["backends"][0]["instance_id"])
+    assert session.get(ProviderInstance, inst_id) is not None
+
+    # Disable the definition → it is no longer placed anywhere.
+    d.enabled = False
+    session.add(d)
+    session.commit()
+
+    second = client.post(
+        "/admin/api/providers/register", json=_body(agent_id="agent-A")
+    ).json()
+    assert second["backends"] == []
+    session.expire_all()
+    assert session.get(ProviderInstance, inst_id) is None
+
+
+def test_register_prune_skips_running_backend(
+    client: TestClient, session: Session
+) -> None:
+    """MEDIUM (round 2): a de-placed backend that is still running/in_use is
+    NOT pruned (its engine holds VRAM + the scheduler's per-booted hold is
+    keyed by its id); once stopped it is pruned on the next registration."""
+    _machine(session)
+    d = _definition(session, alias="running-ghost")
+
+    first = client.post(
+        "/admin/api/providers/register", json=_body(agent_id="agent-A")
+    ).json()
+    inst_id = uuid.UUID(first["backends"][0]["instance_id"])
+
+    # Mark it running, then de-place it.
+    inst = session.get(ProviderInstance, inst_id)
+    inst.backend_status = "running"
+    session.add(inst)
+    session.commit()
+    d.enabled = False
+    session.add(d)
+    session.commit()
+
+    client.post("/admin/api/providers/register", json=_body(agent_id="agent-A"))
+    session.expire_all()
+    # Still there — running backends are never pruned out from under the engine.
+    assert session.get(ProviderInstance, inst_id) is not None
+
+    # Now stop it and re-register: the ghost is finally removed.
+    inst = session.get(ProviderInstance, inst_id)
+    inst.backend_status = "stopped"
+    session.add(inst)
+    session.commit()
+    client.post("/admin/api/providers/register", json=_body(agent_id="agent-A"))
+    session.expire_all()
+    assert session.get(ProviderInstance, inst_id) is None
+
+
+def test_register_unknown_machine(client: TestClient, session: Session) -> None:
+    _definition(session)
+    resp = client.post(
+        "/admin/api/providers/register", json=_body(machine_uid="ghost-machine")
+    )
+    assert resp.status_code == 404
+
+
+def test_register_wrong_machine_secret(client: TestClient, session: Session) -> None:
+    _machine(session, secret="correct")
+    _definition(session)
+    resp = client.post(
+        "/admin/api/providers/register", json=_body(machine_secret="wrong")
+    )
     assert resp.status_code == 401
-
-
-def test_register_disabled_definition(client: TestClient, session: Session) -> None:
-    _machine(session)
-    _definition(session, enabled=False)
-    resp = client.post("/admin/api/providers/register", json=_body())
-    assert resp.status_code == 403
-
-
-def test_register_provider_type_mismatch(client: TestClient, session: Session) -> None:
-    _machine(session)
-    _definition(session, provider_type="llama-cpp")
-    resp = client.post("/admin/api/providers/register", json=_body())
-    assert resp.status_code == 409
-    assert "provider type mismatch" in resp.json()["detail"]
 
 
 def test_register_version_mismatch(client: TestClient, session: Session) -> None:
@@ -168,14 +308,6 @@ def test_register_version_mismatch(client: TestClient, session: Session) -> None
     )
     assert resp.status_code == 409
     assert "version mismatch" in resp.json()["detail"]
-
-
-def test_register_unknown_machine(client: TestClient, session: Session) -> None:
-    _definition(session)
-    resp = client.post(
-        "/admin/api/providers/register", json=_body(machine_uid="ghost-machine")
-    )
-    assert resp.status_code == 404
 
 
 def test_register_hardware_without_total_keeps_machine_vram(
@@ -196,109 +328,33 @@ def test_register_hardware_without_total_keeps_machine_vram(
 
 
 # ============================================================================
-# Phase 14 — shell definition type adoption
+# Schema consensus gate (Phase 12) — voters are agents now
 # ============================================================================
 
 
-def test_register_adopts_shell_type_bootstraps_registry(
+def test_register_bootstraps_provider_type(
     client: TestClient, session: Session
 ) -> None:
-    """Shell definition + unknown container type: the registration adopts
-    the type AND bootstraps the ProviderType row (200)."""
     from app.models import ProviderType
 
     _machine(session)
-    _definition(session, provider_type=None, backend_config=None)
-
+    _definition(session)
     resp = client.post("/admin/api/providers/register", json=_body())
-    assert resp.status_code == 200, resp.text
-    data = resp.json()
-
-    assert data["type_adopted"] is True
-    assert data["provider_definition"]["provider_type"] == "mock"
-    assert data["provider_definition"]["backend_config"] is None
-    assert data["provider_definition"]["config_fingerprint"] is None
-
-    session.expunge_all()
-    def_row = session.get(
-        ProviderDefinition, uuid.UUID(data["provider_definition"]["id"])
-    )
-    assert def_row.provider_type == "mock"
+    assert resp.status_code == 200
     ptype = session.exec(
         select(ProviderType).where(ProviderType.name == "mock")
     ).first()
     assert ptype is not None
     assert ptype.status == "active"
-    # Instance row: fingerprint stays null (never the hash of {}).
-    inst = session.exec(select(ProviderInstance)).one()
-    assert inst.config_fingerprint is None
-    assert inst.instance_status == "registering"
 
 
-def test_register_adopts_shell_known_type(client: TestClient, session: Session) -> None:
-    """Shell definition + an already-registered type: adoption sets the
-    definition's type without touching the registry."""
-    from app.models import ProviderType
-    from app.services.hashing import canonical_json_sha256
-
-    session.add(
-        ProviderType(
-            name="mock",
-            schema={"type": "object"},
-            schema_fingerprint=canonical_json_sha256({"type": "object"}),
-            status="active",
-        )
-    )
-    session.commit()
-    _machine(session)
-    _definition(session, provider_type=None, backend_config=None)
-
-    schema = {"type": "object", "properties": {"x": {"type": "integer"}}}
-    resp = client.post("/admin/api/providers/register", json=_body(schema=schema))
-    assert resp.status_code == 200, resp.text
-    data = resp.json()
-    assert data["type_adopted"] is True
-    assert data["provider_definition"]["provider_type"] == "mock"
-    session.expunge_all()
-    ptype = session.exec(select(ProviderType).where(ProviderType.name == "mock")).one()
-    # Solo voter universe: the presented schema commits unanimously
-    # (ws-protocol §2), so the registry follows the container's schema.
-    assert ptype.schema == schema
-
-
-def test_register_typed_no_type_adopted_flag(
+def test_register_second_agent_same_schema_commits(
     client: TestClient, session: Session
 ) -> None:
-    """A typed definition's registration keeps `type_adopted: false`."""
+    """Two agents of one type presenting the same schema: both succeed."""
     _machine(session)
-    _definition(session, provider_type="mock")
-    resp = client.post("/admin/api/providers/register", json=_body())
-    assert resp.status_code == 200
-    assert resp.json()["type_adopted"] is False
-
-
-def test_register_shell_schema_mismatch_refused_but_type_adopted(
-    client: TestClient, session: Session
-) -> None:
-    """Adoption happens before the schema gate: a shell registering with a
-    schema that conflicts (two instances of one type, differing schemas)
-    gets refused (or voted-pending) — but the type adoption itself is
-    part of the same atomic commit on BOTH paths."""
-    from app.models import ProviderType
-
-    _machine(session)
-    definition = _definition(session, provider_type=None, backend_config=None)
-
-    schema_a = {"type": "object", "properties": {"a": {"const": 1}}}
-    resp = client.post("/admin/api/providers/register", json=_body(schema=schema_a))
-    assert resp.status_code == 200  # solo instance: committed immediately
-    session.expunge_all()
-    ptype = session.exec(select(ProviderType).where(ProviderType.name == "mock")).one()
-    assert (
-        ptype.schema_fingerprint
-        == hashlib.sha256(
-            json.dumps(schema_a, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
-    )
-    def_row = session.get(ProviderDefinition, definition.id)
-    assert def_row is not None and def_row.provider_type == "mock"
+    _definition(session)
+    r1 = client.post("/admin/api/providers/register", json=_body(agent_id="a1"))
+    r2 = client.post("/admin/api/providers/register", json=_body(agent_id="a2"))
+    assert r1.status_code == 200
+    assert r2.status_code == 200

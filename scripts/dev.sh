@@ -17,11 +17,13 @@ ADMIN_PID_FILE="$RUN_DIR/admin.pid"
 PROVIDER_PID_FILE="$RUN_DIR/provider.pid"
 
 MACHINE_UID="${MOCK_MACHINE_UID:-mock-machine-1}"
+AGENT_ID="${MOCK_AGENT_ID:-mock-agent-1}"
 DEF_ALIAS="${MOCK_MODEL_ALIAS:-mock-model}"
-DEF_TOKEN="${MOCK_REGISTRATION_TOKEN:-mock-registration-token}"
 ADMIN_PORT="${DEV_ADMIN_PORT:-8000}"
 ADMIN_URL="http://127.0.0.1:$ADMIN_PORT"
 PROVIDER_PORT="${DEV_PROVIDER_PORT:-8081}"
+# Populated by seed() from the machine's registration_secret.
+MACHINE_SECRET=""
 
 log() { printf '\033[1;36m[dev]\033[0m %s\n' "$*"; }
 err() { printf '\033[1;31m[dev]\033[0m %s\n' "$*" >&2; }
@@ -49,107 +51,55 @@ docker_mode() {
     && docker info >/dev/null 2>&1
 }
 
-# Phase 14: the previous seed_provider_type step is gone — shell
-# definitions are typed at first registration, so a fresh DB needs no
-# provider_types pre-seed at all.
+# Phase 16: no provider_types pre-seed and no shell definitions. A typed
+# definition (provider_type + backend_config) is created directly; the mock
+# agent authenticates with the machine's shared registration_secret.
 
-# Seed machine + definition through the admin API. 409 = already seeded.
+# Seed machine + a TYPED definition through the admin API. Captures the
+# machine's registration_secret into $MACHINE_SECRET for the provider env.
 # $1 = host the admin should use to reach the mock provider.
 seed() {
   local provider_host="$1"
-  log "seeding machine '$MACHINE_UID' + shell definition '$DEF_ALIAS' via admin API..."
-  local code
-  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$ADMIN_URL/admin/api/machines" \
+  log "seeding machine '$MACHINE_UID' + typed definition '$DEF_ALIAS' via admin API..."
+  local body code
+  body=$(curl -s -w $'\n%{http_code}' -X POST "$ADMIN_URL/admin/api/machines" \
     -H 'Content-Type: application/json' \
     -d "{\"uid\":\"$MACHINE_UID\",\"name\":\"Mock Machine\",\"host\":\"$provider_host\",\"total_vram_bytes\":32000000000}") || true
+  code="${body##*$'\n'}"
+  body="${body%$'\n'*}"
   case "$code" in
     2*) log "  machine created" ;;
     409) log "  machine already exists" ;;
     *) err "  machine seed failed (HTTP $code)"; return 1 ;;
   esac
-  # Phase 14: shell definition — no provider_type, no backend_config. The
-  # mock container registers with its token, the definition adopts the
-  # 'mock' type from the registration, and the admin pushes the canonical
-  # config through the standard Phase 9 PATCH flow below.
+  # Read the machine's registration_secret (from the create body if present,
+  # else by looking it up in the list).
+  MACHINE_SECRET=$(python3 -c 'import json,sys
+try:
+    d = json.loads(sys.argv[1])
+except Exception:
+    d = {}
+print(d.get("registration_secret") or "")' "$body")
+  if [[ -z "$MACHINE_SECRET" ]]; then
+    MACHINE_SECRET=$(curl -s "$ADMIN_URL/admin/api/machines" 2>/dev/null \
+      | python3 -c 'import json,sys
+data = json.load(sys.stdin)
+m = next((x for x in data if x.get("uid") == "'"$MACHINE_UID"'"), None)
+print((m or {}).get("registration_secret") or "")' 2>/dev/null || echo "")
+  fi
+  [[ -n "$MACHINE_SECRET" ]] || { err "  could not read machine registration_secret"; return 1; }
+  # Phase 16: a TYPED definition — provider_type + backend_config, no token.
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$ADMIN_URL/admin/api/definitions" \
     -H 'Content-Type: application/json' \
-    -d "{\"alias\":\"$DEF_ALIAS\",\"registration_token\":\"$DEF_TOKEN\",\"capacity\":4,\"vram_required_bytes\":0,\"idle_timeout_seconds\":300}") || true
+    -d "{\"alias\":\"$DEF_ALIAS\",\"provider_type\":\"mock\",\"backend_config\":{\"artifacts\":{\"model\":{\"path\":\"/models/mock.gguf\"}},\"context\":{\"ctx\":4096,\"predict\":-1},\"sampling\":{\"temperature\":0.8,\"top_k\":40,\"top_p\":0.95,\"seed\":-1},\"stream\":{\"delta_count\":3,\"delta_delay\":0.0},\"server\":{\"backend_port\":8082}},\"capacity\":4,\"vram_required_bytes\":0,\"idle_timeout_seconds\":300}") || true
   case "$code" in
-    2*) log "  shell definition created" ;;
+    2*) log "  typed definition created" ;;
     409) log "  definition already exists" ;;
     *) err "  definition seed failed (HTTP $code)"; return 1 ;;
   esac
 }
 
-# Author the mock's backend_config on its (registered, now-typed)
-# definition via the standard PATCH → provider.config.update flow.
-# Waits for the instance's WS to be CONNECTED before PATCHing so the
-# push fans out to the live socket (instead of relying on the
-# connect-time heal), then confirms the provider echoed the fingerprint.
-configure_mock_definition() {
-  local defs_url="$ADMIN_URL/admin/api/definitions"
-  # Only needed for a shell: an existing full definition (pre-Phase-14
-  # seed or a re-run after configure) has non-null config already.
-  local def_json
-  def_json=$(curl -s "$defs_url" 2>/dev/null)
-  local configured
-  configured=$(python3 -c 'import json,sys
-data = json.load(sys.stdin)
-d = next((x for x in data if x.get("alias") == "'"$DEF_ALIAS"'"), None)
-print("True" if d and d.get("backend_config") is not None else "False")' <<<"$def_json" 2>/dev/null || echo False)
-  [[ "$configured" == "True" ]] && { log "mock definition already configured"; return 0; }
-  log "waiting for mock provider registration + ws connect (adopting type)..."
-  local i ready
-  for i in $(seq 1 90); do
-    def_json=$(curl -s "$defs_url" 2>/dev/null)
-    ready=$(python3 -c 'import json,sys
-data = json.load(sys.stdin)
-d = next((x for x in data if x.get("alias") == "'"$DEF_ALIAS"'"), None)
-ok = bool(d) and d.get("provider_type") and any(
-    (inst.get("websocket_connected") and inst.get("config_fingerprint") is None)
-    for inst in (d.get("instances") or [])
-)
-print("True" if ok else "False")' <<<"$def_json" 2>/dev/null || echo False)
-    [[ "$ready" == "True" ]] && break
-    sleep 1
-  done
-  [[ "$ready" == "True" ]] || {
-    err "mock provider did not register + connect within 90s (see $RUN_DIR/*.log)"
-    return 1
-  }
-  log "  registered, type adopted, instance connected — pushing canonical mock backend_config..."
-  local code
-  code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
-    "$ADMIN_URL/admin/api/definitions/$(python3 -c 'import json,sys
-data = json.load(sys.stdin)
-print(next(x["id"] for x in data if x.get("alias") == "'"$DEF_ALIAS"'"))' <<<"$def_json")" \
-    -H 'Content-Type: application/json' \
-    -d '{"backend_config":{"artifacts":{"model":{"path":"/models/mock.gguf"}},"context":{"ctx":4096,"predict":-1},"sampling":{"temperature":0.8,"top_k":40,"top_p":0.95,"seed":-1},"stream":{"delta_count":3,"delta_delay":0.0},"server":{"backend_port":8082}}}') || true
-  case "$code" in
-    2*) log "  config PATCH accepted" ;;
-    *) err "  config PATCH failed (HTTP $code)"; return 1 ;;
-  esac
-  # Confirm the provider actually applied it (echoed fingerprint) and
-  # reconnected to running before the smoke test hits /v1.
-  for i in $(seq 1 60); do
-    def_json=$(curl -s "$defs_url" 2>/dev/null)
-    ready=$(python3 -c 'import json,sys
-data = json.load(sys.stdin)
-d = next((x for x in data if x.get("alias") == "'"$DEF_ALIAS"'"), None)
-ok = bool(d) and bool(d.get("config_fingerprint")) and all(
-    inst.get("config_fingerprint") == d.get("config_fingerprint")
-    for inst in (d.get("instances") or [])
-    if inst.get("websocket_connected")
-)
-print("True" if ok else "False")' <<<"$def_json" 2>/dev/null || echo False)
-    [[ "$ready" == "True" ]] && break
-    sleep 1
-  done
-  [[ "$ready" == "True" ]] || { err "provider never echoed the config fingerprint"; return 1; }
-  log "  provider applied the config (fingerprints in sync)"
-}
-
-# Wait for the mock instance's WS to connect, then stream one response.
+# Wait for the mock agent's WS to connect, then stream one response.
 smoke_test() {
   log "waiting for mock provider websocket..."
   local i connected
@@ -186,7 +136,7 @@ print_summary() {
   Admin UI   $ADMIN_URL/admin
   Swagger    $ADMIN_URL/
   API base   $ADMIN_URL/v1
-  Mock alias $DEF_ALIAS   token $DEF_TOKEN
+  Mock alias $DEF_ALIAS   agent $AGENT_ID on machine $MACHINE_UID
   Logs       $RUN_DIR/*.log          Stop:  ./scripts/dev.sh down
   └─────────────────────────────────────────────────────────────────────────────┘
 EOF
@@ -225,8 +175,8 @@ up_docker() {
   curl -sf "$ADMIN_URL/admin/api/health" >/dev/null 2>&1 || { err "admin not healthy"; return 1; }
   seed "provider-mock"
   log "starting mock provider..."
-  docker compose -f "$ROOT/compose.yml" up -d --build provider-mock
-  configure_mock_definition
+  MOCK_MACHINE_SECRET="$MACHINE_SECRET" MOCK_AGENT_ID="$AGENT_ID" \
+    docker compose -f "$ROOT/compose.yml" up -d --build provider-mock
   smoke_test
 }
 
@@ -268,14 +218,14 @@ up_local() {
   mkdir -p "$RUN_DIR/provider-cache" "$RUN_DIR/provider-models"
   start_bg "$PROVIDER_PID_FILE" "$ROOT/provider/mock" \
     env MACHINE_UID="$MACHINE_UID" \
-      PROVIDER_REGISTRATION_TOKEN="$DEF_TOKEN" \
+      MACHINE_SECRET="$MACHINE_SECRET" \
+      AGENT_ID="$AGENT_ID" \
       ADMIN_BASE_URL="$ADMIN_URL" \
       PROVIDER_PORT="$PROVIDER_PORT" \
       CACHE_DIR="$RUN_DIR/provider-cache" \
       MODELS_DIR="$RUN_DIR/provider-models" \
       uv run python -m provider_mock.main
 
-  configure_mock_definition
   smoke_test
 }
 
@@ -320,7 +270,7 @@ import json, sys
 for d in json.load(sys.stdin):
     print("instance: {} ws={} status={}/{}".format(
         d.get("alias"), d.get("websocket_connected"),
-        d.get("instance_status"), d.get("backend_status")))
+        d.get("agent_status"), d.get("backend_status")))
 ' || true
   else
     echo "instance: (admin not reachable)"

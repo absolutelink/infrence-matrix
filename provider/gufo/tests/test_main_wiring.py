@@ -46,17 +46,25 @@ class _FakeAdminHTTP(BaseHTTPRequestHandler):
         assert body["version"] == VERSION
         payload = json.dumps(
             {
-                "instance_id": INSTANCE_ID,
-                "instance_secret": SECRET,
-                "machine": {"uid": body["machine_uid"]},
-                "provider_definition": {
-                    "alias": "gufo-alias",
-                    "provider_type": PROVIDER_TYPE,
-                    "config_fingerprint": "cafe",
-                    "capacity": CAPACITY,
-                    "backend_config": BACKEND_CONFIG,
+                "agent_id": "aaaaaaaa-2222-3333-4444-555555555555",
+                "agent_secret": SECRET,
+                "machine": {
+                    "uid": body["machine_uid"],
                     "admin_ws_url": ADMIN_WS_URL_HOLDER["url"],
                 },
+                "backends": [
+                    {
+                        "instance_id": INSTANCE_ID,
+                        "port": 8081,
+                        "definition": {
+                            "alias": "gufo-alias",
+                            "provider_type": PROVIDER_TYPE,
+                            "config_fingerprint": "cafe",
+                            "capacity": CAPACITY,
+                            "backend_config": BACKEND_CONFIG,
+                        },
+                    }
+                ],
             }
         ).encode()
         self.send_response(200)
@@ -157,7 +165,7 @@ async def test_admin_driven_boot_and_v1_streaming(
         )
 
         # The /v1 surface uses the SAME lifecycle instance.
-        app = build_app(lifecycle)
+        app = build_app(lifecycle, settings)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://provider"
         ) as v1:

@@ -2,29 +2,34 @@
 scheduler, and the VRAM ledger.
 
 WS keys are prefixed ``im:ws:``. Redis (not Postgres) is the source of truth
-for WS liveness and for the per-instance secret, because the secret is short
--lived operational state returned exactly once to the provider at
+for WS liveness and for the per-agent secret, because the secret is short
+-lived operational state returned exactly once to the agent at
 registration (trusted-LAN design — see docs/ws-protocol.md).
 
-  im:ws:secret:{instance_id}    per-instance WS secret (plaintext, long TTL;
+Phase 16: the WS socket is machine-scoped per agent, so these keys are keyed
+by the ``ProviderAgent`` primary-key uuid (``str(agent.id)``) — NOT the
+operator-supplied ``agent_id`` string. The admin resolves the operator
+``agent_id`` to its PK row at registration and uses the PK everywhere below.
+
+  im:ws:secret:{agent_id}       per-agent WS secret (plaintext, long TTL;
                                 written at registration, read at WS auth)
-  im:ws:epoch:{instance_id}     monotonic connection epoch (INCR per accepted
+  im:ws:epoch:{agent_id}        monotonic connection epoch (INCR per accepted
                                 WS connection; never deleted)
-  im:ws:owner:{instance_id}     admin connection token for the currently
+  im:ws:owner:{agent_id}        admin connection token for the currently
                                 accepted socket (deleted on disconnect)
-  im:ws:presence:{instance_id}  TTL key refreshed on every frame received /
+  im:ws:presence:{agent_id}     TTL key refreshed on every frame received /
                                 pong sent; absence => connection is dead
 
 Machine metrics ownership (Phase 5), prefixed ``im:metrics:``:
 
-  im:metrics:owner:{machine_uid}  instance_id of the single provider
-                                  instance reporting machine-level
+  im:metrics:owner:{machine_uid}  agent_id of the single provider
+                                  agent reporting machine-level
                                   metrics for that machine (SET NX, TTL
                                   METRICS_OWNER_TTL_SECONDS; refreshed
                                   on each metrics.machine receipt)
   im:metrics:machine:{machine_uid} latest machine-level snapshot JSON
                                   (TTL METRICS_OWNER_TTL_SECONDS)
-  im:metrics:cats:{instance_id}   JSON list of the instance's declared
+  im:metrics:cats:{agent_id}      JSON list of the agent's declared
                                   metrics categories (written at
                                   registration, read at assignment)
 
@@ -80,20 +85,20 @@ SCHED_LOCK_TTL_MS = 5000
 VRAM_USED_TTL_SECONDS = 60
 
 
-def secret_key(instance_id: str) -> str:
-    return f"{SECRET_PREFIX}:{instance_id}"
+def secret_key(agent_id: str) -> str:
+    return f"{SECRET_PREFIX}:{agent_id}"
 
 
-def epoch_key(instance_id: str) -> str:
-    return f"{EPOCH_PREFIX}:{instance_id}"
+def epoch_key(agent_id: str) -> str:
+    return f"{EPOCH_PREFIX}:{agent_id}"
 
 
-def owner_key(instance_id: str) -> str:
-    return f"{OWNER_PREFIX}:{instance_id}"
+def owner_key(agent_id: str) -> str:
+    return f"{OWNER_PREFIX}:{agent_id}"
 
 
-def presence_key(instance_id: str) -> str:
-    return f"{PRESENCE_PREFIX}:{instance_id}"
+def presence_key(agent_id: str) -> str:
+    return f"{PRESENCE_PREFIX}:{agent_id}"
 
 
 def metrics_owner_key(machine_uid: str) -> str:
@@ -104,8 +109,8 @@ def metrics_machine_key(machine_uid: str) -> str:
     return f"{METRICS_MACHINE_PREFIX}:{machine_uid}"
 
 
-def metrics_cats_key(instance_id: str) -> str:
-    return f"{METRICS_CATS_PREFIX}:{instance_id}"
+def metrics_cats_key(agent_id: str) -> str:
+    return f"{METRICS_CATS_PREFIX}:{agent_id}"
 
 
 def sched_queue_key(alias: str) -> str:
