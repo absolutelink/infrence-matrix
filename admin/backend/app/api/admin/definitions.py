@@ -77,6 +77,8 @@ from app.api.admin.providers import compute_config_fingerprint
 from app.api.admin.serializers import iso_utc
 from app.core.db import get_session
 from app.models import (
+    DefinitionAgent,
+    ProviderAgent,
     ProviderDefinition,
     ProviderInstance,
     ProviderType,
@@ -87,6 +89,8 @@ from app.services import alias_registry, config_update
 logger = logging.getLogger("admin.definitions")
 
 router = APIRouter(prefix="/admin/api/definitions", tags=["admin"])
+
+_VALID_PLACEMENTS = ("any_of_type", "specific")
 
 
 class DefinitionCreate(BaseModel):
@@ -101,6 +105,10 @@ class DefinitionCreate(BaseModel):
     # issued token into the provider container env).
     registration_token: str | None = Field(default=None, max_length=255)
     enabled: bool = True
+    # Phase 16: placement. 'any_of_type' hosts on every agent of the type;
+    # 'specific' hosts only on the listed agent ids (ProviderAgent.id).
+    agent_placement: str = Field(default="any_of_type", max_length=32)
+    agents: list[str] | None = None
 
 
 class DefinitionPatch(BaseModel):
@@ -112,6 +120,9 @@ class DefinitionPatch(BaseModel):
     capacity: int | None = Field(default=None, ge=1)
     registration_token: str | None = Field(default=None, min_length=1, max_length=255)
     enabled: bool | None = None
+    # Phase 16: placement (see DefinitionCreate).
+    agent_placement: str | None = Field(default=None, max_length=32)
+    agents: list[str] | None = None
 
 
 # Columns that are NOT NULL in the model: an explicit null in a PATCH
@@ -127,6 +138,7 @@ _NON_NULLABLE_FIELDS = frozenset(
         "capacity",
         "registration_token",
         "enabled",
+        "agent_placement",
     }
 )
 
@@ -200,11 +212,83 @@ def _validate_backend_config(
         )
 
 
+def _resolve_placement_agents(
+    session: Session, placement: str, agents: list[str] | None
+) -> list[uuid.UUID]:
+    """Validate ``agent_placement`` and resolve ``specific`` agent ids.
+
+    Returns the list of ``ProviderAgent`` ids to link (empty for
+    ``any_of_type``). Raises 422 on an unknown placement, an empty/absent
+    list for ``specific``, or an unknown/malformed agent id.
+    """
+    if placement not in _VALID_PLACEMENTS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"agent_placement must be one of {list(_VALID_PLACEMENTS)}",
+        )
+    if placement != "specific":
+        if agents:
+            raise HTTPException(
+                status_code=422,
+                detail="'agents' is only valid with agent_placement='specific'",
+            )
+        return []
+    if not agents:
+        raise HTTPException(
+            status_code=422,
+            detail="agent_placement='specific' requires a non-empty 'agents' list",
+        )
+    out: list[uuid.UUID] = []
+    seen: set[uuid.UUID] = set()
+    for raw in agents:
+        try:
+            agent_uuid = uuid.UUID(raw)
+        except ValueError:
+            raise HTTPException(
+                status_code=422, detail=f"invalid agent id '{raw}'"
+            ) from None
+        if session.get(ProviderAgent, agent_uuid) is None:
+            raise HTTPException(status_code=422, detail=f"unknown agent '{raw}'")
+        if agent_uuid not in seen:
+            seen.add(agent_uuid)
+            out.append(agent_uuid)
+    return out
+
+
+def _write_placement(
+    session: Session, definition: ProviderDefinition, agent_ids: list[uuid.UUID]
+) -> None:
+    """Replace the definition's specific-placement link rows."""
+    existing = session.exec(
+        select(DefinitionAgent).where(
+            DefinitionAgent.provider_definition_id == definition.id
+        )
+    ).all()
+    for row in existing:
+        session.delete(row)
+    for agent_id in agent_ids:
+        session.add(
+            DefinitionAgent(provider_definition_id=definition.id, agent_id=agent_id)
+        )
+
+
+def _placement_agent_ids(session: Session, definition: ProviderDefinition) -> list[str]:
+    return [
+        str(row.agent_id)
+        for row in session.exec(
+            select(DefinitionAgent).where(
+                DefinitionAgent.provider_definition_id == definition.id
+            )
+        ).all()
+    ]
+
+
 def definition_dict(
     definition: ProviderDefinition,
     *,
     instances: list[ProviderInstance] | None = None,
     config_update_results: list[dict[str, Any]] | None = None,
+    placement_agents: list[str] | None = None,
 ) -> dict[str, Any]:
     # Phase 14: a shell definition reports null type/config/fingerprint —
     # an empty config must never masquerade as authored (the fingerprint
@@ -227,9 +311,13 @@ def definition_dict(
         "model_metadata": definition.model_metadata,
         "enabled": definition.enabled,
         "status": definition.status,
+        # Phase 16: placement.
+        "agent_placement": definition.agent_placement,
         "created_at": iso_utc(definition.created_at),
         "updated_at": iso_utc(definition.updated_at),
     }
+    if placement_agents is not None:
+        d["agents"] = placement_agents
     if instances is not None:
         d["instances"] = [
             {
@@ -284,12 +372,21 @@ async def create_definition(
         _validate_backend_config(
             ptype, body.backend_config if body.backend_config is not None else {}
         )
+    # Phase 16: validate placement + resolve specific agent ids (422 on an
+    # unknown agent) BEFORE inserting, so a bad placement never persists.
+    agent_ids = _resolve_placement_agents(session, body.agent_placement, body.agents)
     definition = ProviderDefinition(
-        **body.model_dump(exclude={"registration_token"}),
+        **body.model_dump(exclude={"registration_token", "agents"}),
         registration_token=body.registration_token or secrets.token_urlsafe(24),
     )
     session.add(definition)
     try:
+        # Flush so the definition id exists for the link FK, then write the
+        # placement links in the SAME transaction (atomic: never a
+        # 'specific' definition with zero links from a mid-way failure).
+        session.flush()
+        if agent_ids:
+            _write_placement(session, definition, agent_ids)
         session.commit()
     except IntegrityError:
         session.rollback()
@@ -304,7 +401,9 @@ async def create_definition(
     if backend_config_is_authored(definition):
         alias_registry.ensure_registered(definition.alias)
     logger.info("created definition %s (%s)", definition.alias, definition.id)
-    return definition_dict(definition, instances=[])
+    return definition_dict(
+        definition, instances=[], placement_agents=[str(a) for a in agent_ids]
+    )
 
 
 @router.get("")
@@ -313,7 +412,14 @@ def list_definitions(session: Session = Depends(get_session)) -> list[dict[str, 
         select(ProviderDefinition).order_by(ProviderDefinition.alias)
     ).all()
     # `instances` is selectin-loaded on the relationship — no per-row SELECT.
-    return [definition_dict(d, instances=list(d.instances)) for d in definitions]
+    return [
+        definition_dict(
+            d,
+            instances=list(d.instances),
+            placement_agents=_placement_agent_ids(session, d),
+        )
+        for d in definitions
+    ]
 
 
 @router.get("/{definition_id}")
@@ -321,7 +427,11 @@ def get_definition(
     definition_id: str, session: Session = Depends(get_session)
 ) -> dict[str, Any]:
     definition = _get_definition(session, definition_id)
-    return definition_dict(definition, instances=list(definition.instances))
+    return definition_dict(
+        definition,
+        instances=list(definition.instances),
+        placement_agents=_placement_agent_ids(session, definition),
+    )
 
 
 @router.patch("/{definition_id}")
@@ -332,6 +442,21 @@ async def patch_definition(
 ) -> dict[str, Any]:
     definition = _get_definition(session, definition_id)
     changes = body.model_dump(exclude_unset=True)
+
+    # Phase 16: `agents` is a many-to-many relationship, not a column — pull
+    # it out of the setattr loop and handle it via the link table after the
+    # main commit. `agent_placement` IS a column and stays in `changes`.
+    placement_agents_raw = changes.pop("agents", None)
+    placement_touched = "agent_placement" in changes or placement_agents_raw is not None
+    effective_placement = changes.get("agent_placement", definition.agent_placement)
+    resolved_agent_ids: list[uuid.UUID] | None = None
+    if placement_touched:
+        if placement_agents_raw is not None or effective_placement == "specific":
+            resolved_agent_ids = _resolve_placement_agents(
+                session, effective_placement, placement_agents_raw
+            )
+        else:
+            resolved_agent_ids = []  # switching to any_of_type: clear links
 
     # SF-4: explicit null on a non-nullable column is a validation
     # error (422), not a DB IntegrityError dressed up as a 409 conflict.
@@ -415,6 +540,10 @@ async def patch_definition(
         setattr(definition, key, value)
     definition.updated_at = datetime.now(UTC)
     session.add(definition)
+    # Phase 16: write placement links in the SAME transaction as the column
+    # change (atomic). resolved_agent_ids is None when placement is untouched.
+    if resolved_agent_ids is not None:
+        _write_placement(session, definition, resolved_agent_ids)
     try:
         session.commit()
     except IntegrityError:
@@ -498,7 +627,10 @@ async def patch_definition(
         )
     ).all()
     return definition_dict(
-        definition, instances=list(instances), config_update_results=results
+        definition,
+        instances=list(instances),
+        config_update_results=results,
+        placement_agents=_placement_agent_ids(session, definition),
     )
 
 

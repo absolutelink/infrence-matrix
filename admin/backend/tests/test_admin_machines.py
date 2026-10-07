@@ -119,3 +119,39 @@ def test_patch_rejects_negative_vram(client: TestClient) -> None:
         f"/admin/api/machines/{created['id']}", json={"total_vram_bytes": -1}
     )
     assert resp.status_code == 422
+
+
+# --- Phase 16: machine registration secret ---------------------------------
+
+
+def test_machine_create_mints_registration_secret(client: TestClient) -> None:
+    created = _create(client)
+    assert created["registration_secret"]  # non-empty shared secret
+
+
+def test_list_machines_includes_registration_secret(client: TestClient) -> None:
+    created = _create(client)
+    rows = client.get("/admin/api/machines").json()
+    assert len(rows) == 1
+    assert rows[0]["registration_secret"] == created["registration_secret"]
+
+
+def test_rotate_machine_secret_changes_value(
+    client: TestClient, session: Session
+) -> None:
+    created = _create(client)
+    old = created["registration_secret"]
+    resp = client.post(f"/admin/api/machines/{created['id']}/rotate-secret")
+    assert resp.status_code == 200, resp.text
+    new = resp.json()["registration_secret"]
+    assert new and new != old
+    # Persisted on the row.
+    machine = session.get(Machine, uuid.UUID(created["id"]))
+    assert machine is not None and machine.registration_secret == new
+
+
+def test_rotate_unknown_machine_404(client: TestClient) -> None:
+    resp = client.post(
+        "/admin/api/machines/11111111-1111-1111-1111-111111111111/rotate-secret"
+    )
+    assert resp.status_code == 404

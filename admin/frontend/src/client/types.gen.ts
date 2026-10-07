@@ -74,6 +74,14 @@ export type DefinitionCreate = {
      * Enabled
      */
     enabled?: boolean;
+    /**
+     * Agent Placement
+     */
+    agent_placement?: string;
+    /**
+     * Agents
+     */
+    agents?: Array<string> | null;
 };
 
 /**
@@ -114,6 +122,14 @@ export type DefinitionPatch = {
      * Enabled
      */
     enabled?: boolean | null;
+    /**
+     * Agent Placement
+     */
+    agent_placement?: string | null;
+    /**
+     * Agents
+     */
+    agents?: Array<string> | null;
 };
 
 /**
@@ -467,6 +483,40 @@ export type adminPatchMachineResponses = {
 };
 
 export type adminPatchMachineResponse = adminPatchMachineResponses[keyof adminPatchMachineResponses];
+
+export type adminRotateMachineSecretData = {
+    body?: never;
+    path: {
+        /**
+         * Machine Id
+         */
+        machine_id: string;
+    };
+    query?: never;
+    url: '/admin/api/machines/{machine_id}/rotate-secret';
+};
+
+export type adminRotateMachineSecretErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminRotateMachineSecretError = adminRotateMachineSecretErrors[keyof adminRotateMachineSecretErrors];
+
+export type adminRotateMachineSecretResponses = {
+    /**
+     * Response Admin-Rotate Machine Secret
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminRotateMachineSecretResponse = adminRotateMachineSecretResponses[keyof adminRotateMachineSecretResponses];
 
 export type adminListDefinitionsData = {
     body?: never;
@@ -1248,6 +1298,60 @@ export type adminOverviewStatsResponses = {
 };
 
 export type adminOverviewStatsResponse = adminOverviewStatsResponses[keyof adminOverviewStatsResponses];
+
+export type adminListAgentsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/admin/api/agents';
+};
+
+export type adminListAgentsResponses = {
+    /**
+     * Response Admin-List Agents
+     *
+     * Successful Response
+     */
+    200: Array<{
+        [key: string]: unknown;
+    }>;
+};
+
+export type adminListAgentsResponse = adminListAgentsResponses[keyof adminListAgentsResponses];
+
+export type adminGetAgentData = {
+    body?: never;
+    path: {
+        /**
+         * Agent Id
+         */
+        agent_id: string;
+    };
+    query?: never;
+    url: '/admin/api/agents/{agent_id}';
+};
+
+export type adminGetAgentErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminGetAgentError = adminGetAgentErrors[keyof adminGetAgentErrors];
+
+export type adminGetAgentResponses = {
+    /**
+     * Response Admin-Get Agent
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminGetAgentResponse = adminGetAgentResponses[keyof adminGetAgentResponses];
 
 export type responsesCreateResponseData = {
     body?: never;

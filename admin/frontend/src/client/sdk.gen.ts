@@ -2,7 +2,7 @@
 
 import type { Client, Options as Options2, TDataShape } from './client';
 import { client } from './client.gen';
-import type { adminAdminHealthData, adminAdminHealthResponses, adminClearCacheData, adminClearCacheErrors, adminClearCacheResponses, adminCommitPendingData, adminCommitPendingErrors, adminCommitPendingResponses, adminCreateDefinitionData, adminCreateDefinitionErrors, adminCreateDefinitionResponses, adminCreateMachineData, adminCreateMachineErrors, adminCreateMachineResponses, adminDeleteDefinitionData, adminDeleteDefinitionErrors, adminDeleteDefinitionResponses, adminDeleteMachineData, adminDeleteMachineErrors, adminDeleteMachineResponses, adminDismissPendingData, adminDismissPendingErrors, adminDismissPendingResponses, adminGetDefinitionData, adminGetDefinitionErrors, adminGetDefinitionResponses, adminGetInstanceData, adminGetInstanceErrors, adminGetInstanceLogsData, adminGetInstanceLogsErrors, adminGetInstanceLogsResponses, adminGetInstanceResponses, adminGetMachineData, adminGetMachineErrors, adminGetMachineResponses, adminGetProviderTypeData, adminGetProviderTypeErrors, adminGetProviderTypeResponses, adminInitializeInstanceData, adminInitializeInstanceErrors, adminInitializeInstanceResponses, adminListDefinitionsData, adminListDefinitionsResponses, adminListInstancesData, adminListInstancesResponses, adminListMachinesData, adminListMachinesResponses, adminListProviderTypesData, adminListProviderTypesResponses, adminListRepoFilesData, adminListRepoFilesErrors, adminListRepoFilesResponses, adminListResponsesData, adminListResponsesErrors, adminListResponsesResponses, adminOverviewStatsData, adminOverviewStatsResponses, adminPatchDefinitionData, adminPatchDefinitionErrors, adminPatchDefinitionResponses, adminPatchMachineData, adminPatchMachineErrors, adminPatchMachineResponses, adminPruneStorageData, adminPruneStorageErrors, adminPruneStorageResponses, adminRegisterProviderData, adminRegisterProviderErrors, adminRegisterProviderResponses, adminRestartBackendData, adminRestartBackendErrors, adminRestartBackendResponses, adminSearchModelsData, adminSearchModelsErrors, adminSearchModelsResponses, adminStartBackendData, adminStartBackendErrors, adminStartBackendResponses, adminStopBackendData, adminStopBackendErrors, adminStopBackendResponses, adminUsageStatsData, adminUsageStatsErrors, adminUsageStatsResponses, chatCreateChatCompletionData, chatCreateChatCompletionResponses, modelsListModelsData, modelsListModelsResponses, responsesCreateResponseData, responsesCreateResponseResponses } from './types.gen';
+import type { adminAdminHealthData, adminAdminHealthResponses, adminClearCacheData, adminClearCacheErrors, adminClearCacheResponses, adminCommitPendingData, adminCommitPendingErrors, adminCommitPendingResponses, adminCreateDefinitionData, adminCreateDefinitionErrors, adminCreateDefinitionResponses, adminCreateMachineData, adminCreateMachineErrors, adminCreateMachineResponses, adminDeleteDefinitionData, adminDeleteDefinitionErrors, adminDeleteDefinitionResponses, adminDeleteMachineData, adminDeleteMachineErrors, adminDeleteMachineResponses, adminDismissPendingData, adminDismissPendingErrors, adminDismissPendingResponses, adminGetAgentData, adminGetAgentErrors, adminGetAgentResponses, adminGetDefinitionData, adminGetDefinitionErrors, adminGetDefinitionResponses, adminGetInstanceData, adminGetInstanceErrors, adminGetInstanceLogsData, adminGetInstanceLogsErrors, adminGetInstanceLogsResponses, adminGetInstanceResponses, adminGetMachineData, adminGetMachineErrors, adminGetMachineResponses, adminGetProviderTypeData, adminGetProviderTypeErrors, adminGetProviderTypeResponses, adminInitializeInstanceData, adminInitializeInstanceErrors, adminInitializeInstanceResponses, adminListAgentsData, adminListAgentsResponses, adminListDefinitionsData, adminListDefinitionsResponses, adminListInstancesData, adminListInstancesResponses, adminListMachinesData, adminListMachinesResponses, adminListProviderTypesData, adminListProviderTypesResponses, adminListRepoFilesData, adminListRepoFilesErrors, adminListRepoFilesResponses, adminListResponsesData, adminListResponsesErrors, adminListResponsesResponses, adminOverviewStatsData, adminOverviewStatsResponses, adminPatchDefinitionData, adminPatchDefinitionErrors, adminPatchDefinitionResponses, adminPatchMachineData, adminPatchMachineErrors, adminPatchMachineResponses, adminPruneStorageData, adminPruneStorageErrors, adminPruneStorageResponses, adminRegisterProviderData, adminRegisterProviderErrors, adminRegisterProviderResponses, adminRestartBackendData, adminRestartBackendErrors, adminRestartBackendResponses, adminRotateMachineSecretData, adminRotateMachineSecretErrors, adminRotateMachineSecretResponses, adminSearchModelsData, adminSearchModelsErrors, adminSearchModelsResponses, adminStartBackendData, adminStartBackendErrors, adminStartBackendResponses, adminStopBackendData, adminStopBackendErrors, adminStopBackendResponses, adminUsageStatsData, adminUsageStatsErrors, adminUsageStatsResponses, chatCreateChatCompletionData, chatCreateChatCompletionResponses, modelsListModelsData, modelsListModelsResponses, responsesCreateResponseData, responsesCreateResponseResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -109,6 +109,23 @@ export class AdminService {
                 'Content-Type': 'application/json',
                 ...options.headers
             }
+        });
+    }
+    
+    /**
+     * Rotate Machine Secret
+     *
+     * Mint a fresh shared registration secret for this machine (Phase 16).
+     *
+     * Agents keep authenticating with the OLD secret until they are redeployed
+     * with the new value (trusted-LAN manual rotation, mirroring the old
+     * per-definition token rotation). Returns the new secret in full.
+     */
+    public static rotateMachineSecret<ThrowOnError extends boolean = true>(options: Options<adminRotateMachineSecretData, ThrowOnError>) {
+        return (options.client ?? client).post<adminRotateMachineSecretResponses, adminRotateMachineSecretErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/admin/api/machines/{machine_id}/rotate-secret',
+            ...options
         });
     }
     
@@ -456,6 +473,28 @@ export class AdminService {
         return (options?.client ?? client).get<adminOverviewStatsResponses, unknown, ThrowOnError>({
             responseType: 'json',
             url: '/admin/api/stats/overview',
+            ...options
+        });
+    }
+    
+    /**
+     * List Agents
+     */
+    public static listAgents<ThrowOnError extends boolean = true>(options?: Options<adminListAgentsData, ThrowOnError>) {
+        return (options?.client ?? client).get<adminListAgentsResponses, unknown, ThrowOnError>({
+            responseType: 'json',
+            url: '/admin/api/agents',
+            ...options
+        });
+    }
+    
+    /**
+     * Get Agent
+     */
+    public static getAgent<ThrowOnError extends boolean = true>(options: Options<adminGetAgentData, ThrowOnError>) {
+        return (options.client ?? client).get<adminGetAgentResponses, adminGetAgentErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/admin/api/agents/{agent_id}',
             ...options
         });
     }

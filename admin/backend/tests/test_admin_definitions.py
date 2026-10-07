@@ -15,7 +15,13 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
 from app.api.admin.providers import compute_config_fingerprint
-from app.models import ProviderDefinition, ProviderType
+from app.models import (
+    DefinitionAgent,
+    Machine,
+    ProviderAgent,
+    ProviderDefinition,
+    ProviderType,
+)
 from app.services.hashing import canonical_json_sha256
 
 
@@ -586,3 +592,143 @@ def test_patch_shell_type_and_config_same_request(
     assert body["provider_type"] == "mock"
     assert body["backend_config"] == {"delta_count": 3}
     assert body["config_fingerprint"] == compute_config_fingerprint({"delta_count": 3})
+
+
+# --- Phase 16: definition placement (additive) -----------------------------
+
+
+def _seed_agent(session: Session, provider_type: str = "mock") -> ProviderAgent:
+    m = Machine(
+        uid="pm-" + uuid.uuid4().hex[:8],
+        name="pmachine-" + uuid.uuid4().hex[:8],
+        dns="h",
+    )
+    session.add(m)
+    session.commit()
+    a = ProviderAgent(
+        machine_id=m.id,
+        provider_type=provider_type,
+        agent_id="ag-" + uuid.uuid4().hex[:6],
+    )
+    session.add(a)
+    session.commit()
+    session.refresh(a)
+    return a
+
+
+def test_placement_defaults_any_of_type(client: TestClient) -> None:
+    created = _create(client)
+    assert created["agent_placement"] == "any_of_type"
+    assert created["agents"] == []
+
+
+def test_create_specific_placement_links_agents(
+    client: TestClient, session: Session
+) -> None:
+    a = _seed_agent(session)
+    created = _create(client, agent_placement="specific", agents=[str(a.id)])
+    assert created["agent_placement"] == "specific"
+    assert created["agents"] == [str(a.id)]
+    links = session.exec(
+        select(DefinitionAgent).where(
+            DefinitionAgent.provider_definition_id == uuid.UUID(created["id"])
+        )
+    ).all()
+    assert [str(link.agent_id) for link in links] == [str(a.id)]
+
+
+def test_create_specific_requires_agents(client: TestClient) -> None:
+    resp = client.post(
+        "/admin/api/definitions",
+        json={
+            "alias": "spec-no-agents",
+            "provider_type": "mock",
+            "backend_config": {"delta_count": 1},
+            "agent_placement": "specific",
+        },
+    )
+    assert resp.status_code == 422
+
+
+def test_create_specific_unknown_agent_422(client: TestClient) -> None:
+    resp = client.post(
+        "/admin/api/definitions",
+        json={
+            "alias": "spec-bad-agent",
+            "provider_type": "mock",
+            "backend_config": {"delta_count": 1},
+            "agent_placement": "specific",
+            "agents": ["11111111-1111-1111-1111-111111111111"],
+        },
+    )
+    assert resp.status_code == 422
+    assert "unknown agent" in resp.json()["detail"]
+
+
+def test_create_invalid_placement_value_422(client: TestClient) -> None:
+    resp = client.post(
+        "/admin/api/definitions",
+        json={
+            "alias": "bad-placement",
+            "provider_type": "mock",
+            "backend_config": {"delta_count": 1},
+            "agent_placement": "bogus",
+        },
+    )
+    assert resp.status_code == 422
+
+
+def test_create_malformed_agent_id_422(client: TestClient) -> None:
+    resp = client.post(
+        "/admin/api/definitions",
+        json={
+            "alias": "bad-agent-id",
+            "provider_type": "mock",
+            "backend_config": {"delta_count": 1},
+            "agent_placement": "specific",
+            "agents": ["not-a-uuid"],
+        },
+    )
+    assert resp.status_code == 422
+    assert "invalid agent id" in resp.json()["detail"]
+
+
+def test_create_agents_without_specific_422(client: TestClient) -> None:
+    resp = client.post(
+        "/admin/api/definitions",
+        json={
+            "alias": "agents-no-specific",
+            "provider_type": "mock",
+            "backend_config": {"delta_count": 1},
+            "agent_placement": "any_of_type",
+            "agents": ["11111111-1111-1111-1111-111111111111"],
+        },
+    )
+    assert resp.status_code == 422
+    assert "only valid with" in resp.json()["detail"]
+
+
+def test_patch_placement_to_specific_then_back(
+    client: TestClient, session: Session
+) -> None:
+    created = _create(client)
+    a = _seed_agent(session)
+    resp = client.patch(
+        f"/admin/api/definitions/{created['id']}",
+        json={"agent_placement": "specific", "agents": [str(a.id)]},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["agents"] == [str(a.id)]
+    # Back to any_of_type clears the links.
+    resp2 = client.patch(
+        f"/admin/api/definitions/{created['id']}",
+        json={"agent_placement": "any_of_type"},
+    )
+    assert resp2.status_code == 200, resp2.text
+    assert resp2.json()["agents"] == []
+    links = session.exec(
+        select(DefinitionAgent).where(
+            DefinitionAgent.provider_definition_id == uuid.UUID(created["id"])
+        )
+    ).all()
+    assert links == []

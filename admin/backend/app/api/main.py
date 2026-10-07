@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from app.api.admin.agents import router as admin_agents_router
 from app.api.admin.definitions import router as admin_definitions_router
 from app.api.admin.health import router as admin_health_router
 from app.api.admin.huggingface import router as admin_huggingface_router
@@ -29,6 +30,8 @@ api_router.include_router(admin_provider_types_router)
 api_router.include_router(admin_huggingface_router)
 # Phase 10 UI reads: response log, usage stats, dashboard overview.
 api_router.include_router(admin_responses_router)
+# Phase 16: provider-agent reads (containers bound to machine+type).
+api_router.include_router(admin_agents_router)
 # Public OpenAI-compatible inference API lives at /v1 (NOT under /admin/api).
 api_router.include_router(v1_responses_router)
 api_router.include_router(v1_chat_router)

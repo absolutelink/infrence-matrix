@@ -15,6 +15,7 @@ Semantics:
 """
 
 import logging
+import secrets
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -60,6 +61,9 @@ def machine_dict(machine: Machine, instance_count: int | None = None) -> dict[st
         "ip": machine.ip,
         "total_vram_bytes": machine.total_vram_bytes,
         "hardware": machine.hardware,
+        # Phase 16: shared agent registration secret (trusted LAN; the UI
+        # masks it and offers copy/rotate, mirroring the definition token).
+        "registration_secret": machine.registration_secret,
         "created_at": iso_utc(machine.created_at),
         "updated_at": iso_utc(machine.updated_at),
     }
@@ -162,3 +166,29 @@ def delete_machine(
     session.commit()
     logger.info("deleted machine %s (%s)", machine.uid, machine_id)
     return {"ok": True, "id": machine_id}
+
+
+@router.post("/{machine_id}/rotate-secret")
+def rotate_machine_secret(
+    machine_id: str, session: Session = Depends(get_session)
+) -> dict[str, Any]:
+    """Mint a fresh shared registration secret for this machine (Phase 16).
+
+    Agents keep authenticating with the OLD secret until they are redeployed
+    with the new value (trusted-LAN manual rotation, mirroring the old
+    per-definition token rotation). Returns the new secret in full.
+    """
+    machine = _get_machine(session, machine_id)
+    machine.registration_secret = secrets.token_urlsafe(32)
+    machine.updated_at = datetime.now(UTC)
+    session.add(machine)
+    session.commit()
+    session.refresh(machine)
+    logger.info(
+        "rotated registration secret for machine %s (%s)", machine.uid, machine_id
+    )
+    return {
+        "ok": True,
+        "id": machine_id,
+        "registration_secret": machine.registration_secret,
+    }
