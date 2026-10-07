@@ -37,9 +37,10 @@ ARG NVIDIA_DRIVER_BRANCH=580
 ARG NVIDIA_VERSION=580.178.04
 
 # Install the userspace CUDA + NVML libraries (no kernel/akmod deps), then
-# extract nvidia-smi from the core driver RPM WITHOUT installing it — the core
-# package pulls akmod/kernel-devel deps that fail to resolve inside a container
-# build, so rpm2cpio sidesteps dependency resolution entirely.
+# extract nvidia-smi from the `-cuda` RPM (the package that provides
+# /usr/bin/nvidia-smi) WITHOUT installing it — that package pulls akmod/kernel
+# deps that fail to resolve inside a container build, so rpm2cpio sidesteps
+# dependency resolution entirely.
 RUN set -eux; \
     dnf -y install \
         https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-44.noarch.rpm \
@@ -50,8 +51,8 @@ RUN set -eux; \
         "xorg-x11-drv-nvidia-${NVIDIA_DRIVER_BRANCH}xx-cuda-libs-${NVIDIA_VERSION}"; \
     mkdir -p /opt/nvidia-smi /tmp/nvdl; \
     dnf download --destdir /tmp/nvdl \
-        "xorg-x11-drv-nvidia-${NVIDIA_DRIVER_BRANCH}xx-${NVIDIA_VERSION}"; \
-    rpm2cpio /tmp/nvdl/xorg-x11-drv-nvidia-${NVIDIA_DRIVER_BRANCH}xx-*.rpm \
+        "xorg-x11-drv-nvidia-${NVIDIA_DRIVER_BRANCH}xx-cuda-${NVIDIA_VERSION}"; \
+    rpm2cpio /tmp/nvdl/xorg-x11-drv-nvidia-${NVIDIA_DRIVER_BRANCH}xx-cuda-[0-9]*.rpm \
         | (cd /opt/nvidia-smi && cpio -idm --quiet); \
     test -x /opt/nvidia-smi/usr/bin/nvidia-smi; \
     dnf clean all; rm -rf /var/cache/dnf /tmp/nvdl
