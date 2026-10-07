@@ -26,7 +26,6 @@ import asyncio
 import logging
 from typing import Any
 
-import uvicorn
 from provider_lib.admin_client import AdminClient, RegistrationResult
 from provider_lib.app_factory import BackendOverrides, create_provider_app
 from provider_lib.backend import BackendLifecycle
@@ -35,6 +34,8 @@ from provider_lib.config_update import ConfigState, install_config_handlers
 from provider_lib.log_stream import LogStreamingBundle, install_log_streaming
 from provider_lib.metrics import MachineMetricsEmitter, collect_machine_snapshot
 from provider_lib.ops import install_backend_ops
+from provider_lib.registry import BackendHandle, BackendRegistry
+from provider_lib.serve import MultiPortServer
 from provider_lib.wire import Frame, InstanceStatusValue
 
 from provider_gufo.driver import SCHEMA, GufoBackend
@@ -74,19 +75,40 @@ def make_driver(
     settings: ProviderSettings,
     backend_config: dict[str, Any],
     client: AdminClient | None = None,
+    serve_port: int | None = None,
 ) -> GufoBackend:
-    """Build the driver with progress/log events routed to the admin."""
+    """Build the driver with progress/log events routed to the admin.
+
+    ``serve_port`` (slice 6) is this backend's admin-facing port; the engine
+    binds to ``serve_port + 1`` so backends on one agent never collide.
+    """
 
     async def on_progress(payload: dict[str, Any]) -> None:
         if client is not None:
             await client.send_event("download.progress", payload)
 
-    return GufoBackend(settings, backend_config, progress_cb=on_progress)
+    return GufoBackend(
+        settings, backend_config, progress_cb=on_progress, serve_port=serve_port
+    )
 
 
-def make_lifecycle(client: AdminClient, backend_config: dict[str, Any] | None = None):
-    """Build the gufo lifecycle with status events to the admin."""
+def make_lifecycle(
+    client: AdminClient,
+    backend_config: dict[str, Any] | None = None,
+    *,
+    instance_id: str | None = None,
+    serve_port: int | None = None,
+):
+    """Build the gufo lifecycle with status events to the admin (slice 6:
+    keyed to THIS backend's ``instance_id``)."""
     settings = client.settings
+
+    def _iid() -> str | None:
+        if instance_id is not None:
+            return instance_id
+        if getattr(client, "is_registered", False):
+            return client.registration.instance_id
+        return None
 
     async def emit(status: str, reason: str | None) -> None:
         payload: dict[str, Any] = {
@@ -94,33 +116,124 @@ def make_lifecycle(client: AdminClient, backend_config: dict[str, Any] | None = 
             "agent_status": InstanceStatusValue.RUNNING,
             "reason": reason,
         }
-        if client.is_registered and client.registration.instance_id is not None:
-            payload["instance_id"] = client.registration.instance_id
+        iid = _iid()
+        if iid is not None:
+            payload["instance_id"] = iid
         await client.send_event("backend.status", payload)
 
-    driver = make_driver(settings, backend_config or {}, client=client)
-    return BackendLifecycle(driver, capacity=DEFAULT_CAPACITY, status_callback=emit)
+    driver = make_driver(
+        settings, backend_config or {}, client=client, serve_port=serve_port
+    )
+    return BackendLifecycle(
+        driver, capacity=DEFAULT_CAPACITY, status_callback=emit, instance_id=_iid()
+    )
+
+
+def _apply_backend(
+    lifecycle: BackendLifecycle,
+    backend: dict[str, Any],
+    config_state: ConfigState | None = None,
+) -> None:
+    """Adopt capacity + backend_config + fingerprint from ONE registration
+    backend dict into its gufo lifecycle/driver."""
+    definition = backend.get("definition") or {}
+    iid = backend.get("instance_id")
+    if iid is not None:
+        lifecycle.instance_id = str(iid)
+    capacity = definition.get("capacity")
+    if isinstance(capacity, int) and capacity >= 1:
+        lifecycle.capacity = capacity
+    driver = lifecycle.driver
+    if isinstance(driver, GufoBackend):
+        if iid is not None:
+            driver.set_instance_id(str(iid))
+        backend_config = definition.get("backend_config")
+        if isinstance(backend_config, dict):
+            driver.apply_config(backend_config)
+    if config_state is not None:
+        fp = definition.get("config_fingerprint")
+        config_state.applied_fingerprint = fp if isinstance(fp, str) else None
+
+
+def _apply_assignment(
+    lifecycle: BackendLifecycle,
+    entry: dict[str, Any],
+    config_state: ConfigState,
+) -> None:
+    """Adopt an ``agent.assignments.update`` entry (flat shape) into a freshly
+    built gufo lifecycle."""
+    iid = entry.get("instance_id")
+    if iid is not None:
+        lifecycle.instance_id = str(iid)
+    capacity = entry.get("capacity")
+    if isinstance(capacity, int) and capacity >= 1:
+        lifecycle.capacity = capacity
+    driver = lifecycle.driver
+    if isinstance(driver, GufoBackend):
+        driver.set_instance_id(str(iid))
+        backend_config = entry.get("backend_config")
+        if isinstance(backend_config, dict):
+            driver.apply_config(backend_config)
+    fp = entry.get("config_fingerprint")
+    config_state.applied_fingerprint = fp if isinstance(fp, str) else None
+
+
+def build_registry(client: AdminClient, result: RegistrationResult) -> BackendRegistry:
+    """Host one drivable lifecycle per backend the admin placed on this agent."""
+    registry = BackendRegistry()
+    for backend in result.backends:
+        iid = backend.get("instance_id")
+        if iid is None:  # pragma: no cover - admin always assigns an id
+            continue
+        port = backend.get("port")
+        serve_port = port if isinstance(port, int) else None
+        definition = backend.get("definition") or {}
+        backend_config = definition.get("backend_config") or {}
+        lifecycle = make_lifecycle(
+            client, backend_config, instance_id=str(iid), serve_port=serve_port
+        )
+        config_state = ConfigState()
+        _apply_backend(lifecycle, backend, config_state)
+        registry.add(BackendHandle(str(iid), lifecycle, config_state, port=serve_port))
+    return registry
+
+
+def make_handle(client: AdminClient, entry: dict[str, Any]) -> BackendHandle:
+    """Build a drivable gufo lifecycle for a newly-assigned backend (slice 6)."""
+    iid = str(entry["instance_id"])
+    port = entry.get("port")
+    serve_port = port if isinstance(port, int) else None
+    backend_config = entry.get("backend_config") or {}
+    lifecycle = make_lifecycle(
+        client, backend_config, instance_id=iid, serve_port=serve_port
+    )
+    config_state = ConfigState()
+    _apply_assignment(lifecycle, entry, config_state)
+    return BackendHandle(iid, lifecycle, config_state, port=serve_port)
 
 
 def install_command_handlers(
     client: AdminClient,
-    lifecycle: BackendLifecycle,
+    target: BackendLifecycle | BackendRegistry,
     emitter: MachineMetricsEmitter,
     config_state: ConfigState | None = None,
 ) -> None:
-    """Register admin->provider command handlers on the client."""
+    """Register admin->provider command handlers on the client.
+
+    ``target`` is a single lifecycle (single-backend) or a
+    :class:`BackendRegistry` (multi-backend, slice 6).
+    """
     resolved_state = config_state if config_state is not None else ConfigState()
 
     async def re_register() -> dict[str, Any] | None:
         """Re-run the registration handshake and adopt its response.
 
         Called by `provider.initialize` (provider_lib.ops): a fresh
-        `/register` re-checks the version + schema gates, re-adopts capacity
-        and `backend_config`, rewrites `CACHE_DIR/provider_config.json` and
-        mints a new instance secret for *future* reconnects. The live socket
-        is deliberately not recycled — it is already authenticated at the
-        current epoch and keeps carrying the status events the operator is
-        watching.
+        `/register` re-checks the version + schema gates, re-adopts the
+        definition(s), rewrites `CACHE_DIR/provider_config.json` and mints a
+        new agent secret for *future* reconnects. The live socket is
+        deliberately not recycled — it is already authenticated at the current
+        epoch and keeps carrying the status events the operator is watching.
         """
         settings = client.settings
         hardware = await build_hardware_report(settings)
@@ -131,7 +244,14 @@ def install_command_handlers(
             hardware=hardware,
             schema=SCHEMA,
         )
-        apply_registration(lifecycle, result, resolved_state)
+        if isinstance(target, BackendRegistry):
+            by_id = {h.instance_id: h for h in target.handles()}
+            for backend in result.backends:
+                handle = by_id.get(str(backend.get("instance_id")))
+                if handle is not None:
+                    _apply_backend(handle.lifecycle, backend, handle.config_state)
+        else:
+            apply_registration(target, result, resolved_state)
         return result.provider_definition
 
     async def on_metrics_assign(frame: Frame) -> dict[str, Any]:
@@ -151,30 +271,38 @@ def install_command_handlers(
     # request or the command ack window. The scheduler keeps sending
     # `wait_for_running: true`, so its contract ("acked == /v1 is live")
     # is unchanged.
+    make_handle_fn = (
+        (lambda entry: make_handle(client, entry))
+        if isinstance(target, BackendRegistry)
+        else None
+    )
     install_backend_ops(
-        client, lifecycle, backend_name=PROVIDER_TYPE, re_register=re_register
+        client,
+        target,
+        backend_name=PROVIDER_TYPE,
+        re_register=re_register,
+        make_handle=make_handle_fn,
     )
     client.on_command("metrics.assign", on_metrics_assign)
     client.on_command("metrics.unassign", on_metrics_unassign)
     install_config_handlers(
         client,
-        lifecycle,
+        target,
         resolved_state,
         client.settings,
         # gufo's per-instance disk cache (--cache-disk <CACHE_DIR>
         # /<instance_id>) is the provider's prompt cache; cleared
-        # alongside the shared prompt_cache root. Resolved lazily so the
-        # REAL registered instance id is used once registration has
-        # happened (the driver falls back to MACHINE_UID pre-registration,
-        # which is also what this list mirrors before the id is known).
-        # Model files (MODELS_DIR) are never touched.
-        extra_cache_dirs=lambda: [
-            client.settings.CACHE_DIR
-            / (
-                getattr(lifecycle.driver, "instance_id", None)
-                or client.settings.MACHINE_UID
-            ),
-        ],
+        # alongside the shared prompt_cache root. Resolved per-handle so a
+        # multi-backend agent clears the RIGHT backend's cache dir (slice 6).
+        # When a driver has no instance_id yet (pre-registration) we SKIP the
+        # extra dir rather than falling back to the shared MACHINE_UID — two
+        # such backends would otherwise clear the same dir (M2). Model files
+        # (MODELS_DIR) are never touched.
+        extra_cache_dirs=lambda handle: (
+            [client.settings.CACHE_DIR / handle.lifecycle.driver.instance_id]
+            if getattr(handle.lifecycle.driver, "instance_id", None)
+            else []
+        ),
     )
 
 
@@ -221,6 +349,36 @@ async def emit_provider_status(
     )
 
 
+async def bootstrap_agent(
+    client: AdminClient,
+) -> tuple[
+    RegistrationResult,
+    BackendRegistry,
+    BackendLifecycle,
+    MachineMetricsEmitter,
+    LogStreamingBundle,
+]:
+    """Register over HTTP and host one drivable lifecycle per placed backend
+    (slice 6). Returns ``(result, registry, primary, emitter, log_bundle)``."""
+    settings = client.settings
+    hardware = await build_hardware_report(settings)
+    result = await client.register(
+        provider_type=PROVIDER_TYPE,
+        version=VERSION,
+        base_port=settings.PROVIDER_PORT,
+        hardware=hardware,
+        schema=SCHEMA,
+    )
+    registry = build_registry(client, result)
+    primary = (
+        registry.handles()[0].lifecycle if len(registry) else make_lifecycle(client)
+    )
+    emitter = MachineMetricsEmitter(primary, client, settings)
+    install_command_handlers(client, registry, emitter)
+    log_bundle = install_log_streaming(client, primary)
+    return result, registry, primary, emitter, log_bundle
+
+
 async def register_provider(
     client: AdminClient, lifecycle: BackendLifecycle | None = None
 ) -> tuple[
@@ -229,37 +387,31 @@ async def register_provider(
     MachineMetricsEmitter,
     LogStreamingBundle,
 ]:
-    """Build hardware report, register over HTTP, adopt the response config.
+    """Register over HTTP, adopt config, install handlers, build emitter.
 
-    Installs command handlers and creates the metrics emitter but does NOT
-    dial the WS — see AdminClient.run_forever for the persistent
-    connection with reconnect/backoff.
+    When ``lifecycle`` is supplied (single-backend tests) it is used directly;
+    otherwise the agent hosts N backends (slice 6) and the first is returned
+    as the primary. Does NOT dial the WS — see AdminClient.run_forever.
     """
-    settings = client.settings
-    hardware = await build_hardware_report(settings)
-    result = await client.register(
-        provider_type=PROVIDER_TYPE,
-        version=VERSION,
-        base_port=settings.PROVIDER_PORT,
-        hardware=hardware,
-        # Single shared load (provider_gufo.driver.SCHEMA) so the
-        # schema registered with the admin and the schema the driver
-        # validates against are provably the same object.
-        schema=SCHEMA,
-    )
-    backend_config = result.provider_definition.get("backend_config") or {}
-    if lifecycle is None:
-        lifecycle = make_lifecycle(client, backend_config)
-    config_state = ConfigState()
-    emitter = MachineMetricsEmitter(lifecycle, client, settings)
-    install_command_handlers(client, lifecycle, emitter, config_state)
-    apply_registration(lifecycle, result, config_state)
-    # Phase 13: batched backend.logs / provider.logs streaming + the
-    # backend.logs.get catch-up handler. The streamer is started on every
-    # WS connect (run_async) and stopped on disconnect; cursors persist
-    # so lines produced while disconnected ship on reconnect.
-    log_bundle = install_log_streaming(client, lifecycle)
-    return result, lifecycle, emitter, log_bundle
+    if lifecycle is not None:
+        settings = client.settings
+        hardware = await build_hardware_report(settings)
+        result = await client.register(
+            provider_type=PROVIDER_TYPE,
+            version=VERSION,
+            base_port=settings.PROVIDER_PORT,
+            hardware=hardware,
+            schema=SCHEMA,
+        )
+        config_state = ConfigState()
+        emitter = MachineMetricsEmitter(lifecycle, client, settings)
+        install_command_handlers(client, lifecycle, emitter, config_state)
+        apply_registration(lifecycle, result, config_state)
+        log_bundle = install_log_streaming(client, lifecycle)
+        return result, lifecycle, emitter, log_bundle
+
+    result, _registry, primary, emitter, log_bundle = await bootstrap_agent(client)
+    return result, primary, emitter, log_bundle
 
 
 async def register_and_connect(
@@ -270,11 +422,7 @@ async def register_and_connect(
     MachineMetricsEmitter,
     LogStreamingBundle,
 ]:
-    """Register, adopt config, dial the WS once, emit initial status.
-
-    One-shot connect for tests and simple callers. Production entrypoints
-    (run_async) split this into register_provider + run_forever.
-    """
+    """Register, adopt config, dial the WS once, emit initial status."""
     result, lifecycle, emitter, log_bundle = await register_provider(client, lifecycle)
     await client.connect()
     log_bundle.start()
@@ -298,7 +446,7 @@ def build_app(
 async def run_async() -> None:
     settings = ProviderSettings()
     client = AdminClient(settings)
-    _result, lifecycle, emitter, log_bundle = await register_provider(client)
+    _result, registry, lifecycle, emitter, log_bundle = await bootstrap_agent(client)
 
     first_connect = asyncio.Event()
 
@@ -308,10 +456,9 @@ async def run_async() -> None:
         if not first_connect.is_set():
             first_connect.set()
             logger.info(
-                "gufo provider connected: instance=%s epoch=%s capacity=%s",
-                client.registration.instance_id,
+                "gufo agent connected: backends=%d epoch=%s",
+                len(registry),
                 client.epoch,
-                lifecycle.capacity,
             )
 
     async def on_disconnected() -> None:
@@ -324,18 +471,22 @@ async def run_async() -> None:
             on_disconnected=on_disconnected,
         )
     )
-    config = uvicorn.Config(
-        build_app(lifecycle, settings),
-        host="0.0.0.0",
-        port=settings.PROVIDER_PORT,
-        log_level="info",
-    )
-    server = uvicorn.Server(config)
+    # Slice 6: serve each hosted backend's /v1 on its own port (base_port +
+    # offset); a single-backend agent yields exactly one listener on
+    # PROVIDER_PORT — identical to the pre-slice-6 behavior.
+    server = MultiPortServer(settings, PROVIDER_TYPE, VERSION, registry)
+    serve_task = asyncio.create_task(server.serve_forever())
     try:
-        await server.serve()
+        await serve_task
+    except asyncio.CancelledError:
+        # serve_task only ends via cancellation: uvicorn signal capture is
+        # disabled in provider_lib.serve, so SIGINT propagates out of
+        # asyncio.run and is handled in main(), not here.
+        pass
     finally:
         ws_task.cancel()
         await asyncio.gather(ws_task, return_exceptions=True)
+        await server.aclose()
         await log_bundle.stop()
         await emitter.stop()
         await client.disconnect()

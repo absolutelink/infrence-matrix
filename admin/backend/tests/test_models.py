@@ -175,6 +175,26 @@ def test_provider_type_max_running_backends_defaults_zero(session: Session) -> N
     assert pt.max_running_backends == 0  # 0 = unlimited
 
 
+def test_apply_max_running_from_schema_reads_x_key(session: Session) -> None:
+    """Phase 16 slice 6: the admin extracts the per-agent running cap from the
+    committed schema's top-level ``x-max-running-backends``. halogen-flash ships
+    ``1`` (single NPU); an absent key defaults to unlimited (0); a non-int is
+    coerced to 0 rather than crashing registration."""
+    from app.api.admin.providers import _apply_max_running_from_schema
+
+    pt = _ptype(session, max_running_backends=0)
+    _apply_max_running_from_schema(pt, {"type": "object", "x-max-running-backends": 1})
+    assert pt.max_running_backends == 1
+
+    # Absent key -> unlimited.
+    _apply_max_running_from_schema(pt, {"type": "object"})
+    assert pt.max_running_backends == 0
+
+    # Non-integer value -> coerced to 0 (never raises).
+    _apply_max_running_from_schema(pt, {"x-max-running-backends": "many"})
+    assert pt.max_running_backends == 0
+
+
 def test_provider_definition_placement_defaults_any_of_type(
     session: Session,
 ) -> None:

@@ -46,13 +46,21 @@ _STDERR_TAIL_LINES = 5
 SCHEMA: dict[str, Any] = load_schema("provider_llama_cpp")
 
 
-def _read_backend_port(cfg: dict[str, Any], settings: ProviderSettings) -> int:
+def _read_backend_port(
+    cfg: dict[str, Any], settings: ProviderSettings, serve_port: int | None = None
+) -> int:
     """Resolve the llama-server port: `server.backend_port` (Phase 12),
-    the legacy top-level `backend_port`, or PROVIDER_PORT + 1."""
+    the legacy top-level `backend_port`, or ``serve_port + 1`` (the agent's
+    assignment port for this backend, slice 6) falling back to
+    ``PROVIDER_PORT + 1`` when no serve port is threaded (single-backend /
+    direct construction)."""
     port = (cfg.get("server") or {}).get("backend_port")
     if port is None:
         port = cfg.get("backend_port")
-    return int(port or (settings.PROVIDER_PORT + 1))
+    if port is not None:
+        return int(port)
+    base = serve_port if serve_port is not None else settings.PROVIDER_PORT
+    return base + 1
 
 
 class LlamaCppBackend(BackendDriver):
@@ -64,12 +72,18 @@ class LlamaCppBackend(BackendDriver):
         backend_config: dict[str, Any],
         *,
         progress_cb: ProgressCallback | None = None,
+        serve_port: int | None = None,
     ) -> None:
         self._settings = settings
         self._config = backend_config or {}
         self._progress_cb = progress_cb
         self._binary = settings.LLAMA_SERVER_PATH
-        self.backend_port = _read_backend_port(self._config, settings)
+        # Slice 6: the backend's admin-facing port (base_port + offset). The
+        # engine subprocess binds to ``serve_port + 1`` so two backends on one
+        # agent never collide; ``None`` keeps the single-backend default
+        # (``PROVIDER_PORT + 1``).
+        self._serve_port = serve_port
+        self.backend_port = _read_backend_port(self._config, settings, serve_port)
         self._proc: subprocess.Popen[str] | None = None
         self._log_ring = CursorLogRing(_LOG_BUFFER_LINES)
         self._log_readers: list[asyncio.Task[None]] = []
@@ -88,7 +102,9 @@ class LlamaCppBackend(BackendDriver):
         self._config = backend_config or {}
         for err in validate_backend_config(SCHEMA, self._config):
             logger.warning("backend_config schema violation: %s", err)
-        self.backend_port = _read_backend_port(self._config, self._settings)
+        self.backend_port = _read_backend_port(
+            self._config, self._settings, self._serve_port
+        )
         # Config changed: previously resolved artifacts are stale.
         self.resolved_artifacts = []
 

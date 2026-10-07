@@ -9,10 +9,12 @@ socket — without a full re-registration. This handler reconciles the agent's
 * **add** — for each assignment whose ``instance_id`` this agent does not yet
   host, build a fresh ``BackendHandle`` via the package-supplied ``make_handle``
   factory (lifecycle + applied-config state seeded from the entry) and register
-  it. A package that cannot host an additional backend (every real engine today
-  — single-backend-per-process is slice 6) passes no factory and instead
-  **refuses** the add, reporting it in ``refused``; the admin leaves the row and
-  the backend simply never boots until the package learns to host it.
+  it. Since slice 6 every provider package (mock + all four real engines) supplies
+  a ``make_handle`` and hosts N backends per process, so adds are normally served.
+  The factory is optional only as a defensive fallback: an agent that passes none
+  **refuses** an add of a backend it does not already host (reported in
+  ``refused``) rather than crashing; the admin leaves the row and the backend
+  simply never boots.
 * **remove** — for each hosted handle no longer in the set, stop the engine if
   idle and drop the handle. A **busy** backend (live slots held) is refused and
   kept until it frees — the exact mirror of the admin's busy-safe prune, so a
@@ -37,9 +39,9 @@ from provider_lib.wire import Frame, FrameKind
 
 logger = logging.getLogger("provider.assignments")
 
-# Builds a hosted handle from one assignment entry. Provided by packages that
-# can host N backends (the mock); omitted by single-backend packages, which
-# then refuse adds they cannot serve.
+# Builds a hosted handle from one assignment entry. Supplied by every provider
+# package since slice 6 (mock + all four real engines host N backends per
+# process); when omitted the agent defensively refuses adds it cannot serve.
 HandleFactory = Callable[[dict[str, Any]], BackendHandle]
 
 
@@ -53,8 +55,9 @@ def install_assignment_handler(
     """Install the ``agent.assignments.update`` command handler on ``client``.
 
     ``make_handle`` (optional) turns an assignment entry into a
-    :class:`BackendHandle`. When absent the agent refuses any add of a backend
-    it does not already host (single-backend packages) rather than crashing.
+    :class:`BackendHandle`. Every provider package supplies one since slice 6;
+    when absent the agent defensively refuses any add of a backend it does not
+    already host rather than crashing.
     ``on_max_running`` (optional) lets a package cache the agent's
     ``max_running_backends`` view (the admin scheduler is the authority; this
     is informational).
@@ -96,10 +99,14 @@ def install_assignment_handler(
                 # only governs which backends exist, not their live contents.
                 continue
             if make_handle is None:
+                # Defensive: every provider package supplies a make_handle
+                # factory since slice 6, so this path is not hit in practice.
+                # An agent built without one cannot spawn a new lifecycle, so
+                # refuse the add rather than crash.
                 refused.append(
                     {
                         "instance_id": iid,
-                        "reason": "single_backend_agent: cannot host an additional backend",
+                        "reason": "no_handle_factory: agent cannot spawn a new backend",
                     }
                 )
                 continue
@@ -130,6 +137,13 @@ def install_assignment_handler(
                 continue
             registry.remove(handle.instance_id)
             removed.append(iid)
+
+        # Slice 6: a reconcile that changed the hosted set drives the multi-port
+        # server to bind/unbind the affected backends' HTTP listeners. Fired
+        # only on an actual change so the initial build (before the server
+        # exists) and no-op pushes stay silent.
+        if added or removed:
+            await registry.notify_changed()
 
         logger.info(
             "assignments reconciled: added=%s removed=%s refused=%s",

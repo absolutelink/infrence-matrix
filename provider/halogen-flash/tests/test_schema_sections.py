@@ -134,7 +134,7 @@ def test_schema_has_the_planned_sections() -> None:
 # schema.json, every known halogen-flash instance must re-register with
 # the new file (or the operator force-commits); update this pin
 # deliberately.
-SHIPPED_SCHEMA_FP = "79584684e7f41ca75f62a6a322b3047528651380180bbe4c8eae3eafa03a98b8"
+SHIPPED_SCHEMA_FP = "d3b144d49aa3cb8f0b6c75f9cd469d4d652e55c9529c12814cf817532843e130"
 
 
 def test_schema_fingerprint_is_stable() -> None:
@@ -143,6 +143,15 @@ def test_schema_fingerprint_is_stable() -> None:
     # Round-trip determinism (serialization-independent digest).
     assert fp == schema_fingerprint(json.loads(json.dumps(SCHEMA)))
     assert len(fp) == 64
+
+
+def test_schema_declares_single_running_backend() -> None:
+    """Phase 16 slice 6: halogen-flash drives one NPU, so its shipped schema
+    declares ``x-max-running-backends: 1`` at the top level. The admin reads
+    this into ``ProviderType.max_running_backends`` at every commit point, so
+    the scheduler hot-swaps (boots one halogen-flash backend per agent at a
+    time)."""
+    assert SCHEMA.get("x-max-running-backends") == 1
 
 
 def test_canonical_config_validates() -> None:

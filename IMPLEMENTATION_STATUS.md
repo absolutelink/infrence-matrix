@@ -2,7 +2,15 @@
 
 **Overhaul branch:** `litellm-architecture-overhaul`
 **Last updated:** 2026-10-07 (**Phase 16 🟡 machine-scoped provider agents —
-slice 5 implemented**: `agent.assignments.update` push + event-driven placement
+slice 6 implemented**: real-engine **multi-backend-per-process** hosting +
+per-port serving — each hardware provider (llama-cpp/gufo/halogen/halogen-flash)
+now builds a `BackendRegistry` of drivable lifecycles (one per placed backend),
+threads the assignment `port` into its engine driver so subprocess ports stay
+distinct, and serves every hosted backend's `/v1` on its own port through the new
+`provider_lib.serve.MultiPortServer` (dynamic add/remove sync on registry change);
+halogen-flash declares `x-max-running-backends: 1` so the admin places at most one
+backend per its agent; single-backend behavior is byte-identical to before.
+Prior: **slice 5**: `agent.assignments.update` push + event-driven placement
 reconciliation — a placement change now propagates to a live agent over its
 socket without a re-registration via the single shared `reconcile_agent_placement`
 diff (busy-safe on both sides) + the slice-4 warm-up re-trigger; provider_lib
@@ -48,12 +56,8 @@ hold is never orphaned, pruned on a later pass once stopped, with a test;
 `connection_manager` ignores `backend.status`/`backend.metadata` frames whose
 `instance_id` belongs to a different agent (cross-agent guard) with a test;
 `settings.tsx` help text + CI `build-and-push.yml` env migrated to
-`MACHINE_SECRET`/`AGENT_ID`; a slice-6 note added to the mock serve path.
-Deferred: `agent.assignments.update` push / `AGENT_ASSIGNMENTS_UPDATE` (slice 5), real
-multi-backend-per-process engine hosting + per-port serving (slice 6 — the
-provider_lib dispatch layer is ready; the engine drivers still host one
-backend, and per-backend config updates on a multi-backend agent can flap
-agent-level status until slice 6), React Agents/placement UI + removing the
+`MACHINE_SECRET`/`AGENT_ID`.
+Deferred: React Agents/placement UI + removing the
 inert `awaiting_config`/shell-create UI remnants (slice 7), `provider/README.md`
 `no_config_nak` references + full `docs/ws-protocol.md` rewrite (slice 8). See
 the Phase 16 section below for the full plan.). Prior:
@@ -85,7 +89,7 @@ starting a feature, read the linked protocol/doc first.
 | 13 | Server + backend log capture, Redis tails, UI log views | ✅ Complete |
 | 14 | Shell definitions: deferred typing + `awaiting_config` pre-state | ✅ Complete (superseded by 16) |
 | 15 | Manual backend control + `provider.initialize` + download-bound boot budget | ✅ Complete |
-| 16 | Machine-scoped provider **agents**: one container → many same-type backends, placement, `max_running_backends` | 🟡 slices 1–5 landed (agents, placement, `max_running` hot-swap + proactive warm-up, `agent.assignments.update` push); 6–8 pending |
+| 16 | Machine-scoped provider **agents**: one container → many same-type backends, placement, `max_running_backends` | 🟡 slices 1–6 landed (agents, placement, `max_running` hot-swap + proactive warm-up, `agent.assignments.update` push, real-engine multi-backend-per-process + per-port serving); 7–8 pending |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
 
@@ -1574,15 +1578,31 @@ clean; no model/route-schema change this slice so alembic and the generated
 client are unchanged — the added `request: Request` params do not alter
 OpenAPI).
 
-**Still deferred (later slices):** real-engine **multi-backend-per-process**
-hosting — the provider lib still runs one `BackendLifecycle` per real container
-and addresses it as the agent's first backend (slice 6; the mock now hosts N and
-demonstrates the assignments reconcile, and real packages safely *refuse* an
-assignment add they cannot host rather than crashing), halogen-flash
-`x-max-running-backends: 1` schema declaration (slice 6), and the full React
-Agents/placement UI (slice 7). The wire `AGENT_ASSIGNMENTS_UPDATE` FrameKind is
-now introduced (both mirrors + drift guard green); the `PROVIDER_TYPE` env is
-slice 6.
+**Slice 6 (real-engine multi-backend-per-process) — landed.** Each hardware
+provider now hosts a `BackendRegistry` of drivable `BackendLifecycle`s (one per
+placed backend) and serves every backend's `/v1` on its own assignment port via
+the new `provider_lib.serve.MultiPortServer` (dynamic listener sync on registry
+change; a single-backend agent yields exactly one listener on `PROVIDER_PORT`,
+byte-identical to pre-slice-6). The assignment `port` is threaded into each
+engine driver so subprocess ports stay distinct (llama-cpp/gufo `serve_port+1`;
+halogen `serve_port+1/+2`; halogen-flash uses static engine ports). halogen-flash
+declares `x-max-running-backends: 1` in its `schema.json`, read into
+`ProviderType.max_running_backends` so the admin places at most one backend per
+its agent. Per-backend `config.update`/`cache.clear` resolve to the correct
+lifecycle (gufo's per-instance cache dir now resolves from the target handle).
+**Slice 6 review follow-up:** `MultiPortServer.sync` now log-and-continues per
+backend so one failing app-build can't strand the others (M1, + test); gufo's
+`extra_cache_dirs` skips the per-instance dir when `driver.instance_id` is unset
+instead of falling back to the shared `MACHINE_UID` (M2, + test — two pre-registration
+backends no longer clobber one dir); stale "single-backend-per-process" docstrings in
+`assignments.py` updated and the no-factory refuse branch reworded as purely defensive
+(N1). The bare `except A, B:` form is **correct** under the project's `>=3.14` floor
+(PEP 758) and is what `ruff format` (target py314) canonicalizes to — parenthesizing it
+is stripped by the formatter, so clarity is added via inline comments instead; the five
+`run_async` clauses were simplified to `except asyncio.CancelledError:` (L1: with uvicorn
+signal capture disabled, SIGINT exits via `main()`, never reaching `await serve_task`).
+**Still deferred (later slices):** the full React Agents/placement UI (slice 7)
+and the `provider/README.md` + `docs/ws-protocol.md` rewrite (slice 8).
 
 
 **Goal.** Stop binding a provider container to a single `ProviderDefinition`.
@@ -1761,14 +1781,25 @@ into one container per (machine, type) that owns its backends and one socket.
       `AGENT_ID` + per-backend `instance_id` status/commands done; slice 5 added
       `assignments.install_assignment_handler` (auto-installed by
       `install_backend_ops`, busy-safe registry reconcile + ack) and the mock's
-      `make_handle` factory; single backend per real process + N-app serving +
-      `PROVIDER_TYPE` env + `x-max-running-backends` deferred to slice 6)*
-- [~] **H. Provider packages** — mock/llama-cpp/gufo/halogen/halogen-flash:
-      multi-backend driver instances keyed by definition; halogen-flash sets
-      `x-max-running-backends: 1` in its `schema.json`; each keeps its
-      `install_config_handlers`/`install_backend_ops` per backend.
-      *(all five migrated to the agent registration/WS/status contract;
-      multi-backend instances + `x-max-running-backends` deferred to slice 6)*
+      `make_handle` factory; **slice 6 landed** N-app serving via
+      `provider_lib.serve.MultiPortServer` (one uvicorn listener per hosted
+      backend on its assignment port, dynamic sync on registry change) and
+      `x-max-running-backends` is read from the committed schema into
+      `ProviderType.max_running_backends`)*
+- [x] **H. Provider packages** — mock/llama-cpp/gufo/halogen/halogen-flash:
+       multi-backend driver instances keyed by definition; halogen-flash sets
+       `x-max-running-backends: 1` in its `schema.json`; each keeps its
+       `install_config_handlers`/`install_backend_ops` per backend.
+       *(all five migrated to the agent registration/WS/status contract;
+       **slice 6 landed**: each real package builds a `BackendRegistry` of
+       drivable lifecycles (one per placed backend) via `build_registry`/
+       `make_handle`, threads the assignment `port` into its driver so engine
+       ports stay distinct (llama-cpp/gufo `serve_port+1`; halogen
+       `serve_port+1/+2`; halogen-flash uses static engine ports), serves each
+       backend's `/v1` on its own port through `MultiPortServer`, and routes
+       per-backend `config.update`/`cache.clear` to the correct lifecycle;
+       halogen-flash declares `x-max-running-backends: 1` so the admin places
+       at most one backend per its agent. Single-backend behavior is unchanged.)*
 - [ ] **I. Admin UI** — Machines page: show/rotate secret. New **Agents**
       page (or expand Machines): list agents per machine/type, hosted
       backends, `waiting_schema`. Definitions page: placement dropdown
@@ -1799,9 +1830,17 @@ into one container per (machine, type) that owns its backends and one socket.
         `test_push_no_warm_when_provider_refuses_add` (M2),
         `test_push_refuses_port_collision_with_connected_peer` (H1),
         `test_renumber_avoids_retained_busy_ghost` (M1) and provider-lib
-        `test_single_backend_placeholder_key_is_kept` (B1), each verified to fail
-        against the pre-fix code; real-engine N-per-process serving tests remain
-        slice 6)*
+        `test_single_backend_placeholder_key_is_kept` (B1); **slice 6 added**
+        provider-lib `test_serve.py` (`MultiPortServer` per-port listener
+        bookkeeping: start/add/remove reconcile, base-port fallback, dynamic
+        sync via the registry change listener) and per-package
+        `test_multi_backend.py` (llama-cpp/gufo/halogen: `build_registry`/
+        `make_handle` thread the assignment port into the driver so engine
+        ports stay distinct, `agent.assignments.update` spawns a fresh
+        drivable lifecycle, and per-backend `config.update` reaches the correct
+        driver only) plus `test_serve_config.py` guards that `run_async` serves
+        via `MultiPortServer` (never `base_port=`) and halogen-flash's
+        `x-max-running-backends: 1` schema pin)*
 - [ ] **L. Conformance** — re-run openresponses suite on the mock agent
       (now hosting the mock definition) to confirm the request path is
       unchanged by the agent indirection. *(requires a deployed admin +

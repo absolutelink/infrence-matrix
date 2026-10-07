@@ -26,7 +26,6 @@ import asyncio
 import logging
 from typing import Any
 
-import uvicorn
 from provider_lib.admin_client import AdminClient, RegistrationResult
 from provider_lib.app_factory import BackendOverrides, create_provider_app
 from provider_lib.backend import BackendLifecycle
@@ -35,6 +34,7 @@ from provider_lib.config_update import ConfigState, install_config_handlers
 from provider_lib.log_stream import install_log_streaming
 from provider_lib.ops import install_backend_ops
 from provider_lib.registry import BackendHandle, BackendRegistry
+from provider_lib.serve import MultiPortServer
 from provider_lib.wire import InstanceStatusValue
 
 from provider_mock.backend import SCHEMA, MockBackend
@@ -107,10 +107,12 @@ def build_registry(client: AdminClient, result: RegistrationResult) -> BackendRe
         iid = backend.get("instance_id")
         if iid is None:  # pragma: no cover - admin always assigns an id
             continue
+        port = backend.get("port")
+        serve_port = port if isinstance(port, int) else None
         lifecycle = make_lifecycle(client, instance_id=iid)
         config_state = ConfigState()
         _apply_backend(lifecycle, backend, config_state)
-        registry.add(BackendHandle(str(iid), lifecycle, config_state))
+        registry.add(BackendHandle(str(iid), lifecycle, config_state, port=serve_port))
     return registry
 
 
@@ -166,12 +168,14 @@ def install_command_handlers(
     make_handle = None
     if isinstance(target, BackendRegistry):
 
-        def make_handle(entry: dict[str, Any]) -> BackendHandle:  # noqa: ARG001
+        def make_handle(entry: dict[str, Any]) -> BackendHandle:
             iid = str(entry["instance_id"])
+            port = entry.get("port")
+            serve_port = port if isinstance(port, int) else None
             lifecycle = make_lifecycle(client, instance_id=iid)
             config_state = ConfigState()
             _apply_assignment(lifecycle, entry, config_state)
-            return BackendHandle(iid, lifecycle, config_state)
+            return BackendHandle(iid, lifecycle, config_state, port=serve_port)
 
     install_backend_ops(
         client,
@@ -260,6 +264,32 @@ async def emit_provider_status(
     )
 
 
+async def bootstrap_agent(
+    client: AdminClient,
+) -> tuple[RegistrationResult, BackendRegistry, BackendLifecycle]:
+    """Register over HTTP and host one lifecycle per placed backend (slice 6).
+
+    Returns ``(result, registry, primary)``; the primary (first) backend drives
+    agent-level log streaming. Does NOT dial the WS.
+    """
+    result = await client.register(
+        provider_type=PROVIDER_TYPE,
+        version=VERSION,
+        base_port=client.settings.PROVIDER_PORT,
+        hardware=FAKE_HARDWARE,
+        # Single shared load (provider_mock.backend.SCHEMA) so the schema
+        # registered with the admin and the schema the driver validates
+        # against are provably the same object.
+        schema=SCHEMA,
+    )
+    registry = build_registry(client, result)
+    install_command_handlers(client, registry)
+    primary = (
+        registry.handles()[0].lifecycle if len(registry) else make_lifecycle(client)
+    )
+    return result, registry, primary
+
+
 async def register_provider(
     client: AdminClient, lifecycle: BackendLifecycle | None = None
 ) -> tuple[RegistrationResult, BackendLifecycle]:
@@ -287,22 +317,8 @@ async def register_provider(
         apply_registration(lifecycle, result, config_state)
         return result, lifecycle
 
-    result = await client.register(
-        provider_type=PROVIDER_TYPE,
-        version=VERSION,
-        base_port=client.settings.PROVIDER_PORT,
-        hardware=FAKE_HARDWARE,
-        # Single shared load (provider_mock.backend.SCHEMA) so the schema
-        # registered with the admin and the schema the driver validates
-        # against are provably the same object.
-        schema=SCHEMA,
-    )
-    registry = build_registry(client, result)
-    install_command_handlers(client, registry)
-    primary = (
-        registry.handles()[0].lifecycle if len(registry) else make_lifecycle(client)
-    )
-    return result, primary
+    _result, _registry, primary = await bootstrap_agent(client)
+    return _result, primary
 
 
 async def register_and_connect(
@@ -336,16 +352,16 @@ def build_app(
 async def run_async() -> None:
     settings = ProviderSettings()
     client = AdminClient(settings)
-    # Host one lifecycle per placed backend (H3); `lifecycle` is the primary
-    # (first) backend used for log streaming + the served /v1 surface.
-    _result, lifecycle = await register_provider(client)
+    # Host one lifecycle per placed backend (slice 6); `lifecycle` is the
+    # primary (first) backend used for agent-level log streaming.
+    _result, registry, lifecycle = await bootstrap_agent(client)
     # Phase 13: provider.logs streaming + backend.logs.get handler (the
     # mock driver has no subprocess ring, so only provider.logs flows).
     log_bundle = install_log_streaming(client, lifecycle)
 
-    # Keep the admin WS alive for the process lifetime alongside uvicorn:
-    # run_forever dials in, re-emits provider.status on every (re)connect,
-    # and reconnects with exponential backoff if the admin restarts
+    # Keep the admin WS alive for the process lifetime alongside the per-backend
+    # HTTP servers: run_forever dials in, re-emits provider.status on every
+    # (re)connect, and reconnects with exponential backoff if the admin restarts
     # (ARCHITECTURE.md §5).
     first_connect = asyncio.Event()
 
@@ -355,10 +371,9 @@ async def run_async() -> None:
         if not first_connect.is_set():
             first_connect.set()
             logger.info(
-                "mock provider connected: instance=%s epoch=%s capacity=%s",
-                client.registration.instance_id,
+                "mock agent connected: backends=%d epoch=%s",
+                len(registry),
                 client.epoch,
-                lifecycle.capacity,
             )
 
     ws_task = asyncio.create_task(
@@ -367,23 +382,22 @@ async def run_async() -> None:
             on_disconnected=log_bundle.stop,
         )
     )
-    # NOTE (slice 6): the agent may host N backends (see build_registry), but
-    # this serves only the PRIMARY backend's app on PROVIDER_PORT. Real
-    # per-backend-port serving (one uvicorn listener per placed backend at
-    # base_port + offset) is deferred to slice 6 — do not assume the extra
-    # backends are reachable over HTTP here.
-    config = uvicorn.Config(
-        build_app(lifecycle, settings),
-        host="0.0.0.0",
-        port=settings.PROVIDER_PORT,
-        log_level="info",
-    )
-    server = uvicorn.Server(config)
+    # Slice 6: serve each hosted backend's /v1 on its own port (base_port +
+    # offset). A single-backend agent yields exactly one listener on
+    # PROVIDER_PORT — identical to the pre-slice-6 behavior.
+    server = MultiPortServer(settings, PROVIDER_TYPE, VERSION, registry)
+    serve_task = asyncio.create_task(server.serve_forever())
     try:
-        await server.serve()
+        await serve_task
+    except asyncio.CancelledError:
+        # serve_task only ends via cancellation: uvicorn signal capture is
+        # disabled in provider_lib.serve, so SIGINT propagates out of
+        # asyncio.run and is handled in main(), not here.
+        pass
     finally:
         ws_task.cancel()
         await asyncio.gather(ws_task, return_exceptions=True)
+        await server.aclose()
         await log_bundle.stop()
         await client.disconnect()
 

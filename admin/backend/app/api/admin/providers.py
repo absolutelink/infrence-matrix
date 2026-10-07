@@ -300,6 +300,8 @@ def _apply_max_running_from_schema(ptype: ProviderType, schema: dict[str, Any]) 
     raw = schema.get("x-max-running-backends", 0) if isinstance(schema, dict) else 0
     try:
         ptype.max_running_backends = max(0, int(raw))
+    # PEP 758 (Python 3.14): unparenthesized except group is valid; ruff format
+    # (target py314) canonicalizes it this way. Not a Python-2 syntax error.
     except TypeError, ValueError:
         ptype.max_running_backends = 0
 

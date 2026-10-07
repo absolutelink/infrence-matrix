@@ -83,12 +83,18 @@ class HalogenBackend(BackendDriver):
         *,
         progress_cb: ProgressCallback | None = None,
         status_cb: StatusCallback | None = None,
+        serve_port: int | None = None,
     ) -> None:
         self._settings = settings
         self._config = backend_config or {}
         self._progress_cb = progress_cb
         self._status_cb = status_cb
         self._binary = settings.HALOGEN_SERVER_PATH
+        # Slice 6: the (api, engine) pair derives from the backend's
+        # admin-facing assignment port (base_port + offset) so two halogen
+        # backends on one agent never collide; ``None`` keeps the
+        # single-backend default (PROVIDER_PORT + 1 / + 2).
+        self._serve_port = serve_port
         self._ports = self._resolve_ports()
         self._proc: subprocess.Popen[str] | None = None
         # Legacy merges stderr into stdout (single pipe); the ring labels
@@ -102,8 +108,12 @@ class HalogenBackend(BackendDriver):
 
     def _resolve_ports(self) -> tuple[int, int]:
         # Phase 12: `networking.{api_port,engine_port}`, atomic with the
-        # legacy top-level keys (see env.resolve_ports).
-        return resolve_ports(self._config, self._settings.PROVIDER_PORT)
+        # legacy top-level keys (see env.resolve_ports). The default base is
+        # this backend's serve port (slice 6) or the agent's PROVIDER_PORT.
+        base = self._serve_port
+        if base is None:
+            base = self._settings.PROVIDER_PORT
+        return resolve_ports(self._config, base)
 
     def attach_status_callback(self, emit: StatusCallback) -> None:
         """Bind the lifecycle's out-of-band status reporter.

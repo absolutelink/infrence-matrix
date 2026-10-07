@@ -218,6 +218,8 @@ async def test_stop_if_idle_atomic_against_concurrent_acquire() -> None:
         nonlocal acquire_failed
         try:
             await lifecycle.acquire_slot()
+        # PEP 758 (Python 3.14): unparenthesized except group is valid; ruff
+        # format (target py314) canonicalizes it this way. Not a syntax error.
         except BackendBusy, BackendNotReady:
             acquire_failed += 1
 

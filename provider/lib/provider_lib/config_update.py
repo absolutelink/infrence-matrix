@@ -242,7 +242,7 @@ def install_config_handlers(
     state: ConfigState,
     settings: ProviderSettings,
     *,
-    extra_cache_dirs: (Callable[[], Iterable[Path]] | Iterable[Path] | None) = None,
+    extra_cache_dirs: (Callable[[Any], Iterable[Path]] | Iterable[Path] | None) = None,
 ) -> None:
     """Wire the three Phase 9 admin commands on the provider client.
 
@@ -253,10 +253,11 @@ def install_config_handlers(
     its one lifecycle; a multi-backend agent NAKs ``unknown_instance`` for an
     id it does not host.
 
-    ``extra_cache_dirs`` (a list or a zero-arg callable returning one)
-    lets a provider add its engine-managed cache directories (e.g.
-    gufo's per-instance ``--cache-disk`` dir) to the cleared set; the
-    shared prompt-cache root is always included.
+    ``extra_cache_dirs`` (a list, or a callable taking the resolved
+    :class:`~provider_lib.registry.BackendHandle` and returning one) lets a
+    provider add its engine-managed cache directories (e.g. gufo's
+    per-instance ``--cache-disk`` dir, keyed off the handle's driver) to the
+    cleared set; the shared prompt-cache root is always included.
     """
 
     registry = (
@@ -265,11 +266,11 @@ def install_config_handlers(
         else registry_from_lifecycle(lifecycle_or_registry, state)
     )
 
-    def extras() -> list[Path]:
+    def extras(handle: BackendHandle) -> list[Path]:
         if extra_cache_dirs is None:
             return []
         if callable(extra_cache_dirs):
-            return list(extra_cache_dirs())
+            return list(extra_cache_dirs(handle))
         return list(extra_cache_dirs)
 
     def _resolve(frame: Frame) -> BackendHandle | None:
@@ -372,7 +373,9 @@ def install_config_handlers(
             step = _STEP_CACHE_CLEAR
             # 6. Clear the orphaned prompt cache (never model files).
             cleared_paths, cleared_bytes = clear_prompt_cache(
-                settings, fingerprints=[old_fp] if old_fp else [], extra_dirs=extras()
+                settings,
+                fingerprints=[old_fp] if old_fp else [],
+                extra_dirs=extras(handle),
             )
             # 7. Apply the new config.
             step = _STEP_APPLY_CONFIG
@@ -461,7 +464,7 @@ def install_config_handlers(
                     "in_flight": lifecycle.in_flight,
                 },
             }
-        extra = extras()
+        extra = extras(handle)
         if dry_run:
             planned, size = plan_prompt_cache_clear(settings, extra)
             return {

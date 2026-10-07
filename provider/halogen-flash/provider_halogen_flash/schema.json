@@ -3,6 +3,7 @@
   "title": "halogen-flash backend_config",
   "description": "Sectioned backend_config for the halogen-flash provider (Phase 12). x-flag names the exact HALOGEN_* env var; env.py + driver.py remain the executable mapping. Upstream flags the driver does not wire yet carry x-supported: false (documented, disabled in the UI). The (api, engine) port pair is hashed into the engine's on-disk prompt-cache fingerprint and must stay stable across restarts (see env.derive_static_ports).",
   "type": "object",
+  "x-max-running-backends": 1,
   "additionalProperties": false,
   "properties": {
     "artifacts": {
