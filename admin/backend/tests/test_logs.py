@@ -113,7 +113,10 @@ async def test_ingest_caps_list(app_stub, aredis: aioredis.Redis) -> None:
             for i in range(cap // 2 + 50)
         ]
         await _ingest(
-            app_stub, instance_id, FrameKind.BACKEND_LOGS, {"lines": lines, "dropped": 0}
+            app_stub,
+            instance_id,
+            FrameKind.BACKEND_LOGS,
+            {"lines": lines, "dropped": 0},
         )
     raw = await aredis.lrange(redis_keys.logs_backend_key(instance_id), 0, -1)
     assert len(raw) == cap
@@ -122,7 +125,9 @@ async def test_ingest_caps_list(app_stub, aredis: aioredis.Redis) -> None:
 
 
 @pytest.mark.asyncio
-async def test_ingest_tolerates_legacy_single_line(app_stub, aredis: aioredis.Redis) -> None:
+async def test_ingest_tolerates_legacy_single_line(
+    app_stub, aredis: aioredis.Redis
+) -> None:
     instance_id = str(uuid.uuid4())
     await _ingest(
         app_stub,
@@ -214,9 +219,7 @@ def _seed(client: TestClient, session: Session) -> str:
     return resp.json()["instance_id"]
 
 
-def test_logs_endpoint_cursor_and_merge(
-    client: TestClient, session: Session
-) -> None:
+def test_logs_endpoint_cursor_and_merge(client: TestClient, session: Session) -> None:
     import asyncio
 
     instance_id = _seed(client, session)
@@ -239,8 +242,16 @@ def test_logs_endpoint_cursor_and_merge(
                     epoch=1,
                     payload={
                         "lines": [
-                            {"ts": "2026-01-01T00:00:01+00:00", "stream": "stdout", "text": "b1"},
-                            {"ts": "2026-01-01T00:00:02+00:00", "stream": "stderr", "text": "b2"},
+                            {
+                                "ts": "2026-01-01T00:00:01+00:00",
+                                "stream": "stdout",
+                                "text": "b1",
+                            },
+                            {
+                                "ts": "2026-01-01T00:00:02+00:00",
+                                "stream": "stderr",
+                                "text": "b2",
+                            },
                         ],
                         "dropped": 3,
                     },
@@ -260,7 +271,11 @@ def test_logs_endpoint_cursor_and_merge(
                     epoch=1,
                     payload={
                         "lines": [
-                            {"ts": "2026-01-01T00:00:03+00:00", "stream": "stdout", "text": "p1"},
+                            {
+                                "ts": "2026-01-01T00:00:03+00:00",
+                                "stream": "stdout",
+                                "text": "p1",
+                            },
                         ],
                         "dropped": 1,
                     },
@@ -282,9 +297,7 @@ def test_logs_endpoint_cursor_and_merge(
     assert body["oldest_seq"] == 1
 
     # since cursor: only newer than 1 → just seq 2
-    resp = client.get(
-        f"/admin/api/instances/{instance_id}/logs?kind=backend&since=1"
-    )
+    resp = client.get(f"/admin/api/instances/{instance_id}/logs?kind=backend&since=1")
     body = resp.json()
     assert [e["text"] for e in body["entries"]] == ["b2"]
     assert body["cursor"] == 2
@@ -304,14 +317,14 @@ def test_logs_endpoint_cursor_and_merge(
     assert resp.json()["cursor"] == cursor
 
     # limit caps the page.
-    resp = client.get(
-        f"/admin/api/instances/{instance_id}/logs?kind=all&limit=1"
-    )
+    resp = client.get(f"/admin/api/instances/{instance_id}/logs?kind=all&limit=1")
     assert len(resp.json()["entries"]) == 1
     assert resp.json()["entries"][0]["text"] == "p1"
 
 
-def test_logs_endpoint_unseen_total_pre_trim(client: TestClient, session: Session) -> None:
+def test_logs_endpoint_unseen_total_pre_trim(
+    client: TestClient, session: Session
+) -> None:
     """H1: unseen_total is the pre-trim count of entries with
     seq > since, so the UI can warn when >limit new lines arrived."""
     import asyncio
@@ -347,9 +360,7 @@ def test_logs_endpoint_unseen_total_pre_trim(client: TestClient, session: Sessio
     assert body["entries"][0]["seq"] == 900
 
     # Caught-up reads: nothing unseen, unseen_total == 0.
-    resp = client.get(
-        f"/admin/api/instances/{instance_id}/logs?kind=backend&since=900"
-    )
+    resp = client.get(f"/admin/api/instances/{instance_id}/logs?kind=backend&since=900")
     body = resp.json()
     assert body["entries"] == []
     assert body["unseen_total"] == 0
@@ -391,9 +402,7 @@ def test_logs_endpoint_bad_params(client: TestClient, session: Session) -> None:
         == 422
     )
     assert (
-        client.get(
-            f"/admin/api/instances/{instance_id}/logs?limit=99999"
-        ).status_code
+        client.get(f"/admin/api/instances/{instance_id}/logs?limit=99999").status_code
         == 422
     )
     assert (
@@ -402,7 +411,9 @@ def test_logs_endpoint_bad_params(client: TestClient, session: Session) -> None:
     )
 
 
-def test_logs_endpoint_reports_eviction_gap(client: TestClient, session: Session) -> None:
+def test_logs_endpoint_reports_eviction_gap(
+    client: TestClient, session: Session
+) -> None:
     """M1: when `since` points before the oldest retained entry (rows
     were LTRIM'd away), the response flags gap=True with oldest_seq."""
     import asyncio

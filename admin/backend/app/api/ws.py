@@ -30,7 +30,7 @@ from sqlmodel import Session
 
 from app.core.db import engine
 from app.core.redis import RedisNotInitialized
-from app.models import ProviderInstance
+from app.models import ProviderInstance, backend_config_is_authored
 from app.services import metrics_service
 from app.services.connection_manager import manager
 from app.services.wire import (
@@ -60,6 +60,12 @@ def _mark_connected(instance_id: str, epoch: int) -> None:
         inst.epoch = epoch
         inst.last_seen = now
         inst.updated_at = now
+        # Phase 14: an unconfigured definition's instance carries the
+        # admin-owned `awaiting_config` pre-state — connected and alive,
+        # but explicitly not runnable. Re-asserted on every reconnect so
+        # a disconnect/reconnect cannot let a stale `running` linger.
+        if not backend_config_is_authored(inst.provider_definition):
+            inst.instance_status = InstanceStatusValue.AWAITING_CONFIG
         session.add(inst)
         session.commit()
 

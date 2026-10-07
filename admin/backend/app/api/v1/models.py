@@ -51,7 +51,12 @@ def list_models() -> dict[str, Any]:
     with Session(engine) as session:
         definitions = session.exec(
             select(ProviderDefinition)
-            .where(col(ProviderDefinition.enabled) == True)  # noqa: E712
+            .where(
+                col(ProviderDefinition.enabled) == True,  # noqa: E712
+                # Phase 14: shell definitions (no backend_config yet) are
+                # not client-visible — they cannot serve traffic.
+                col(ProviderDefinition.backend_config).is_not(None),
+            )
             .order_by(col(ProviderDefinition.alias).asc())
         ).all()
         data = [model_object(d) for d in definitions]

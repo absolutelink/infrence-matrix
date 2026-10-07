@@ -72,6 +72,9 @@ class RegistrationResult:
         self.instance_secret: str = data["instance_secret"]
         self.machine: dict[str, Any] = data.get("machine", {})
         self.provider_definition: dict[str, Any] = data.get("provider_definition", {})
+        # Phase 14: True when THIS registration set the definition's
+        # provider_type from the container's report (shell → typed).
+        self.type_adopted: bool = bool(data.get("type_adopted"))
 
     @property
     def ws_url(self) -> str:
@@ -102,6 +105,12 @@ class AdminClient:
     def __init__(self, settings: ProviderSettings) -> None:
         self.settings = settings
         self._registration: RegistrationResult | None = None
+        # Phase 14: the shell-definition fence; assigned by
+        # install_config_handlers (provider_lib.config_update) so
+        # backend.start handlers can NAK a boot with no applied config.
+        self.no_config_nak: (
+            Callable[[Frame], Awaitable[dict[str, Any] | None]] | None
+        ) = None
         self._ws: Any | None = None
         self._epoch: int = 0
         self._outgoing: asyncio.Queue[Frame] = asyncio.Queue()
@@ -170,6 +179,8 @@ class AdminClient:
             "instance_id": result.instance_id,
             "machine": result.machine,
             "provider_definition": result.provider_definition,
+            # Phase 14: null for a shell definition (no authored
+            # backend_config yet) — never coerced to the hash of {}.
             "config_fingerprint": result.provider_definition.get("config_fingerprint"),
             "saved_at": now_iso(),
         }

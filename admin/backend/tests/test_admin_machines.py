@@ -83,7 +83,9 @@ def test_delete_refused_with_instances_attached(
 
     created = _create(client, uid="busy", name="busy-machine")
     definition = ProviderDefinition(
-        alias="busy-model", provider_type="mock", registration_token="busy-tok"
+        alias="busy-model",
+        provider_type="mock",
+        registration_token="busy-tok",
     )
     session.add(definition)
     session.commit()

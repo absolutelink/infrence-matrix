@@ -92,13 +92,16 @@ def _machine_dict(machine: Machine) -> dict[str, Any]:
 
 
 def _definition_dict(
-    definition: ProviderDefinition, config_fingerprint: str
+    definition: ProviderDefinition, config_fingerprint: str | None
 ) -> dict[str, Any]:
+    # Phase 14: shells carry null backend_config/fingerprint (never the
+    # hash of {}); provider_lib persists and re-reads both forms.
+    authored = definition.backend_config is not None
     return {
         "id": str(definition.id),
         "alias": definition.alias,
         "provider_type": definition.provider_type,
-        "backend_config": definition.backend_config,
+        "backend_config": definition.backend_config if authored else None,
         "config_fingerprint": config_fingerprint,
         "idle_timeout_seconds": definition.idle_timeout_seconds,
         "capacity": definition.capacity,
@@ -342,8 +345,18 @@ async def register_provider(
             detail=f"provider definition '{definition.alias}' is disabled",
         )
 
-    # 2. Provider type must match the definition.
-    if body.provider_type != definition.provider_type:
+    # 2. Provider type must match the definition. Phase 14: an untyped
+    #    (shell) definition ADOPTS the container's reported type instead —
+    #    the container is authoritative for a definition it registers
+    #    against first (the registration log + type_adopted response flag
+    #    make the adoption visible; an operator PATCH can repair a typo
+    #    while no instance is attached).
+    type_adopted = False
+    if definition.provider_type is None:
+        definition.provider_type = body.provider_type
+        session.add(definition)
+        type_adopted = True
+    elif body.provider_type != definition.provider_type:
         raise HTTPException(
             status_code=409,
             detail=(
@@ -406,7 +419,14 @@ async def register_provider(
     instance.port = body.port
     instance.version = body.version
     instance.instance_status = "registering"
-    instance.config_fingerprint = compute_config_fingerprint(definition.backend_config)
+    # Phase 14: a shell definition has no config yet → no fingerprint
+    # (None, not the hash of {}). The config push/heal flows rely on the
+    # null-config distinction via models.backend_config_is_authored.
+    instance.config_fingerprint = (
+        compute_config_fingerprint(definition.backend_config)
+        if definition.backend_config is not None
+        else None
+    )
     session.add(instance)
     # L3: flush so the voter-universe query inside the gate sees this row
     # even with autoflush disabled (the id itself is known pre-flush).
@@ -463,11 +483,12 @@ async def register_provider(
     )
 
     logger.info(
-        "registered instance %s for definition %s on machine %s (port %s)",
+        "registered instance %s for definition %s on machine %s (port %s)%s",
         instance.id,
         definition.alias,
         machine.uid,
         body.port,
+        f" (adopted provider type '{body.provider_type}')" if type_adopted else "",
     )
 
     return {
@@ -475,4 +496,7 @@ async def register_provider(
         "instance_secret": instance_secret,
         "machine": _machine_dict(machine),
         "provider_definition": _definition_dict(definition, config_fingerprint),
+        # Phase 14: set when THIS registration set the definition's
+        # provider_type from the container's report (shell → typed).
+        "type_adopted": type_adopted,
     }

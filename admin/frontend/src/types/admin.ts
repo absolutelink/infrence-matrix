@@ -58,9 +58,11 @@ export interface ConfigUpdateResult {
 export interface ProviderDefinition {
   id: string
   alias: string
-  provider_type: ProviderType | string
-  backend_config: Record<string, unknown>
-  config_fingerprint: string
+  /** Phase 14: null on a shell definition (type adopted at registration). */
+  provider_type: ProviderType | string | null
+  /** Phase 14: null = no config authored yet (shell); {} is a real config. */
+  backend_config: Record<string, unknown> | null
+  config_fingerprint: string | null
   vram_required_bytes: number
   idle_timeout_seconds: number
   capacity: number

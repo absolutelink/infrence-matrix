@@ -25,11 +25,42 @@ from datetime import UTC, datetime
 
 from sqlalchemy import BigInteger, DateTime, Index, Text
 from sqlalchemy.dialects.postgresql import JSON, UUID
+from sqlalchemy.types import TypeDecorator
 from sqlmodel import Column, Field, Relationship, SQLModel
 
 
 def get_datetime_utc() -> datetime:
     return datetime.now(UTC)
+
+
+def backend_config_is_authored(definition: ProviderDefinition) -> bool:
+    """True when the definition has a real backend_config (Phase 14).
+
+    This is the SINGLE source of truth for the ``NULL ≠ {}`` distinction:
+    a shell definition has ``backend_config IS NULL`` (never schedulable,
+    never pushed), while ``{}`` is a real — possibly empty — config valid
+    under a permissive committed schema. Do NOT truthiness-test
+    ``backend_config`` (``{} or`` swallows the distinction); use this.
+    """
+    return definition.backend_config is not None
+
+
+class NullableJSON(TypeDecorator):
+    """JSON column type that maps a top-level Python ``None`` to a real
+    SQL NULL (Phase 14).
+
+    SQLAlchemy's JSON type serializes a top-level ``None`` through
+    ``json.dumps`` → the **JSON null VALUE** (text `null`), not SQL NULL
+    — ``IS NULL`` misses shell rows. The canonical fix is
+    ``none_as_null=True`` on the inner type (TypeDecorator wraps it).
+    Every nullable JSON column that is FILTERED on SQL nullness (or whose
+    SQL NULL must be distinguishable from JSON null) must use this;
+    non-nullable JSON columns keep the plain type (None never binds
+    there).
+    """
+
+    impl = JSON(none_as_null=True)
+    cache_ok = True
 
 
 def _uuid_col() -> UUID:
@@ -162,6 +193,11 @@ class ProviderDefinition(SQLModel, table=True):
     ``registration_token`` is the secret a provider container presents at
     registration; it binds the instance to this definition and its
     provider_type is cross-checked against the container's type.
+
+    Phase 14 shell semantics: a definition may be created with
+    ``provider_type``/``backend_config`` NULL ("shell"). Registration adopts
+    the container's type; config is authored via the UI and pushed with the
+    existing provider.config.update flow. A shell never schedules.
     """
 
     __tablename__ = "provider_definitions"
@@ -173,7 +209,15 @@ class ProviderDefinition(SQLModel, table=True):
     )
 
     alias: str = Field(max_length=255, unique=True)
-    provider_type: str = Field(max_length=64)  # references ProviderType.name (Phase 12)
+    # Phase 14: nullable on a shell definition — a definition may be created
+    # untyped and the container's reported provider_type is ADOPTED at its
+    # first registration. Typed definitions keep today's every-write
+    # registry check. NULL (with NULL backend_config) also means "not yet
+    # schedulable": scheduler / /v1/models / alias registration all exclude
+    # shells until config is authored.
+    provider_type: str | None = Field(
+        default=None, max_length=64
+    )  # references ProviderType.name (Phase 12) when set
 
     # Everything the provider needs to start the backend. Schema documented
     # in provider/README.md. Example:
@@ -181,7 +225,13 @@ class ProviderDefinition(SQLModel, table=True):
     #    "mmproj": {...}, "draft": {...},
     #    "args": {"ctx": 8192, "gpu_layers": 35, "flash_attn": "on"},
     #    "engine_options": {...}}
-    backend_config: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    # Phase 14: NULL = "no config authored yet" (shell). This is DISTINCT
+    # from {} — an empty object is a real config, valid under a permissive
+    # schema, and pushes/schedules normally. NullableJSON (not the plain
+    # JSON) makes NULL bind as SQL NULL — the plain type serializes a
+    # top-level None to a JSON-null VALUE which silently defeats
+    # `IS NULL` shell detection everywhere.
+    backend_config: dict | None = Field(default=None, sa_column=Column(NullableJSON()))
 
     # Scheduler hints.
     vram_required_bytes: int = Field(default=0, sa_type=BigInteger)  # type: ignore[call-arg]

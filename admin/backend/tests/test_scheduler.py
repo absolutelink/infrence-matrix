@@ -56,6 +56,9 @@ def make_stack(
         alias=alias,
         provider_type="mock",
         registration_token=f"tok-{alias}",
+        # Phase 14: backend_config defaults to None (shell) — these tests
+        # exercise the scheduled flows, which require an authored config.
+        backend_config={"model": {"file": "m.gguf"}},
         vram_required_bytes=vram_required,
         capacity=capacity,
     )
@@ -216,6 +219,7 @@ async def test_vram_second_alias_evicts_idle_first_alias(
         registration_token="tok-va",
         vram_required_bytes=80,
         capacity=1,
+        backend_config={"model": {"file": "m.gguf"}},
     )
     def_b = ProviderDefinition(
         alias="vb",
@@ -223,6 +227,7 @@ async def test_vram_second_alias_evicts_idle_first_alias(
         registration_token="tok-vb",
         vram_required_bytes=80,
         capacity=1,
+        backend_config={"model": {"file": "m.gguf"}},
     )
     session.add_all([def_a, def_b])
     session.commit()
@@ -299,6 +304,7 @@ def two_alias_machine(
         registration_token=f"tok-{a_alias}",
         vram_required_bytes=a_vram,
         capacity=1,
+        backend_config={"model": {"file": "m.gguf"}},
     )
     def_b = ProviderDefinition(
         alias=b_alias,
@@ -306,6 +312,7 @@ def two_alias_machine(
         registration_token=f"tok-{b_alias}",
         vram_required_bytes=b_vram,
         capacity=1,
+        backend_config={"model": {"file": "m.gguf"}},
     )
     session.add_all([def_a, def_b])
     session.commit()
@@ -371,6 +378,7 @@ async def test_evict_lru_order_oldest_first(
         registration_token="tok-luc",
         vram_required_bytes=50,
         capacity=1,
+        backend_config={"model": {"file": "m.gguf"}},
     )
     session.add(def_c)
     session.commit()
@@ -418,6 +426,7 @@ async def test_evict_only_different_alias_victims(session: Session, aredis) -> N
         registration_token="tok-dif-a",
         vram_required_bytes=40,
         capacity=1,
+        backend_config={"model": {"file": "m.gguf"}},
     )
     def_b = ProviderDefinition(
         alias="dif-b",
@@ -425,6 +434,7 @@ async def test_evict_only_different_alias_victims(session: Session, aredis) -> N
         registration_token="tok-dif-b",
         vram_required_bytes=40,
         capacity=1,
+        backend_config={"model": {"file": "m.gguf"}},
     )
     session.add_all([def_a, def_b])
     session.commit()
@@ -476,6 +486,7 @@ async def test_evict_victim_nak_tries_next_candidate(
         registration_token="tok-nka",
         vram_required_bytes=40,
         capacity=1,
+        backend_config={"model": {"file": "m.gguf"}},
     )
     def_b = ProviderDefinition(
         alias="nkb",
@@ -483,6 +494,7 @@ async def test_evict_victim_nak_tries_next_candidate(
         registration_token="tok-nkb",
         vram_required_bytes=40,
         capacity=1,
+        backend_config={"model": {"file": "m.gguf"}},
     )
     def_c = ProviderDefinition(
         alias="nkc",
@@ -490,6 +502,7 @@ async def test_evict_victim_nak_tries_next_candidate(
         registration_token="tok-nkc",
         vram_required_bytes=50,
         capacity=1,
+        backend_config={"model": {"file": "m.gguf"}},
     )
     session.add_all([def_a, def_b, def_c])
     session.commit()
@@ -554,6 +567,7 @@ async def test_evict_no_workable_victim_stays_queued(
         registration_token="tok-noa",
         vram_required_bytes=60,
         capacity=1,
+        backend_config={"model": {"file": "m.gguf"}},
     )
     def_b = ProviderDefinition(
         alias="nob",
@@ -561,6 +575,7 @@ async def test_evict_no_workable_victim_stays_queued(
         registration_token="tok-nob",
         vram_required_bytes=60,
         capacity=1,
+        backend_config={"model": {"file": "m.gguf"}},
     )
     session.add_all([def_a, def_b])
     session.commit()
@@ -812,7 +827,10 @@ async def test_admission_uses_machine_reachable_preference(
     session.add(machine)
     session.commit()
     definition = ProviderDefinition(
-        alias="ad-a", provider_type="mock", registration_token="tok-ad-a"
+        alias="ad-a",
+        provider_type="mock",
+        registration_token="tok-ad-a",
+        backend_config={"model": {"file": "m.gguf"}},
     )
     session.add(definition)
     session.commit()
@@ -852,6 +870,7 @@ async def test_already_booted_target_admits_on_capacity_alone(
         registration_token="tok-pb-a",
         vram_required_bytes=60,
         capacity=2,
+        backend_config={"model": {"file": "m.gguf"}},
     )
     session.add(definition)
     session.commit()
@@ -916,6 +935,7 @@ async def test_ledger_survives_release_and_redis_reflects_holds(
         registration_token="tok-lg-b",
         vram_required_bytes=30,
         capacity=1,
+        backend_config={"model": {"file": "m.gguf"}},
     )
     session.add(def_small)
     session.commit()
@@ -959,6 +979,7 @@ def make_reap_target(
         idle_timeout_seconds=idle_timeout,
         vram_required_bytes=vram_required,
         capacity=1,
+        backend_config={"model": {"file": "m.gguf"}},
     )
     session.add(definition)
     session.commit()
@@ -1216,6 +1237,7 @@ async def test_concurrent_acquire_not_admitted_onto_eviction_victim(
         registration_token="tok-va1",
         vram_required_bytes=80,
         capacity=1,
+        backend_config={"model": {"file": "m.gguf"}},
     )
     def_b = ProviderDefinition(
         alias="vb1",
@@ -1223,6 +1245,7 @@ async def test_concurrent_acquire_not_admitted_onto_eviction_victim(
         registration_token="tok-vb1",
         vram_required_bytes=80,
         capacity=1,
+        backend_config={"model": {"file": "m.gguf"}},
     )
     session.add_all([def_a, def_b])
     session.commit()
@@ -1304,6 +1327,7 @@ async def test_eviction_can_reclaim_stopped_status_booted_instance(
         registration_token="tok-n2a",
         vram_required_bytes=70,
         capacity=1,
+        backend_config={"model": {"file": "m.gguf"}},
     )
     def_b = ProviderDefinition(
         alias="n2b",
@@ -1311,6 +1335,7 @@ async def test_eviction_can_reclaim_stopped_status_booted_instance(
         registration_token="tok-n2b",
         vram_required_bytes=70,
         capacity=1,
+        backend_config={"model": {"file": "m.gguf"}},
     )
     session.add_all([def_a, def_b])
     session.commit()
@@ -1475,3 +1500,80 @@ async def test_reaper_refreshes_mirror_ttl(
     await scheduler._reap_idle_once()
     ttl = await aredis.ttl(redis_keys.vram_used_key("reap-ttl"))
     assert 0 < ttl <= redis_keys.VRAM_USED_TTL_SECONDS
+
+
+# ============================================================================
+# Phase 14 — shell definitions never schedule
+# ============================================================================
+
+
+def _mk_shell(
+    session: Session,
+    *,
+    machine_uid: str,
+    alias: str,
+    backend_status: str = "running",
+) -> tuple[Machine, ProviderDefinition, ProviderInstance]:
+    existing = session.exec(select(Machine).where(Machine.uid == machine_uid)).first()
+    if existing is None:
+        existing = Machine(
+            uid=machine_uid, name=f"name-{machine_uid}", host="127.0.0.1"
+        )
+        session.add(existing)
+    session.commit()
+    definition = ProviderDefinition(
+        alias=alias,
+        provider_type=None,  # shell (post-adoption shape: type may be set)
+        registration_token=f"tok-{alias}",
+        backend_config=None,
+        capacity=1,
+    )
+    session.add(definition)
+    session.commit()
+    instance = ProviderInstance(
+        machine_id=existing.id,
+        provider_definition_id=definition.id,
+        backend_status=backend_status,
+        websocket_connected=True,
+    )
+    session.add(instance)
+    session.commit()
+    session.refresh(instance)
+    return existing, definition, instance
+
+
+async def test_shell_connected_instance_never_admitted(session, aredis) -> None:
+    """A connected instance of an unconfigured definition is NOT a
+    candidate — acquire raises NoProviderAvailable."""
+    _mk_shell(session, machine_uid="sh-m", alias="sh-a")
+    scheduler = InferenceScheduler(aredis)
+    with pytest.raises(NoProviderAvailable):
+        await scheduler.acquire("sh-a", "req-shell")
+
+
+async def test_shell_not_in_candidates_query(session, aredis) -> None:
+    _mk_shell(session, machine_uid="sh-m2", alias="sh-b")
+    scheduler = InferenceScheduler(aredis)
+    assert scheduler._candidates("sh-b") == []
+    assert not scheduler.has_candidates("sh-b")
+
+
+def test_idle_reaper_skips_shells(session, aredis) -> None:
+    import datetime as dt
+
+    machine, definition, instance = _mk_shell(
+        session, machine_uid="sh-m3", alias="sh-c"
+    )
+    # Simulate an ancient last seen + a running backend (impossible for a
+    # shell, but the reaper must not crash / must not select it).
+    instance.backend_status = "running"
+    instance.websocket_connected = True
+    instance.last_request_at = dt.datetime.now(dt.UTC) - dt.timedelta(hours=1)
+    session.add(instance)
+    session.commit()
+
+    scheduler = InferenceScheduler(aredis)
+    now = dt.datetime.now(dt.UTC)
+    ids = [c["id"] for c in scheduler._idle_stop_candidates(now)]
+    assert str(instance.id) not in ids
+    _ = machine, definition

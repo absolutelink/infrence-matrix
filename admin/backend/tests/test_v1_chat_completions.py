@@ -67,6 +67,7 @@ def seed_instance(
         provider_type="mock",
         registration_token=f"tok-{alias}",
         enabled=enabled,
+        backend_config={"model": {"file": "m.gguf"}},
     )
     session.add(definition)
     session.commit()
@@ -494,7 +495,10 @@ def test_disabled_alias_404(client: TestClient, session: Session) -> None:
 def test_no_connected_provider_503(client: TestClient, session: Session) -> None:
     machine = Machine(uid="ct-np", name="ct-np", host="127.0.0.1")
     definition = ProviderDefinition(
-        alias="ct-np", provider_type="mock", registration_token="tok-ct-np"
+        alias="ct-np",
+        provider_type="mock",
+        registration_token="tok-ct-np",
+        backend_config={"model": {"file": "m.gguf"}},
     )
     session.add_all([machine, definition])
     session.commit()
@@ -664,3 +668,33 @@ async def test_non_stream_cancel_releases_slot(session, monkeypatch) -> None:
     assert scheduler.active_count("ct-nsx") == 0
     assert await aredis.smembers("im:sched:active:ct-nsx") == set()
     await aredis.aclose()
+
+
+def test_shell_alias_404_not_configured(client, session) -> None:
+    """Phase 14: an unconfigured (shell) definition is invisible to
+    inference — 404, mirroring the disabled-alias path (spec item F)."""
+    machine = Machine(uid="sh404c-m", name="sh404c", host="127.0.0.1")
+    definition = ProviderDefinition(
+        alias="sh404c-a",
+        provider_type=None,
+        registration_token="tok-sh404c",
+        backend_config=None,
+    )
+    session.add_all([machine, definition])
+    session.commit()
+    session.add(
+        ProviderInstance(
+            machine_id=machine.id,
+            provider_definition_id=definition.id,
+            websocket_connected=True,
+            backend_status="running",
+        )
+    )
+    session.commit()
+
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"model": "sh404c-a", "messages": [{"role": "user", "content": "x"}]},
+    )
+    assert resp.status_code == 404
+    assert "not configured" in resp.json()["detail"]

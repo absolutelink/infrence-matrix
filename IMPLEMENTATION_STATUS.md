@@ -1,7 +1,7 @@
 # Inference Matrix — Implementation Status
 
 **Overhaul branch:** `litellm-architecture-overhaul`
-**Last updated:** 2026-10-06 (Phase 12 ✅ schema-driven backend config — `ProviderType` registry + JSON Schema consensus + HF picker + rjsf form. Phase 13 ✅ log views — batched provider capture, Redis tails, LogsSheet UI. Docs/ARCHITECTURE/WS-protocol/provider README/redis-keys/AGENTS updated first. Prior: halogen-flash legacy-parity fixes; Phase 10 admin UI rework complete.)
+**Last updated:** 2026-10-07 (Phase 14 ✅ shell definitions — `provider_type`/`backend_config` nullable at create, type adopted at first registration (`type_adopted`), new admin-owned `awaiting_config` pre-state excludes shells from scheduling//v1/models/pushes; `NullableJSON` (none_as_null) for the JSON null-vs-SQL-NULL trap; `seed_provider_type` dev ceremony removed. Phase 13 ✅ log views. Prior: Phase 12 schema-driven backend config, Phase 10 admin UI rework.)
 
 This file tracks the litellm-based architecture overhaul (see
 [ARCHITECTURE.md](ARCHITECTURE.md)). Each phase lists its features with
@@ -26,6 +26,7 @@ starting a feature, read the linked protocol/doc first.
 | 11 | Docs consolidation + full E2E validation | ✅ Complete |
 | 12 | Schema-driven backend config: `ProviderType` registry + JSON Schema consensus + HF picker + rjsf form | ✅ Complete |
 | 13 | Server + backend log capture, Redis tails, UI log views | ✅ Complete |
+| 14 | Shell definitions: deferred typing + `awaiting_config` pre-state | ✅ Complete |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
 
@@ -998,6 +999,209 @@ mock **23** · llama-cpp **61** · halogen-flash **140** · halogen **67** ·
 gufo **67**. Frontend `bun run build` + biome lint clean. Logs are
 best-effort end-to-end: capture, transport, storage, and read never block
 or crash the request/WS path.
+
+---
+
+## Phase 14 — Shell definitions: deferred typing + `awaiting_config` ✅
+
+**Goal:** remove the fresh-install bootstrap ceremony (definitions require a
+registered `ProviderType` whose registry only materializes at first provider
+registration — the chicken-and-egg solved today by `seed_provider_type` in
+`scripts/dev.sh` and the manual SQL in `development.md`). New operator flow:
+
+1. Create **machine** in the UI.
+2. Create a **shell definition**: alias + optional registration_token +
+   scheduler hints — `provider_type: null`, `backend_config: null`.
+3. Start the provider container. Registration binds the instance and
+   **adopts** the container's `provider_type` onto the definition; the type's
+   `ProviderType` row bootstraps from the container's shipped `schema.json`
+   (existing `_bootstrap_type` path, unchanged).
+4. Instance sits in a new **`awaiting_config`** pre-state (admin-owned, sits
+   before `running` — registered, connected, metrics flowing, but explicitly
+   not schedulable).
+5. Operator configures `backend_config` in the UI — now rendered from the
+   *actual committed schema* instead of a free JSON editor. The standard
+   Phase 9 PATCH push (`provider.config.update`) delivers the config; ack
+   clears `awaiting_config` → `initializing/running`. Everything downstream
+   (`/v1/models`, scheduler, alias registry) activates only here.
+
+**Non-goals:** no change to the registration-token model (§12 stays: token
+still binds instance→definition, still secrets-checked 401/403/409, still
+minted per definition), no wire-protocol envelope changes (`v: 1` untouched),
+no worker-pool reassignment semantics. One definition = one type, still
+immutable while instances are attached.
+
+### Locked decisions
+
+- **Type is adopted at registration, not deferred past it.** The container's
+  reported `provider_type` is authoritative for an untyped definition
+  (registration is the only place a container and definition meet).
+  Downstream joins (`ProviderInstance`→definition→type, voter universe,
+  `owned_by`) require the definition typed before an instance row exists —
+  which registration guarantees.
+- **`backend_config: null` ≠ `{}`.** Null = "no config authored yet"
+  (definition not runnable, never pushed). `{}` = a real (possibly empty)
+  config, valid under permissive schemas. Fingerprint helpers treat only
+  the NULL-config case as unconfigured; `_instance_fingerprint`/pushes fire
+  only when config is non-null.
+- **`awaiting_config` is admin-owned** (like `disconnected`): the provider
+  never emits it. Added to `InstanceStatusValue` in BOTH wire mirrors.
+- **Unconfigured definitions never appear client-facing**: excluded from
+  `/v1/models`, litellm alias registration, and all scheduler candidate
+  queries. A request for such an alias is a clean `NoProviderAvailable` →
+  503 (or 404 at route resolution — same as today's unknown alias).
+- **First PATCH-with-config validates, then pushes** through the existing
+  `config_update.push_config_update` — no new push mechanism. The heal
+  sweep covers a config authored while the instance was disconnected.
+- **Old behavior fully preserved** when a definition is created typed with
+  a config (existing tests keep passing unchanged).
+
+### Sub-tasks
+
+- [x] **A. Model + migration** — `NullableJSON` TypeDecorator
+      (`JSON(none_as_null=True)` wrapper — REQUIRED: the plain postgres
+      `JSON` type serializes a top-level Python `None` to the JSON
+      null *VALUE* (text `null`), silently defeating `backend_config IS
+      NULL` shell detection); `provider_definitions.provider_type` +
+      `backend_config` nullable; migration `b8e4f7d2a9c1`
+      (downgrade refuses while shells exist);
+      `models.backend_config_is_authored()` is the single truth source
+      for the null≠{} distinction.
+- [x] **B. Definitions CRUD** — shell create (config refused on a
+      typeless definition, 422); typed create validates as before;
+      serializers emit null type/config/fingerprint for shells; PATCH:
+      unset-to-null refused 422 (never returns to shell state),
+      config-set requires a type (same-PATCH type+config allowed),
+      retype validates the stored config, alias warms exactly when
+      config is authored.
+- [x] **C. Registration adoption** — shell definition adopts the
+      container's `provider_type` (same atomic commit; log +
+      `type_adopted: true` in the response; `RegistrationResult.type_adopted`
+      provider-side); registry bootstrap reuses `_bootstrap_type`
+      untouched; instance fingerprint stays null for shells.
+- [x] **D. `awaiting_config` state** — added before `registering` in
+      BOTH `InstanceStatusValue` mirrors (admin + provider lib);
+      drift guard unchanged/passing.
+- [x] **E. Connect path** — `_mark_connected` sets `awaiting_config`
+      when the definition is unconfigured (re-asserted on reconnect);
+      `_persist_status` coerces provider-reported
+      running/initializing/registering → `awaiting_config` while
+      unconfigured (error/unhealthy stay honest);
+      `heal_stale_fingerprint` + `push_config_update` early-return for
+      shells (never push a fabricated `{}` config).
+- [x] **F. Scheduler + /v1 gates** — `_candidates` +
+      `_idle_stop_candidates` filter `backend_config IS NOT NULL`;
+      `_try_admit` raises `NoProviderAvailable` for an unconfigured
+      alias; `/v1/models` hides shells; `/v1/responses` +
+      `/v1/chat/completions` return 404 (`not configured`) mirroring
+      the disabled-alias path.
+- [x] **G. Provider lib + packages** — `RegistrationResult` persists
+      null fingerprint honestly (`_persist_config`);
+      `install_config_handlers` exposes `client.no_config_nak` (NAK
+      `no_config` @ validate when `applied_fingerprint is None`);
+      wired into `on_backend_start` of all five provider packages
+      (defense-in-depth behind the admin gates); `apply_registration`
+      keeps None fingerprints as None in all packages (pre-existing
+      behavior verified).
+- [x] **H. Admin UI** — `StatusBadge` `awaiting_config` (violet);
+      definition row shows the state badge for null types; create form
+      gains the "(shell — type adopted at registration)" option
+      (omits `backend_config`; PATCH never sends explicit nulls);
+      detail view explains the shell + null fingerprint state;
+      rjsf form path only activates for typed definitions;
+      `scripts/generate-client.sh` run (client types now nullable).
+- [x] **I. Bootstrap cleanup** — `seed_provider_type` removed from
+      `scripts/dev.sh`; seeding creates a shell, waits for mock
+      registration (type adoption), then PATCHes the canonical mock
+      `backend_config` through the real Phase 9 push flow
+      (`configure_mock_definition`); the smoke test is unchanged and
+      end-to-end validates the whole shell lifecycle.
+- [x] **J. Docs** — ARCHITECTURE.md §3 (definitions row), §4
+      (ProviderDefinition fields + instance statuses), §5 (sequence +
+      shell-adoption + awaiting_config notes); docs/ws-protocol.md §2
+      (validation rule 3 rewritten, response example + type_adopted),
+      §3 (hello/status coercion note), §4 (provider.status enum +
+      config.update shell note + backend.start no_config NAK);
+      provider/README.md (step 4 note + "Shell definitions" section).
+- [x] **K. Tests** — admin: shell create/config-refusal/unknown-type,
+      shell PATCH paths (config-needs-type, validate+push, no-unset),
+      capacity-only-on-shell never pushes, registration adoption
+      matrix (unknown-type bootstrap + known-type + typed flag +
+      adopt-before-gate), scheduler (never admitted, excluded from
+      candidates, reaper skip), /v1/models hidden, ws `awaiting_config`
+      persist + non-clobber + honest errors + configured-path
+      unchanged. Provider/lib: null-fingerprint persist+round-trip,
+      `type_adopted` flag, `no_config` fence NAK+pass-through.
+
+### Implementation notes / deviations
+
+- **`none_as_null` discovery (important for any future nullable JSON
+  column):** SQLAlchemy's postgres `JSON` type serializes a top-level
+  Python `None` to the **JSON null value** (text `null`), NOT SQL NULL.
+  The `NullableJSON` TypeDecorator (models.py) must wrap every nullable
+  JSON column; the initial migration's `postgresql.JSON` stays (the
+  type is Python-side only).
+- **PATCH null-handling:** `.get()` vs `in changes` — explicit null
+  checks on `provider_type`/`backend_config` use `key in changes`
+  (absent ≠ null) after an early version broke every normal config
+  PATCH; SF-4's loop for the remaining non-nullable fields keeps
+  `changes[key] is None` iteration.
+- **Consensus interplay:** adoption happens BEFORE `_schema_gate`
+  consumes the type, so a first-ever registration via a shell adopts
+  AND participates in consensus identically to a typed registration
+  (solo voter → presented schema commits immediately).
+- **Mock e2e tests need env locally** (`PROVIDER_REGISTRATION_TOKEN` /
+  `MACHINE_UID` / `ADMIN_BASE_URL` — CI provides them; bare `pytest`
+  runs of `test_mock_phase4.py`/`test_main_wiring.py` fail in
+  pydantic-settings at `ProviderSettings()` — pre-existing, not a
+  Phase 14 regression).
+
+### Accepted risks (per spec)
+
+1. Typo'd container `PROVIDER_TYPE` poisons a shell on first
+   registration — visible (`type_adopted: true` + log); repair = PATCH
+   the type while no instances attached (or delete + recreate the
+   shell).
+2. Never-configured shell definitions linger with an
+   `awaiting_config` badge — intentional (no reaper touches them,
+   nothing is loaded).
+3. `null` vs `{}` remains the cardinal footgun —
+   `backend_config_is_authored()` + `NullableJSON` centralize it;
+   both are doc-commented in models.py.
+
+**Test totals after Phase 14:** admin **272** · provider/lib **108** ·
+mock **23** (env-provided) · llama-cpp **61** · halogen-flash **140** ·
+halogen **67** · gufo **67**. `bun run build` + lint clean.
+Client regenerated from the updated OpenAPI (nullable
+provider_type/backend_config on DefinitionCreate/DefinitionPatch).
+
+### Implementation notes / ordering
+
+- Deploy order (§10 lockstep): admin image first, then recreate every
+  provider container — version gate forces this anyway; old providers
+  registering against a shell definition are the only new path and they
+  speak the same registration body.
+- DB migration is additive (nullable columns); prestart applies it.
+  Existing rows all have type+config → zero behavior change until a
+  shell is created.
+- The two wire mirrors MUST be edited in the same commit
+  (`test_wire_drift_guard.py`).
+- Client generation (`scripts/generate-client.sh`) after A/B/C/E/F route
+  changes.
+
+### Accepted risks / regressions
+
+1. **Typo'd container `PROVIDER_TYPE` poisons a shell** (adopted on first
+   registration). Mitigation: `type_adopted: true` in the response +
+   registration log line; operator repair = DELETE shell definition and
+   recreate (no instances of consequence attached pre-config) or PATCH
+   type while instance detached. Cheaper than the old system's total
+   block (unknown type → 422 with "(none registered yet)").
+2. **Shell definitions linger if never configured.** Visible
+   (`awaiting_config` badge); no reaper touches them; acceptable.
+3. **Null vs `{}` distinction is a footgun for future contributors.**
+   Locked decision above; `backend_config_is_authored()` helper +
+   `NullableJSON` column type centralize it; doc notes in models.py.
 
 ---
 

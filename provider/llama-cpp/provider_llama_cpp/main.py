@@ -108,7 +108,14 @@ def install_command_handlers(
 ) -> None:
     """Register admin->provider command handlers on the client."""
 
-    async def on_backend_start(frame: Frame) -> dict[str, Any]:  # noqa: ARG001
+    async def on_backend_start(frame: Frame) -> dict[str, Any]:
+        # Phase 14: fence — a shell definition (no applied config) never
+        # starts a backend on defaults.
+        nak_fn = getattr(client, "no_config_nak", None)
+        if nak_fn is not None:
+            nak = await nak_fn(frame)
+            if nak is not None:
+                return nak
         await lifecycle.start()
         driver = lifecycle.driver
         return {

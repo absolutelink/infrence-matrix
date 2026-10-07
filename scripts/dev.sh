@@ -49,48 +49,16 @@ docker_mode() {
     && docker info >/dev/null 2>&1
 }
 
-# Phase 12: definition create validates provider_type against the
-# ProviderType registry, which normally bootstraps on the first provider
-# registration — but on a fresh DB the definition is seeded *before* any
-# provider exists. Seed the `mock` type row directly from the shipped
-# schema.json (upsert: keeps dev re-runs working after schema edits).
-# A live consensus vote (pending_fingerprint NOT NULL) is never clobbered:
-# the update is guarded and the script warns instead.
-# $@ = psql invocation (docker exec or local psql).
-seed_provider_type() {
-  local schema="$ROOT/provider/mock/provider_mock/schema.json"
-  local fp
-  fp=$(python3 -c 'import json,sys,hashlib
-s = json.load(open(sys.argv[1]))
-print(hashlib.sha256(json.dumps(s, sort_keys=True, separators=(",", ":")).encode()).hexdigest())' "$schema")
-  local pending
-  pending=$("$@" -tA -c "SELECT pending_fingerprint FROM provider_types WHERE name = 'mock'" 2>/dev/null || true)
-  if [[ -n "$pending" ]]; then
-    log "  provider type 'mock' has a pending consensus vote (pending_fingerprint=$pending) — committed schema left untouched"
-    log "  (dismiss or force-commit via /admin/api/provider-types/mock/pending/{dismiss,commit}, then re-run to re-seed)"
-    return 0
-  fi
-  "$@" -v schema="$(cat "$schema")" <<SQL || return 1
-INSERT INTO provider_types (id, name, "schema", schema_fingerprint, pending_voters, status, created_at)
-VALUES (gen_random_uuid(), 'mock', :'schema'::json, '$fp', '[]', 'active', now())
-ON CONFLICT (name) DO UPDATE
-  SET "schema" = EXCLUDED."schema",
-      schema_fingerprint = EXCLUDED.schema_fingerprint,
-      updated_at = now()
-  WHERE provider_types.pending_fingerprint IS NULL;
-SQL
-  log "  provider type 'mock' seeded"
-}
+# Phase 14: the previous seed_provider_type step is gone — shell
+# definitions are typed at first registration, so a fresh DB needs no
+# provider_types pre-seed at all.
 
 # Seed machine + definition through the admin API. 409 = already seeded.
 # $1 = host the admin should use to reach the mock provider.
-# $2.. = psql invocation used for the Phase 12 provider-type bootstrap.
 seed() {
   local provider_host="$1"
-  shift
-  log "seeding machine '$MACHINE_UID' + definition '$DEF_ALIAS' via admin API..."
+  log "seeding machine '$MACHINE_UID' + shell definition '$DEF_ALIAS' via admin API..."
   local code
-  seed_provider_type "$@" || { err "  provider type seed failed"; return 1; }
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$ADMIN_URL/admin/api/machines" \
     -H 'Content-Type: application/json' \
     -d "{\"uid\":\"$MACHINE_UID\",\"name\":\"Mock Machine\",\"host\":\"$provider_host\",\"total_vram_bytes\":32000000000}") || true
@@ -99,16 +67,86 @@ seed() {
     409) log "  machine already exists" ;;
     *) err "  machine seed failed (HTTP $code)"; return 1 ;;
   esac
-  # backend_config uses the Phase 12 sectioned shape (see the mock's
-  # provider_mock/schema.json).
+  # Phase 14: shell definition — no provider_type, no backend_config. The
+  # mock container registers with its token, the definition adopts the
+  # 'mock' type from the registration, and the admin pushes the canonical
+  # config through the standard Phase 9 PATCH flow below.
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$ADMIN_URL/admin/api/definitions" \
     -H 'Content-Type: application/json' \
-    -d "{\"alias\":\"$DEF_ALIAS\",\"provider_type\":\"mock\",\"registration_token\":\"$DEF_TOKEN\",\"capacity\":4,\"vram_required_bytes\":0,\"idle_timeout_seconds\":300,\"backend_config\":{\"artifacts\":{\"model\":{\"path\":\"/models/mock.gguf\"}},\"context\":{\"ctx\":4096,\"predict\":-1},\"sampling\":{\"temperature\":0.8,\"top_k\":40,\"top_p\":0.95,\"seed\":-1},\"stream\":{\"delta_count\":3,\"delta_delay\":0.0},\"server\":{\"backend_port\":8082}}}") || true
+    -d "{\"alias\":\"$DEF_ALIAS\",\"registration_token\":\"$DEF_TOKEN\",\"capacity\":4,\"vram_required_bytes\":0,\"idle_timeout_seconds\":300}") || true
   case "$code" in
-    2*) log "  definition created" ;;
+    2*) log "  shell definition created" ;;
     409) log "  definition already exists" ;;
     *) err "  definition seed failed (HTTP $code)"; return 1 ;;
   esac
+}
+
+# Author the mock's backend_config on its (registered, now-typed)
+# definition via the standard PATCH → provider.config.update flow.
+# Waits for the instance's WS to be CONNECTED before PATCHing so the
+# push fans out to the live socket (instead of relying on the
+# connect-time heal), then confirms the provider echoed the fingerprint.
+configure_mock_definition() {
+  local defs_url="$ADMIN_URL/admin/api/definitions"
+  # Only needed for a shell: an existing full definition (pre-Phase-14
+  # seed or a re-run after configure) has non-null config already.
+  local def_json
+  def_json=$(curl -s "$defs_url" 2>/dev/null)
+  local configured
+  configured=$(python3 -c 'import json,sys
+data = json.load(sys.stdin)
+d = next((x for x in data if x.get("alias") == "'"$DEF_ALIAS"'"), None)
+print("True" if d and d.get("backend_config") is not None else "False")' <<<"$def_json" 2>/dev/null || echo False)
+  [[ "$configured" == "True" ]] && { log "mock definition already configured"; return 0; }
+  log "waiting for mock provider registration + ws connect (adopting type)..."
+  local i ready
+  for i in $(seq 1 90); do
+    def_json=$(curl -s "$defs_url" 2>/dev/null)
+    ready=$(python3 -c 'import json,sys
+data = json.load(sys.stdin)
+d = next((x for x in data if x.get("alias") == "'"$DEF_ALIAS"'"), None)
+ok = bool(d) and d.get("provider_type") and any(
+    (inst.get("websocket_connected") and inst.get("config_fingerprint") is None)
+    for inst in (d.get("instances") or [])
+)
+print("True" if ok else "False")' <<<"$def_json" 2>/dev/null || echo False)
+    [[ "$ready" == "True" ]] && break
+    sleep 1
+  done
+  [[ "$ready" == "True" ]] || {
+    err "mock provider did not register + connect within 90s (see $RUN_DIR/*.log)"
+    return 1
+  }
+  log "  registered, type adopted, instance connected — pushing canonical mock backend_config..."
+  local code
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
+    "$ADMIN_URL/admin/api/definitions/$(python3 -c 'import json,sys
+data = json.load(sys.stdin)
+print(next(x["id"] for x in data if x.get("alias") == "'"$DEF_ALIAS"'"))' <<<"$def_json")" \
+    -H 'Content-Type: application/json' \
+    -d '{"backend_config":{"artifacts":{"model":{"path":"/models/mock.gguf"}},"context":{"ctx":4096,"predict":-1},"sampling":{"temperature":0.8,"top_k":40,"top_p":0.95,"seed":-1},"stream":{"delta_count":3,"delta_delay":0.0},"server":{"backend_port":8082}}}') || true
+  case "$code" in
+    2*) log "  config PATCH accepted" ;;
+    *) err "  config PATCH failed (HTTP $code)"; return 1 ;;
+  esac
+  # Confirm the provider actually applied it (echoed fingerprint) and
+  # reconnected to running before the smoke test hits /v1.
+  for i in $(seq 1 60); do
+    def_json=$(curl -s "$defs_url" 2>/dev/null)
+    ready=$(python3 -c 'import json,sys
+data = json.load(sys.stdin)
+d = next((x for x in data if x.get("alias") == "'"$DEF_ALIAS"'"), None)
+ok = bool(d) and bool(d.get("config_fingerprint")) and all(
+    inst.get("config_fingerprint") == d.get("config_fingerprint")
+    for inst in (d.get("instances") or [])
+    if inst.get("websocket_connected")
+)
+print("True" if ok else "False")' <<<"$def_json" 2>/dev/null || echo False)
+    [[ "$ready" == "True" ]] && break
+    sleep 1
+  done
+  [[ "$ready" == "True" ]] || { err "provider never echoed the config fingerprint"; return 1; }
+  log "  provider applied the config (fingerprints in sync)"
 }
 
 # Wait for the mock instance's WS to connect, then stream one response.
@@ -185,10 +223,10 @@ up_docker() {
     sleep 1
   done
   curl -sf "$ADMIN_URL/admin/api/health" >/dev/null 2>&1 || { err "admin not healthy"; return 1; }
-  seed "provider-mock" \
-    docker compose -f "$ROOT/compose.yml" exec -T postgres psql -U inference -d inference_matrix
+  seed "provider-mock"
   log "starting mock provider..."
   docker compose -f "$ROOT/compose.yml" up -d --build provider-mock
+  configure_mock_definition
   smoke_test
 }
 
@@ -224,10 +262,7 @@ up_local() {
   curl -sf "$ADMIN_URL/admin/api/health" >/dev/null 2>&1 \
     || { err "admin failed to start — see $RUN_DIR/admin.log"; return 1; }
 
-  seed "127.0.0.1" \
-    env PGPASSWORD="${POSTGRES_PASSWORD:-}" psql \
-         -h "${POSTGRES_HOST:-localhost}" -p "${POSTGRES_PORT:-5432}" \
-         -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-inference_matrix}"
+  seed "127.0.0.1"
 
   log "starting mock provider (:$PROVIDER_PORT)..."
   mkdir -p "$RUN_DIR/provider-cache" "$RUN_DIR/provider-models"
@@ -240,6 +275,7 @@ up_local() {
       MODELS_DIR="$RUN_DIR/provider-models" \
       uv run python -m provider_mock.main
 
+  configure_mock_definition
   smoke_test
 }
 

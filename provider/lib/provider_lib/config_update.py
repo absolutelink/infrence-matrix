@@ -254,6 +254,23 @@ def install_config_handlers(
             return list(extra_cache_dirs())
         return list(extra_cache_dirs)
 
+    async def no_config_nak(_frame: Frame) -> dict[str, Any] | None:
+        """Phase 14 defense-in-depth: NAK ``backend.start`` when no
+        config has been applied (shell definition). Returns the NAK
+        payload, or ``None`` when a config exists (proceed normally).
+
+        The admin never boots an unconfigured definition (scheduler +
+        routes gate on ``backend_config IS NOT NULL``); this NAK is the
+        second fence so a buggy admin or a hand-rolled command cannot
+        start a driver on defaults and pretend it serves the alias."""
+        if state.applied_fingerprint is None:
+            return {
+                "ok": False,
+                "error": "no_config",
+                "detail": {"step": _STEP_VALIDATE},
+            }
+        return None
+
     async def on_config_update(frame: Frame) -> dict[str, Any]:
         payload = frame.payload or {}
         new_fp = payload.get("config_fingerprint")
@@ -483,3 +500,8 @@ def install_config_handlers(
     client.on_command("provider.config.update", on_config_update)
     client.on_command("cache.clear", on_cache_clear)
     client.on_command("storage.prune_unused", on_prune_unused)
+    # Expose the shell-definition fence so every provider package's
+    # backend.start handler can consult it (one call per package). The
+    # attribute is declared on AdminClient; install_config_handlers owns
+    # its single assignment.
+    client.no_config_nak = no_config_nak

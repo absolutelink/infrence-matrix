@@ -82,9 +82,17 @@ def install_command_handlers(
     config_state: ConfigState | None = None,
 ) -> None:
     """Register admin->provider command handlers on the client."""
+    resolved_state = config_state if config_state is not None else ConfigState()
 
     async def on_backend_start(frame: Frame) -> dict[str, Any]:
         logger.info("mock backend.start received: %s", frame.payload)
+        # Phase 14: fence — a shell definition (no applied config) never
+        # starts a backend on defaults (see provider_lib.config_update).
+        nak_fn = getattr(client, "no_config_nak", None)
+        if nak_fn is not None:
+            nak = await nak_fn(frame)
+            if nak is not None:
+                return nak
         await lifecycle.start()
         return {
             "ok": True,
@@ -98,9 +106,7 @@ def install_command_handlers(
 
     client.on_command("backend.start", on_backend_start)
     client.on_command("backend.stop", on_backend_stop)
-    install_config_handlers(
-        client, lifecycle, config_state or ConfigState(), client.settings
-    )
+    install_config_handlers(client, lifecycle, resolved_state, client.settings)
 
 
 def apply_registration(
@@ -120,6 +126,8 @@ def apply_registration(
     if isinstance(backend_config, dict):
         lifecycle.driver.apply_config(backend_config)
     if config_state is not None:
+        # Phase 14: null fingerprint (shell) stays None — never coerced
+        # to a hash of {} (that would let the no_config fence pass).
         fp = definition.get("config_fingerprint")
         config_state.applied_fingerprint = fp if isinstance(fp, str) else None
 

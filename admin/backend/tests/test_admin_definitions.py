@@ -305,8 +305,9 @@ def test_patch_capacity_only_triggers_push(
 def test_patch_explicit_null_on_required_fields_is_422(
     client: TestClient, session: Session, monkeypatch
 ) -> None:
-    """SF-4: explicit null on a NOT NULL column -> clear 422, never a
-    409 IntegrityError or a crash."""
+    """SF-4 + Phase 14: explicit null on a NOT NULL column or on the
+    shell-nullable fields (once set) -> clear 422, never a 409
+    IntegrityError or a crash."""
     from app.services import config_update as cu
 
     created = _create(client, alias="null-model")
@@ -316,18 +317,28 @@ def test_patch_explicit_null_on_required_fields_is_422(
 
     monkeypatch.setattr(cu.manager, "send_command", no_send)
 
-    for field in ("alias", "registration_token", "provider_type", "capacity"):
+    for field in ("alias", "registration_token", "capacity"):
         resp = client.patch(
             f"/admin/api/definitions/{created['id']}", json={field: None}
         )
         assert resp.status_code == 422, (field, resp.text)
         assert "cannot be null" in str(resp.json()["detail"]), field
 
+    # Phase 14: provider_type/backend_config are nullable columns, but a
+    # definition never returns to the shell state → the same 422.
+    for field in ("provider_type", "backend_config"):
+        resp = client.patch(
+            f"/admin/api/definitions/{created['id']}", json={field: None}
+        )
+        assert resp.status_code == 422, (field, resp.text)
+        assert "cannot be" in str(resp.json()["detail"]), field
+
     # Row untouched.
     session.expunge_all()
     row = session.get(ProviderDefinition, uuid.UUID(created["id"]))
     assert row.alias == "null-model"
     assert row.capacity == 1
+    assert row.provider_type == "mock"
 
 
 def test_patch_provider_type_refused_with_instances_attached(
@@ -431,3 +442,147 @@ def test_delete_refused_when_connected_instance(
     session.commit()
     resp = client.delete(f"/admin/api/definitions/{created['id']}")
     assert resp.status_code == 200
+
+
+# ============================================================================
+# Phase 14 — shell definitions
+# ============================================================================
+
+
+def test_create_shell_definition(client: TestClient) -> None:
+    """A definition with no provider_type/backend_config is a shell: null
+    type/config/fingerprint, schedulable machinery untouched."""
+    resp = client.post(
+        "/admin/api/definitions", json={"alias": "shell-model", "capacity": 2}
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["provider_type"] is None
+    assert body["backend_config"] is None
+    assert body["config_fingerprint"] is None
+    assert len(body["registration_token"]) >= 16
+
+
+def test_create_shell_with_backend_config_is_422(client: TestClient) -> None:
+    """No type → no schema to validate against → refuse config (never
+    store unvalidatable config)."""
+    resp = client.post(
+        "/admin/api/definitions",
+        json={"alias": "sh-cfg", "backend_config": {"delta_count": 3}},
+    )
+    assert resp.status_code == 422
+    assert "backend_config" in str(resp.json()["detail"])
+
+
+def test_create_shell_with_provider_type_wants_type_registered(
+    client: TestClient,
+) -> None:
+    resp = client.post(
+        "/admin/api/definitions", json={"alias": "sh-bad", "provider_type": "ghost"}
+    )
+    assert resp.status_code == 422
+    assert "unknown provider_type" in str(resp.json()["detail"])
+
+
+def test_patch_config_onto_shell_validates_and_pushes(
+    client: TestClient, monkeypatch
+) -> None:
+    """shell → configured: the PATCH validates against the (adopted or
+    set) type's committed schema and fires the standard push; config may
+    not be written while the definition is still untyped."""
+    from app.services import config_update as cu
+
+    created = client.post("/admin/api/definitions", json={"alias": "shell-push"}).json()
+
+    async def no_send(*args, **kwargs):  # noqa: ARG001
+        raise AssertionError("must not push without a type")
+
+    monkeypatch.setattr(cu.manager, "send_command", no_send)
+    resp = client.patch(
+        f"/admin/api/definitions/{created['id']}",
+        json={"backend_config": {"delta_count": 3}},
+    )
+    assert resp.status_code == 422
+
+    # Set the type first (operator path; no instances attached), then
+    # config validates + pushes (no connected instances → empty results).
+    resp = client.patch(
+        f"/admin/api/definitions/{created['id']}",
+        json={"provider_type": "mock"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["provider_type"] == "mock"
+
+    async def ok_send(instance_id, kind, payload, timeout=None):  # noqa: ARG001
+        from app.services.wire import Frame
+
+        return Frame(
+            type="ack",
+            payload={
+                "ok": True,
+                "detail": {
+                    "config_fingerprint": compute_config_fingerprint({"delta_count": 3})
+                },
+            },
+        )
+
+    monkeypatch.setattr(cu.manager, "send_command", ok_send)
+    resp = client.patch(
+        f"/admin/api/definitions/{created['id']}",
+        json={"backend_config": {"delta_count": 3}},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["backend_config"] == {"delta_count": 3}
+    assert body["config_fingerprint"] == compute_config_fingerprint({"delta_count": 3})
+
+    # No going back: explicit nulls are refused once set.
+    for field in ("provider_type", "backend_config"):
+        resp = client.patch(
+            f"/admin/api/definitions/{created['id']}", json={field: None}
+        )
+        assert resp.status_code == 422
+
+
+def test_shell_type_only_patch_never_pushes(
+    client: TestClient, monkeypatch, session: Session
+) -> None:
+    """A capacity-only PATCH on a still-shell definition (type set, config
+    still null) must NOT fabricate a push with the hash of {}."""
+    from app.services import config_update as cu
+
+    created = client.post("/admin/api/definitions", json={"alias": "shell-cap"}).json()
+    session.expunge_all()
+    row = session.get(ProviderDefinition, uuid.UUID(created["id"]))
+    row.provider_type = "mock"
+    session.add(row)
+    session.commit()
+
+    async def no_send(*args, **kwargs):  # noqa: ARG001
+        raise AssertionError("shell must not be pushed")
+
+    monkeypatch.setattr(cu.manager, "send_command", no_send)
+    resp = client.patch(f"/admin/api/definitions/{created['id']}", json={"capacity": 3})
+    assert resp.status_code == 200
+    assert resp.json()["config_fingerprint"] is None
+
+
+def test_patch_shell_type_and_config_same_request(
+    client: TestClient,
+) -> None:
+    """Phase 14 spec item B: a single PATCH may both type the shell and
+    author the config (validated against that newly-set type's schema,
+    then pushed)."""
+    created = client.post(
+        "/admin/api/definitions", json={"alias": "shell-one-shot"}
+    ).json()
+
+    resp = client.patch(
+        f"/admin/api/definitions/{created['id']}",
+        json={"provider_type": "mock", "backend_config": {"delta_count": 3}},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["provider_type"] == "mock"
+    assert body["backend_config"] == {"delta_count": 3}
+    assert body["config_fingerprint"] == compute_config_fingerprint({"delta_count": 3})

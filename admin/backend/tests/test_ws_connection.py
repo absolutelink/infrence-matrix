@@ -390,11 +390,13 @@ async def test_sweep_marks_presence_expired(session: Session) -> None:
             alias="sweep-model",
             provider_type="mock",
             registration_token="sweep-token",
+            backend_config={"model": {"file": "m.gguf"}},
         )
         definition2 = ProviderDefinition(
             alias="sweep-model-2",
             provider_type="mock",
             registration_token="sweep-token-2",
+            backend_config={"model": {"file": "m.gguf"}},
         )
         session.add_all([machine, definition, definition2])
         session.commit()
@@ -428,3 +430,136 @@ async def test_sweep_marks_presence_expired(session: Session) -> None:
         assert stale_row.instance_status == InstanceStatusValue.DISCONNECTED
     finally:
         await aredis.aclose()
+
+
+# ============================================================================
+# Phase 14 — awaiting_config
+# ============================================================================
+
+
+def _register_shell(client: TestClient, session: Session) -> dict:
+    machine = Machine(uid="sh-ws-mach", name="sh-ws-machine", host="10.0.0.9")
+    definition = ProviderDefinition(
+        alias="sh-ws-model",
+        provider_type=None,  # shell
+        registration_token="sh-ws-token",
+        backend_config=None,
+    )
+    session.add(machine)
+    session.add(definition)
+    session.commit()
+    resp = client.post(
+        "/admin/api/providers/register",
+        json={
+            "machine_uid": "sh-ws-mach",
+            "registration_token": "sh-ws-token",
+            "provider_type": "mock",
+            "schema": {"type": "object"},
+            "version": settings.VERSION,
+            "port": 8081,
+            "hardware": {},
+            "metrics_categories": [],
+        },
+    )
+    assert resp.status_code == 200
+    return resp.json()
+
+
+def test_shell_instance_reports_awaiting_config(
+    client: TestClient, session: Session
+) -> None:
+    """After connect, an unconfigured definition's instance is
+    `awaiting_config` (admin-owned), and a provider running-status frame
+    does NOT clobber it."""
+    reg = _register_shell(client, session)
+    instance_id = reg["instance_id"]
+
+    with client.websocket_connect(
+        f"/provider/ws?instance_id={instance_id}",
+        headers=_ws_headers(reg["instance_secret"]),
+    ) as ws:
+        _recv_frame(ws)  # hello
+        epoch = 1
+
+        # Provider (ignorant of the pre-state) claims running.
+        ws.send_text(
+            Frame(
+                type=FrameKind.PROVIDER_STATUS,
+                id="ev-sh-1",
+                epoch=epoch,
+                payload={
+                    "instance_status": InstanceStatusValue.RUNNING,
+                    "backend_status": "running",
+                },
+            ).to_json()
+        )
+
+        def stayed_awaiting() -> bool:
+            session.expire_all()
+            row = session.get(ProviderInstance, uuid.UUID(instance_id))
+            return (
+                row.instance_status == InstanceStatusValue.AWAITING_CONFIG
+                and row.backend_status == "running"
+            )
+
+        _wait_for(stayed_awaiting)
+
+        # An error payload stays honest (not coerced).
+        ws.send_text(
+            Frame(
+                type=FrameKind.PROVIDER_STATUS,
+                id="ev-sh-2",
+                epoch=epoch,
+                payload={"instance_status": InstanceStatusValue.ERROR},
+            ).to_json()
+        )
+
+        def honest_error() -> bool:
+            session.expire_all()
+            row = session.get(ProviderInstance, uuid.UUID(instance_id))
+            return row.instance_status == InstanceStatusValue.ERROR
+
+        _wait_for(honest_error)
+
+    session.expunge_all()
+
+
+def test_configured_instance_connect_does_not_show_awaiting_config(
+    client: TestClient, session: Session
+) -> None:
+    """Today's behavior unchanged: a configured definition's instance goes
+    registering → running via provider.status with no coercion."""
+    reg = _register(client, session)
+    instance_id = reg["instance_id"]
+
+    with client.websocket_connect(
+        f"/provider/ws?instance_id={instance_id}",
+        headers=_ws_headers(reg["instance_secret"]),
+    ) as ws:
+        hello = _recv_frame(ws)
+        epoch = hello.epoch
+
+        def connecting() -> bool:
+            session.expire_all()
+            row = session.get(ProviderInstance, uuid.UUID(instance_id))
+            return row.websocket_connected is True and (
+                row.instance_status != InstanceStatusValue.AWAITING_CONFIG
+            )
+
+        _wait_for(connecting)
+
+        ws.send_text(
+            Frame(
+                type=FrameKind.PROVIDER_STATUS,
+                id="ev-cfg-1",
+                epoch=epoch,
+                payload={"instance_status": InstanceStatusValue.RUNNING},
+            ).to_json()
+        )
+
+        def running() -> bool:
+            session.expire_all()
+            row = session.get(ProviderInstance, uuid.UUID(instance_id))
+            return row.instance_status == InstanceStatusValue.RUNNING
+
+        _wait_for(running)

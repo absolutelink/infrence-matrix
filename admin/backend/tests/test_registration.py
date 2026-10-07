@@ -26,16 +26,20 @@ def _definition(
     session: Session,
     *,
     token: str = "reg-token-1",
-    provider_type: str = "mock",
+    provider_type: str | None = "mock",
     enabled: bool = True,
     backend_config: dict | None = None,
 ) -> ProviderDefinition:
+    # Phase 14: an explicit backend_config=None request means a SHELL —
+    # pass the None through (never `or { ... }`, which would swallow it).
+    shell = backend_config is None and provider_type is None
     d = ProviderDefinition(
         alias=f"alias-{uuid.uuid4().hex[:8]}",
         provider_type=provider_type,
         registration_token=token,
         backend_config=backend_config
-        or {"model": {"file": "m.gguf"}, "args": {"ctx": 4096}},
+        if shell
+        else (backend_config or {"model": {"file": "m.gguf"}, "args": {"ctx": 4096}}),
         vram_required_bytes=8 * 1024**3,
         idle_timeout_seconds=123,
         capacity=2,
@@ -189,3 +193,112 @@ def test_register_hardware_without_total_keeps_machine_vram(
     session.refresh(machine)
     assert machine.total_vram_bytes == 99 * 1024**3
     assert machine.hardware == {"gpus": []}
+
+
+# ============================================================================
+# Phase 14 — shell definition type adoption
+# ============================================================================
+
+
+def test_register_adopts_shell_type_bootstraps_registry(
+    client: TestClient, session: Session
+) -> None:
+    """Shell definition + unknown container type: the registration adopts
+    the type AND bootstraps the ProviderType row (200)."""
+    from app.models import ProviderType
+
+    _machine(session)
+    _definition(session, provider_type=None, backend_config=None)
+
+    resp = client.post("/admin/api/providers/register", json=_body())
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+
+    assert data["type_adopted"] is True
+    assert data["provider_definition"]["provider_type"] == "mock"
+    assert data["provider_definition"]["backend_config"] is None
+    assert data["provider_definition"]["config_fingerprint"] is None
+
+    session.expunge_all()
+    def_row = session.get(
+        ProviderDefinition, uuid.UUID(data["provider_definition"]["id"])
+    )
+    assert def_row.provider_type == "mock"
+    ptype = session.exec(
+        select(ProviderType).where(ProviderType.name == "mock")
+    ).first()
+    assert ptype is not None
+    assert ptype.status == "active"
+    # Instance row: fingerprint stays null (never the hash of {}).
+    inst = session.exec(select(ProviderInstance)).one()
+    assert inst.config_fingerprint is None
+    assert inst.instance_status == "registering"
+
+
+def test_register_adopts_shell_known_type(client: TestClient, session: Session) -> None:
+    """Shell definition + an already-registered type: adoption sets the
+    definition's type without touching the registry."""
+    from app.models import ProviderType
+    from app.services.hashing import canonical_json_sha256
+
+    session.add(
+        ProviderType(
+            name="mock",
+            schema={"type": "object"},
+            schema_fingerprint=canonical_json_sha256({"type": "object"}),
+            status="active",
+        )
+    )
+    session.commit()
+    _machine(session)
+    _definition(session, provider_type=None, backend_config=None)
+
+    schema = {"type": "object", "properties": {"x": {"type": "integer"}}}
+    resp = client.post("/admin/api/providers/register", json=_body(schema=schema))
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["type_adopted"] is True
+    assert data["provider_definition"]["provider_type"] == "mock"
+    session.expunge_all()
+    ptype = session.exec(select(ProviderType).where(ProviderType.name == "mock")).one()
+    # Solo voter universe: the presented schema commits unanimously
+    # (ws-protocol §2), so the registry follows the container's schema.
+    assert ptype.schema == schema
+
+
+def test_register_typed_no_type_adopted_flag(
+    client: TestClient, session: Session
+) -> None:
+    """A typed definition's registration keeps `type_adopted: false`."""
+    _machine(session)
+    _definition(session, provider_type="mock")
+    resp = client.post("/admin/api/providers/register", json=_body())
+    assert resp.status_code == 200
+    assert resp.json()["type_adopted"] is False
+
+
+def test_register_shell_schema_mismatch_refused_but_type_adopted(
+    client: TestClient, session: Session
+) -> None:
+    """Adoption happens before the schema gate: a shell registering with a
+    schema that conflicts (two instances of one type, differing schemas)
+    gets refused (or voted-pending) — but the type adoption itself is
+    part of the same atomic commit on BOTH paths."""
+    from app.models import ProviderType
+
+    _machine(session)
+    definition = _definition(session, provider_type=None, backend_config=None)
+
+    schema_a = {"type": "object", "properties": {"a": {"const": 1}}}
+    resp = client.post("/admin/api/providers/register", json=_body(schema=schema_a))
+    assert resp.status_code == 200  # solo instance: committed immediately
+    session.expunge_all()
+    ptype = session.exec(select(ProviderType).where(ProviderType.name == "mock")).one()
+    assert (
+        ptype.schema_fingerprint
+        == hashlib.sha256(
+            json.dumps(schema_a, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
+    def_row = session.get(ProviderDefinition, definition.id)
+    assert def_row is not None and def_row.provider_type == "mock"

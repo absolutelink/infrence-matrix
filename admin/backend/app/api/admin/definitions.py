@@ -42,6 +42,23 @@ Config-change semantics (docs/ws-protocol.md §4):
   websocket_connected**; otherwise 409 with a suggestion to disable.
   When allowed, the definition's *offline* instance rows are deleted
   with it (cascade to non-connected rows only).
+
+Shell definitions (Phase 14):
+- Create may omit ``provider_type`` AND ``backend_config`` (a "shell").
+  A shell holds the alias + token + scheduler hints only; its type is
+  ADOPTED from the container's first registration and its config is
+  authored through a later PATCH (validated against the adopted type's
+  committed schema, then pushed via the Phase 9 flow). A shell is
+  never schedulable and never pushed — the scheduler, /v1/models and
+  the alias registry all exclude it (``backend_config_is_authored``).
+- Rules: a shell (type null) MUST NOT carry ``backend_config`` (422 —
+  there is no schema to validate against yet, so accepting it would
+  store unvalidatable config). A typed definition behaves exactly as
+  before (type resolved + config validated on every affected write).
+- Once a type/config has been set, explicit nulls are refused (422):
+  a definition cannot go back to being a shell. Setting the type on a
+  shell is allowed (operator repair path) subject to the usual
+  attached-instances refusal.
 """
 
 import logging
@@ -59,7 +76,12 @@ from sqlmodel import Session, select
 from app.api.admin.providers import compute_config_fingerprint
 from app.api.admin.serializers import iso_utc
 from app.core.db import get_session
-from app.models import ProviderDefinition, ProviderInstance, ProviderType
+from app.models import (
+    ProviderDefinition,
+    ProviderInstance,
+    ProviderType,
+    backend_config_is_authored,
+)
 from app.services import alias_registry, config_update
 
 logger = logging.getLogger("admin.definitions")
@@ -69,8 +91,9 @@ router = APIRouter(prefix="/admin/api/definitions", tags=["admin"])
 
 class DefinitionCreate(BaseModel):
     alias: str = Field(min_length=1, max_length=255)
-    provider_type: str = Field(min_length=1, max_length=64)
-    backend_config: dict[str, Any] = Field(default_factory=dict)
+    # Phase 14: None = shell definition (type adopted at first registration).
+    provider_type: str | None = Field(default=None, min_length=1, max_length=64)
+    backend_config: dict[str, Any] | None = None
     vram_required_bytes: int = Field(default=0, ge=0)
     idle_timeout_seconds: int = Field(default=300, ge=0)
     capacity: int = Field(default=1, ge=1)
@@ -93,11 +116,12 @@ class DefinitionPatch(BaseModel):
 
 # Columns that are NOT NULL in the model: an explicit null in a PATCH
 # body is a client error, never a silent skip or a DB IntegrityError.
+# Phase 14: provider_type/backend_config leave this list (nullable on a
+# shell) but are instead guarded as "cannot return to null once set" —
+# see _check_no_unshell in patch_definition.
 _NON_NULLABLE_FIELDS = frozenset(
     {
         "alias",
-        "provider_type",
-        "backend_config",
         "vram_required_bytes",
         "idle_timeout_seconds",
         "capacity",
@@ -182,13 +206,19 @@ def definition_dict(
     instances: list[ProviderInstance] | None = None,
     config_update_results: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    # Phase 14: a shell definition reports null type/config/fingerprint —
+    # an empty config must never masquerade as authored (the fingerprint
+    # of {} would look identical to a real permissive-schema config).
+    authored = backend_config_is_authored(definition)
     d: dict[str, Any] = {
         "id": str(definition.id),
         "alias": definition.alias,
         "provider_type": definition.provider_type,
-        "backend_config": definition.backend_config,
-        "config_fingerprint": compute_config_fingerprint(
-            definition.backend_config or {}
+        "backend_config": definition.backend_config if authored else None,
+        "config_fingerprint": (
+            compute_config_fingerprint(definition.backend_config or {})
+            if authored
+            else None
         ),
         "vram_required_bytes": definition.vram_required_bytes,
         "idle_timeout_seconds": definition.idle_timeout_seconds,
@@ -236,8 +266,24 @@ def _get_definition(session: Session, definition_id: str) -> ProviderDefinition:
 async def create_definition(
     body: DefinitionCreate, session: Session = Depends(get_session)
 ) -> dict[str, Any]:
-    ptype = _get_provider_type(session, body.provider_type)
-    _validate_backend_config(ptype, body.backend_config)
+    # Phase 14: a Shell definition (provider_type null) must not carry a
+    # backend_config — there is no committed schema to validate it against.
+    if body.provider_type is None:
+        if body.backend_config is not None:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "backend_config cannot be set on a definition without "
+                    "provider_type: create the shell and let the provider "
+                    "registration adopt the type first"
+                ),
+            )
+        ptype = None
+    else:
+        ptype = _get_provider_type(session, body.provider_type)
+        _validate_backend_config(
+            ptype, body.backend_config if body.backend_config is not None else {}
+        )
     definition = ProviderDefinition(
         **body.model_dump(exclude={"registration_token"}),
         registration_token=body.registration_token or secrets.token_urlsafe(24),
@@ -252,8 +298,11 @@ async def create_definition(
             detail=(f"alias or registration_token already exists ('{body.alias}')"),
         ) from None
     session.refresh(definition)
-    # Warm the litellm alias registration before first use (checklist 4).
-    alias_registry.ensure_registered(definition.alias)
+    # Warm the litellm alias registration before first use (checklist 4) —
+    # only for definitions that can actually serve (a shell never
+    # schedules; it is registered when the config lands instead).
+    if backend_config_is_authored(definition):
+        alias_registry.ensure_registered(definition.alias)
     logger.info("created definition %s (%s)", definition.alias, definition.id)
     return definition_dict(definition, instances=[])
 
@@ -290,13 +339,48 @@ async def patch_definition(
         if changes[key] is None and key in _NON_NULLABLE_FIELDS:
             raise HTTPException(status_code=422, detail=f"field '{key}' cannot be null")
 
+    # Phase 14: a definition can never go BACK to being a shell. Explicit
+    # null on provider_type/backend_config *present in the body* is
+    # refused 422 (absent keys mean "unchanged").
+    for key in ("provider_type", "backend_config"):
+        if key in changes and changes[key] is None:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"field '{key}' cannot be unset: a definition never "
+                    "returns to the shell (provider_type/backend_config "
+                    "null) state"
+                ),
+            )
+
     # M3: validate the EFFECTIVE config (post-change) against the
     # EFFECTIVE type's committed schema — a retype without a config
     # change must still satisfy the new schema. The type is resolved once
     # up front so an unknown provider_type keeps its original 422-before-
     # 409 ordering.
     effective_type_name = changes.get("provider_type", definition.provider_type)
-    ptype = _get_provider_type(session, effective_type_name)
+    # Phase 14 shell rule: backend_config is settable only against a type.
+    # "backend_config" arriving on a still-untyped definition (type not
+    # touched by this PATCH and definition untyped) is rejected up front;
+    # _get_provider_type above would NPE on None otherwise.
+    if effective_type_name is None:
+        if "backend_config" in changes:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "backend_config cannot be set while the definition has "
+                    "no provider_type — set provider_type first"
+                ),
+            )
+        ptype = None
+    else:
+        ptype = _get_provider_type(session, effective_type_name)
+        if "backend_config" in changes:
+            _validate_backend_config(ptype, changes["backend_config"])
+        elif "provider_type" in changes and backend_config_is_authored(definition):
+            # Retype onto an existing config: validate the stored config
+            # against the new type's schema.
+            _validate_backend_config(ptype, definition.backend_config or {})
     if "provider_type" in changes and effective_type_name != definition.provider_type:
         attached = session.exec(
             select(ProviderInstance).where(
@@ -314,12 +398,16 @@ async def patch_definition(
                     "instead"
                 ),
             )
-    if "provider_type" in changes or "backend_config" in changes:
-        effective_config = changes.get("backend_config", definition.backend_config)
-        _validate_backend_config(ptype, effective_config)
+    # Shell → typed transition with no config change is admin-side only
+    # (no push): the type follows the already-registered container.
 
-    old_fp = compute_config_fingerprint(definition.backend_config or {})
+    old_fp: str | None = (
+        compute_config_fingerprint(definition.backend_config or {})
+        if backend_config_is_authored(definition)
+        else None
+    )
     old_capacity = definition.capacity
+    was_shell = not backend_config_is_authored(definition)
     # NOTE (N-6): a rapid double-PATCH can transiently read a stale row
     # here and push the older config; the reconnect/sweep self-heal
     # converges it, so no locking is added.
@@ -336,9 +424,20 @@ async def patch_definition(
             detail="alias or registration_token already exists",
         ) from None
     session.refresh(definition)
-    alias_registry.ensure_registered(definition.alias)
+    # Phase 14: a shell is never litellm-registered — the alias warms
+    # exactly when the config is authored (possibly in this PATCH).
+    if backend_config_is_authored(definition):
+        alias_registry.ensure_registered(definition.alias)
 
-    new_fp = compute_config_fingerprint(definition.backend_config or {})
+    # The provider-visible state: an authored config (fingerprint) or a
+    # capacity change. A type-only change on a typed definition with the
+    # SAME config is not a push trigger (fingerprint identical); a type
+    # adoption on a shell never pushes (nothing to apply yet).
+    new_fp: str | None = (
+        compute_config_fingerprint(definition.backend_config or {})
+        if backend_config_is_authored(definition)
+        else None
+    )
     # SF-2: push when the provider-visible fields changed — the
     # backend_config fingerprint (restart-worthy) or capacity (adopted
     # at the provider without restart). idle_timeout_seconds is not a
@@ -354,11 +453,13 @@ async def patch_definition(
         pushed = await config_update.push_config_update(definition)
         results = [r.to_dict() for r in pushed]
         logger.info(
-            "definition %s %s changed (%s -> %s); pushed to %d connected instance(s)",
+            "definition %s %s changed (%s -> %s; shell→configured=%s); "
+            "pushed to %d connected instance(s)",
             definition.alias,
             "+".join(reasons),
-            old_fp[:8],
-            new_fp[:8],
+            str(old_fp)[:8],
+            str(new_fp)[:8],
+            was_shell,
             len(results),
         )
         # The push commits instance fingerprints / model_metadata in a

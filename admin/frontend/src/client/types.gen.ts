@@ -29,13 +29,13 @@ export type DefinitionCreate = {
     /**
      * Provider Type
      */
-    provider_type: string;
+    provider_type?: string | null;
     /**
      * Backend Config
      */
     backend_config?: {
         [key: string]: unknown;
-    };
+    } | null;
     /**
      * Vram Required Bytes
      */

@@ -148,7 +148,7 @@ duplicates the frame shape from `provider_lib.wire` (keep them in sync;
 | `/admin/api/health` | admin | none | Health check (used by compose healthcheck) |
 | `/admin/api/providers/register` | admin | registration token | Provider registration (§5) |
 | `/admin/api/machines*` | admin | none (trusted LAN) | Machine CRUD (Phase 9; delete refused while instances attached) |
-| `/admin/api/definitions*` | admin | none (trusted LAN) | ProviderDefinition CRUD (Phase 9; `backend_config`/`capacity` PATCH pushes `provider.config.update` to connected instances; explicit null on required fields → 422; `provider_type` change refused 409 while instances attached; Phase 12: `backend_config` validated against the committed JSON Schema of its `ProviderType` → 422 with per-field errors) |
+| `/admin/api/definitions*` | admin | none (trusted LAN) | ProviderDefinition CRUD (Phase 9; `backend_config`/`capacity` PATCH pushes `provider.config.update` to connected instances; explicit null on required fields → 422; `provider_type` change refused 409 while instances attached; Phase 12: `backend_config` validated against the committed JSON Schema of its `ProviderType` → 422 with per-field errors; **Phase 14**: `provider_type`/`backend_config` may be omitted at create (a *shell* definition — typed at first registration, configured via PATCH afterwards) and can never return to null once set) |
 | `/admin/api/provider-types` `/admin/api/provider-types/{name}` | admin | none (trusted LAN) | ProviderType registry reads (Phase 12; UI renders the backend-config form from the committed schema) |
 | `/admin/api/provider-types/{name}/pending/commit` `.../pending/dismiss` | admin | none (trusted LAN) | Operator override of the schema-consensus state (Phase 12) |
 | `/admin/api/huggingface/search` `/admin/api/huggingface/files` | admin | none (trusted LAN) | HF proxy for the `hf-file` picker widget (Phase 12; ported from legacy `huggingface.py` routes) |
@@ -230,8 +230,8 @@ A client-facing model: how to boot a backend and how to schedule it.
 | Field | Notes |
 | --- | --- |
 | `alias` | Public model name clients use in `/v1/models` and the `model` field. Unique. |
-| `provider_type` | Must reference a registered `ProviderType` (Phase 12). Known types after rollout: `llama-cpp`, `halogen`, `halogen-flash`, `gufo`, `mock` — but the registry, not a constant, is the source of truth. |
-| `backend_config` | JSON handed to the provider to start its backend: model artifacts (main GGUF + mmproj + draft, each with source), engine args, engine options. **Validated against the committed JSON Schema of its `ProviderType` on create/PATCH (Phase 12)**; the UI form is rendered from that schema (collapseable sections, `hf-file` artifact widget). |
+| `provider_type` | Must reference a registered `ProviderType` — **unless NULL**. Phase 14: a definition may be created as a *shell* (`provider_type` NULL): the container's reported type is **adopted** at its first registration (and the `ProviderType` row bootstraps from the shipped `schema.json`). Once set it can never go back to NULL (422). A type change is still refused 409 while instances are attached. |
+| `backend_config` | JSON handed to the provider to start its backend: model artifacts (main GGUF + mmproj + draft, each with source), engine args, engine options. **Validated against the committed JSON Schema of its `ProviderType` on create/PATCH (Phase 12)**; the UI form is rendered from that schema (collapseable sections, `hf-file` artifact widget). **Phase 14: NULL = no config authored yet (shell)** — distinct from `{}`, which is a real (possibly empty) config. A shell is excluded from `/v1/models`, scheduling, litellm alias registration and config pushes until config is authored (`backend_config IS NOT NULL`). |
 | `vram_required_bytes` | Scheduler admission hint. |
 | `idle_timeout_seconds` | Admin-driven idle stop (reaper — Phase 6 TODO). |
 | `capacity` | Concurrent backend slots (≥1). |
@@ -248,7 +248,9 @@ of the same definition.
 | --- | --- |
 | `port` | The provider's own port (default 8081). |
 | `version` | Provider instance version (commit id until first release). |
-| `instance_status` | `registering` `initializing` `running` `unhealthy` `error` `disconnected` |
+| Field | Notes |
+| --- | --- |
+| `instance_status` | `awaiting_config` `registering` `initializing` `running` `unhealthy` `error` `disconnected` — Phase 14 adds `awaiting_config`: the admin-owned pre-state for an instance whose definition has no authored `backend_config`. Connected + metrics healthy, but never schedulable. The provider never emits it (like `disconnected`, admin-only); a provider `running` status is coerced back to it while unconfigured. Cleared when a config PATCH push acks. |
 | `backend_status` | `stopped` `initializing` `starting` `running` `in_use` `stopping` `error` |
 | `websocket_connected` | DB mirror; authoritative liveness is the Redis presence key. |
 | `epoch` | Connection epoch: bumped on every accepted socket; stale-epoch frames ignored (fencing). |
@@ -311,18 +313,20 @@ Provider                          Admin
     │ ──────────────────────────────▶
     │  validations (401/403/404/409):
     │    registration_token → ProviderDefinition exists
+    │    provider_type: definition match — or (Phase 14) definition is
+    │      a shell → type ADOPTED from the container's report
     │    provider_type registered in ProviderType   (Phase 12;
     │      unknown type → created from this schema, committed)
     │    schema consensus gate                      (Phase 12;
     │      mismatch → 409 schema_pending/schema_conflict)
-    │    definition.provider_type == container's provider_type
-    │    version == admin settings.VERSION   (HARD FAIL)
-    │    machine_uid exists
+    │    machine_uid exists                          (404)
+    │    version == admin settings.VERSION   (HARD FAIL 409)
    │  effects:
    │    merge hardware into Machine, upsert ProviderInstance
    │    issue per-instance secret → Redis im:ws:secret:{id}
    │ ◀──────────────────────────────
-   │  {instance_id, instance_secret, provider config, fingerprint}
+   │  {instance_id, instance_secret, provider config, fingerprint,
+   │   type_adopted (Phase 14: true when this call set the shell's type)}
    │ write provider_config.json to CACHE_DIR
    │ dial ws(s)://{admin}/provider/ws
    │   Authorization: Bearer {instance_secret}
@@ -334,6 +338,20 @@ Provider                          Admin
 
 - **Version hard fail:** provider versions must match the admin exactly
   (409). Admin and provider images are deployed together (§10).
+- **Shell adoption (Phase 14):** a definition created without
+  `provider_type` adopts the container's reported type at its first
+  registration (response carries `"type_adopted": true`; logged). The
+  type registry bootstraps from the container's shipped `schema.json` at
+  the same call. This removes the fresh-install ordering constraint
+  (definitions no longer need a pre-registered type).
+- **`awaiting_config` (Phase 14):** while the definition has no
+  `backend_config`, its instance sits in the admin-owned
+  `awaiting_config` pre-state — connected, metrics-flowing, never
+  scheduled (`NoProviderAvailable` → 503), never pushed to, never
+  idle-stopped, hidden from `/v1/models`. Config arrives via a
+  definitions PATCH → standard `provider.config.update` push; the ack
+  clears the state. A provider-reported `running` status does not
+  clobber it (coerced by the admin).
 - **Schema gate (Phase 12):** each agent ships a `schema.json` and sends
   it with the registration body. A fingerprint mismatch against the
   committed schema is refused **409 `schema_pending`** — the agent stays

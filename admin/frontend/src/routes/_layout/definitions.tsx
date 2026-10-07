@@ -96,7 +96,10 @@ export const Route = createFileRoute("/_layout/definitions")({
 
 const definitionSchema = z.object({
   alias: z.string().min(1, "alias is required").max(255),
-  provider_type: z.string().min(1, "provider type is required"),
+  // Phase 14: empty = shell definition (type adopted at registration,
+  // backend_config authored afterwards). Editing an existing shell's type
+  // is the operator repair path.
+  provider_type: z.string().max(64),
   capacity: z
     .string()
     .refine((t) => Number.isInteger(Number(t)) && Number(t) >= 1, {
@@ -254,7 +257,16 @@ function DefinitionRow({
           {d.alias}
         </TableCell>
         <TableCell>
-          <StatusBadge status={d.provider_type} />
+          {d.provider_type === null ? (
+            <Badge
+              variant="outline"
+              className="border-violet-500/30 bg-violet-500/15 font-mono text-violet-600 dark:text-violet-400"
+            >
+              awaiting_config
+            </Badge>
+          ) : (
+            <StatusBadge status={d.provider_type} />
+          )}
         </TableCell>
         <TableCell>
           <Badge
@@ -355,6 +367,7 @@ function DefinitionDetail({
   // x-secret leaf before rendering so stored secrets never hit the DOM.
   const { data: typeDetail } = useProviderType(d.provider_type)
   const displayConfig = useMemo(() => {
+    if (d.backend_config === null) return null
     const schema = (typeDetail?.schema ?? null) as RJSFSchema | null
     if (!schema) return d.backend_config
     const stripped = stripSecrets(schema, d.backend_config)
@@ -380,7 +393,9 @@ function DefinitionDetail({
         <CopyButton value={d.registration_token} />
         <h4 className="mt-4 mb-2 text-sm font-semibold">Config fingerprint</h4>
         <code className="rounded bg-muted px-2 py-1 font-mono text-xs">
-          {d.config_fingerprint.slice(0, 16)}…
+          {d.config_fingerprint === null
+            ? "null — no config authored yet"
+            : `${d.config_fingerprint.slice(0, 16)}…`}
         </code>
       </div>
       <div>
@@ -400,13 +415,24 @@ function DefinitionDetail({
       </div>
       <div className="md:col-span-2">
         <h4 className="mb-2 text-sm font-semibold">backend_config</h4>
-        <p className="mb-1 text-xs text-muted-foreground">
-          x-secret fields are hidden (write-only — edit via the schema form;
-          leaving the input blank keeps the stored value).
-        </p>
-        <pre className="max-h-64 overflow-auto rounded-md bg-muted p-3 font-mono text-xs">
-          {JSON.stringify(displayConfig, null, 2)}
-        </pre>
+        {displayConfig === null ? (
+          <p className="rounded-md border border-dashed border-violet-500/40 p-3 text-xs text-muted-foreground">
+            No backend_config yet — this shell definition is waiting for its
+            provider to register (which adopts the type). Then edit this
+            definition to author the config against the committed schema; saving
+            pushes it to the connected instance.
+          </p>
+        ) : (
+          <>
+            <p className="mb-1 text-xs text-muted-foreground">
+              x-secret fields are hidden (write-only — edit via the schema form;
+              leaving the input blank keeps the stored value).
+            </p>
+            <pre className="max-h-64 overflow-auto rounded-md bg-muted p-3 font-mono text-xs">
+              {JSON.stringify(displayConfig, null, 2)}
+            </pre>
+          </>
+        )}
         {(d.instances ?? []).length > 0 && (
           <>
             <h4 className="mt-4 mb-2 text-sm font-semibold">Instances</h4>
@@ -591,8 +617,13 @@ function DefinitionFormDialog({
 
   const mutation = useMutation({
     mutationFn: async (values: DefinitionFormValues) => {
+      // Phase 14: empty provider type = shell creation. No config is sent
+      // (the API refuses backend_config on a shell).
+      const shellCreate = !isEdit && values.provider_type === ""
       let backendConfig: Record<string, unknown>
-      if (effectiveRawMode) {
+      if (shellCreate) {
+        backendConfig = {}
+      } else if (effectiveRawMode) {
         try {
           const parsed = JSON.parse(rawText)
           if (
@@ -635,7 +666,8 @@ function DefinitionFormDialog({
       }
       const body = {
         alias: values.alias,
-        provider_type: values.provider_type,
+        provider_type:
+          values.provider_type === "" ? null : values.provider_type,
         backend_config: backendConfig,
         capacity: Number(values.capacity),
         vram_required_bytes: Number(values.vram_required_bytes),
@@ -645,6 +677,28 @@ function DefinitionFormDialog({
       setExtraErrors(undefined)
       if (isEdit && definition) {
         const patch: DefinitionPatch = { ...body }
+        // Never null-out provider_type/backend_config in a PATCH (the API
+        // refuses unset; a shell edit carries the current values).
+        if (
+          (patch as { provider_type?: string | null }).provider_type === null
+        ) {
+          delete (patch as { provider_type?: string | null }).provider_type
+        }
+        // Phase 14 (review F1): editing a SHELL must not silently author
+        // a config. A shell's editor seeds from {} (no stored config);
+        // unless the operator actually typed one, drop backend_config
+        // from the PATCH entirely — sending {} would otherwise commit an
+        // empty config (push + schedulable on defaults) on an adopted
+        // shell, and 422 on a not-yet-adopted one.
+        if (
+          definition.backend_config === null &&
+          JSON.stringify(backendConfig) === JSON.stringify({})
+        ) {
+          delete (patch as { backend_config?: unknown }).backend_config
+        }
+        if ((patch as { backend_config?: unknown }).backend_config === null) {
+          delete (patch as { backend_config?: unknown }).backend_config
+        }
         if (
           values.registration_token &&
           values.registration_token !== definition.registration_token
@@ -657,6 +711,10 @@ function DefinitionFormDialog({
         })
       }
       const createBody: DefinitionCreate = { ...body }
+      // Phase 14: a shell create omits backend_config entirely.
+      if (shellCreate) {
+        delete (createBody as { backend_config?: unknown }).backend_config
+      }
       if (values.registration_token) {
         createBody.registration_token = values.registration_token
       }
@@ -761,18 +819,27 @@ function DefinitionFormDialog({
                   <FormItem>
                     <FormLabel>Provider type</FormLabel>
                     <Select
-                      onValueChange={field.onChange}
+                      onValueChange={(v) =>
+                        field.onChange(v === "SHELL" ? "" : v)
+                      }
                       value={field.value}
                       disabled={
-                        isEdit && (definition?.instances?.length ?? 0) > 0
+                        isEdit &&
+                        (definition?.provider_type ?? "") !== "" &&
+                        (definition?.instances?.length ?? 0) > 0
                       }
                     >
                       <FormControl>
                         <SelectTrigger>
-                          <SelectValue placeholder="Select type" />
+                          <SelectValue placeholder="Select type (or shell)" />
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
+                        {!isEdit && (
+                          <SelectItem value="SHELL">
+                            (shell — type adopted at registration)
+                          </SelectItem>
+                        )}
                         {providerTypes.map((t) => (
                           <SelectItem key={t.name} value={t.name}>
                             {t.name}
@@ -783,7 +850,9 @@ function DefinitionFormDialog({
                     <FormDescription>
                       {isEdit && (definition?.instances?.length ?? 0) > 0
                         ? "Locked: instances are attached (changing the type would break their binding)."
-                        : "Registered types only — see the Provider Types page."}
+                        : isEdit && (definition?.provider_type ?? "") === ""
+                          ? "Shell definition — the type is set by the provider's first registration (repair path)."
+                          : "Pick a registered type, or create a shell and let the container adopt its type."}
                     </FormDescription>
                     <FormMessage />
                   </FormItem>
@@ -864,7 +933,9 @@ function DefinitionFormDialog({
               </div>
               {!providerType ? (
                 <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
-                  Select a provider type to load its schema.
+                  {isEdit
+                    ? "Shell definition — backend_config is authored here after the provider registers and adopts its type."
+                    : "Select a provider type to load its schema. Pick “shell” to configure after registration."}
                 </p>
               ) : schemaLoading ? (
                 <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">

@@ -71,7 +71,12 @@ import redis.asyncio as aioredis
 from sqlmodel import Session, col, select
 
 from app.core.db import engine
-from app.models import Machine, ProviderDefinition, ProviderInstance
+from app.models import (
+    Machine,
+    ProviderDefinition,
+    ProviderInstance,
+    backend_config_is_authored,
+)
 from app.services import redis_keys
 from app.services.connection_manager import manager
 from app.services.wire import BackendStatusValue
@@ -310,6 +315,12 @@ class InferenceScheduler:
         definition = self._definition(alias)
         if definition is None or not definition.enabled:
             raise NoProviderAvailable(f"alias '{alias}' has no enabled definition")
+        if not backend_config_is_authored(definition):
+            # Phase 14: a shell definition can register an instance but
+            # never serves — nothing has been configured to boot.
+            raise NoProviderAvailable(
+                f"alias '{alias}' is not configured yet (awaiting backend_config)"
+            )
         instances = self._candidates(alias)
         if not instances:
             raise NoProviderAvailable(
@@ -746,6 +757,8 @@ class InferenceScheduler:
     # ------------------------------------------------------------------
     def _candidates(self, alias: str) -> list[ProviderInstance]:
         with Session(engine) as session:
+            # Phase 14: shell definitions (backend_config NULL) are never
+            # schedulable — the definition must have an authored config.
             rows = session.exec(
                 select(ProviderInstance)
                 .join(
@@ -757,6 +770,7 @@ class InferenceScheduler:
                     ProviderDefinition.alias == alias,
                     col(ProviderDefinition.enabled) == True,  # noqa: E712
                     col(ProviderInstance.websocket_connected) == True,  # noqa: E712
+                    col(ProviderDefinition.backend_config).is_not(None),
                 )
             ).all()
             for row in rows:
@@ -997,6 +1011,8 @@ class InferenceScheduler:
                 .where(
                     col(ProviderInstance.websocket_connected) == True,  # noqa: E712
                     col(ProviderInstance.backend_status).in_(RUNNING_BACKEND_STATUSES),
+                    # Phase 14: a shell never boots, so never idle-stops.
+                    col(ProviderDefinition.backend_config).is_not(None),
                 )
             ).all()
             out: list[dict] = []

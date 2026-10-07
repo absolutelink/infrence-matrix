@@ -53,7 +53,11 @@ from sqlmodel import Session, col, select
 
 from app.core.config import settings
 from app.core.db import engine
-from app.models import ProviderDefinition, ProviderInstance
+from app.models import (
+    ProviderDefinition,
+    ProviderInstance,
+    backend_config_is_authored,
+)
 from app.services.connection_manager import manager
 
 logger = logging.getLogger("admin.config_update")
@@ -79,6 +83,10 @@ def _build_payload(definition: ProviderDefinition, new_fp: str) -> dict[str, Any
     ``idle_timeout_seconds`` is carried for observability only — the idle
     reaper is admin-side (``InferenceScheduler._idle_reaper``); the
     provider does not adopt it.
+
+    Phase 14: never call this for a shell definition — callers must gate
+    (a shell would otherwise push a fabricated ``{}``-config with the
+    hash of empty space as its fingerprint).
     """
     return {
         "backend_config": definition.backend_config or {},
@@ -244,6 +252,9 @@ async def push_config_update(definition: ProviderDefinition) -> list[UpdateResul
     """
     from app.api.admin.providers import compute_config_fingerprint
 
+    # Phase 14: shells are never pushed (nothing authored to apply).
+    if not backend_config_is_authored(definition):
+        return []
     new_fp = compute_config_fingerprint(definition.backend_config or {})
     with Session(engine) as session:
         instances = _connected_instances(session, definition.id)
@@ -279,6 +290,11 @@ async def heal_stale_fingerprint(instance_id: str) -> bool:
             return False
         definition = session.get(ProviderDefinition, inst.provider_definition_id)
         if definition is None:
+            return False
+        # Phase 14: a shell definition never heals — there is no config
+        # whose fingerprint could be stale (and fabricating `{}`'s hash
+        # would push an empty config that the provider must not adopt).
+        if not backend_config_is_authored(definition):
             return False
         current_fp = _instance_fingerprint(definition)
         if inst.config_fingerprint == current_fp:

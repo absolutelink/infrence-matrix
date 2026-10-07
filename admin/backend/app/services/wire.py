@@ -88,6 +88,11 @@ class BackendStatusValue:
 
 
 class InstanceStatusValue:
+    # Phase 14: admin-owned pre-state — a definition with no authored
+    # backend_config. Placed before the others: it fences registration
+    # until config arrives (the provider NEVER emits it; like
+    # `disconnected`, it's set by the admin only).
+    AWAITING_CONFIG = "awaiting_config"
     REGISTERING = "registering"
     INITIALIZING = "initializing"
     RUNNING = "running"

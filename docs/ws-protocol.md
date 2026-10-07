@@ -89,8 +89,11 @@ fingerprint separately.
 1. `registration_token` must match an existing `ProviderDefinition`
    → otherwise **401**.
 2. The definition must be `enabled` → otherwise **403**.
-3. `provider_type` must equal the definition's `provider_type`
-   → otherwise **409**.
+3. `provider_type` binding (Phase 14): the definition is typed → its
+   `provider_type` must equal the container's → otherwise **409**; the
+   definition is a **shell** (`provider_type` NULL) → the container's
+   reported type is **adopted** onto the definition (no error). The
+   response then carries `"type_adopted": true`.
 4. `machine_uid` must reference a `Machine` pre-created in the admin UI
    → otherwise **404**.
 5. **Version gate**: `version` must exactly equal the admin's
@@ -164,6 +167,7 @@ Notes:
 {
   "instance_id": "<uuid str>",
   "instance_secret": "<token_urlsafe(32)>",
+  "type_adopted": false,
   "machine": {
     "id": "<uuid str>", "uid": "gpu-box-1", "name": "...",
     "host": "...", "dns": "...", "ip": "...",
@@ -182,6 +186,11 @@ Notes:
   }
 }
 ```
+
+Phase 14: for a shell definition `backend_config` and
+`config_fingerprint` are `null` (never the hash of `{}`), and
+`type_adopted` is `true` when *this call* set the definition's type
+from the container's report.
 
 The client derives the WS URL from `ADMIN_BASE_URL` (scheme swap
 `http→ws`, `https→wss`); a definition echo may optionally carry
@@ -242,7 +251,11 @@ retrying via the normal backoff.
    receives and stamps all subsequent frames with it.
 5. Admin updates the DB row: `websocket_connected=true`, `epoch=<new>`,
    `last_seen=now`. `instance_status` stays `registering` until the
-   provider emits its first `provider.status`.
+   provider emits its first `provider.status` — **except** when the
+   definition is a shell (Phase 14: no authored `backend_config`): the
+   admin then sets `awaiting_config` immediately, and provider-reported
+   `running`/`initializing`/`registering` statuses are coerced back to
+   `awaiting_config` until the config push clears it (§4).
 6. Presence: `im:ws:presence:{instance_id}` (TTL 60s) is refreshed on
    every accepted inbound frame and on every outbound command/pong. A
    background sweep (every `INSTANCE_SWEEP_INTERVAL_SECONDS`) marks any
@@ -312,8 +325,11 @@ Events do **not** require an ack; the admin persists/acts on them.
 | `provider.logs` | `{"lines": [{"ts": iso, "stream": "stdout", "text": "..."}], "dropped": int}` | **Live (Phase 13)** | The provider process's own logger output, captured via a ring-buffer handler and flushed with the same throttle as `backend.logs`. Admin stores in Redis `im:logs:provider:{instance_id}`. |
 | `backend.metadata` | model metadata scraped from the backend | Reserved | Not used: discovered metadata travels in the `provider.config.update` **ack detail** (`model_metadata`) and is persisted by the admin there (Phase 9). |
 
-`instance_status` ∈ `registering|initializing|running|unhealthy|error|disconnected`
-(`InstanceStatusValue`).
+`instance_status` ∈
+`awaiting_config|registering|initializing|running|unhealthy|error|disconnected`
+(`InstanceStatusValue`). **`awaiting_config` is admin-owned** (Phase 14):
+the provider never emits it; while a definition is unconfigured the admin
+coerces provider-reported running/initializing/registering statuses to it.
 `backend_status` ∈ `stopped|initializing|starting|running|in_use|stopping|error`
 (`BackendStatusValue`).
 
@@ -333,11 +349,11 @@ timeout)` sends the command and awaits the matching ack (default 30s).
 
 | type | payload | status | notes |
 | --- | --- | --- | --- |
-| `backend.start` | `{}` | Live | Provider awaits `BackendLifecycle.start()` (STOPPED → STARTING → RUNNING with `backend.status` per transition) and acks ok with `detail.capacity`. |
+| `backend.start` | `{}` | Live | Provider awaits `BackendLifecycle.start()` (STOPPED → STARTING → RUNNING with `backend.status` per transition) and acks ok with `detail.capacity`. Phase 14: NAKs `{"ok": false, "error": "no_config", "detail": {"step": "validate"}}` when no config has been applied (shell definition) — defense-in-depth behind the admin's own gates. |
 | `backend.stop` | `{}` | Live | Provider awaits `BackendLifecycle.stop()` (→ STOPPING → STOPPED, emitted) and acks ok. **No forced drain**: in-flight streams are not cancelled — their producer tasks release their slots as the upstream closes (the client may see the stream end early). Use `provider.config.update` when drain semantics matter (it refuses to stop while `in_use`). |
 | `backend.restart` | `{}` | Reserved | Stop + start. |
 | `provider.initialize` | `{}` | Reserved | Run the full init lifecycle (see `ARCHITECTURE.md` §8 / Phase 9). |
-| `provider.config.update` | `{"backend_config": {...}, "config_fingerprint": "<sha256 hex>", "idle_timeout_seconds": int, "capacity": int}` | **Live (Phase 9)** | Apply a new definition config in place. Provider order matters: (1) **capacity adopt** — a differing `capacity` is applied to `lifecycle.capacity` immediately (enforced at the provider; no restart needed); (2) **noop** — received fingerprint == applied → ack `{"ok": true, "detail": {"noop": true, "capacity_adopted": bool, ...}}`, always safely ackable even under load; (3) **drain** — `lifecycle.stop_if_idle()` checks busy and transitions STOPPING under the same lifecycle lock with no intervening await (a concurrent `acquire_slot()` can never slip in and get SIGTERMed mid-stream); busy → NAK `{"ok": false, "error": "backend_in_use", "detail": {"step": "drain", "retry_after": 10, "in_flight": N}}`; (4) otherwise emits `provider.status initializing`, clears the old fingerprint's prompt cache, `driver.apply_config`, starts (artifact downloads stream `download.progress`), scrapes `list_models()`. **Ok ack detail:** `{"config_fingerprint", "capacity", "model_metadata": [...], "prompt_cache_deleted", "prompt_cache_bytes_freed"}` — the admin persists the echoed fingerprint on the instance and `model_metadata` (`{"models": [...]}`) on the definition. **Failure NAK:** `{"ok": false, "error": "<msg>", "detail": {"step": "validate|drain|cache_clear|apply_config|start"}}`. `idle_timeout_seconds` is carried in the payload for observability only — the provider does not consume it (idle reaping is admin-side, `InferenceScheduler._idle_reaper`). Admin retry policy: 300s per-instance timeout, instances pushed concurrently; only `backend_in_use` is retried (3 attempts, 10s apart); other failures reported per-instance without rolling back the admin row. A stale fingerprint on (re)connect is auto-healed by the connect path and the presence sweep (**stale instance only**, guarded against duplicate in-flight pushes). See `provider/README.md`. |
+| `provider.config.update` | `{"backend_config": {...}, "config_fingerprint": "<sha256 hex>", "idle_timeout_seconds": int, "capacity": int}` | **Live (Phase 9)** | Apply a new definition config in place. **Phase 14: never pushed for a shell definition** (no authored config — the admin gates every push/heal on `backend_config IS NOT NULL`). Provider order matters: (1) **capacity adopt** — a differing `capacity` is applied to `lifecycle.capacity` immediately (enforced at the provider; no restart needed); (2) **noop** — received fingerprint == applied → ack `{"ok": true, "detail": {"noop": true, "capacity_adopted": bool, ...}}`, always safely ackable even under load; (3) **drain** — `lifecycle.stop_if_idle()` checks busy and transitions STOPPING under the same lifecycle lock with no intervening await (a concurrent `acquire_slot()` can never slip in and get SIGTERMed mid-stream); busy → NAK `{"ok": false, "error": "backend_in_use", "detail": {"step": "drain", "retry_after": 10, "in_flight": N}}`; (4) otherwise emits `provider.status initializing`, clears the old fingerprint's prompt cache, `driver.apply_config`, starts (artifact downloads stream `download.progress`), scrapes `list_models()`. **Ok ack detail:** `{"config_fingerprint", "capacity", "model_metadata": [...], "prompt_cache_deleted", "prompt_cache_bytes_freed"}` — the admin persists the echoed fingerprint on the instance and `model_metadata` (`{"models": [...]}`) on the definition. **Failure NAK:** `{"ok": false, "error": "<msg>", "detail": {"step": "validate|drain|cache_clear|apply_config|start"}}`. `idle_timeout_seconds` is carried in the payload for observability only — the provider does not consume it (idle reaping is admin-side, `InferenceScheduler._idle_reaper`). Admin retry policy: 300s per-instance timeout, instances pushed concurrently; only `backend_in_use` is retried (3 attempts, 10s apart); other failures reported per-instance without rolling back the admin row. A stale fingerprint on (re)connect is auto-healed by the connect path and the presence sweep (**stale instance only**, guarded against duplicate in-flight pushes). See `provider/README.md`. |
 | `metrics.assign` | resource list (GPU UUIDs / categories) | Live (Phase 5) | Grant machine-level metrics ownership; admin `assign_ownership` sends it, provider starts its emitter. Carries epoch. |
 | `metrics.unassign` | resource list | Provider handler live; admin send not yet wired (ownership currently lapses via Redis lease expiry) | Revoke machine-level metrics ownership. |
 | `metrics.category.start` | category name | Reserved | Enable a `METRICS_CATEGORIES` category. |

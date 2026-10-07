@@ -30,9 +30,20 @@ from sqlmodel import Session
 
 from app.core.db import engine
 from app.core.redis import get_redis_from_app
-from app.models import Machine, ProviderInstance
+from app.models import (
+    Machine,
+    ProviderInstance,
+    backend_config_is_authored,
+)
 from app.services import redis_keys
-from app.services.wire import Ack, BackendStatusValue, Frame, FrameKind, now_iso
+from app.services.wire import (
+    Ack,
+    BackendStatusValue,
+    Frame,
+    FrameKind,
+    InstanceStatusValue,
+    now_iso,
+)
 
 logger = logging.getLogger("admin.connection_manager")
 
@@ -301,7 +312,14 @@ class ConnectionManager:
         error_message: str | None = None,
     ) -> str | None:
         """Persist a status frame to the DB; returns the instance's
-        machine uid (when the row exists) for VRAM-ledger pruning."""
+        machine uid (when the row exists) for VRAM-ledger pruning.
+
+        Phase 14: while the definition is unconfigured (a shell), a
+        provider-reported ``running``/``initializing`` instance_status is
+        coerced to ``awaiting_config`` — the provider does not know about
+        the admin-owned pre-state and would otherwise clobber it. Error
+        and unhealthy reports stay honest (they are more urgent than the
+        pre-state)."""
         with Session(engine) as session:
             inst = session.get(ProviderInstance, _to_uuid(instance_id))
             if inst is None:
@@ -310,6 +328,14 @@ class ConnectionManager:
                 )
                 return None
             if instance_status:
+                if not backend_config_is_authored(
+                    inst.provider_definition
+                ) and instance_status in (
+                    InstanceStatusValue.RUNNING,
+                    InstanceStatusValue.INITIALIZING,
+                    InstanceStatusValue.REGISTERING,
+                ):
+                    instance_status = InstanceStatusValue.AWAITING_CONFIG
                 inst.instance_status = instance_status
             if backend_status:
                 inst.backend_status = backend_status

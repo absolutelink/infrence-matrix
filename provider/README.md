@@ -46,7 +46,11 @@ normalization), override just that.
    the driver, wrap in `BackendLifecycle`, install WS command handlers,
    register + connect, serve `create_provider_app(...)`.
 4. Set `PROVIDER_TYPE` for the package; the admin cross-checks it against
-    the registration token's definition.
+    the registration token's definition. **Phase 14:** the definition may
+    be created as a *shell* (`provider_type` NULL) — the first
+    registration then adopts your reported type automatically (see
+    "Shell definitions" below), and the first registration of the type
+    also creates the `ProviderType` registry entry.
 5. **Ship `provider_<type>/schema.json`** (Phase 12) — a JSON Schema
     (2020-12) describing this type's `backend_config`. See "Authoring
     schema.json" below. `provider_lib` loads it and sends it in the
@@ -54,7 +58,35 @@ normalization), override just that.
     admin's `ProviderType` registry entry.
 6. Add a `Dockerfile` and tests.
 7. Do **not** re-implement lifecycle/slot/WS semantics — they come from
-    the lib.
+   the lib.
+
+## Shell definitions (Phase 14)
+
+A definition may be created in the admin with **no `provider_type` and
+no `backend_config`** (a *shell*): alias + registration token +
+scheduler hints only. Your container then:
+
+1. Registers normally (token + `MACHINE_UID`). The admin **adopts** the
+   `provider_type` from the registration body and bootstraps/validates
+   the type registry from your shipped `schema.json`. The registration
+   response returns `"type_adopted": true` and `backend_config: null`
+   with `config_fingerprint: null` in the definition echo.
+2. Persists the config (null fingerprint is preserved — never coerced to
+   the hash of `{}`), and connects. The admin marks the instance
+   `awaiting_config`.
+3. Until the operator authors a `backend_config` (definitions UI; the
+   standard `provider.config.update` push applies it), no `backend.start`
+   arrives — and if one did (buggy admin), your `backend.start` handler
+   NAKs `{"ok": false, "error": "no_config",
+   "detail": {"step": "validate"}}` (ws-protocol §4)
+   because `ConfigState.applied_fingerprint` is `None`. Wire the fence:
+   `install_config_handlers` exposes `client.no_config_nak`; call it at
+   the top of `on_backend_start` (see any provider package's `main.py`).
+
+Registration on a shell never fails for schema reasons your type can't
+help — adopt happens before the schema-consensus gate consumes the type,
+so the adopted registration participates in consensus like any other.
+
 
 ## Authoring schema.json (Phase 12)
 

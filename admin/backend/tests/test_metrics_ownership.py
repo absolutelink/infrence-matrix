@@ -54,7 +54,10 @@ def _make_stack(session: Session, machine_uid: str) -> None:
         ):
             session.add(
                 ProviderDefinition(
-                    alias=alias, provider_type="mock", registration_token=token
+                    alias=alias,
+                    provider_type="mock",
+                    registration_token=token,
+                    backend_config={"model": {"file": "m.gguf"}},
                 )
             )
     session.commit()
@@ -229,7 +232,9 @@ async def test_assign_rolls_back_lease_when_command_fails(
 
     machine = Machine(uid="mm-rb", name="mm-rb-machine")
     definition = ProviderDefinition(
-        alias="rb-a", provider_type="mock", registration_token="tok-rb-a"
+        alias="rb-a",
+        provider_type="mock",
+        registration_token="tok-rb-a",
     )
     session.add_all([machine, definition])
     session.commit()

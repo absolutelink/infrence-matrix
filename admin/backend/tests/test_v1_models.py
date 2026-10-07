@@ -22,6 +22,9 @@ def _mk_def(session: Session, alias: str, **kwargs) -> ProviderDefinition:
         alias=alias,
         provider_type=kwargs.pop("provider_type", "mock"),
         registration_token=f"tok-{alias}-{uuid.uuid4().hex[:6]}",
+        # Phase 14: default to an authored config (the listed flows assume
+        # a configured definition; shells are covered by their own tests).
+        backend_config=kwargs.pop("backend_config", {"model": {"file": "m.gguf"}}),
         **kwargs,
     )
     session.add(definition)
@@ -76,3 +79,24 @@ def test_ordering_alias_asc(client: TestClient, session: Session) -> None:
     resp = client.get("/v1/models")
     ids = [d["id"] for d in resp.json()["data"]]
     assert ids == ["aa-model", "mm-model", "zz-model"]
+
+
+def test_shell_definition_not_listed(client, session: Session) -> None:
+    """Phase 14: a shell (backend_config NULL) is invisible to /v1/models
+    even when enabled, and appears once config is authored."""
+    _mk_def(session, "shell-model", backend_config=None)
+    resp = client.get("/v1/models")
+    assert [m["id"] for m in resp.json()["data"]] == []
+
+    shell = session.exec(_query_def("shell-model")).one()
+    shell.backend_config = {}
+    session.add(shell)
+    session.commit()
+    resp = client.get("/v1/models")
+    assert [m["id"] for m in resp.json()["data"]] == ["shell-model"]
+
+
+def _query_def(alias: str):
+    from sqlmodel import select
+
+    return select(ProviderDefinition).where(ProviderDefinition.alias == alias)
