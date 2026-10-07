@@ -50,6 +50,8 @@ _TABLE_ORDER = [
     models.TokenUsageSample,
     models.ResponseRecord,
     models.ProviderInstance,
+    models.DefinitionAgent,
+    models.ProviderAgent,
     models.ProviderDefinition,
     models.ProviderType,
     models.Machine,

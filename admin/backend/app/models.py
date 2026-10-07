@@ -1,25 +1,36 @@
-"""Inference Matrix admin data model (Phase 2).
+"""Inference Matrix admin data model (Phase 2; Phase 16 agents).
 
-Six tables replace the old agent/server_instance/model/lease set:
+Tables:
 
   Machine            a physical/virtual host, pre-registered in the UI by uid.
+                     Holds the shared registration_secret agents authenticate with.
   ProviderType       registered provider type (Phase 12): the committed JSON
-                     Schema for its backend_config + schema consensus state.
+                     Schema for its backend_config + schema consensus state +
+                     max_running_backends (Phase 16 per-agent running cap).
+  ProviderAgent      (Phase 16) one hardware-local container bound to a
+                     (machine, provider_type, agent_id) triple; owns 1..N
+                     backends of that single type and holds the one WebSocket.
   ProviderDefinition the client-facing "model": how to boot a backend +
-                     scheduling hints (vram, idle timeout, capacity) + the
-                     registration token that binds instances to it.
-  ProviderInstance   one running (or registered) backend on one Machine for
-                     one ProviderDefinition. Exactly one backend per instance.
+                     scheduling hints (vram, idle timeout, capacity) +
+                     placement (any_of_type / specific agents).
+  ProviderInstance   one backend on one ProviderAgent for one ProviderDefinition.
+  DefinitionAgent    (Phase 16) link table for `specific` definition placement.
   ResponseRecord     stored OpenResponses turn, chained via previous_response_id.
   TokenUsageSample   per-request token/rate telemetry.
 
-The provider instance itself is stateless (no DB); it derives everything from
+The provider agent itself is stateless (no DB); it derives everything from
 env + the registration response, mirrored here by the admin.
 
-Auth model: trusted LAN. The registration_token and per-instance secret gate
-only the provider WebSocket. See the root ARCHITECTURE.md.
+Auth model: trusted LAN. The machine registration_secret and per-agent secret
+gate only the provider WebSocket. See the root ARCHITECTURE.md.
+
+NOTE (Phase 16, additive slice): the agent tables/columns below are introduced
+additively and are not yet wired into registration/WS/scheduler — the breaking
+re-key of ProviderInstance onto (agent_id, definition_id) and the retirement of
+ProviderDefinition.registration_token land in the follow-on slices.
 """
 
+import secrets
 import uuid
 from datetime import UTC, datetime
 
@@ -91,6 +102,13 @@ class Machine(SQLModel, table=True):
     uid: str = Field(max_length=255, unique=True)
     name: str = Field(max_length=255, unique=True)
 
+    # Phase 16: shared secret every agent on this machine authenticates
+    # registration with (replaces the per-definition registration_token).
+    # Minted on create; rotated via the admin UI. Plaintext (trusted LAN).
+    registration_secret: str = Field(
+        default_factory=lambda: secrets.token_urlsafe(32), max_length=255
+    )
+
     # How the admin reaches provider instances on this machine. At least one
     # of host/dns/ip must be set; litellm targets http://{reachable}:{port}/v1.
     host: str | None = Field(default=None, max_length=255)
@@ -111,6 +129,10 @@ class Machine(SQLModel, table=True):
     updated_at: datetime | None = None
 
     instances: list[ProviderInstance] = Relationship(
+        back_populates="machine",
+        sa_relationship_kwargs={"lazy": "selectin"},
+    )
+    agents: list[ProviderAgent] = Relationship(
         back_populates="machine",
         sa_relationship_kwargs={"lazy": "selectin"},
     )
@@ -166,6 +188,12 @@ class ProviderType(SQLModel, table=True):
     # config_fingerprint (app.services.hashing).
     schema_fingerprint: str = Field(max_length=64)
 
+    # Phase 16: per-agent cap on simultaneously running backends of this
+    # type (0 = unlimited). Declared in the shipped schema.json
+    # (`x-max-running-backends`); halogen-flash = 1 (single NPU). Enforced
+    # by the scheduler.
+    max_running_backends: int = Field(default=0, ge=0)
+
     # Staged schema awaiting consensus (None when nothing is pending).
     pending_schema: dict | None = Field(default=None, sa_column=Column(JSON))
     pending_fingerprint: str | None = Field(default=None, max_length=64)
@@ -177,6 +205,100 @@ class ProviderType(SQLModel, table=True):
 
     created_at: datetime = Field(default_factory=get_datetime_utc)
     updated_at: datetime | None = None
+
+
+# ============================================================================
+# DefinitionAgent (Phase 16 link table)
+# ============================================================================
+class DefinitionAgent(SQLModel, table=True):
+    """`specific` placement join: which agents host which definitions.
+
+    Populated only when ProviderDefinition.agent_placement == 'specific';
+    'any_of_type' definitions implicitly target every agent of their type.
+    """
+
+    __tablename__ = "definition_agents"
+
+    provider_definition_id: uuid.UUID = Field(
+        foreign_key="provider_definitions.id",
+        ondelete="CASCADE",
+        primary_key=True,
+    )
+    agent_id: uuid.UUID = Field(
+        foreign_key="provider_agents.id",
+        ondelete="CASCADE",
+        primary_key=True,
+    )
+
+
+# ============================================================================
+# ProviderAgent (Phase 16)
+# ============================================================================
+class ProviderAgent(SQLModel, table=True):
+    """One hardware-local container: a (machine, provider_type, agent_id)
+    triple that runs 1..N backends of a single type and holds one WebSocket.
+
+    Multiple agents may share a (machine, provider_type); the operator-
+    supplied ``agent_id`` (the container's AGENT_ID env) discriminates them
+    and keeps cherry-picked placements stable across restarts. The
+    container-level connection state (secret/epoch/presence) and
+    machine-metrics ownership live here (in Redis for the secret/epoch).
+    """
+
+    __tablename__ = "provider_agents"
+    __table_args__ = (
+        Index(
+            "idx_provider_agents_machine_type_agent",
+            "machine_id",
+            "provider_type",
+            "agent_id",
+            unique=True,
+        ),
+        Index("idx_provider_agents_type", "provider_type"),
+        Index("idx_provider_agents_status", "agent_status"),
+    )
+
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        sa_column=Column(_uuid_col(), primary_key=True),
+    )
+
+    machine_id: uuid.UUID = Field(foreign_key="machines.id", ondelete="CASCADE")
+    # references ProviderType.name; all this agent's backends are this type.
+    provider_type: str = Field(max_length=64)
+    # Operator-supplied stable id (container AGENT_ID env).
+    agent_id: str = Field(max_length=255)
+
+    # Base HTTP port; backends listen on base_port + offset.
+    base_port: int = Field(default=8081)
+    version: str = Field(default="dev", max_length=64)
+
+    # Container-level status (was the old per-instance instance_status).
+    agent_status: str = Field(default="registering", max_length=32)
+    websocket_connected: bool = False
+    epoch: int = 0
+    last_seen: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True))
+    )
+
+    # Schema fingerprint presented at the last registration attempt (drives
+    # the waiting_schema badge + the consensus voter roster).
+    reported_schema_fingerprint: str | None = Field(default=None, max_length=64)
+    # Agent-reported GPU UUIDs (VRAM accounting + metrics dedup).
+    assigned_gpus: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    error_message: str | None = Field(default=None, sa_column=Column(Text))
+
+    created_at: datetime = Field(default_factory=get_datetime_utc)
+    updated_at: datetime | None = None
+
+    machine: Machine = Relationship(
+        back_populates="agents",
+        sa_relationship_kwargs={"lazy": "selectin"},
+    )
+    definitions: list[ProviderDefinition] = Relationship(
+        back_populates="agents",
+        link_model=DefinitionAgent,
+    )
 
 
 # ============================================================================
@@ -238,6 +360,11 @@ class ProviderDefinition(SQLModel, table=True):
     idle_timeout_seconds: int = Field(default=300, ge=0)
     capacity: int = Field(default=1, ge=1)  # concurrent backend slots
 
+    # Phase 16: placement policy. 'any_of_type' hosts on every agent whose
+    # provider_type matches; 'specific' hosts only on the agents listed in
+    # definition_agents.
+    agent_placement: str = Field(default="any_of_type", max_length=32)
+
     # Binding secret for provider registration.
     registration_token: str = Field(max_length=255, unique=True)
 
@@ -255,6 +382,10 @@ class ProviderDefinition(SQLModel, table=True):
     instances: list[ProviderInstance] = Relationship(
         back_populates="provider_definition",
         sa_relationship_kwargs={"lazy": "selectin"},
+    )
+    agents: list[ProviderAgent] = Relationship(
+        back_populates="definitions",
+        link_model=DefinitionAgent,
     )
 
 

@@ -7,9 +7,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
 
 from app.models import (
+    DefinitionAgent,
     Machine,
+    ProviderAgent,
     ProviderDefinition,
     ProviderInstance,
+    ProviderType,
     ResponseRecord,
     TokenUsageSample,
 )
@@ -127,3 +130,97 @@ def test_unique_constraints(session: Session) -> None:
         _machine(session, uid="dup")
         _machine(session, uid="dup")
         session.commit()
+
+
+# --- Phase 16: machine-scoped provider agents (additive foundation) ---------
+
+
+def _ptype(session: Session, name: str = "llama-cpp", **kw) -> ProviderType:
+    data = {
+        "name": name,
+        "schema": {"type": "object"},
+        "schema_fingerprint": "fp-" + name,
+        "status": "active",
+    }
+    data.update(kw)
+    pt = ProviderType(**data)
+    session.add(pt)
+    session.commit()
+    session.refresh(pt)
+    return pt
+
+
+def test_machine_has_generated_registration_secret(session: Session) -> None:
+    m = _machine(session)
+    assert m.registration_secret  # default_factory minted a non-empty secret
+
+
+def test_provider_type_max_running_backends_defaults_zero(session: Session) -> None:
+    pt = _ptype(session)
+    assert pt.max_running_backends == 0  # 0 = unlimited
+
+
+def test_provider_definition_placement_defaults_any_of_type(
+    session: Session,
+) -> None:
+    d = _definition(session)
+    assert d.agent_placement == "any_of_type"
+
+
+def test_provider_agent_roundtrip(session: Session) -> None:
+    m = _machine(session)
+    agent = ProviderAgent(
+        machine_id=m.id,
+        provider_type="llama-cpp",
+        agent_id="agent-a",
+        base_port=8081,
+        version="dev",
+    )
+    session.add(agent)
+    session.commit()
+    session.refresh(agent)
+
+    assert agent.machine.uid == m.uid
+    assert agent.agent_status == "registering"
+    assert agent.websocket_connected is False
+    assert agent.epoch == 0
+    assert agent.assigned_gpus == []
+
+
+def test_provider_agent_unique_on_machine_type_agent(session: Session) -> None:
+    m = _machine(session)
+    session.add(
+        ProviderAgent(machine_id=m.id, provider_type="llama-cpp", agent_id="dup")
+    )
+    session.commit()
+    with pytest.raises(IntegrityError):
+        session.add(
+            ProviderAgent(machine_id=m.id, provider_type="llama-cpp", agent_id="dup")
+        )
+        session.commit()
+
+
+def test_two_agents_share_machine_and_type_via_agent_id(session: Session) -> None:
+    m = _machine(session)
+    a = ProviderAgent(machine_id=m.id, provider_type="llama-cpp", agent_id="a")
+    b = ProviderAgent(machine_id=m.id, provider_type="llama-cpp", agent_id="b")
+    session.add_all([a, b])
+    session.commit()
+    session.refresh(m)
+    assert {agent.agent_id for agent in m.agents} == {"a", "b"}
+
+
+def test_definition_specific_placement_link(session: Session) -> None:
+    m = _machine(session)
+    agent = ProviderAgent(
+        machine_id=m.id, provider_type="llama-cpp", agent_id="pick-me"
+    )
+    session.add(agent)
+    session.commit()
+    d = _definition(session, agent_placement="specific")
+    session.add(DefinitionAgent(provider_definition_id=d.id, agent_id=agent.id))
+    session.commit()
+    session.refresh(d)
+    session.refresh(agent)
+    assert [a.id for a in d.agents] == [agent.id]
+    assert [defn.id for defn in agent.definitions] == [d.id]

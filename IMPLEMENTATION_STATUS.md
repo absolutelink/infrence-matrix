@@ -1,7 +1,16 @@
 # Inference Matrix — Implementation Status
 
 **Overhaul branch:** `litellm-architecture-overhaul`
-**Last updated:** 2026-10-07 (Phase 14 ✅ shell definitions — `provider_type`/`backend_config` nullable at create, type adopted at first registration (`type_adopted`), new admin-owned `awaiting_config` pre-state excludes shells from scheduling//v1/models/pushes; `NullableJSON` (none_as_null) for the JSON null-vs-SQL-NULL trap; `seed_provider_type` dev ceremony removed. Phase 13 ✅ log views. Prior: Phase 12 schema-driven backend config, Phase 10 admin UI rework.)
+**Last updated:** 2026-10-07 (**Phase 16 🟡 machine-scoped provider agents —
+docs locked, code pending**: a provider container is now an *agent* bound to a
+machine + one provider type that runs 1..N backends of that type; auth moves
+to a shared `Machine.registration_secret` + `AGENT_ID`; one agent-level WS
+multiplexes per-backend frames addressed by `ProviderInstance` id; definitions
+get placement (`any_of_type` / cherry-picked agents); `ProviderType.max_running_backends`
+caps concurrent running backends per agent (halogen-flash = 1) with hot-swap
+eviction; Phase 14 shells/`awaiting_config` removed. See the Phase 16 section
+below for the full plan.). Prior: Phase 15 manual backend control, Phase 14
+shell definitions, Phase 13 log views, Phase 12 schema-driven backend config.
 
 This file tracks the litellm-based architecture overhaul (see
 [ARCHITECTURE.md](ARCHITECTURE.md)). Each phase lists its features with
@@ -26,8 +35,9 @@ starting a feature, read the linked protocol/doc first.
 | 11 | Docs consolidation + full E2E validation | ✅ Complete |
 | 12 | Schema-driven backend config: `ProviderType` registry + JSON Schema consensus + HF picker + rjsf form | ✅ Complete |
 | 13 | Server + backend log capture, Redis tails, UI log views | ✅ Complete |
-| 14 | Shell definitions: deferred typing + `awaiting_config` pre-state | ✅ Complete |
+| 14 | Shell definitions: deferred typing + `awaiting_config` pre-state | ✅ Complete (superseded by 16) |
 | 15 | Manual backend control + `provider.initialize` + download-bound boot budget | ✅ Complete |
+| 16 | Machine-scoped provider **agents**: one container → many same-type backends, placement, `max_running_backends` | 🟡 Docs locked, code pending |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
 
@@ -1479,10 +1489,173 @@ one per layer:
   reaped; load-clock reap), WS status-ingest clock assertions, and
   disconnect→reconnect clock re-arm.
 
+- **halogen-flash disk cache never got its directory (found on
+  `rocinante` @ matrix.thelink.family, 2026-10-07):** `build_env` exported
+  `HALOGEN_CACHE_DIR` only when `cache_dir_enabled` was **explicitly**
+  `True`, but the UI prunes untouched defaults and the schema default is
+  `true` — a config of `{"disk_cache": {"cache_disk_gib": 512}}` started
+  the engine with `HALOGEN_CACHE_DISK_GIB=512` (and the image's
+  `HALOGEN_PROMPT_CACHE=2`) but **no cache dir**, so the disk cache had
+  nowhere to persist. Fix: absent/null `cache_dir_enabled` now follow the
+  schema default (export + create); only an explicit `false` disables.
+  `schema.json` untouched (description wording aside, the gate change is
+  provider-side; the committed fingerprint stays stable). Test:
+  `test_cache_dir_emitted_when_key_pruned_away`. Apply by recreating the
+  provider container after deploying the image.
+
 Suites after the fix: admin **294** · lib **128** · mock **23** ·
 llama-cpp **61** · halogen **70** · halogen-flash **158** · gufo **67**.
 Client regenerated (no surface change: instance payloads are free-form
 dicts).
+
+---
+
+## Phase 16 — Machine-scoped provider agents 🟡
+
+**Status: design locked + ARCHITECTURE.md updated; code NOT yet written.**
+This is the first step (docs as law). The implementation plan is below.
+
+**Goal.** Stop binding a provider container to a single `ProviderDefinition`.
+A container becomes a **provider agent** bound to a **machine + one provider
+type**, running **1..N backends** (one per assigned definition) of that same
+type. Add a per-type **`max_running_backends`** cap so engines that can only
+host one model at a time (halogen-flash / single NPU) are limited to one
+running backend per agent, hot-swapped by the scheduler.
+
+**Why now.** Today one container = one alias = one backend = one port = one
+WS. Scaling a machine to several models means several containers, several
+registration tokens, and (for single-NPU engines) no clean way to say "this
+engine can only hold one model at a time." The agent model collapses that
+into one container per (machine, type) that owns its backends and one socket.
+
+### Locked decisions (from operator Q&A)
+
+1. **Agent identity** — new `ProviderAgent` row keyed
+   `(machine_id, provider_type, agent_id)`. **Multiple agents may share a
+   `(machine, type)`**; the operator-supplied `AGENT_ID` env discriminates
+   them and keeps cherry-picked placements stable across restarts.
+2. **Auth** — container authenticates with `MACHINE_UID` + a shared
+   **`Machine.registration_secret`** + `provider_type` + `AGENT_ID`. The
+   per-definition `registration_token` is **retired**. One secret per machine
+   (all agents/types on it share it). Per-connection secret (`agent_secret`)
+   is minted at registration into Redis, as before but agent-scoped.
+3. **Placement** — `ProviderDefinition.agent_placement` ∈
+   `any_of_type` | `specific`; `specific` uses a `definition_agents` link
+   table (cherry-picked agent ids). UI dropdown drives it.
+4. **Backend rows** — `ProviderInstance` = one backend on one agent for one
+   definition, re-keyed to `(agent_id, provider_definition_id)`. Fan-out: a
+   definition placed on several eligible agents gets one backend per agent;
+   the scheduler balances across them.
+5. **WebSocket** — **one agent-level socket**. Secret/epoch/presence and
+   machine-metrics ownership move to the agent. Commands/events address a
+   specific backend by `instance_id` in the payload. New
+   `agent.assignments.update` command pushes add/remove of backends.
+6. **Boot** — the **admin scheduler stays the boot + VRAM authority**. On
+   agent (re)connect it **proactively warms the agent's assigned backends one
+   at a time** (serialized per agent, gated by VRAM + `max_running`) until
+   they no longer fit; the rest boot on demand. Idle reaper unchanged.
+7. **`max_running_backends`** — declared in each type's shipped `schema.json`
+   (`x-max-running-backends`, default unlimited), stored on `ProviderType`,
+   enforced **per agent**. halogen-flash = `1`. To boot past the cap the
+   scheduler **hot-swaps** (evicts the LRU running backend of that type on
+   that agent).
+8. **Ports** — per-container base port via `PROVIDER_PORT`; backends take
+   `base_port + offset`. Admin keeps the per-machine `port_conflict` guard
+   (now across all backends of all agents on the machine).
+9. **Shells removed** — Phase 14 shell definitions + type adoption +
+   `awaiting_config` are **dropped**; a definition is always typed and
+   configured at create.
+10. **Schema consensus** — voter universe is now **`ProviderAgent` rows of
+    the type** (agents ship the schema). Decommissioned agents: keep rows,
+    rely on **force-commit** (same posture as today's instance rows).
+11. **Migration** — full replacement (no dual path). Version hard-fail forces
+    admin-first then redeploy every agent.
+
+### Sub-tasks (implementation order)
+
+- [ ] **A. Remaining law docs** — `docs/ws-protocol.md` (§2 registration body
+      + validation + response = agent/machine-secret/assignments; §3 connect
+      = agent secret/epoch/presence; §4 add `agent.assignments.update`,
+      per-backend `instance_id` addressing, `provider.status` agent-level vs
+      `backend.status` per-backend), `provider/README.md` (agent lifecycle,
+      multi-backend, base+offset ports, `max_running`), `admin/backend/docs/redis-keys.md`
+      (`im:ws:*`/`im:metrics:cats` → `{agent_id}`, `im:logs:provider` →
+      `{agent_id}`), and **`AGENTS.md`** (its Architecture bullets still say
+      "each own one inference backend" / "instance_secret" — must be
+      corrected to the agent model).
+- [ ] **B. Models + migration** — add `ProviderAgent`, `definition_agents`;
+      `Machine.registration_secret`; `ProviderType.max_running_backends`;
+      `ProviderDefinition.agent_placement` (+ drop `registration_token`,
+      make `provider_type`/`backend_config` non-null again); re-key
+      `ProviderInstance` to `(agent_id, provider_definition_id)` and move
+      `instance_status`/`version`/`websocket_connected`/`epoch`/
+      `reported_schema_fingerprint` onto `ProviderAgent`. Data migration:
+      for each existing instance, synthesize an agent
+      `(machine, definition.provider_type, agent_id=<new>)` and repoint.
+      Alembic revision + downgrade.
+- [ ] **C. Registration + auth** — `app/api/admin/providers.py`: accept
+      machine-secret auth (401/404), upsert `ProviderAgent`, resolve
+      placement → upsert `ProviderInstance` backends (stopped), mint
+      `im:ws:secret:{agent_id}`, return the assignment set. Retire the
+      definition-token path.
+- [ ] **D. Agent WS + wire** — `app/api/ws.py`, `app/services/connection_manager.py`,
+      both `wire.py` mirrors: socket keyed by `agent_id`; epoch/presence/
+      owner at agent level; `send_command(agent_id, type, payload)` with
+      `instance_id` in payload for per-backend commands; add
+      `AGENT_ASSIGNMENTS_UPDATE` FrameKind; `provider.status` → agent_status,
+      `backend.status` → per-backend. Presence sweep marks the **agent**
+      disconnected (and its backends unschedulable).
+- [ ] **E. Scheduler** — `app/services/scheduler.py`: candidates join through
+      agent connectivity + placement; add `max_running_backends` gate +
+      hot-swap eviction (per agent, per type); implement the serialized
+      **proactive init warm-up** on agent connect (per-agent `_booting`
+      guard under `im:sched:lock`); VRAM ledger stays per booted backend.
+- [ ] **F. Placement CRUD + push** — `app/api/admin/definitions.py`:
+      `agent_placement` + `agents` on create/PATCH; on placement change push
+      `agent.assignments.update` to affected agents; config PATCH still
+      pushes `provider.config.update` per backend. New
+      `app/api/admin/agents.py` reads. Machines route exposes/rotates
+      `registration_secret`.
+- [ ] **G. Provider lib** — `provider_lib/admin_client.py`: register as agent
+      (machine secret + agent_id + type), one socket, dispatch per-backend
+      commands by `instance_id`, handle `agent.assignments.update`
+      (spawn/retire `BackendLifecycle`s). `config.py`: `MACHINE_SECRET`,
+      `AGENT_ID`, `PROVIDER_TYPE`, base `PROVIDER_PORT`. `app_factory.py`:
+      serve N backend apps (one per backend port). `schema.py`: read
+      `x-max-running-backends`.
+- [ ] **H. Provider packages** — mock/llama-cpp/gufo/halogen/halogen-flash:
+      multi-backend driver instances keyed by definition; halogen-flash sets
+      `x-max-running-backends: 1` in its `schema.json`; each keeps its
+      `install_config_handlers`/`install_backend_ops` per backend.
+- [ ] **I. Admin UI** — Machines page: show/rotate secret. New **Agents**
+      page (or expand Machines): list agents per machine/type, hosted
+      backends, `waiting_schema`. Definitions page: placement dropdown
+      (any-of-type / pick agents). Instances page: group backends under their
+      agent; drop the `awaiting_config` badge.
+- [ ] **J. Client** — `bash scripts/generate-client.sh` after B/C/D/F routes.
+- [ ] **K. Tests** — admin: agent registration + placement resolution +
+      machine-secret auth + `max_running` hot-swap + proactive warm-up +
+      per-backend frame routing + presence-sweep-disconnects-agent; provider
+      lib: multi-backend dispatch + `agent.assignments.update`; each
+      provider package: N backends + halogen-flash singleton. Wire drift
+      guard for the new FrameKind.
+- [ ] **L. Conformance** — re-run openresponses suite on the mock agent
+      (now hosting the mock definition) to confirm the request path is
+      unchanged by the agent indirection.
+
+### Accepted risks / notes
+
+- **Breaking change, no dual path.** Every provider container must be
+  redeployed with the new env (`MACHINE_SECRET`, `AGENT_ID`, `PROVIDER_TYPE`);
+  the version hard-fail enforces admin-first deploys anyway.
+- **`AGENT_ID` discipline.** Two containers on one machine+type that forget
+  to set distinct `AGENT_ID`s collide onto one agent row. Mitigation: the
+  base-port `port_conflict` guard catches the common case; document loudly.
+- **Proactive warm-up vs VRAM thrash.** Warming many assigned backends on a
+  small machine can evict as fast as it boots; the one-at-a-time + fit-stop
+  bound keeps it from looping (stop at first non-fit).
+- **Phase 14 reversal.** Removing shells/`awaiting_config` reverts part of
+  Phase 14; its tests are deleted/rewritten, not kept.
 
 ---
 

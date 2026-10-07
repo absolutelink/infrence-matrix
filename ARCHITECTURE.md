@@ -2,77 +2,101 @@
 
 Inference Matrix is an OpenAI-compatible inference broker that schedules GGUF
 model inference across one or more hardware machines. The admin container is
-the brain (database, scheduler, client API); provider instances are
-hardware-local containers that each own exactly one inference backend
-process.
+the brain (database, scheduler, client API); **provider agents** are
+hardware-local containers that each own one inference **backend type** and may
+run **one or more backend processes** (instances) of that type on a single
+machine.
 
 **Status: this document describes the litellm-based architecture on the
 `litellm-architecture-overhaul` branch.** It supersedes the legacy
 broker/agent design; the pre-overhaul code was removed in the final
 cleanup and lives in git history only.
 
+> **Phase 16 (machine-scoped agents) is the canonical target described below
+> and is NOT yet implemented** — see `IMPLEMENTATION_STATUS.md` Phase 16 for
+> the build plan. It replaces the Phase 1–15 model where a provider container
+> was bound to exactly one `ProviderDefinition` (one backend, one
+> `registration_token`). Until Phase 16 lands, the running code still reflects
+> the old one-definition-per-container binding; the architecture here is the
+> law the code must move to.
+
 ---
 
 ## 1. System Overview
 
 ```
-                     ┌───────────────────────────────────────────────┐
-                     │               ADMIN CONTAINER                 │
-                     │  FastAPI (1 uvicorn worker) + Redis + Postgres│
-                     │                                             │
+                      ┌───────────────────────────────────────────────┐
+                      │               ADMIN CONTAINER                 │
+                      │  FastAPI (1 uvicorn worker) + Redis + Postgres│
+                      │                                             │
   Client             │  /                 Swagger UI               │
   (OpenAI SDK /      │  /openapi.json     OpenAPI schema           │
    WebUI)            │  /admin/*          React admin UI           │
     │  HTTPS /v1/*   │  /admin/api/*      Admin management API     │
     └───────────────▶│  /v1/*             Public inference API     │
-                     │      │  (driven by litellm SDK)             │
-                     │      ▼                                      │
-                     │  InferenceScheduler  ── FIFO + VRAM admit   │
-                     │      │                                      │
-                     │      │  WS: commands ↓ / events ↑           │
-                     └──────┼──────────────────────────────────────┘
-                            │  /provider/ws  (provider dials in)
-        ┌───────────────────┼───────────────────────┐
-        ▼                   ▼                       ▼
-  ┌───────────┐       ┌───────────┐          ┌───────────┐
-  │ MACHINE A │       │ MACHINE B │   ...    │ MACHINE N │
-  │ provider  │       │ provider  │          │ provider  │
-  │ instance  │       │ instance  │          │ instance  │
-  │  ┌─────┐  │       │  ┌─────┐  │          │  ┌─────┐  │
-  │  │backend│ │       │  │backend│ │          │  │backend│ │
-  │  └─────┘  │       │  └─────┘  │          │  └─────┘  │
-  │  :8081 ▲──┼───────┼──▲ :8081 │          │           │
-  └────────┼──┘       └──┼───────┘          └───────────┘
-           │  litellm targets http://<machine>:<port>/v1 │
-           └─────────────────────────────────────────────┘
+                      │      │  (driven by litellm SDK)             │
+                      │      ▼                                      │
+                      │  InferenceScheduler  ── FIFO + VRAM admit   │
+                      │      │                                      │
+                      │      │  WS: commands ↓ / events ↑           │
+                      └──────┼──────────────────────────────────────┘
+                             │  /provider/ws  (one socket per AGENT)
+         ┌───────────────────┼───────────────────────┐
+         ▼                   ▼                       ▼
+   ┌───────────────┐   ┌───────────────┐      ┌───────────────┐
+   │  MACHINE A    │   │  MACHINE B    │      │  MACHINE N    │
+   │  agent(t1)    │   │  agent(t1)    │      │  agent(tX)    │
+   │  ┌────┐┌────┐ │   │  ┌────┐       │      │  ┌────┐       │
+   │  │bknd││bknd│ │   │  │bknd│       │      │  │bknd│       │
+   │  │ :p0││ :p1│ │   │  │ :p0│       │      │  │ :p0│       │
+   │  └────┘└────┘ │   │  └────┘       │      │  └────┘       │
+   │  (same type)  │   │  (+ agent(t2))│      │               │
+   └───────┬───────┘   └──────┬────────┘      └───────┬───────┘
+           │  litellm targets http://<machine>:<backend port>/v1
+           └──────────────────────────────────────────┘
 ```
+
+A **machine** may host several **agents** (one per `provider_type`, and even
+several of the same type — discriminated by `AGENT_ID`). Each agent runs
+1..N **backends** (one per assigned `ProviderDefinition`), each backend
+listening on its own port (`base_port + offset`). The single agent WebSocket
+multiplexes commands/events for all of its backends, addressed by the
+per-backend `ProviderInstance` id.
 
 ### Components
 
 | Component | Role |
 | --- | --- |
-| **Admin** (`admin/backend`) | Owns Postgres + Redis, the scheduler, conversation state, the client-facing `/v1` API, the admin UI/API, and the provider WebSocket registry. Runs **litellm** to drive inference. Knows **nothing** provider-specific. |
-| **Provider instance** (`provider/<type>`) | Hardware-local container. Owns exactly **one** backend subprocess, its lifecycle, metrics, logs, and downloads. Serves a fully OpenAI/OpenResponses-spec-compliant HTTP API on `PROVIDER_PORT` and dials the admin over a WebSocket. |
-| **Backend** | The provider's inference software (llama-server, halogen, halogen-flash, gufo). A private detail of the provider instance; never seen by the admin. |
-| **Machine** | A physical/virtual host with a unique `uid`, pre-registered in the admin UI, with VRAM capacity tracked for scheduler admission. |
-| **Redis** | Scheduler queues/mirrors, VRAM ledger, WS presence/secrets/epochs, metrics-ownership leases. |
-| **Postgres** | Source of truth for configuration (machines, provider definitions, instances) and stored responses. |
+| **Admin** (`admin/backend`) | Owns Postgres + Redis, the scheduler, conversation state, the client-facing `/v1` API, the admin UI/API, and the provider-agent WebSocket registry. Runs **litellm** to drive inference. Knows **nothing** provider-specific. |
+| **Provider agent** (`provider/<type>`) | Hardware-local container tied to **one machine + one provider type** (and a stable `AGENT_ID`). Owns 1..N backend subprocesses of that type, their lifecycles, metrics, logs, and downloads. Serves a fully OpenAI/OpenResponses-spec-compliant HTTP API per backend on `base_port + offset` and dials the admin over **one** WebSocket. |
+| **Backend** (`ProviderInstance`) | One inference process (llama-server, halogen, halogen-flash, gufo) for one `ProviderDefinition` on one agent. A private detail of the agent; the admin reaches it only over the agent's WS (control) or its own port (litellm data). |
+| **Machine** | A physical/virtual host with a unique `uid`, pre-registered in the admin UI, holding the shared **machine registration secret** agents authenticate with, and VRAM capacity tracked for scheduler admission. |
+| **Redis** | Scheduler queues/mirrors, VRAM ledger, WS presence/secrets/epochs (agent-level), metrics-ownership leases. |
+| **Postgres** | Source of truth for configuration (machines, agents, provider definitions, backend instances) and stored responses. |
 
 ### Key invariants
 
-1. A provider instance has **exactly one** backend.
-2. The provider instance is in full control of the backend lifecycle and
+1. A **provider agent** is bound to exactly one machine and one provider
+   **type**, and runs **one or more** backends (instances) of that type. A
+   `ProviderInstance` is exactly one backend for one `ProviderDefinition` on
+   one agent.
+2. A type may declare **`max_running_backends`** (e.g. `1` for halogen-flash).
+   The admin scheduler enforces it **per agent**: at most that many backends
+   of the type are `running` on a given agent at once; to boot another the
+   scheduler hot-swaps (evicts the running one, LRU-first).
+3. The provider agent is in full control of each backend's lifecycle and
    inference-slot admission. Slot capacity is enforced **at the provider**,
    tied to the inbound connection lifecycle — a dead admin/litellm
    connection cannot leak a slot.
-3. The admin never proxies raw provider-quirk traffic. Everything between
-   admin and provider is either (a) the WS control protocol or (b)
-   standard OpenAI-compatible HTTP driven by litellm against the
-   provider's spec-compliant port.
-4. The client-facing `/v1/responses` SSE stream must pass the
+4. The admin never proxies raw provider-quirk traffic. Everything between
+   admin and agent is either (a) the WS control protocol (one socket per
+   agent, frames addressed by backend `ProviderInstance` id) or (b)
+   standard OpenAI-compatible HTTP driven by litellm against the backend's
+   spec-compliant port.
+5. The client-facing `/v1/responses` SSE stream must pass the
    openresponses.org conformance suite. That client boundary is the
    fidelity contract; internal layers are free as long as it holds.
-5. The admin owns the client-facing `resp_<uuid>` id and the conversation
+6. The admin owns the client-facing `resp_<uuid>` id and the conversation
    chain. litellm-side session state is never relied upon.
 
 ---
@@ -84,7 +108,9 @@ admin/
   backend/                FastAPI admin + public inference API (package: matrix-admin)
     app/
       main.py             App factory: docs at "/", /openapi.json, routers, lifespan
-      models.py           SQLModel tables (squashed schema, see §4)
+      models.py           SQLModel tables (squashed schema, see §4): Machine,
+                          ProviderAgent, ProviderType, ProviderDefinition,
+                          ProviderInstance, ResponseRecord, TokenUsageSample
       api/
         admin/            /admin/api/*  (health, provider registration)
         v1/               /v1/*         (public inference)
@@ -105,10 +131,11 @@ admin/
 provider/
   lib/                    Shared provider library (package: provider_lib)
     provider_lib/
-      admin_client.py     Registration, WS dial, bearer auth, reconnect/backoff
+      admin_client.py     Agent registration (machine+type+agent_id), one WS
+                          dial multiplexing N backends, bearer auth, backoff
       wire.py             Canonical wire envelope (Frame, FrameKind, Ack)
       backend.py          BackendDriver ABC + BackendLifecycle (slot mgmt)
-      app_factory.py      FastAPI app serving the provider port + /v1 surface
+      app_factory.py      FastAPI app serving each backend's port + /v1 surface
       config.py           ProviderSettings (env-derived)
       downloader.py       Model downloads with progress events
       metrics.py          GPU / RAM / CPU / storage collectors
@@ -146,23 +173,25 @@ duplicates the frame shape from `provider_lib.wire` (keep them in sync;
 | `/openapi.json` | admin | none | Full OpenAPI schema of the admin app |
 | `/admin/*` | admin (static SPA) | none | React UI, Vite `base: "/admin"` |
 | `/admin/api/health` | admin | none | Health check (used by compose healthcheck) |
-| `/admin/api/providers/register` | admin | registration token | Provider registration (§5; refused **409 `port_conflict`** when another *connected* instance on the same machine already claims the reported port — the admin addresses instances as `machine address:instance port`, so a clash silently serves one alias from another provider's engine) |
-| `/admin/api/machines*` | admin | none (trusted LAN) | Machine CRUD (Phase 9; delete refused while instances attached) |
-| `/admin/api/definitions*` | admin | none (trusted LAN) | ProviderDefinition CRUD (Phase 9; `backend_config`/`capacity` PATCH pushes `provider.config.update` to connected instances; explicit null on required fields → 422; `provider_type` change refused 409 while instances attached; Phase 12: `backend_config` validated against the committed JSON Schema of its `ProviderType` → 422 with per-field errors; **Phase 14**: `provider_type`/`backend_config` may be omitted at create (a *shell* definition — typed at first registration, configured via PATCH afterwards) and can never return to null once set) |
+| `/admin/api/providers/register` | admin | **machine secret** | Provider **agent** registration (§5). Body carries `machine_uid`, `agent_id`, `provider_type`, `version`, `base_port`, `hardware`, `metrics_categories`, `schema`. Authenticated by the shared `Machine.registration_secret` (not a per-definition token). Refused **409 `port_conflict`** when another *connected* backend on the same machine already claims a port the agent's backends would use — the admin addresses backends as `machine address:backend port`, so a clash silently serves one alias from another backend's engine. |
+| `/admin/api/machines*` | admin | none (trusted LAN) | Machine CRUD (Phase 9; delete refused while agents attached). Phase 16: the machine row carries the shared `registration_secret` shown/rotated here. |
+| `/admin/api/agents*` | admin | none (trusted LAN) | **ProviderAgent** reads + placement (Phase 16): list agents per machine/type, see hosted backends. Cherry-picked definition placement targets reference agent ids here. |
+| `/admin/api/definitions*` | admin | none (trusted LAN) | ProviderDefinition CRUD (Phase 9; `backend_config`/`capacity` PATCH pushes `provider.config.update` to the backends hosting it; explicit null on required fields → 422; Phase 12: `backend_config` validated against the committed JSON Schema of its `ProviderType` → 422 with per-field errors). **Phase 16:** `provider_type` is required at create (no shells); placement is `any_of_type` or an explicit set of `agent_ids` (link table); placement/config edits push `agent.assignments.update` / `provider.config.update` over the affected agents' sockets. |
 | `/admin/api/provider-types` `/admin/api/provider-types/{name}` | admin | none (trusted LAN) | ProviderType registry reads (Phase 12; UI renders the backend-config form from the committed schema) |
 | `/admin/api/provider-types/{name}/pending/commit` `.../pending/dismiss` | admin | none (trusted LAN) | Operator override of the schema-consensus state (Phase 12) |
 | `/admin/api/huggingface/search` `/admin/api/huggingface/files` | admin | none (trusted LAN) | HF proxy for the `hf-file` picker widget (Phase 12; ported from legacy `huggingface.py` routes) |
 | `/admin/api/instances/{id}/cache/clear` `/admin/api/instances/{id}/storage/prune` | admin | none (trusted LAN) | Instance storage actions (Phase 9) |
-| `/admin/api/instances/{id}/backend/start` `.../backend/stop` `.../backend/restart` `/admin/api/instances/{id}/initialize` | admin | none (trusted LAN) | Manual backend control over the provider WS (`provider_lib.ops`): start/restart/initialize answer **202 accepted** by default and the transition runs at the provider (body `{"wait_for_running": true}` waits instead, bounded by `BACKEND_BOOT_TIMEOUT_SECONDS`); start/restart refuse 409 on a shell definition, `initialize` does not; the provider's `backend_in_use` / `boot_in_progress` NAKs surface as 502 with `step` + `retry_after` |
+| `/admin/api/instances/{id}/backend/start` `.../backend/stop` `.../backend/restart` `/admin/api/instances/{id}/initialize` | admin | none (trusted LAN) | Manual control of **one backend** (`ProviderInstance`), routed over its **agent's** WS (`provider_lib.ops`): start/restart/initialize answer **202 accepted** by default and the transition runs at the agent (body `{"wait_for_running": true}` waits instead, bounded by `BACKEND_BOOT_TIMEOUT_SECONDS`); the agent's `backend_in_use` / `boot_in_progress` NAKs surface as 502 with `step` + `retry_after` |
 | `/admin/api/instances` `/admin/api/instances/{id}` | admin | none (trusted LAN) | Provider-instance reads for the UI (Phase 10) |
 | `/admin/api/instances/{id}/logs` | admin | none (trusted LAN) | Backend/provider log tail (Phase 13; Redis-backed, `kind`/`since`/`limit` cursor) |
 | `/admin/api/responses` `/admin/api/stats/usage` `/admin/api/stats/overview` | admin | none (trusted LAN) | Response log + usage/dashboard reads (Phase 10; overview reads the scheduler Redis mirror, observability only) |
 | `/v1/*` | admin | none (trusted LAN) | Public OpenAI-compatible inference |
-| `/provider/ws` | admin | bearer (instance secret) | Provider instances dial in (§5) |
+| `/provider/ws` | admin | bearer (**agent secret**) | Provider **agents** dial in — one socket per agent, frames addressed by backend `ProviderInstance` id (§5) |
 
-The provider instance serves its own OpenAI-compatible HTTP API on
-`PROVIDER_PORT` (default **8081**), reachable from the admin at
-`http://{machine.reachable_address()}:{port}/v1/...`. `Machine` exposes
+Each **backend** on an agent serves its own OpenAI-compatible HTTP API on
+`base_port + offset` (the agent's `PROVIDER_PORT` env is the base; the first
+backend uses it, subsequent backends increment), reachable from the admin at
+`http://{machine.reachable_address()}:{backend_port}/v1/...`. `Machine` exposes
 `dns`/`host`/`ip`; `reachable_address()` prefers `dns or host or ip`.
 
 ---
@@ -173,24 +202,50 @@ All tables are created by **one squashed Alembic initial migration**
 (`admin/backend/alembic/versions/0140d6ad9f48_initial_squashed_schema.py`),
 applied by `scripts/prestart.sh` and by CI; Phase 12 adds the
 `provider_types` table (plus the two instance columns) in a follow-up
-migration. The provider instance itself has **no database** — it derives
-everything from env + the registration response, mirrored here by the
-admin.
+migration. **Phase 16 adds `provider_agents` and a `definition_agents` link
+table, moves the registration secret onto `machines`, re-keys
+`provider_instances` onto `(agent_id, provider_definition_id)`, drops
+`provider_definitions.registration_token`, and adds
+`provider_types.max_running_backends`.** The provider agent itself has **no
+database** — it derives everything from env + the registration response,
+mirrored here by the admin.
 
 ### Machine
-A host that provider instances run on. **Created in the admin UI before
-any provider registers against its `uid`.**
+A host that provider agents run on. **Created in the admin UI before
+any agent registers against its `uid`.**
 
 | Field | Notes |
 | --- | --- |
-| `uid` | Stable identifier supplied by the operator, referenced by the provider's `MACHINE_UID` env. Unique. |
+| `uid` | Stable identifier supplied by the operator, referenced by the agent's `MACHINE_UID` env. Unique. |
 | `name` | Display name. Unique. |
-| `host` / `dns` / `ip` | How the admin reaches instances on this machine. |
-| `total_vram_bytes` | Admission budget; merged/refreshed from provider-reported hardware. |
-| `hardware` | JSON inventory: `{"gpus": [{"uuid","vendor","name","total_vram_bytes"}, ...], "cpu": {...}, "ram": {...}}`. Union of reports from all instances on the machine. |
+| `registration_secret` | **Phase 16.** Shared secret every agent on this machine authenticates registration with (replaces the per-definition `registration_token`). Shown/rotated in the UI. |
+| `host` / `dns` / `ip` | How the admin reaches backends on this machine. |
+| `total_vram_bytes` | Admission budget; merged/refreshed from agent-reported hardware. |
+| `hardware` | JSON inventory: `{"gpus": [{"uuid","vendor","name","total_vram_bytes"}, ...], "cpu": {...}, "ram": {...}}`. Union of reports from all agents on the machine. |
 
-A provider registering with an unknown `MACHINE_UID` is **rejected (404)**.
-UIDs must not be reused across physical hosts (see Known Limitations).
+An agent registering with an unknown `MACHINE_UID` is **rejected (404)**; a
+wrong `registration_secret` is **rejected (401)**. UIDs must not be reused
+across physical hosts (see Known Limitations).
+
+### ProviderAgent
+**Phase 16.** One hardware-local container: a `(machine, provider_type,
+agent_id)` triple. The agent owns 1..N backends (`ProviderInstance`s) of its
+single type and holds the one WebSocket the admin commands it over.
+
+| Field | Notes |
+| --- | --- |
+| `machine_id` | FK → Machine. The host this agent runs on. |
+| `provider_type` | FK → ProviderType. **All** the agent's backends are this type. Immutable while backends are attached. |
+| `agent_id` | Operator-supplied stable id (the container's `AGENT_ID` env) that discriminates multiple agents sharing a `(machine, provider_type)`. Unique on `(machine_id, provider_type, agent_id)`. |
+| `base_port` | The agent's `PROVIDER_PORT` env; backends take `base_port + offset`. |
+| `version` | Agent version (commit id until first release); hard-fail gate vs admin `VERSION`. |
+| `agent_status` | `registering` `initializing` `running` `unhealthy` `error` `disconnected` — the container-level state (was the old per-instance `instance_status`). |
+| `websocket_connected` / `epoch` / `last_seen` | Agent-level WS liveness mirror (authoritative liveness is the Redis presence key). |
+| `reported_schema_fingerprint` | Schema fingerprint presented at the agent's last registration attempt (drives `waiting_schema` + the consensus voter roster). |
+| `assigned_gpus` | Agent-reported GPU UUIDs; VRAM accounting + metrics dedup. |
+
+The agent's per-connection secret (`im:ws:secret:{agent_id}`) is minted at
+registration and stored in Redis only (see §5, §9, §12).
 
 ### ProviderType
 A registered provider **type** (Phase 12), created by the first
@@ -202,22 +257,23 @@ must reference a registered type.
 | --- | --- |
 | `name` | Type id (`llama-cpp`, `halogen`, `halogen-flash`, `gufo`, `mock`, …). Unique. |
 | `schema` | Committed JSON Schema (2020-12) for this type's `backend_config`. Drives admin validation on write **and** the UI form render. |
+| `max_running_backends` | **Phase 16.** Per-agent cap on simultaneously `running` backends of this type, declared in the shipped `schema.json` (top-level `x-max-running-backends`, default unlimited). `1` for halogen-flash (single NPU). Enforced by the scheduler (§6). |
 | `schema_fingerprint` | SHA-256 of canonical `schema` (same canonicalization as `config_fingerprint`). |
 | `pending_schema` / `pending_fingerprint` | Staged schema awaiting consensus (null when none). |
-| `pending_voters` | JSON list of instance ids that have registered presenting `pending_fingerprint`. |
+| `pending_voters` | JSON list of **agent ids** that have registered presenting `pending_fingerprint` (Phase 16: voters are agents, not backends). |
 | `status` | `active` \| `consensus_pending` \| `conflict`. |
 
-**Schema consensus** (all known instances of the type must agree):
+**Schema consensus** (all known **agents** of the type must agree):
 registration with the committed fingerprint proceeds normally. A
 different fingerprint stages it as pending and the registration is
 **refused 409 `schema_pending`** — the agent keeps retrying (waiting
 for all agents to update). Repeat registrations with the pending
-fingerprint add voters; when voters cover **every `ProviderInstance`
+fingerprint add voters; when voters cover **every `ProviderAgent`
 row of that type**, the pending schema is committed. A third distinct
 fingerprint while pending → 409 `schema_conflict`. Operator override:
 force-commit (e.g. a permanently dead machine can never vote) or
 dismiss. Force-commit applies to **future registrations and new/edited
-definitions only** — connected old-schema instances are not force-
+definitions only** — connected old-schema agents are not force-
 converged. Full algorithm in `docs/ws-protocol.md` §2.
 
 The `PROVIDER_TYPES` constant is gone; the registry is the source of
@@ -226,40 +282,44 @@ truth. The static `schema.json` lives in each provider package
 agent at registration — the admin never holds provider code.
 
 ### ProviderDefinition
-A client-facing model: how to boot a backend and how to schedule it.
+A client-facing model: how to boot a backend and how to schedule it. One
+definition may be hosted by many agents (fan-out), each running its own
+backend (`ProviderInstance`).
 
 | Field | Notes |
 | --- | --- |
 | `alias` | Public model name clients use in `/v1/models` and the `model` field. Unique. |
-| `provider_type` | Must reference a registered `ProviderType` — **unless NULL**. Phase 14: a definition may be created as a *shell* (`provider_type` NULL): the container's reported type is **adopted** at its first registration (and the `ProviderType` row bootstraps from the shipped `schema.json`). Once set it can never go back to NULL (422). A type change is still refused 409 while instances are attached. |
-| `backend_config` | JSON handed to the provider to start its backend: model artifacts (main GGUF + mmproj + draft, each with source), engine args, engine options. **Validated against the committed JSON Schema of its `ProviderType` on create/PATCH (Phase 12)**; the UI form is rendered from that schema (collapseable sections, `hf-file` artifact widget). **Phase 14: NULL = no config authored yet (shell)** — distinct from `{}`, which is a real (possibly empty) config. A shell is excluded from `/v1/models`, scheduling, litellm alias registration and config pushes until config is authored (`backend_config IS NOT NULL`). |
-| `vram_required_bytes` | Scheduler admission hint. |
-| `idle_timeout_seconds` | Admin-driven idle stop (reaper — Phase 6 TODO). |
-| `capacity` | Concurrent backend slots (≥1). |
-| `registration_token` | Secret presented at registration; binds instance→definition and cross-checked against the container's provider type. Unique. |
+| `provider_type` | Must reference a registered `ProviderType`. **Phase 16: required at create — the Phase 14 shell (NULL type adopted at registration) is removed.** A type change is refused 409 while backends are attached. |
+| `backend_config` | JSON handed to the agent to start a backend for this definition: model artifacts (main GGUF + mmproj + draft, each with source), engine args, engine options. **Validated against the committed JSON Schema of its `ProviderType` on create/PATCH (Phase 12)**; the UI form is rendered from that schema (collapseable sections, `hf-file` artifact widget). Required (no shells). |
+| `agent_placement` | **Phase 16.** `any_of_type` (host on every agent whose `provider_type` matches) or `specific` (host only on the agents listed in `definition_agents`). Drives which agents receive `agent.assignments.update` and which backends the scheduler may pick. |
+| `agents` (link) | **Phase 16.** `definition_agents` join table (`provider_definition_id`, `agent_id`) — populated only when `agent_placement = specific`. |
+| `vram_required_bytes` | Scheduler admission hint (per backend). |
+| `idle_timeout_seconds` | Admin-driven idle stop (reaper — §6). |
+| `capacity` | Concurrent inference **slots within one backend** (≥1). Distinct from `max_running_backends` (how many backends of the type run per agent). |
 | `model_metadata` | OpenAI model metadata discovered at init. |
 | `enabled` | Disabled definitions are excluded from scheduling. |
 
+> **Phase 16 removals:** `registration_token` (auth moves to the shared
+> `Machine.registration_secret`) and the shell/`awaiting_config` machinery
+> from Phase 14 (a definition is always typed and configured at create).
+
 ### ProviderInstance
-One backend on one Machine for one ProviderDefinition. Unique on
-`(machine_id, provider_definition_id)` — a machine cannot run two backends
-of the same definition.
+**One backend**: one `ProviderDefinition` running on one `ProviderAgent`.
+Unique on `(agent_id, provider_definition_id)` — an agent cannot run two
+backends of the same definition. Phase 16 moves the container-level fields
+(`instance_status`, `version`, `websocket_connected`, `epoch`,
+`reported_schema_fingerprint`) up onto `ProviderAgent`; this row is purely
+the per-backend state the scheduler and lifecycle act on.
 
 | Field | Notes |
 | --- | --- |
-| `port` | The provider's own port (default 8081). |
-| `version` | Provider instance version (commit id until first release). |
-| Field | Notes |
-| --- | --- |
-| `instance_status` | `awaiting_config` `registering` `initializing` `running` `unhealthy` `error` `disconnected` — Phase 14 adds `awaiting_config`: the admin-owned pre-state for an instance whose definition has no authored `backend_config`. Connected + metrics healthy, but never schedulable. The provider never emits it (like `disconnected`, admin-only); a provider `running` status is coerced back to it while unconfigured. Cleared when a config PATCH push acks. |
+| `agent_id` | FK → ProviderAgent (was `machine_id`). The backend's owning container. |
+| `port` | This backend's HTTP port = `agent.base_port + offset`. |
 | `backend_status` | `stopped` `initializing` `starting` `running` `in_use` `stopping` `error` |
-| `websocket_connected` | DB mirror; authoritative liveness is the Redis presence key. |
-| `epoch` | Connection epoch: bumped on every accepted socket; stale-epoch frames ignored (fencing). |
-| `last_seen` / `last_request_at` | Liveness + idle tracking. |
-| `backend_loaded_at` | When the backend last entered `running`/`in_use` (stamped by the status ingest on transition; cleared when it leaves the loaded set or the socket dies). The idle reaper's window baseline is `max(last_request_at, backend_loaded_at)` so a freshly booted, never-requested backend is not reaped against a stale clock. |
-| `config_fingerprint` | SHA-256 of the applied `backend_config`; drives auto cache-clear and the Phase 9 `provider.config.update` push (admin PATCH + reconnect self-heal). |
-| `reported_schema_fingerprint` | Schema fingerprint the instance presented at its last registration attempt (Phase 12; drives the `waiting_schema` badge and the pending voter roster). |
-| `assigned_gpus` | Instance-reported GPU UUIDs this backend is bound to; VRAM accounting + metrics dedup. |
+| `last_request_at` | Idle tracking (liveness is the agent's). |
+| `backend_loaded_at` | When the backend last entered `running`/`in_use` (stamped by the status ingest on transition; cleared when it leaves the loaded set or the agent's socket dies). The idle reaper's window baseline is `max(last_request_at, backend_loaded_at)` so a freshly booted, never-requested backend is not reaped against a stale clock. |
+| `config_fingerprint` | SHA-256 of the applied `backend_config`; drives auto cache-clear and the `provider.config.update` push (admin PATCH + reconnect self-heal). |
+| `assigned_gpus` | GPU UUIDs this backend is bound to; VRAM accounting + metrics dedup. |
 
 ### ResponseRecord
 Stored OpenResponses turn (spec `ResponseResource`), chained by
@@ -292,13 +352,15 @@ provider instance + definition.
 Full wire-level detail lives in **`docs/ws-protocol.md`** (canonical RFC).
 Summary:
 
-### Provider environment (all env-derived, no DB)
+### Provider agent environment (all env-derived, no DB)
 | Variable | Required | Meaning |
 | --- | --- | --- |
 | `MACHINE_UID` | yes | UID of the Machine this container runs on |
-| `PROVIDER_REGISTRATION_TOKEN` | yes | Token of the ProviderDefinition it serves |
+| `MACHINE_SECRET` | yes | The shared `Machine.registration_secret` proving the container belongs to that machine (**replaces `PROVIDER_REGISTRATION_TOKEN`**) |
+| `AGENT_ID` | yes | Stable operator-set id discriminating multiple agents that share a `(machine, provider_type)` |
+| `PROVIDER_TYPE` | yes | The single backend type this agent runs (must match a registered `ProviderType`) |
 | `ADMIN_BASE_URL` | yes | e.g. `http://admin:8000` |
-| `PROVIDER_PORT` | no (8081) | Port the spec-compliant API listens on |
+| `PROVIDER_PORT` | no (8081) | **Base** port; the agent's backends listen on `PROVIDER_PORT + offset` |
 | `CACHE_DIR` | yes (`/cache`) | Prompt caches, persisted `provider_config.json` |
 | `MODELS_DIR` | yes (`/models`) | Model artifact storage |
 | `METRICS_CATEGORIES` | no | Space-delimited: `gpu_usage vram os_ram cpu storage`. Inference metrics are **always** enabled and must not appear here. |
@@ -308,65 +370,64 @@ environment, never from `backend_config`.
 
 ### Sequence
 ```
-Provider                          Admin
+Provider agent                      Admin
     │ POST /admin/api/providers/register
-    │  {machine_uid, registration_token, provider_type, schema,
-    │   version, port, hardware, metrics_categories}
+    │  {machine_uid, machine_secret, agent_id, provider_type, schema,
+    │   version, base_port, hardware, metrics_categories}
     │ ──────────────────────────────▶
-    │  validations (401/403/404/409):
-    │    registration_token → ProviderDefinition exists
-    │    provider_type: definition match — or (Phase 14) definition is
-    │      a shell → type ADOPTED from the container's report
+    │  validations (401/404/409):
+    │    machine_uid exists + machine_secret matches   (401/404)
     │    provider_type registered in ProviderType   (Phase 12;
     │      unknown type → created from this schema, committed)
-    │    schema consensus gate                      (Phase 12;
-    │      mismatch → 409 schema_pending/schema_conflict)
-    │    machine_uid exists                          (404)
+    │    schema consensus gate                      (Phase 12; voters =
+    │      agents of the type; mismatch → 409 schema_pending/conflict)
     │    version == admin settings.VERSION   (HARD FAIL 409)
+    │    base_port (+ per-backend offsets) free on the machine (409)
    │  effects:
-   │    merge hardware into Machine, upsert ProviderInstance
-   │    issue per-instance secret → Redis im:ws:secret:{id}
+   │    merge hardware into Machine; upsert ProviderAgent
+   │    resolve placement → upsert one ProviderInstance per assigned
+   │      definition (agent_id, definition_id), stopped
+   │    issue per-agent secret → Redis im:ws:secret:{agent_id}
    │ ◀──────────────────────────────
-   │  {instance_id, instance_secret, provider config, fingerprint,
-   │   type_adopted (Phase 14: true when this call set the shell's type)}
+   │  {agent_id, agent_secret, assignments:[{instance_id, definition
+   │   alias, backend_config, config_fingerprint, capacity, port}, ...]}
    │ write provider_config.json to CACHE_DIR
-   │ dial ws(s)://{admin}/provider/ws
-   │   Authorization: Bearer {instance_secret}
+   │ dial ws(s)://{admin}/provider/ws   (ONE socket for the agent)
+   │   Authorization: Bearer {agent_secret}
    │ ──────────────────────────────▶  auth vs Redis (constant-time)
-   │                                  accept → bump im:ws:epoch:{id}
-   │   ◀── provider.hello {epoch}    claim im:ws:owner:{id}
-   │                                  instance_status → running
+   │                                  accept → bump im:ws:epoch:{agent_id}
+   │   ◀── provider.hello {epoch}    claim im:ws:owner:{agent_id}
+   │                                  agent_status → running
+   │  (proactive init warm-up, one backend at a time — see below)
+   │   ── backend.status per backend as the scheduler boots them ──▶
 ```
 
-- **Version hard fail:** provider versions must match the admin exactly
+- **Version hard fail:** agent versions must match the admin exactly
   (409). Admin and provider images are deployed together (§10).
-- **Shell adoption (Phase 14):** a definition created without
-  `provider_type` adopts the container's reported type at its first
-  registration (response carries `"type_adopted": true`; logged). The
-  type registry bootstraps from the container's shipped `schema.json` at
-  the same call. This removes the fresh-install ordering constraint
-  (definitions no longer need a pre-registered type).
-- **`awaiting_config` (Phase 14):** while the definition has no
-  `backend_config`, its instance sits in the admin-owned
-  `awaiting_config` pre-state — connected, metrics-flowing, never
-  scheduled (`NoProviderAvailable` → 503), never pushed to, never
-  idle-stopped, hidden from `/v1/models`. Config arrives via a
-  definitions PATCH → standard `provider.config.update` push; the ack
-  clears the state. A provider-reported `running` status does not
-  clobber it (coerced by the admin).
+- **Placement resolution:** the admin computes the agent's assigned
+  definitions = enabled `ProviderDefinition`s of the agent's type whose
+  `agent_placement` is `any_of_type`, plus those `specific`-placed on this
+  agent (via `definition_agents`). Each becomes a `ProviderInstance`
+  (backend) row, initially `stopped`.
+- **Proactive init warm-up (one at a time):** after the socket is up, the
+  scheduler walks the agent's assigned backends and boots them **one at a
+  time** (serialized per agent), each gated by machine VRAM admission and
+  the type's `max_running_backends`, until they no longer fit; the rest
+  stay `stopped` and boot on demand later. The idle reaper still applies to
+  warm backends that go idle.
 - **Schema gate (Phase 12):** each agent ships a `schema.json` and sends
   it with the registration body. A fingerprint mismatch against the
   committed schema is refused **409 `schema_pending`** — the agent stays
   in a *waiting for consensus* state (visible in the UI as
-  `waiting_schema` on the instance) and keeps retrying via the normal
-  backoff until every known instance of the type has presented the new
+  `waiting_schema` on the agent) and keeps retrying via the normal
+  backoff until every known agent of the type has presented the new
   schema (or the operator force-commits).
-- **Socket lifecycle:** if the WS dies, the admin marks the instance
+- **Socket lifecycle:** if the agent WS dies, the admin marks the agent
   `disconnected` immediately (live path) and via the presence sweep
-  (safety net for missed disconnects / admin restarts). The provider
-  reconnects with exponential backoff (1s → 30s max). Each accepted
-  reconnect gets a strictly greater **epoch**; the old socket is closed
-  with code `4409`.
+  (safety net for missed disconnects / admin restarts); all its backends
+  become unschedulable while disconnected. The agent reconnects with
+  exponential backoff (1s → 30s max). Each accepted reconnect gets a
+  strictly greater **epoch**; the old socket is closed with code `4409`.
 
 ### Frame envelope (both directions)
 ```json
@@ -375,21 +436,27 @@ Provider                          Admin
 ```
 Commands carry an `id` and require an `ack` frame (`reply_to=<id>`,
 payload `{ok, error, detail}`). The admin's
-`ConnectionManager.send_command(instance_id, type, payload, timeout)`
-awaits the matching ack (default 30s). Every frame carries the epoch;
-stale-epoch frames are discarded by both sides.
+`ConnectionManager.send_command(agent_id, type, payload, timeout)` sends on
+the agent's socket and awaits the matching ack (default 30s). **Per-backend
+commands/events carry the target `instance_id` inside `payload`** (the
+socket is agent-level; the backend is addressed by id). Every frame carries
+the agent's epoch; stale-epoch frames are discarded by both sides.
 
 ### Event / command catalog
-Provider → admin: `provider.status`, `backend.status`,
-`backend.boot_requested`, `metrics.machine`, `backend.logs`,
-`provider.logs`, `download.progress`, `backend.metadata`, `ping`
+Provider agent → admin: `provider.status` (agent-level),
+`backend.status` (per `instance_id`), `backend.boot_requested`,
+`metrics.machine`, `backend.logs` (per `instance_id`), `provider.logs`
+(agent-level), `download.progress`, `backend.metadata`, `ping`
 (`metrics.inference` is defined but reserved — see §8).
 
-Admin → provider: `provider.hello`, `backend.start`, `backend.stop`,
-`backend.restart`, `provider.initialize`, `provider.config.update`,
-`metrics.assign`, `metrics.unassign`, `metrics.category.start`,
-`cache.clear`, `storage.prune_unused`, `backend.logs.get` (Phase 13),
-`pong`.
+Admin → provider agent: `provider.hello`, `agent.assignments.update`
+(**Phase 16** — add/remove backends the agent should host), `backend.start`,
+`backend.stop`, `backend.restart`, `provider.initialize`,
+`provider.config.update`, `metrics.assign`, `metrics.unassign`,
+`metrics.category.start`, `cache.clear`, `storage.prune_unused`,
+`backend.logs.get` (Phase 13), `pong`. Per-backend commands
+(`backend.*`, `provider.config.update`, `cache.clear`, `storage.prune_unused`)
+carry `instance_id` in the payload.
 
 `backend.start` acks only after the provider's lifecycle reaches
 `running` **when it asks to wait** (`wait_for_running: true`, the
@@ -400,7 +467,7 @@ halogen-flash boot downloads its checkpoint and companions inside that
 wait — tens of GB), and reports the terminal state as events.
 `backend.restart` is the same with a drain check first (refuses while slots
 are held), and `provider.initialize` re-runs the whole init lifecycle
-(re-register → adopt → reboot → publish `backend.metadata`) and always
+(re-register → re-resolve placement → reboot → publish `backend.metadata`) and always
 acks before the boot. `backend.stop` stops the backend plainly
 (→ STOPPING → STOPPED): in-flight streams are not force-cancelled and there
 is no in_use refusal on this command — their producer tasks release their
@@ -423,6 +490,12 @@ fingerprint on reconnect is healed automatically to the **stale
 instance only** (connect-path background task + presence sweep, with a
 per-instance in-flight push guard). Full semantics in
 `docs/ws-protocol.md` §4 and `provider/README.md`.
+
+`agent.assignments.update` (**Phase 16**) is the agent-level counterpart:
+when a definition's placement changes (added to / removed from this agent),
+the admin pushes the new assignment set so the agent spins up or tears down
+the corresponding backend slot. Config edits to an already-assigned
+definition still ride `provider.config.update` (addressed by `instance_id`).
 
 Unknown event/command types are logged and ignored (forward compatible).
 
@@ -527,6 +600,31 @@ transiently oversubscribe).
 (`asyncio.shield` around cleanup so a client-disconnect-mid-stream still
 releases and wakes the next waiter). It does **not** clear the booted
 instance's VRAM hold.
+
+### Agent-scoped admission & `max_running` (Phase 16)
+
+Candidates for an alias are the `ProviderInstance` backends whose
+definition is placed on a **connected** agent (per `agent_placement`:
+`any_of_type` or `specific`), still filtered by enabled + authored config.
+The VRAM ledger stays **per booted backend** (unchanged) and the admin
+remains the sole VRAM authority — an agent never boots a backend the admin
+hasn't admitted.
+
+Two new constraints layer on top of the existing per-machine VRAM gate:
+
+1. **`max_running_backends` (per agent).** Before booting a backend of type
+   `T` on agent `A`, the scheduler counts `A`'s backends of type `T`
+   already `running`/`in_use`. If the count is at `ProviderType.max_running_backends`
+   (e.g. `1` for halogen-flash), it **hot-swaps**: evict the LRU running
+   backend of that type on that agent (subject to the same busy/zero-active-
+   slot guard as VRAM eviction) before admitting the new one. A singleton
+   type therefore never has two backends resident on one agent at once.
+2. **Serialized init warm-up.** On agent (re)connect the scheduler enqueues
+   the agent's assigned backends and boots them **one at a time** under the
+   `im:sched:lock` + a per-agent `_booting` guard, each gated by VRAM +
+   `max_running`, stopping at the first that doesn't fit. This is proactive
+   (not request-driven) but bounded; the remaining backends boot on demand
+   exactly as before.
 
 ### Idle-timeout reaper (Phase 6)
 
@@ -670,12 +768,12 @@ Same flow as §7 steps 5–10 with `aresponses` → `acompletion`, plus:
 ## 8. Metrics
 
 ### Machine-level metrics (deduped)
-Multiple provider instances share one machine; each hardware resource is
-emitted by **exactly one** connected instance. `metrics_service.py`
-manages ownership via Redis `im:metrics:owner:{machine_uid}` (SET NX,
-TTL 30s, refreshed on each `metrics.machine` receipt). On connect the
-admin assigns unowned resources (subject to the instance's declared
-`im:metrics:cats:{instance_id}`); on expiry/disconnect another instance
+Multiple provider agents share one machine; each hardware resource is
+emitted by **exactly one** connected agent. `metrics_service.py`
+manages ownership via Redis `im:metrics:owner:{machine_uid}` (SET NX, TTL
+30s, refreshed on each `metrics.machine` receipt). On connect the admin
+assigns unowned resources (subject to the agent's declared
+`im:metrics:cats:{agent_id}`); on expiry/disconnect another agent
 on the same machine can take over. Epoch fencing makes failover safe
 against half-open sockets.
 
@@ -721,20 +819,20 @@ a fresh provider registration. All keys namespaced `im:`. Full table in
 
 | Key | Type | TTL | Purpose |
 | --- | --- | --- | --- |
-| `im:ws:secret:{instance_id}` | String | 30d | Per-instance WS secret (trusted LAN, plaintext; not in Postgres) |
-| `im:ws:epoch:{instance_id}` | Counter | none | Monotonic connection epoch (INCR per accepted socket) |
-| `im:ws:owner:{instance_id}` | String | none | Connection token of the currently accepted socket |
-| `im:ws:presence:{instance_id}` | String | 60s | Liveness marker; absence ⇒ sweep marks disconnected |
-| `im:metrics:owner:{machine_uid}` | String | 30s | Which instance emits machine-level metrics for the machine |
+| `im:ws:secret:{agent_id}` | String | 30d | Per-**agent** WS secret (trusted LAN, plaintext; not in Postgres) |
+| `im:ws:epoch:{agent_id}` | Counter | none | Monotonic connection epoch (INCR per accepted socket) |
+| `im:ws:owner:{agent_id}` | String | none | Connection token of the currently accepted socket |
+| `im:ws:presence:{agent_id}` | String | 60s | Liveness marker; absence ⇒ sweep marks the agent disconnected |
+| `im:metrics:owner:{machine_uid}` | String | 30s | Which **agent** emits machine-level metrics for the machine |
 | `im:metrics:machine:{machine_uid}` | String | 30s | Latest machine-level snapshot JSON |
-| `im:metrics:cats:{instance_id}` | String | — | Instance's declared metrics categories (JSON list) |
+| `im:metrics:cats:{agent_id}` | String | — | Agent's declared metrics categories (JSON list) |
 | `im:sched:queue:{alias}` | List | — | Queued request ids (mirror of in-process deque) |
 | `im:sched:wait:{req_id}` | Hash | 1h | position / enqueued_at / status |
 | `im:sched:active:{alias}` | Set | — | Admitted request ids (cardinality ≤ capacity) |
 | `im:sched:lock:{alias}` | String | 5s (SET NX PX) | Admission lock contract |
 | `im:vram:used:{machine_uid}` | Hash | 60s | `{instance_id}` → bytes held **per booted instance** (§6); refreshed on boot/stop, TTL kept alive by the reaper |
-| `im:logs:backend:{instance_id}` | List | 1h | Backend stdout/stderr tail (Phase 13; capped ~2000 lines, newest left) |
-| `im:logs:provider:{instance_id}` | List | 1h | Provider's own log tail (Phase 13; same cap) |
+| `im:logs:backend:{instance_id}` | List | 1h | Backend stdout/stderr tail (Phase 13; capped ~2000 lines, newest left) — **per backend** |
+| `im:logs:provider:{agent_id}` | List | 1h | Agent's own log tail (Phase 13; same cap) — **per agent** |
 
 Schema-consensus state (pending schema, fingerprint, voters) lives in the
 `provider_types` Postgres row — not Redis — because the admin is a
@@ -749,11 +847,11 @@ single writer and the state must survive a Redis flush (§9 preamble).
 | `admin` | built SPA + FastAPI, port 8000 behind Traefik at `matrix.thelink.family` | **single uvicorn worker** (in-process scheduler authority) |
 | `postgres` 16 | schema via squashed migration at prestart | |
 | `redis` 7 | scheduler/WS/metrics runtime state | |
-| provider images | one per provider type from `provider/<type>/Dockerfile` | run on hardware hosts; mock for local dev |
+| provider images | one per provider type from `provider/<type>/Dockerfile` | run on hardware hosts as **agents** (one container = one machine+type, 1..N backends); mock for local dev |
 
 **Deploy order (mandatory, due to version hard-fail):** admin first, then
-all provider instances. A version-mismatched provider refuses to start
-with a clear 409. Accepted constraint of the solo-operator model.
+all provider agents. A version-mismatched agent refuses to start with a
+clear 409. Accepted constraint of the solo-operator model.
 
 ---
 
@@ -781,14 +879,15 @@ operation:
 
 - `/admin/api/*` and `/v1/*` are **unauthenticated**. Do not expose them
   beyond the LAN / a trusted reverse proxy without adding auth first.
-- The **only** secrets are the per-definition `registration_token`
-  (plaintext in provider env — possession proves entitlement) and the
-  per-instance WS `instance_secret` issued at registration (Redis).
-- Token rotation is manual: edit the definition, redeploy the provider.
-  No revocation short of deleting the definition/instance.
+- The **only** secrets are the per-**machine** `registration_secret`
+  (plaintext in agent env — possession proves the container belongs to that
+  machine; **replaces the per-definition `registration_token`**) and the
+  per-**agent** WS `agent_secret` issued at registration (Redis).
+- Secret rotation is manual: edit the machine's secret, redeploy the agents
+  on it. No revocation short of deleting the machine/agent.
 - Threat accepted: anyone on the network can call inference and the admin
-  API; anyone with `registration_token` + a valid `MACHINE_UID` can
-  register a rogue instance.
+  API; anyone with a machine's `registration_secret` + `MACHINE_UID` can
+  register a rogue agent (and thus backends) on that machine.
 
 ---
 
@@ -807,11 +906,18 @@ operation:
 6. `MACHINE_UID` misuse (same UID on two physical hosts) poisons VRAM
    admission; there is no host-fingerprint check.
 7. **Schema consensus (Phase 12)** requires every known
-   `ProviderInstance` row of a type to present the new schema before it
-   commits. A machine that is permanently gone (row never deleted) blocks
-   consensus forever unless the operator **force-commits** the pending
-   schema. Stale instance rows should be deleted when hardware is
-   decommissioned.
+   `ProviderAgent` row of a type to present the new schema before it
+   commits (Phase 16: voters are agents). A machine that is permanently gone
+   (agent row never deleted) blocks consensus forever unless the operator
+   **force-commits** the pending schema. Stale agent rows should be deleted
+   when hardware is decommissioned.
+12. **Phase 16 — agent fan-out & ports.** Multiple agents may share a
+   `(machine, provider_type)`; they are discriminated only by the operator-
+   supplied `AGENT_ID`, and their backend ports are `base_port + offset`
+   with the base set per container via env. Nothing stops an operator from
+   configuring two agents on one machine with colliding base ports — the
+   admin's `port_conflict` guard rejects the second registration, but the
+   base-port plan is a manual, per-deployment responsibility.
 8. Scheduler VRAM eviction is implemented (§6): idle different-alias
    backends are stopped LRU-first to make room. Remaining nuance:
    eviction is per-machine (no cross-machine rebalancing) and victims are
