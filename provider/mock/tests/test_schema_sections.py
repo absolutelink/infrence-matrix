@@ -36,7 +36,12 @@ def test_shipped_schema_loads_and_is_valid_2020_12() -> None:
 # fleet consensus contract (docs/ws-protocol.md §2). If you change
 # schema.json, every known mock instance must re-register with the new
 # file (or the operator force-commits); update this pin deliberately.
-SHIPPED_SCHEMA_FP = "19144f7695a97d94afd739e2b99be3a0ba6c0d86c10284d324fb67c3ad41b205"
+SHIPPED_SCHEMA_FP = "017addc96ee40eeea2ee58bdf517ca730bfed33847e2c28255fa343c98e06382"
+
+
+def test_shipped_schema_declares_serves_modalities() -> None:
+    # Phase 18 slice 6: the mock hosts both chat and embedding definitions.
+    assert SCHEMA.get("x-serves-modalities") == ["llm", "embedding"]
 
 
 def test_schema_fingerprint_is_stable() -> None:

@@ -4,6 +4,9 @@ Implements `provider_lib.backend.BackendDriver` with instant,
 deterministic behavior: `start()` always succeeds, `stream_responses()`
 emits a configurable OpenResponses SSE event sequence, and
 `stream_chat_completions()` emits OpenAI chat.completion.chunk events.
+`embeddings()` returns a deterministic, spec-shaped CreateEmbeddingResponse
+(fake fixed-length vectors derived from sha256) so the full local
+`/v1/embeddings` path runs with no GPU (Phase 18 slice 6).
 
 The stream generator records its own close (normal exhaustion or early
 aclose) in `stream_close_count` so tests can assert the
@@ -11,6 +14,8 @@ release-on-upstream-close invariant end to end.
 """
 
 import asyncio
+import hashlib
+import json
 import logging
 import time
 import uuid
@@ -29,6 +34,10 @@ SCHEMA: dict[str, Any] = load_schema("provider_mock")
 
 class MockBackend(BackendDriver):
     """A backend that fakes inference with a canned token stream."""
+
+    # Phase 18 slice 6: fixed dimensionality of the mock's fake embedding
+    # vectors (sha256 yields 32 bytes, so 8 dims is comfortably derivable).
+    EMBEDDING_DIM = 8
 
     def __init__(
         self,
@@ -49,6 +58,9 @@ class MockBackend(BackendDriver):
         self.started = False
         self.stream_open_count = 0
         self.stream_close_count = 0
+        # Phase 18 slice 6: embeddings call counter (mirrors the stream
+        # counters) so tests can assert the driver was reached.
+        self.embeddings_calls = 0
         # Phase 9: artifact tracking for storage.prune_unused. The mock
         # downloads nothing; tests can seed this list directly.
         self.resolved_artifacts: list[str] = []
@@ -374,3 +386,47 @@ class MockBackend(BackendDriver):
             }
         finally:
             self.stream_close_count += 1
+
+    def _fake_vector(self, text: str) -> list[float]:
+        """Deterministic fixed-length vector derived from sha256(text).
+
+        Same text -> identical vector across processes (never Python's
+        randomized ``hash()``); different text -> different vector. Each
+        byte maps linearly to [-1.0, 1.0] and is rounded for stable JSON.
+        """
+        digest = hashlib.sha256(text.encode("utf-8")).digest()
+        return [round(byte / 127.5 - 1.0, 4) for byte in digest[: self.EMBEDDING_DIM]]
+
+    async def embeddings(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Return a spec-shaped, deterministic CreateEmbeddingResponse.
+
+        Accepts ``input`` as a ``str`` or a ``list`` of strings (one
+        embedding per item); an empty/missing input is treated as a single
+        empty text. The ``usage`` carries a naive whitespace token estimate
+        so the admin can persist a TokenUsageSample.
+        """
+        self.embeddings_calls += 1
+        raw = request.get("input")
+        if isinstance(raw, str):
+            texts = [raw]
+        elif isinstance(raw, list):
+            texts = [t if isinstance(t, str) else json.dumps(t) for t in raw]
+            if not texts:
+                texts = [""]
+        else:
+            texts = [""]
+        model = request.get("model") or self.model
+        data = [
+            {"object": "embedding", "index": i, "embedding": self._fake_vector(text)}
+            for i, text in enumerate(texts)
+        ]
+        prompt_tokens = sum(max(1, len(text.split())) for text in texts)
+        return {
+            "object": "list",
+            "data": data,
+            "model": model,
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "total_tokens": prompt_tokens,
+            },
+        }

@@ -3,6 +3,7 @@
   "title": "Mock backend_config",
   "description": "Sectioned backend_config for the hardware-free mock provider. The mock fakes inference: no real engine, no downloads. Sections mirror the canonical layout used by real providers (Phase 12).",
   "type": "object",
+  "x-serves-modalities": ["llm", "embedding"],
   "additionalProperties": false,
   "properties": {
     "artifacts": {
