@@ -6,6 +6,7 @@ import type {
   LogsResponse,
   Machine,
   OverviewStats,
+  ProviderAgent,
   ProviderDefinition,
   ProviderInstance,
   ProviderTypeDetail,
@@ -17,6 +18,7 @@ import type {
 export const machineKeys = { all: ["machines"] as const }
 export const definitionKeys = { all: ["definitions"] as const }
 export const instanceKeys = { all: ["instances"] as const }
+export const agentKeys = { all: ["agents"] as const }
 export const responseKeys = (limit: number, offset: number) =>
   ["responses", limit, offset] as const
 export const usageKeys = {
@@ -64,6 +66,20 @@ export function useInstances(refetchInterval = 4000) {
     queryFn: async () =>
       cast<ProviderInstance[]>((await AdminService.listInstances()).data),
     refetchInterval,
+  })
+}
+
+// Phase 16: provider agents (hardware-local containers). Backends nest under
+// each agent in the API payload; the Agents page reads them from here.
+// ``enabled`` lets callers (e.g. the Definitions dialog) mount the query only
+// while it is actually needed instead of polling unconditionally.
+export function useAgents(refetchInterval = 4000, enabled = true) {
+  return useQuery({
+    queryKey: agentKeys.all,
+    queryFn: async () =>
+      cast<ProviderAgent[]>((await AdminService.listAgents()).data),
+    refetchInterval,
+    enabled,
   })
 }
 

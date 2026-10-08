@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as LayoutRouteImport } from './routes/_layout'
 import { Route as LayoutIndexRouteImport } from './routes/_layout/index'
+import { Route as LayoutAgentsRouteImport } from './routes/_layout/agents'
 import { Route as LayoutDefinitionsRouteImport } from './routes/_layout/definitions'
 import { Route as LayoutInstancesRouteImport } from './routes/_layout/instances'
 import { Route as LayoutMachinesRouteImport } from './routes/_layout/machines'
@@ -26,6 +27,11 @@ const LayoutRoute = LayoutRouteImport.update({
 const LayoutIndexRoute = LayoutIndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => LayoutRoute,
+} as any)
+const LayoutAgentsRoute = LayoutAgentsRouteImport.update({
+  id: '/agents',
+  path: '/agents',
   getParentRoute: () => LayoutRoute,
 } as any)
 const LayoutDefinitionsRoute = LayoutDefinitionsRouteImport.update({
@@ -66,6 +72,7 @@ const LayoutSettingsRoute = LayoutSettingsRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof LayoutIndexRoute
+  '/agents': typeof LayoutAgentsRoute
   '/definitions': typeof LayoutDefinitionsRoute
   '/instances': typeof LayoutInstancesRoute
   '/machines': typeof LayoutMachinesRoute
@@ -75,6 +82,7 @@ export interface FileRoutesByFullPath {
   '/settings': typeof LayoutSettingsRoute
 }
 export interface FileRoutesByTo {
+  '/agents': typeof LayoutAgentsRoute
   '/definitions': typeof LayoutDefinitionsRoute
   '/instances': typeof LayoutInstancesRoute
   '/machines': typeof LayoutMachinesRoute
@@ -87,6 +95,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_layout': typeof LayoutRouteWithChildren
+  '/_layout/agents': typeof LayoutAgentsRoute
   '/_layout/definitions': typeof LayoutDefinitionsRoute
   '/_layout/instances': typeof LayoutInstancesRoute
   '/_layout/machines': typeof LayoutMachinesRoute
@@ -100,6 +109,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/agents'
     | '/definitions'
     | '/instances'
     | '/machines'
@@ -109,6 +119,7 @@ export interface FileRouteTypes {
     | '/settings'
   fileRoutesByTo: FileRoutesByTo
   to:
+    | '/agents'
     | '/definitions'
     | '/instances'
     | '/machines'
@@ -120,6 +131,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/_layout'
+    | '/_layout/agents'
     | '/_layout/definitions'
     | '/_layout/instances'
     | '/_layout/machines'
@@ -148,6 +160,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof LayoutIndexRouteImport
+      parentRoute: typeof LayoutRoute
+    }
+    '/_layout/agents': {
+      id: '/_layout/agents'
+      path: '/agents'
+      fullPath: '/agents'
+      preLoaderRoute: typeof LayoutAgentsRouteImport
       parentRoute: typeof LayoutRoute
     }
     '/_layout/definitions': {
@@ -203,6 +222,7 @@ declare module '@tanstack/react-router' {
 }
 
 interface LayoutRouteChildren {
+  LayoutAgentsRoute: typeof LayoutAgentsRoute
   LayoutDefinitionsRoute: typeof LayoutDefinitionsRoute
   LayoutInstancesRoute: typeof LayoutInstancesRoute
   LayoutMachinesRoute: typeof LayoutMachinesRoute
@@ -214,6 +234,7 @@ interface LayoutRouteChildren {
 }
 
 const LayoutRouteChildren: LayoutRouteChildren = {
+  LayoutAgentsRoute: LayoutAgentsRoute,
   LayoutDefinitionsRoute: LayoutDefinitionsRoute,
   LayoutInstancesRoute: LayoutInstancesRoute,
   LayoutMachinesRoute: LayoutMachinesRoute,

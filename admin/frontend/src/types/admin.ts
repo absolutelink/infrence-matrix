@@ -32,7 +32,42 @@ export interface Machine {
   hardware: MachineHardware
   created_at: string
   updated_at: string | null
-  instance_count?: number
+  /** Phase 16: shared agent registration secret (trusted-LAN plaintext). */
+  registration_secret?: string
+  /** Phase 16: number of ProviderAgents attached to this machine. */
+  agent_count?: number
+}
+
+// Phase 16: one backend (ProviderInstance) hosted by a ProviderAgent.
+export interface AgentBackend {
+  id: string
+  provider_definition_id: string
+  backend_status: string
+  port: number
+  config_fingerprint: string | null
+}
+
+// Phase 16: a hardware-local container bound to (machine, provider_type,
+// agent_id). Mirrors admin/backend/app/api/admin/agents.py::_agent_dict.
+export interface ProviderAgent {
+  id: string
+  machine_id: string
+  machine_uid: string | null
+  provider_type: string
+  agent_id: string
+  base_port: number
+  version: string
+  agent_status: string
+  websocket_connected: boolean
+  epoch: number
+  reported_schema_fingerprint: string | null
+  assigned_gpus: string[]
+  error_message: string | null
+  last_seen: string | null
+  created_at: string
+  updated_at: string | null
+  backends?: AgentBackend[]
+  definition_count?: number
 }
 
 export interface InstanceSummary {
@@ -69,6 +104,10 @@ export interface ProviderDefinition {
   model_metadata: Record<string, unknown>
   enabled: boolean
   status: string
+  /** Phase 16: 'any_of_type' | 'specific'. */
+  agent_placement: string
+  /** Phase 16: ProviderAgent ids linked for 'specific' placement (empty for any_of_type). */
+  agents?: string[]
   created_at: string
   updated_at: string | null
   instances?: InstanceSummary[]
@@ -229,6 +268,8 @@ export interface ProviderTypeSummary {
   name: string
   status: string
   schema_fingerprint: string
+  /** Phase 16: per-agent running cap (0 = unlimited). */
+  max_running_backends?: number
   consensus: ProviderTypeConsensus
 }
 
@@ -237,6 +278,8 @@ export interface ProviderTypeDetail {
   status: string
   schema: Record<string, unknown>
   schema_fingerprint: string
+  /** Phase 16: per-agent running cap (0 = unlimited). */
+  max_running_backends?: number
   pending_schema: Record<string, unknown> | null
   consensus: ProviderTypeConsensus
   created_at: string

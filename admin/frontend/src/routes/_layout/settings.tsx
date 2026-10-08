@@ -76,9 +76,9 @@ function SettingsPage() {
         </CardHeader>
         <CardContent className="space-y-3 text-sm text-muted-foreground">
           <p>
-            Each provider agent is a hardware-local container bound to a
-            machine + one backend type; it may host one or more backends of that
-            type. It needs no database — everything comes from env:
+            Each provider agent is a hardware-local container bound to a machine
+            + one backend type; it may host one or more backends of that type.
+            It needs no database — everything comes from env:
           </p>
           <pre className="overflow-auto rounded-md bg-muted p-3 font-mono text-xs">
             {`MACHINE_UID=<machine uid created here>

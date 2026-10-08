@@ -315,6 +315,9 @@ def test_list_provider_types(client: TestClient, session: Session) -> None:
     assert [t["name"] for t in items] == [TYPE_NAME]
     assert items[0]["status"] == "active"
     assert items[0]["schema_fingerprint"] == FP_V1
+    # Phase 16: per-agent running cap surfaced for the Agents UI (SCHEMA_V1
+    # declares no x-max-running-backends → 0 = unlimited).
+    assert items[0]["max_running_backends"] == 0
     assert items[0]["consensus"]["pending_fingerprint"] is None
     assert items[0]["consensus"]["universe_count"] == 1
     assert items[0]["consensus"]["on_committed"] == 1
@@ -334,6 +337,27 @@ def test_get_provider_type_full_schema(client: TestClient, session: Session) -> 
     assert body["status"] == "active"
 
     assert client.get("/admin/api/provider-types/nope").status_code == 404
+
+
+def test_provider_type_detail_exposes_max_running_backends(
+    client: TestClient, session: Session
+) -> None:
+    # Phase 16: a schema declaring x-max-running-backends must surface the
+    # cap on BOTH the list and the detail endpoint (the Agents UI reads it).
+    capped = {
+        "type": "object",
+        "properties": {"delta_count": {"type": "integer"}},
+        "required": ["delta_count"],
+        "x-max-running-backends": 1,
+    }
+    _machine(session, "mr-m")
+    _definition(session)
+    assert _register(client, "mr-m", capped).status_code == 200
+
+    detail = client.get(f"/admin/api/provider-types/{TYPE_NAME}").json()
+    assert detail["max_running_backends"] == 1
+    listed = client.get("/admin/api/provider-types").json()
+    assert listed[0]["max_running_backends"] == 1
 
 
 def test_force_commit_pending(client: TestClient, session: Session) -> None:

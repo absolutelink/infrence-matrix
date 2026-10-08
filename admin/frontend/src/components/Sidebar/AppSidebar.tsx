@@ -3,6 +3,7 @@ import {
   Cpu,
   LayoutDashboard,
   MessagesSquare,
+  Network,
   Package,
   Play,
   Server,
@@ -22,6 +23,7 @@ import { type Item, Main } from "./Main"
 const baseItems: Item[] = [
   { icon: LayoutDashboard, title: "Dashboard", path: "/" },
   { icon: Server, title: "Machines", path: "/machines" },
+  { icon: Network, title: "Agents", path: "/agents" },
   { icon: Package, title: "Definitions", path: "/definitions" },
   { icon: Boxes, title: "Provider Types", path: "/provider-types" },
   { icon: Cpu, title: "Instances", path: "/instances" },

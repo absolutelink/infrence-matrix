@@ -1,7 +1,16 @@
 import { zodResolver } from "@hookform/resolvers/zod"
 import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { createFileRoute } from "@tanstack/react-router"
-import { Pencil, Plus, Trash2 } from "lucide-react"
+import {
+  Check,
+  Copy,
+  Eye,
+  EyeOff,
+  Pencil,
+  Plus,
+  RotateCw,
+  Trash2,
+} from "lucide-react"
 import { useState } from "react"
 import { useForm } from "react-hook-form"
 import { z } from "zod"
@@ -36,6 +45,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { machineKeys, useMachines } from "@/hooks/useAdminData"
+import { useCopyToClipboard } from "@/hooks/useCopyToClipboard"
 import useCustomToast from "@/hooks/useCustomToast"
 import { extractError } from "@/lib/errors"
 import type { Machine } from "@/types/admin"
@@ -98,7 +108,7 @@ function MachinesPage() {
                 <TableHead>Name</TableHead>
                 <TableHead>Address</TableHead>
                 <TableHead>Total VRAM</TableHead>
-                <TableHead>Instances</TableHead>
+                <TableHead>Agents</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
@@ -161,7 +171,7 @@ function MachineRow({
         <TableCell className="text-muted-foreground">{address}</TableCell>
         <TableCell className="font-mono text-xs">{vramGb}</TableCell>
         <TableCell>
-          {machine.instance_count ?? 0}{" "}
+          {machine.agent_count ?? 0}{" "}
           <span className="text-xs text-muted-foreground">attached</span>
         </TableCell>
         <TableCell className="text-right">
@@ -189,6 +199,9 @@ function MachineRow({
       {expanded && (
         <TableRow className="bg-muted/40 hover:bg-muted/40">
           <TableCell colSpan={6} className="py-4">
+            <div className="mb-4">
+              <MachineSecretPanel machine={machine} />
+            </div>
             <HardwareView machine={machine} />
           </TableCell>
         </TableRow>
@@ -259,6 +272,92 @@ function KvList({
         </li>
       ))}
     </ul>
+  )
+}
+
+function MachineSecretPanel({ machine }: { machine: Machine }) {
+  const queryClient = useQueryClient()
+  const { showErrorToast, showSuccessToast } = useCustomToast()
+  const [revealed, setRevealed] = useState(false)
+  const [secret, setSecret] = useState(machine.registration_secret ?? "")
+  const [copied, copy] = useCopyToClipboard()
+
+  const rotate = useMutation({
+    mutationFn: async () =>
+      await AdminService.rotateMachineSecret({
+        path: { machine_id: machine.id },
+      }),
+    onSuccess: (resp) => {
+      const next = (resp?.data as Record<string, unknown>)
+        ?.registration_secret as string | undefined
+      if (next) {
+        setSecret(next)
+        setRevealed(true)
+      }
+      queryClient.invalidateQueries({ queryKey: machineKeys.all })
+      showSuccessToast(
+        "Registration secret rotated — redeploy every agent on this machine with the new MACHINE_SECRET.",
+      )
+    },
+    onError: (err: Error) => showErrorToast(extractError(err)),
+  })
+
+  const masked = "•".repeat(24)
+
+  return (
+    <div className="rounded-md border bg-background p-3">
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <h4 className="text-sm font-semibold">Registration secret</h4>
+        <span className="text-xs text-muted-foreground">
+          paste as <code className="font-mono">MACHINE_SECRET</code> in provider
+          containers on this machine
+        </span>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <code className="min-w-0 flex-1 truncate rounded bg-muted px-2 py-1 font-mono text-xs">
+          {secret ? (revealed ? secret : masked) : "—"}
+        </code>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => setRevealed((r) => !r)}
+          disabled={!secret}
+          aria-label={revealed ? "Hide secret" : "Reveal secret"}
+        >
+          {revealed ? <EyeOff /> : <Eye />}
+          {revealed ? "Hide" : "Reveal"}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={!secret}
+          onClick={async () => {
+            if (secret && (await copy(secret))) {
+              showSuccessToast("Registration secret copied")
+            } else {
+              showErrorToast("Copy failed")
+            }
+          }}
+          aria-label="Copy secret"
+        >
+          {copied ? <Check /> : <Copy />}
+          {copied ? "Copied" : "Copy"}
+        </Button>
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          disabled={rotate.isPending}
+          onClick={() => rotate.mutate()}
+          title="Mint a new secret (agents keep the old one until redeployed)"
+        >
+          <RotateCw />
+          {rotate.isPending ? "Rotating…" : "Rotate"}
+        </Button>
+      </div>
+    </div>
   )
 }
 

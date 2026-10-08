@@ -78,6 +78,9 @@ def list_provider_types(
             "name": t.name,
             "status": t.status,
             "schema_fingerprint": t.schema_fingerprint,
+            # Phase 16: per-agent running cap (0 = unlimited) — surfaced so the
+            # Agents UI can show each agent's type cap without a second fetch.
+            "max_running_backends": t.max_running_backends,
             "consensus": _consensus_dict(session, t),
         }
         for t in types
@@ -95,6 +98,7 @@ def get_provider_type(
         "status": ptype.status,
         "schema": ptype.schema,
         "schema_fingerprint": ptype.schema_fingerprint,
+        "max_running_backends": ptype.max_running_backends,
         "pending_schema": ptype.pending_schema,
         "consensus": _consensus_dict(session, ptype),
         "created_at": ptype.created_at.isoformat(),

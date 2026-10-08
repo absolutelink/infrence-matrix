@@ -35,6 +35,7 @@ import {
 } from "@/components/schema-form/SchemaForm"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   Dialog,
   DialogContent,
@@ -74,6 +75,7 @@ import {
   definitionKeys,
   instanceKeys,
   providerTypeKeys,
+  useAgents,
   useDefinitions,
   useProviderType,
 } from "@/hooks/useAdminData"
@@ -92,10 +94,8 @@ export const Route = createFileRoute("/_layout/definitions")({
 
 const definitionSchema = z.object({
   alias: z.string().min(1, "alias is required").max(255),
-  // Phase 14: empty = shell definition (type adopted at registration,
-  // backend_config authored afterwards). Editing an existing shell's type
-  // is the operator repair path.
-  provider_type: z.string().max(64),
+  // Phase 16: provider_type is required (the Phase 14 shell is retired).
+  provider_type: z.string().min(1, "provider_type is required").max(64),
   capacity: z
     .string()
     .refine((t) => Number.isInteger(Number(t)) && Number(t) >= 1, {
@@ -112,6 +112,11 @@ const definitionSchema = z.object({
       message: "must be an integer ≥ 0",
     }),
   enabled: z.boolean(),
+  // Phase 16: placement. 'specific' requires ≥1 agent — enforced in the submit
+  // handler (and server-side) rather than on the object schema, so the
+  // zodResolver generic stays a plain ZodObject.
+  agent_placement: z.enum(["any_of_type", "specific"]),
+  agents: z.array(z.string()),
 })
 
 type DefinitionFormValues = z.infer<typeof definitionSchema>
@@ -252,16 +257,7 @@ function DefinitionRow({
           {d.alias}
         </TableCell>
         <TableCell>
-          {d.provider_type === null ? (
-            <Badge
-              variant="outline"
-              className="border-violet-500/30 bg-violet-500/15 font-mono text-violet-600 dark:text-violet-400"
-            >
-              awaiting_config
-            </Badge>
-          ) : (
-            <StatusBadge status={d.provider_type} />
-          )}
+          <StatusBadge status={d.provider_type} />
         </TableCell>
         <TableCell>
           <Badge
@@ -325,7 +321,6 @@ function DefinitionDetail({
   // x-secret leaf before rendering so stored secrets never hit the DOM.
   const { data: typeDetail } = useProviderType(d.provider_type)
   const displayConfig = useMemo(() => {
-    if (d.backend_config === null) return null
     const schema = (typeDetail?.schema ?? null) as RJSFSchema | null
     if (!schema) return d.backend_config
     const stripped = stripSecrets(schema, d.backend_config)
@@ -341,15 +336,31 @@ function DefinitionDetail({
     }
     return out
   }, [typeDetail, d.backend_config])
+  const placementAgents = d.agents ?? []
   return (
     <div className="grid gap-6 md:grid-cols-2">
       <div>
         <h4 className="mb-2 text-sm font-semibold">Config fingerprint</h4>
         <code className="rounded bg-muted px-2 py-1 font-mono text-xs">
-          {d.config_fingerprint === null
-            ? "null — no config authored yet"
-            : `${d.config_fingerprint.slice(0, 16)}…`}
+          {d.config_fingerprint ? `${d.config_fingerprint.slice(0, 16)}…` : "—"}
         </code>
+      </div>
+      <div>
+        <h4 className="mb-2 text-sm font-semibold">Placement</h4>
+        <p className="text-xs text-muted-foreground">
+          {d.agent_placement === "specific" ? (
+            <>
+              <span className="font-mono">specific</span> — hosted on{" "}
+              {placementAgents.length} cherry-picked agent
+              {placementAgents.length === 1 ? "" : "s"}
+            </>
+          ) : (
+            <>
+              <span className="font-mono">any_of_type</span> — hosted on every{" "}
+              {d.provider_type} agent
+            </>
+          )}
+        </p>
       </div>
       <div>
         <h4 className="mb-2 text-sm font-semibold">
@@ -368,24 +379,13 @@ function DefinitionDetail({
       </div>
       <div className="md:col-span-2">
         <h4 className="mb-2 text-sm font-semibold">backend_config</h4>
-        {displayConfig === null ? (
-          <p className="rounded-md border border-dashed border-violet-500/40 p-3 text-xs text-muted-foreground">
-            No backend_config yet — this shell definition is waiting for its
-            provider to register (which adopts the type). Then edit this
-            definition to author the config against the committed schema; saving
-            pushes it to the connected instance.
-          </p>
-        ) : (
-          <>
-            <p className="mb-1 text-xs text-muted-foreground">
-              x-secret fields are hidden (write-only — edit via the schema form;
-              leaving the input blank keeps the stored value).
-            </p>
-            <pre className="max-h-64 overflow-auto rounded-md bg-muted p-3 font-mono text-xs">
-              {JSON.stringify(displayConfig, null, 2)}
-            </pre>
-          </>
-        )}
+        <p className="mb-1 text-xs text-muted-foreground">
+          x-secret fields are hidden (write-only — edit via the schema form;
+          leaving the input blank keeps the stored value).
+        </p>
+        <pre className="max-h-64 overflow-auto rounded-md bg-muted p-3 font-mono text-xs">
+          {JSON.stringify(displayConfig, null, 2)}
+        </pre>
         {(d.instances ?? []).length > 0 && (
           <>
             <h4 className="mt-4 mb-2 text-sm font-semibold">Instances</h4>
@@ -445,10 +445,23 @@ function DefinitionFormDialog({
       vram_required_bytes: String(definition?.vram_required_bytes ?? 0),
       idle_timeout_seconds: String(definition?.idle_timeout_seconds ?? 300),
       enabled: definition?.enabled ?? true,
+      // Phase 16: placement.
+      agent_placement:
+        definition?.agent_placement === "specific" ? "specific" : "any_of_type",
+      agents: definition?.agents ?? [],
     },
   })
 
   const providerType = form.watch("provider_type")
+  const placement = form.watch("agent_placement")
+
+  // Phase 16: agents available to cherry-pick for 'specific' placement,
+  // filtered to the definition's provider_type (the backend enforces the
+  // type match too — 422 on a mismatch). Poll only while the dialog is open.
+  const { data: allAgents = [] } = useAgents(4000, open)
+  const eligibleAgents = allAgents.filter(
+    (a) => a.provider_type === providerType,
+  )
 
   const { data: providerTypes = [] } = useQuery({
     queryKey: providerTypeKeys.all,
@@ -569,13 +582,8 @@ function DefinitionFormDialog({
 
   const mutation = useMutation({
     mutationFn: async (values: DefinitionFormValues) => {
-      // Phase 14: empty provider type = shell creation. No config is sent
-      // (the API refuses backend_config on a shell).
-      const shellCreate = !isEdit && values.provider_type === ""
       let backendConfig: Record<string, unknown>
-      if (shellCreate) {
-        backendConfig = {}
-      } else if (effectiveRawMode) {
+      if (effectiveRawMode) {
         try {
           const parsed = JSON.parse(rawText)
           if (
@@ -617,54 +625,29 @@ function DefinitionFormDialog({
           ? restoreSecrets(schema, pruned, storedConfig)
           : pruned
       }
+      // Phase 16: placement. 'specific' sends the cherry-picked agent ids;
+      // 'any_of_type' sends an empty list (the backend clears the links).
+      const agents = values.agent_placement === "specific" ? values.agents : []
       const body = {
         alias: values.alias,
-        provider_type:
-          values.provider_type === "" ? null : values.provider_type,
+        provider_type: values.provider_type,
         backend_config: backendConfig,
         capacity: Number(values.capacity),
         vram_required_bytes: Number(values.vram_required_bytes),
         idle_timeout_seconds: Number(values.idle_timeout_seconds),
         enabled: values.enabled,
+        agent_placement: values.agent_placement,
+        agents,
       }
       setExtraErrors(undefined)
       if (isEdit && definition) {
         const patch: DefinitionPatch = { ...body }
-        // Never null-out provider_type/backend_config in a PATCH (the API
-        // refuses unset; a shell edit carries the current values).
-        if (
-          (patch as { provider_type?: string | null }).provider_type === null
-        ) {
-          delete (patch as { provider_type?: string | null }).provider_type
-        }
-        // Phase 14 (review F1): editing a SHELL must not silently author
-        // a config. A shell's editor seeds from {} (no stored config);
-        // unless the operator actually typed one, drop backend_config
-        // from the PATCH entirely — sending {} would otherwise commit an
-        // empty config (push + schedulable on defaults) on an adopted
-        // shell, and 422 on a not-yet-adopted one.
-        if (
-          definition.backend_config === null &&
-          JSON.stringify(backendConfig) === JSON.stringify({})
-        ) {
-          delete (patch as { backend_config?: unknown }).backend_config
-        }
-        if ((patch as { backend_config?: unknown }).backend_config === null) {
-          delete (patch as { backend_config?: unknown }).backend_config
-        }
         return await AdminService.patchDefinition({
           path: { definition_id: definition.id },
           body: patch,
         })
       }
-      const createBody: DefinitionCreate = {
-        ...body,
-        provider_type: values.provider_type,
-      }
-      // Phase 14: a shell create omits backend_config entirely.
-      if (shellCreate) {
-        delete (createBody as { backend_config?: unknown }).backend_config
-      }
+      const createBody: DefinitionCreate = { ...body }
       return await AdminService.createDefinition({ body: createBody })
     },
     onSuccess: (resp) => {
@@ -734,12 +717,23 @@ function DefinitionFormDialog({
           <DialogDescription>
             {isEdit
               ? "Changing backend_config or capacity pushes provider.config.update to every connected instance (results shown after save)."
-              : "A provider container registers against this definition with its registration token."}
+              : "Agents of the chosen provider type host this definition according to its placement."}
           </DialogDescription>
         </DialogHeader>
         <Form {...form}>
           <form
-            onSubmit={form.handleSubmit((v) => mutation.mutate(v))}
+            onSubmit={form.handleSubmit((v) => {
+              // 'specific' placement needs at least one agent (server also
+              // 422s an empty list).
+              if (v.agent_placement === "specific" && v.agents.length === 0) {
+                form.setError("agents", {
+                  message: "select at least one agent for 'specific' placement",
+                })
+                return
+              }
+              form.clearErrors("agents")
+              mutation.mutate(v)
+            })}
             className="space-y-4"
           >
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -766,27 +760,23 @@ function DefinitionFormDialog({
                   <FormItem>
                     <FormLabel>Provider type</FormLabel>
                     <Select
-                      onValueChange={(v) =>
-                        field.onChange(v === "SHELL" ? "" : v)
-                      }
+                      onValueChange={(v) => {
+                        field.onChange(v)
+                        // Agents are type-specific: a retype invalidates any
+                        // cherry-picked selection.
+                        form.setValue("agents", [])
+                      }}
                       value={field.value}
                       disabled={
-                        isEdit &&
-                        (definition?.provider_type ?? "") !== "" &&
-                        (definition?.instances?.length ?? 0) > 0
+                        isEdit && (definition?.instances?.length ?? 0) > 0
                       }
                     >
                       <FormControl>
                         <SelectTrigger>
-                          <SelectValue placeholder="Select type (or shell)" />
+                          <SelectValue placeholder="Select type" />
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
-                        {!isEdit && (
-                          <SelectItem value="SHELL">
-                            (shell — type adopted at registration)
-                          </SelectItem>
-                        )}
                         {providerTypes.map((t) => (
                           <SelectItem key={t.name} value={t.name}>
                             {t.name}
@@ -797,9 +787,7 @@ function DefinitionFormDialog({
                     <FormDescription>
                       {isEdit && (definition?.instances?.length ?? 0) > 0
                         ? "Locked: instances are attached (changing the type would break their binding)."
-                        : isEdit && (definition?.provider_type ?? "") === ""
-                          ? "Shell definition — the type is set by the provider's first registration (repair path)."
-                          : "Pick a registered type, or create a shell and let the container adopt its type."}
+                        : "The registered type whose schema renders backend_config and whose agents can host this model."}
                     </FormDescription>
                     <FormMessage />
                   </FormItem>
@@ -854,6 +842,104 @@ function DefinitionFormDialog({
               />
             </div>
 
+            <div className="space-y-3 rounded-lg border p-3">
+              <FormLabel className="text-sm font-semibold">Placement</FormLabel>
+              <FormField
+                control={form.control}
+                name="agent_placement"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Agent placement</FormLabel>
+                    <Select onValueChange={field.onChange} value={field.value}>
+                      <FormControl>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        <SelectItem value="any_of_type">
+                          Any agent of this type
+                        </SelectItem>
+                        <SelectItem value="specific">
+                          Specific agents…
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <FormDescription>
+                      {providerType
+                        ? `any_of_type hosts on every "${providerType}" agent; specific cherry-picks individual agents.`
+                        : "Pick a provider type first — placement lists that type's agents."}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              {placement === "specific" && (
+                <FormField
+                  control={form.control}
+                  name="agents"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>
+                        Host on{" "}
+                        <span className="font-mono">{providerType || "—"}</span>{" "}
+                        agents
+                      </FormLabel>
+                      {eligibleAgents.length === 0 ? (
+                        <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+                          No {providerType || "—"} agents registered yet. Start
+                          a provider container of this type, then pick it here.
+                        </p>
+                      ) : (
+                        <div className="max-h-48 space-y-1 overflow-auto rounded-md border p-2">
+                          {eligibleAgents.map((a) => {
+                            const checked = field.value.includes(a.id)
+                            const cbId = `def-agent-${a.id}`
+                            return (
+                              <div
+                                key={a.id}
+                                className="flex items-center gap-2 rounded px-1 py-1 text-sm hover:bg-accent"
+                              >
+                                <Checkbox
+                                  id={cbId}
+                                  checked={checked}
+                                  onCheckedChange={(c) =>
+                                    field.onChange(
+                                      c
+                                        ? [...field.value, a.id]
+                                        : field.value.filter((x) => x !== a.id),
+                                    )
+                                  }
+                                />
+                                <label
+                                  htmlFor={cbId}
+                                  className="flex flex-1 cursor-pointer items-center gap-2"
+                                >
+                                  <span className="font-mono text-xs">
+                                    {a.agent_id}
+                                  </span>
+                                  <span className="text-xs text-muted-foreground">
+                                    @ {a.machine_uid ?? "—"} · :{a.base_port}
+                                  </span>
+                                </label>
+                                <StatusBadge status={a.agent_status} />
+                                {!a.websocket_connected && (
+                                  <span className="text-xs text-muted-foreground">
+                                    (ws down)
+                                  </span>
+                                )}
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )}
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              )}
+            </div>
+
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-2">
                 <FormLabel className="text-sm font-semibold">
@@ -880,9 +966,8 @@ function DefinitionFormDialog({
               </div>
               {!providerType ? (
                 <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
-                  {isEdit
-                    ? "Shell definition — backend_config is authored here after the provider registers and adopts its type."
-                    : "Select a provider type to load its schema. Pick “shell” to configure after registration."}
+                  Select a provider type to load its schema and render
+                  backend_config.
                 </p>
               ) : schemaLoading ? (
                 <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
