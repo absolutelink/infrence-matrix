@@ -6,9 +6,7 @@ owning agent and carry the target ``instance_id``):
 * the 202 accept-style defaults (``wait_for_running: false`` + the short ack
   window) versus the opt-in blocking form (boot budget),
 * provider NAKs surfacing as 502 with ``step`` / ``retry_after``,
-* ``backend.metadata`` ingest onto the definition,
-* the registration port-clash refusal that keeps two backends on one machine
-  addressable as separate targets.
+* ``backend.metadata`` ingest onto the definition.
 
 Routes are called directly (no HTTP layer) with the ack intercepted, so the
 command payload — the part the provider contract actually depends on — is
@@ -22,7 +20,6 @@ import pytest
 from sqlmodel import Session
 
 from app.api.admin import instances as routes
-from app.api.admin import providers as provider_routes
 from app.api.admin.instances import BackendActionBody, _send_action
 from app.models import (
     Machine,
@@ -76,7 +73,6 @@ def _seed(
     inst = ProviderInstance(
         agent_id=agent.id,
         provider_definition_id=definition.id,
-        port=port,
         backend_status="stopped",
     )
     session.add(inst)
@@ -268,124 +264,3 @@ async def test_backend_metadata_ignores_empty_and_unknown(
     # Unset means the column default ({}): an empty or unknown-instance
     # event must not create a phantom roster.
     assert not fresh.model_metadata
-
-
-# ---------------------------------------------------------------------------
-# registration port clash (agent-scoped)
-# ---------------------------------------------------------------------------
-
-
-def _peer_agent(
-    session: Session, machine: Machine, *, connected: bool
-) -> ProviderAgent:
-    agent = ProviderAgent(
-        machine_id=machine.id,
-        provider_type="mock",
-        agent_id=f"peer-{uuid.uuid4().hex[:8]}",
-        websocket_connected=connected,
-    )
-    session.add(agent)
-    session.commit()
-    session.refresh(agent)
-    return agent
-
-
-def test_port_clash_rejects_a_connected_peer(session: Session) -> None:
-    from fastapi import HTTPException
-
-    inst, _definition, machine = _seed(session, port=8083)
-    agent = session.get(ProviderAgent, inst.agent_id)
-    peer_agent = _peer_agent(session, machine, connected=True)
-    other_def = ProviderDefinition(
-        alias=f"other-{uuid.uuid4().hex[:6]}",
-        provider_type="mock",
-        backend_config={},
-        vram_required_bytes=0,
-        idle_timeout_seconds=300,
-        capacity=1,
-        enabled=True,
-    )
-    session.add(other_def)
-    session.commit()
-    session.refresh(other_def)
-    session.add(
-        ProviderInstance(
-            agent_id=peer_agent.id,
-            provider_definition_id=other_def.id,
-            port=8083,
-        )
-    )
-    session.commit()
-
-    with pytest.raises(HTTPException) as exc:
-        provider_routes._reject_port_clash(session, agent, [8083])
-    assert exc.value.status_code == 409
-    detail = exc.value.detail
-    assert detail["error"] == "port_conflict"
-    assert detail["port"] == 8083
-    assert other_def.alias in detail["message"]
-
-
-def test_port_clash_ignores_disconnected_peer(session: Session) -> None:
-    inst, _definition, machine = _seed(session, port=8083)
-    agent = session.get(ProviderAgent, inst.agent_id)
-    peer_agent = _peer_agent(session, machine, connected=False)
-    other_def = ProviderDefinition(
-        alias=f"stale-{uuid.uuid4().hex[:6]}",
-        provider_type="mock",
-        backend_config={},
-        vram_required_bytes=0,
-        idle_timeout_seconds=300,
-        capacity=1,
-        enabled=True,
-    )
-    session.add(other_def)
-    session.commit()
-    session.refresh(other_def)
-    session.add(
-        ProviderInstance(
-            agent_id=peer_agent.id,
-            provider_definition_id=other_def.id,
-            port=8083,
-        )
-    )
-    session.commit()
-    # Disconnected peer holds no port: no clash.
-    provider_routes._reject_port_clash(session, agent, [8083])
-
-
-def test_port_clash_is_scoped_to_the_machine(session: Session) -> None:
-    inst, _definition, _machine = _seed(session, port=8083, machine_uid="mach-a")
-    agent = session.get(ProviderAgent, inst.agent_id)
-    other = Machine(
-        uid="mach-b",
-        name=f"mach-b-{uuid.uuid4().hex[:8]}",
-        host="10.0.0.6",
-        dns="other.local",
-    )
-    session.add(other)
-    session.commit()
-    session.refresh(other)
-    peer_agent = _peer_agent(session, other, connected=True)
-    other_def = ProviderDefinition(
-        alias=f"other-mach-{uuid.uuid4().hex[:6]}",
-        provider_type="mock",
-        backend_config={},
-        vram_required_bytes=0,
-        idle_timeout_seconds=300,
-        capacity=1,
-        enabled=True,
-    )
-    session.add(other_def)
-    session.commit()
-    session.refresh(other_def)
-    session.add(
-        ProviderInstance(
-            agent_id=peer_agent.id,
-            provider_definition_id=other_def.id,
-            port=8083,
-        )
-    )
-    session.commit()
-    # Same port on another machine must not collide with mach-a.
-    provider_routes._reject_port_clash(session, agent, [8083])

@@ -350,7 +350,6 @@ def definition_dict(
                     i.agent.websocket_connected if i.agent else False
                 ),
                 "config_fingerprint": i.config_fingerprint,
-                "port": i.port,
             }
             for i in instances
         ]

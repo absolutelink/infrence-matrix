@@ -257,7 +257,6 @@ def test_cross_agent_backend_status_ignored(client: TestClient, session: Session
     other_inst = ProviderInstance(
         agent_id=other_agent.id,
         provider_definition_id=definition.id,
-        port=8091,
         backend_status="stopped",
     )
     session.add(other_inst)

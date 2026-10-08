@@ -72,7 +72,6 @@ def _backend_dicts(session: Session, agent_id: uuid.UUID) -> list[dict[str, Any]
             "id": str(i.id),
             "provider_definition_id": str(i.provider_definition_id),
             "backend_status": i.backend_status,
-            "port": i.port,
             "config_fingerprint": i.config_fingerprint,
         }
         for i in rows

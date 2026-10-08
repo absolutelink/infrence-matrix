@@ -72,7 +72,11 @@ def make_provider_type(
 
 
 def _agent(
-    session: Session, machine: Machine, *, connected: bool = True
+    session: Session,
+    machine: Machine,
+    *,
+    connected: bool = True,
+    base_port: int = 8081,
 ) -> ProviderAgent:
     """Get-or-create a connected agent for ``machine`` (one per machine)."""
     existing = session.exec(
@@ -85,7 +89,7 @@ def _agent(
             session.commit()
             session.refresh(existing)
         return existing
-    return make_agent(session, machine, connected=connected)
+    return make_agent(session, machine, connected=connected, base_port=base_port)
 
 
 def make_stack(
@@ -113,7 +117,6 @@ def make_stack(
         session,
         agent,
         definition,
-        port=port,
         backend_status=backend_status,
     )
     return machine, definition, instance
@@ -681,9 +684,8 @@ async def test_boot_exception_falls_through_to_next_candidate(
         .first()
     )
     inst2 = ProviderInstance(
-        agent_id=_agent(session, machine2).id,
+        agent_id=_agent(session, machine2, base_port=9091).id,
         provider_definition_id=definition.id,
-        port=9091,
         backend_status="stopped",
     )
     session.add(inst2)
@@ -857,7 +859,6 @@ async def test_admission_uses_machine_reachable_preference(
     instance = ProviderInstance(
         agent_id=_agent(session, machine).id,
         provider_definition_id=definition.id,
-        port=8081,
         backend_status="running",
     )
     session.add(instance)

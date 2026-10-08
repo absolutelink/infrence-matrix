@@ -634,7 +634,6 @@ def test_patch_placement_prunes_stale_backend(
     ghost = ProviderInstance(
         agent_id=agent_a.id,
         provider_definition_id=def_id,
-        port=agent_a.base_port,
     )
     session.add(ghost)
     session.commit()

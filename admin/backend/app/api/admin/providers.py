@@ -14,13 +14,15 @@ admin:
   * resolves the definitions *placed* on this agent (``agent_placement``:
     every enabled definition of the type for ``any_of_type``, or the
     cherry-picked set for ``specific``) and upserts one ``ProviderInstance``
-    per placed definition, assigning each a port ``base_port + offset``,
+    per placed definition (the agent publishes a single admin-facing
+    ``PROVIDER_PORT`` — ``base_port`` — and routes each request to a backend by
+    model, so the admin allocates no per-backend port),
   * mints a single per-agent WebSocket secret (stored in Redis under
     ``im:ws:secret:{agent_id}``) that authorizes the one socket the agent
     multiplexes all its backends over.
 
 The response returns the agent id/secret plus the list of backends (instance
-id + definition + port) the agent is responsible for. See docs/ws-protocol.md.
+id + definition) the agent is responsible for. See docs/ws-protocol.md.
 """
 
 import json
@@ -69,7 +71,9 @@ class RegistrationRequest(BaseModel):
 
     Phase 16: ``machine_secret`` replaces ``registration_token``; ``agent_id``
     is the operator-supplied stable id (container ``AGENT_ID`` env) and
-    ``base_port`` is the first backend port (backends get ``base_port + i``).
+    ``base_port`` is the agent's single published admin-facing ``/v1`` port
+    (container ``PROVIDER_PORT`` env); the agent routes each request to a
+    backend by model, so there are no per-backend ports.
     """
 
     machine_uid: str = Field(max_length=255)
@@ -388,8 +392,8 @@ def _placed_definitions(
 
     A ``specific`` definition placed on some OTHER agent must never leak onto
     this one, and an ``any_of_type`` definition must still apply even when the
-    agent also carries ``specific`` links. Sorted by alias so port offsets are
-    stable across registrations.
+    agent also carries ``specific`` links. Sorted by alias so the assignment
+    list is deterministic across registrations.
     """
     placed: dict[uuid.UUID, ProviderDefinition] = {}
     # any_of_type defs of this agent's provider_type.
@@ -424,58 +428,8 @@ def prune_unplaced_backends(
     registration/PATCH to retire once it stops. Returns the number of rows
     deleted.
     """
-    diff = reconcile_agent_placement(
-        session, agent, placed, create_new=False, renumber_ports=False
-    )
+    diff = reconcile_agent_placement(session, agent, placed, create_new=False)
     return len(diff.removed)
-
-
-def _reject_port_clash(
-    session: Session, agent: ProviderAgent, ports: list[int]
-) -> None:
-    """409 when a CONNECTED instance on another agent of this machine already
-    holds one of the ports this agent is about to claim.
-
-    The admin dials litellm at ``http://{machine address}:{instance.port}``,
-    so a collision silently misroutes one alias's traffic into another
-    provider's engine. Only a connected peer holds the port: refusing on a
-    stale row would make it impossible to bring a replacement online, and the
-    presence sweep clears those within its TTL.
-    """
-    if not ports:
-        return
-    peer = session.exec(
-        select(ProviderInstance, ProviderDefinition)
-        .join(
-            ProviderDefinition,
-            ProviderInstance.provider_definition_id == ProviderDefinition.id,
-        )
-        .join(ProviderAgent, ProviderInstance.agent_id == ProviderAgent.id)
-        .where(
-            ProviderAgent.machine_id == agent.machine_id,
-            ProviderInstance.agent_id != agent.id,
-            ProviderInstance.port.in_(ports),  # type: ignore[attr-defined]
-            ProviderAgent.websocket_connected == True,  # noqa: E712
-        )
-    ).first()
-    if peer is None:
-        return
-    inst, peer_definition = peer
-    raise HTTPException(
-        status_code=409,
-        detail={
-            "error": "port_conflict",
-            "message": (
-                f"machine already has a connected backend of definition "
-                f"'{peer_definition.alias}' on port {inst.port}; the admin "
-                "could not tell the two apart. Give this agent a distinct "
-                "PROVIDER_PORT/base_port and publish that same host port."
-            ),
-            "port": inst.port,
-            "conflicting_definition": peer_definition.alias,
-            "conflicting_instance_id": str(inst.id),
-        },
-    )
 
 
 @router.post("/register")
@@ -604,20 +558,17 @@ async def register_provider(
         raise HTTPException(status_code=409, detail=refusal)
 
     # 7. Resolve placed definitions and reconcile one ProviderInstance each
-    #    (create stopped rows at ``base_port + sorted-alias offset``, refresh
-    #    fingerprints, and retire de-placed ghosts busy-safe). Slice 5: this is
-    #    the SAME shared diff the live ``agent.assignments.update`` push runs,
-    #    so registration and placement-change reconciliation never diverge.
+    #    (create stopped rows, refresh fingerprints, and retire de-placed ghosts
+    #    busy-safe). Backends carry no admin-facing port — the agent publishes a
+    #    single env PROVIDER_PORT and routes by model. Slice 5: this is the SAME
+    #    shared diff the live ``agent.assignments.update`` push runs, so
+    #    registration and placement-change reconciliation never diverge.
     placed = _placed_definitions(session, agent)
-    ports = [agent.base_port + i for i in range(len(placed))]
-    _reject_port_clash(session, agent, ports)
-    diff = reconcile_agent_placement(
-        session, agent, placed, create_new=True, renumber_ports=True
-    )
+    diff = reconcile_agent_placement(session, agent, placed, create_new=True)
     pruned = len(diff.removed)
 
     # Build the response backends list from the reconciled rows, preserving the
-    # registration response shape (instance id + port + definition echo).
+    # registration response shape (instance id + definition echo).
     rows = {
         inst.provider_definition_id: inst
         for inst in session.exec(
@@ -627,7 +578,6 @@ async def register_provider(
     backends: list[dict[str, Any]] = [
         {
             "instance_id": str(rows[d.id].id),
-            "port": rows[d.id].port,
             "definition": _definition_dict(d, rows[d.id].config_fingerprint),
         }
         for d in placed

@@ -137,7 +137,9 @@ class Admission:
     """A granted inference slot for one request."""
 
     instance_id: str
-    # http://{machine.reachable}:{port}  (NO trailing /v1; caller appends)
+    # http://{machine.reachable}:{agent.base_port}  (the agent's single env
+    # /v1 port; NO trailing /v1; caller appends). litellm routes to the
+    # specific backend by the request's model (= alias).
     base_url: str
     machine_uid: str
 
@@ -447,7 +449,7 @@ class InferenceScheduler:
             await self._record_admission(alias, request_id, instance, definition)
             return Admission(
                 instance_id=instance_id,
-                base_url=f"http://{address}:{instance.port}",
+                base_url=f"http://{address}:{instance.agent.base_port}",
                 machine_uid=machine.uid,
             )
         return None

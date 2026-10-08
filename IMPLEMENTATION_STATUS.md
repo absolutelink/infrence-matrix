@@ -2,10 +2,11 @@
 
 **Overhaul branch:** `litellm-architecture-overhaul`
 **Last updated:** 2026-10-08 (**Port model overhaul — agent-owned ports +
-model-routed `/v1`: Slice 0 (docs/spec) DONE, Slices 1–5 PLANNED — no code
-changed yet.** Fixes the production `port_conflict` cross-agent collision by
-moving to one published `PROVIDER_PORT` per agent that routes `/v1` by model;
-the admin stops allocating/policing ports and `ProviderInstance.port` is dropped.
+model-routed `/v1`: Slices 0–1 DONE (docs + admin cutover), Slices 2–5 PLANNED.**
+Fixes the production `port_conflict` cross-agent collision by moving to one
+published `PROVIDER_PORT` per agent that routes `/v1` by model; the admin stops
+allocating/policing ports and `ProviderInstance.port` is dropped (migration
+`b7d3f0a1c9e2`).
 `ARCHITECTURE.md` rewritten to the new model; see the "Port model overhaul"
 section below for the locked decisions + slice plan. Prior: **Phase 18 ✅
 embeddings + modality-scoped
@@ -2326,12 +2327,15 @@ the data model again.
 
 ## Port model overhaul — agent-owned ports + model-routed `/v1` (2026-10-08)
 
-**Status: IN PROGRESS — Slice 0 (docs/spec) DONE; Slices 1–5 PLANNED (no code
-changed yet).** This section records the locked target model and the slice plan;
-the code still reflects the old admin-allocated per-backend-port scheme until
-Slices 1–4 land. `ARCHITECTURE.md` has been rewritten to the new model (this
-slice); `docs/ws-protocol.md` and `provider/README.md` still describe the old
-`base_port + offset` / `MultiPortServer` per-port scheme and are updated in
+**Status: IN PROGRESS — Slices 0–1 DONE (docs + admin cutover); Slices 2–5
+PLANNED.** Slice 1 landed the admin half: the admin no longer allocates or
+polices per-backend ports, dials `machine.reachable_address():agent.base_port`,
+and the `ProviderInstance.port` column is dropped (Alembic `b7d3f0a1c9e2`). The
+provider side still runs the per-backend `MultiPortServer` until Slice 2 lands
+(the admin now sends no `port`, and the provider falls back to its env
+`PROVIDER_PORT`, so the wire stays compatible). `ARCHITECTURE.md` is rewritten to
+the new model; `docs/ws-protocol.md` and `provider/README.md` still describe the
+old `base_port + offset` / `MultiPortServer` per-port scheme and are updated in
 Slice 5.
 
 **The production bug.** Adding a 2nd `ProviderDefinition` to an agent that shares
@@ -2382,13 +2386,13 @@ admin-facing port `base_port + offset` and enforces machine-wide uniqueness
       `agent.assignments.update` prose + payload, §7 flow steps, §13 known
       limitation). This IMPLEMENTATION_STATUS.md section added. **No code,
       schema, test, or other-doc changes.**
-- [ ] **Slice 1 — admin stops allocating/policing ports.** Remove the
+- [x] **Slice 1 — admin stops allocating/policing ports.** DONE: removed the
       `base_port + offset` allocation, the registration `port_conflict` 409
       (`_reject_port_clash`), and the cross-agent clash refusal on the
-      `agent.assignments.update` push; drop the `ProviderInstance.port` column +
-      Alembic migration; point litellm's `api_base` at the agent's env port
-      (`machine.reachable_address():agent.base_port`) with the alias as the
-      model. Update admin tests.
+      `agent.assignments.update` push; dropped the `ProviderInstance.port` column
+      + Alembic migration `b7d3f0a1c9e2`; pointed litellm's `api_base` at the
+      agent's env port (`machine.reachable_address():agent.base_port`) with the
+      alias as the model. Admin tests updated (396 green); client regenerated.
 - [ ] **Slice 2 — provider_lib single env-port listener + model routing.**
       Replace the per-backend `MultiPortServer` with one `/v1` listener on the
       agent's env `PROVIDER_PORT` that dispatches to the target backend by the
@@ -2406,8 +2410,10 @@ admin-facing port `base_port + offset` and enforces machine-wide uniqueness
       `deployment.md` (one published `PROVIDER_PORT` per agent container);
       `bash scripts/generate-client.sh`.
 
-**Not yet done:** every code/schema/migration/test change above (Slices 1–5).
-This slice is documentation-only.
+**Not yet done:** the provider-side model routing (Slice 2), llama-cpp random
+engine port + schema field removal (Slice 3), halogen-flash schema field removal
+(Slice 4), and the `docs/ws-protocol.md` / `provider/README.md` / `deployment.md`
+rewrites (Slice 5).
 
 ---
 

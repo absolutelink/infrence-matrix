@@ -112,7 +112,6 @@ def _instance(
     inst = ProviderInstance(
         agent_id=agent.id,
         provider_definition_id=definition.id,
-        port=8081,
         backend_status=backend_status,
         last_request_at=BASE + timedelta(seconds=5),
         config_fingerprint="fp",
@@ -166,7 +165,7 @@ def test_list_instances_shape_and_ordering(
     assert item["backend_status"] == "running"
     assert item["websocket_connected"] is True
     assert item["epoch"] == 1
-    assert item["port"] == 8081
+    assert "port" not in item  # port model overhaul: no per-backend port
     assert item["config_fingerprint"] == "fp"
     _assert_utc_iso(item["created_at"])
     _assert_utc_iso(item["last_seen"])

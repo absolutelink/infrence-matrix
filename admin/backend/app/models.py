@@ -82,7 +82,8 @@ class Machine(SQLModel, table=True):
     )
 
     # How the admin reaches provider instances on this machine. At least one
-    # of host/dns/ip must be set; litellm targets http://{reachable}:{port}/v1.
+    # of host/dns/ip must be set; litellm targets
+    # http://{reachable}:{agent.base_port}/v1 (the agent routes by model).
     host: str | None = Field(default=None, max_length=255)
     dns: str | None = Field(default=None, max_length=255)
     ip: str | None = Field(default=None, max_length=255)
@@ -247,7 +248,9 @@ class ProviderAgent(SQLModel, table=True):
     # Operator-supplied stable id (container AGENT_ID env).
     agent_id: str = Field(max_length=255)
 
-    # Base HTTP port; backends listen on base_port + offset.
+    # The agent's single published admin-facing /v1 port (container env
+    # PROVIDER_PORT). The admin dials every backend of this agent here and the
+    # agent routes by model. No per-backend offsets.
     base_port: int = Field(default=8081)
     version: str = Field(default="dev", max_length=64)
 
@@ -396,10 +399,6 @@ class ProviderInstance(SQLModel, table=True):
     provider_definition_id: uuid.UUID = Field(
         foreign_key="provider_definitions.id", ondelete="CASCADE"
     )
-
-    # This backend's HTTP port = agent.base_port + offset. Admin points
-    # litellm at http://{machine.reachable_address()}:{port}/v1.
-    port: int = Field(default=8081)
 
     # Per-backend lifecycle:
     # backend_status: stopped|initializing|starting|running|in_use|stopping|error

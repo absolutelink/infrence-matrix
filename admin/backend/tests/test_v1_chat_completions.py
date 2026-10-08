@@ -71,7 +71,7 @@ def seed_instance(
         backend_config={"model": {"file": "m.gguf"}},
     )
     return make_instance(
-        session, agent, definition, port=8081, backend_status="running"
+        session, agent, definition, backend_status="running"
     )
 
 

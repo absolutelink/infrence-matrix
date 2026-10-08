@@ -80,7 +80,6 @@ def test_provider_instance_roundtrip(session: Session) -> None:
     inst = ProviderInstance(
         agent_id=a.id,
         provider_definition_id=d.id,
-        port=8081,
         backend_status="running",
         config_fingerprint="abc123",
         assigned_gpus=["gpu-uuid-1"],

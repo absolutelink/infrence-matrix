@@ -110,14 +110,12 @@ def make_instance(
     agent: ProviderAgent,
     definition: ProviderDefinition,
     *,
-    port: int | None = None,
     backend_status: str = "stopped",
     **kwargs: Any,
 ) -> ProviderInstance:
     instance = ProviderInstance(
         agent_id=agent.id,
         provider_definition_id=definition.id,
-        port=port if port is not None else agent.base_port,
         backend_status=backend_status,
         **kwargs,
     )
@@ -138,7 +136,7 @@ def make_stack(
     capacity: int = 1,
     backend_status: str = "stopped",
     connected: bool = True,
-    port: int = 8081,
+    base_port: int = 8081,
     backend_config: dict[str, Any] | None = None,
 ) -> tuple[Machine, ProviderAgent, ProviderDefinition, ProviderInstance]:
     """One machine + one agent + one definition + one backend."""
@@ -147,7 +145,7 @@ def make_stack(
         session,
         machine,
         provider_type=provider_type,
-        base_port=port,
+        base_port=base_port,
         connected=connected,
     )
     definition = make_definition(
@@ -166,7 +164,6 @@ def make_stack(
         session,
         agent,
         definition,
-        port=port,
         backend_status=backend_status,
     )
     return machine, agent, definition, instance

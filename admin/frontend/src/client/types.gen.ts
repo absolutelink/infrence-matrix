@@ -209,7 +209,9 @@ export type MachinePatch = {
  *
  * Phase 16: ``machine_secret`` replaces ``registration_token``; ``agent_id``
  * is the operator-supplied stable id (container ``AGENT_ID`` env) and
- * ``base_port`` is the first backend port (backends get ``base_port + i``).
+ * ``base_port`` is the agent's single published admin-facing ``/v1`` port
+ * (container ``PROVIDER_PORT`` env); the agent routes each request to a
+ * backend by model, so there are no per-backend ports.
  */
 export type RegistrationRequest = {
     /**

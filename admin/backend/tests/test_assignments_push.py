@@ -123,7 +123,7 @@ def _row(
     from tests.helpers import make_instance
 
     return make_instance(
-        session, agent, definition, backend_status=status, port=agent.base_port
+        session, agent, definition, backend_status=status
     )
 
 
@@ -192,7 +192,8 @@ async def test_push_creates_new_row_and_warms(session: Session, monkeypatch) -> 
     assert entry["capacity"] == 1
     assert entry["idle_timeout_seconds"] == 300
     assert entry["vram_required_bytes"] == 0
-    assert "port" in entry and "instance_id" in entry
+    assert "instance_id" in entry
+    assert "port" not in entry  # port model overhaul: no per-backend port
 
     # Warm-up was triggered (a backend was added).
     assert sched.warmed == [str(agent.id)]
@@ -397,21 +398,23 @@ async def test_push_no_warm_when_provider_refuses_add(
     assert sched.warmed == []
 
 
-async def test_push_refuses_port_collision_with_connected_peer(
+async def test_push_allows_shared_base_port_no_clash(
     session: Session, monkeypatch
 ) -> None:
-    """H1: a placement push that would hand a connected agent a port already held
-    by a connected PEER agent on the same machine must NOT create the colliding
-    row (refused with reason port_conflict)."""
+    """Port model overhaul: two connected agents on one machine may share the
+    same ``base_port`` (each routes ``/v1`` by model internally). A placement
+    push to the second agent now simply creates its backend row and pushes it —
+    there is no cross-agent ``port_conflict`` refusal anymore."""
     from tests.helpers import get_or_create_machine, make_agent
 
     machine = get_or_create_machine(session, uid="clash-m", total_vram=1000)
-    # Peer agent A (connected) already hosts a running backend on port 8081.
+    # Peer agent A (connected) already hosts a running backend on base_port 8081.
     peer = make_agent(session, machine, provider_type="mock", base_port=8081)
     peer_def = _def(session, alias="peer-def")
-    _row(session, peer, peer_def, status="running")  # holds 8081
+    _row(session, peer, peer_def, status="running")
     # Target agent B shares base_port 8081, has no rows, and is a DIFFERENT type
-    # so its only placed def is the colliding one (peer_def is not placed on it).
+    # so its only placed def is the one that used to collide (peer_def is not
+    # placed on it).
     target = make_agent(
         session,
         machine,
@@ -427,21 +430,17 @@ async def test_push_refuses_port_collision_with_connected_peer(
     await asyncio_sleep()
 
     assert diff is not None
-    # The colliding row was rolled back: nothing added, refused with
-    # port_conflict, and absent from the pushed assignment set.
-    assert diff.added == []
-    assert any(r["reason"] == "port_conflict" for r in diff.refused), diff.refused
-    assert all(a["alias"] != "collide-def" for a in diff.assignments)
-    session.expunge_all()
-    assert (
-        session.exec(
-            select(ProviderInstance).where(
-                ProviderInstance.agent_id == target.id,
-                ProviderInstance.provider_definition_id == new.id,
-            )
-        ).first()
-        is None
-    )
+    # The formerly-colliding row IS created and pushed (no refusal, no port).
+    assert diff.added and all(r["reason"] != "port_conflict" for r in diff.refused)
+    assert any(a["alias"] == "collide-def" for a in diff.assignments)
+    session.expire_all()
+    row = session.exec(
+        select(ProviderInstance).where(
+            ProviderInstance.agent_id == target.id,
+            ProviderInstance.provider_definition_id == new.id,
+        )
+    ).first()
+    assert row is not None
 
 
 def test_build_assignment_entry_carries_modality(session: Session) -> None:
@@ -460,18 +459,18 @@ def test_build_assignment_entry_carries_modality(session: Session) -> None:
     assert asg.build_assignment_entry(llm_row, llm)["modality"] == "llm"
 
 
-async def test_renumber_avoids_retained_busy_ghost(session: Session) -> None:
-    """M1: registration renumber must not assign a placed row the port held by a
-    de-placed-but-running ghost retained on the same agent."""
+async def test_reconcile_creates_row_and_refuses_busy_ghost(session: Session) -> None:
+    """Port model overhaul: reconcile creates a stopped row for a newly-placed
+    def (no admin-facing port) while a de-placed-but-running ghost on the same
+    agent is retained busy-safe (reported refused), never deleted."""
     from tests.helpers import get_or_create_machine, make_agent
 
     machine = get_or_create_machine(session, uid="renum-m", total_vram=1000)
     agent = make_agent(session, machine, provider_type="mock", base_port=8081)
-    # A running ghost at base+0 that is NOT placed (disabled).
+    # A running ghost that is NOT placed (disabled def).
     ghost = _def(session, alias="ghost-running", enabled=False)
-    ghost_row = _row(session, agent, ghost, status="running")  # port 8081
-    # A placed def that renumber would otherwise put at base+0 (colliding with
-    # the retained ghost). It is any_of_type, so it is placed on the agent.
+    ghost_row = _row(session, agent, ghost, status="running")
+    # A placed def (any_of_type) with no row yet -> reconcile creates one.
     _def(session, alias="placed-a")
 
     from app.api.admin.providers import _placed_definitions
@@ -479,15 +478,12 @@ async def test_renumber_avoids_retained_busy_ghost(session: Session) -> None:
     with Session(engine) as s:
         ag = s.get(ProviderAgent, agent.id)
         placed = _placed_definitions(s, ag)
-        diff = asg.reconcile_agent_placement(
-            s, ag, placed, create_new=True, renumber_ports=True
-        )
+        diff = asg.reconcile_agent_placement(s, ag, placed, create_new=True)
         s.commit()
         placed_row = s.get(ProviderInstance, uuid.UUID(diff.added[0]))
         ghost_after = s.get(ProviderInstance, ghost_row.id)
 
-    # The ghost is retained (busy) at 8081; the placed row got a DIFFERENT port.
-    assert ghost_after is not None and ghost_after.port == 8081
-    assert placed_row is not None
-    assert placed_row.port != ghost_after.port
-    assert placed_row.port == 8082  # next free offset, skipping the ghost
+    # The placed def got a new stopped row; the busy ghost is retained + refused.
+    assert placed_row is not None and placed_row.backend_status == "stopped"
+    assert ghost_after is not None
+    assert {"instance_id": str(ghost_row.id), "reason": "backend_busy"} in diff.refused

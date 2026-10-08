@@ -101,7 +101,7 @@ def test_register_success(client: TestClient, session: Session, clean_redis) -> 
     assert backend["definition"]["idle_timeout_seconds"] == 123
     assert backend["definition"]["capacity"] == 2
     assert backend["definition"]["vram_required_bytes"] == 8 * 1024**3
-    assert backend["port"] == 8081
+    assert "port" not in backend  # port model overhaul: no per-backend port
 
     expected_fp = hashlib.sha256(
         json.dumps(
@@ -124,7 +124,6 @@ def test_register_success(client: TestClient, session: Session, clean_redis) -> 
     assert str(inst.id) == backend["instance_id"]
     assert inst.agent_id == agent.id
     assert inst.provider_definition_id == definition.id
-    assert inst.port == 8081
     assert inst.config_fingerprint == expected_fp
 
     # Secret lives in Redis (keyed by agent id), not Postgres.
@@ -174,8 +173,10 @@ def test_register_reregister_reuses_rows(client: TestClient, session: Session) -
     assert first["agent_secret"] != second["agent_secret"]
     assert len(session.exec(select(ProviderAgent)).all()) == 1
     assert len(session.exec(select(ProviderInstance)).all()) == 1
-    inst = session.exec(select(ProviderInstance)).one()
-    assert inst.port == 9100
+    # The single agent row is reused and its env base_port updated to the latest
+    # registration (backends no longer carry their own port).
+    agent = session.exec(select(ProviderAgent)).one()
+    assert agent.base_port == 9100
 
 
 def test_register_hosts_all_enabled_definitions_of_type(
@@ -192,10 +193,9 @@ def test_register_hosts_all_enabled_definitions_of_type(
     data = resp.json()
     aliases = sorted(b["definition"]["alias"] for b in data["backends"])
     assert aliases == ["a1", "a2"]
-    # Ports are base_port + stable offset (sorted by alias).
-    ports = {b["definition"]["alias"]: b["port"] for b in data["backends"]}
-    assert ports["a1"] == 8081
-    assert ports["a2"] == 8082
+    # Port model overhaul: backends carry no per-backend port; the agent
+    # publishes a single env base_port and routes by model.
+    assert all("port" not in b for b in data["backends"])
 
 
 def test_register_mixed_placement_union(

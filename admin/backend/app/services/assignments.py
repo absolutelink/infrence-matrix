@@ -33,7 +33,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlmodel import Session, col, select
+from sqlmodel import Session, select
 
 from app.core.db import engine
 from app.models import (
@@ -70,34 +70,6 @@ class PlacementDiff:
     assignments: list[dict[str, Any]] = field(default_factory=list)
 
 
-def _next_free_port(base_port: int, used: set[int]) -> int:
-    """Smallest ``base_port + offset`` not already claimed on this agent."""
-    offset = 0
-    while base_port + offset in used:
-        offset += 1
-    return base_port + offset
-
-
-def _connected_peer_port_clash(
-    session: Session, agent: ProviderAgent, port: int
-) -> ProviderInstance | None:
-    """Return a CONNECTED peer backend on the same machine already holding
-    ``port`` (H1). Mirrors ``providers._reject_port_clash`` but non-raising:
-    the live push cannot 409 an operator, so a colliding new backend is
-    refused + rolled back instead. Only a connected peer holds the port (a
-    stale row is cleared by the presence sweep)."""
-    return session.exec(
-        select(ProviderInstance)
-        .join(ProviderAgent, col(ProviderInstance.agent_id) == col(ProviderAgent.id))
-        .where(
-            ProviderAgent.machine_id == agent.machine_id,
-            col(ProviderInstance.agent_id) != agent.id,
-            ProviderInstance.port == port,
-            ProviderAgent.websocket_connected == True,  # noqa: E712
-        )
-    ).first()
-
-
 def build_assignment_entry(
     instance: ProviderInstance, definition: ProviderDefinition
 ) -> dict[str, Any]:
@@ -111,7 +83,6 @@ def build_assignment_entry(
         "modality": definition.modality,
         "backend_config": definition.backend_config,
         "config_fingerprint": compute_config_fingerprint(definition.backend_config),
-        "port": instance.port,
         "capacity": definition.capacity,
         "idle_timeout_seconds": definition.idle_timeout_seconds,
         "vram_required_bytes": definition.vram_required_bytes,
@@ -124,7 +95,6 @@ def reconcile_agent_placement(
     placed: list[ProviderDefinition],
     *,
     create_new: bool,
-    renumber_ports: bool,
 ) -> PlacementDiff:
     """Diff ``agent``'s ``ProviderInstance`` rows against ``placed`` (the one
     placement-diff path shared by registration and the live push).
@@ -133,19 +103,18 @@ def reconcile_agent_placement(
       agent does not yet host. Registration always creates (the agent is
       declaring itself); the live push creates only for a **connected** agent
       (a disconnected one materializes its rows on its next registration).
-    * ``renumber_ports`` — registration reassigns every placed row to the next
-      free ``base_port + offset`` (reserving any retained busy-ghost ports, so
-      no two rows on the agent collide — M1). With no ghosts this is exactly
-      ``base_port + sorted-alias-index`` (stable across registrations). The live
-      push never renumbers (running backends hold their ports); new rows take
-      the next free offset.
-    * Always: delete rows for definitions no longer placed **unless** the
-      backend is ``running``/``in_use`` (busy-safe — dropping a live row would
-      leak the scheduler's per-booted VRAM hold and orphan the engine). Busy
-      ghosts are reported in ``refused`` and left for a later prune.
+    * Always: refresh the ``config_fingerprint`` of existing placed rows, and
+      delete rows for definitions no longer placed **unless** the backend is
+      ``running``/``in_use`` (busy-safe — dropping a live row would leak the
+      scheduler's per-booted VRAM hold and orphan the engine). Busy ghosts are
+      reported in ``refused`` and left for a later prune.
+
+    Backends carry no admin-facing port (the agent publishes a single env
+    ``PROVIDER_PORT`` and routes by model), so there is nothing to allocate or
+    renumber here.
 
     ``placed`` must be sorted by alias (as ``_placed_definitions`` returns) so
-    renumbered offsets are deterministic. Mutates the caller's session; the
+    the assignment list is deterministic. Mutates the caller's session; the
     caller commits.
     """
     from app.api.admin.providers import compute_config_fingerprint
@@ -157,71 +126,30 @@ def reconcile_agent_placement(
             select(ProviderInstance).where(ProviderInstance.agent_id == agent.id)
         ).all()
     }
-    # Ports held by de-placed-but-busy ghosts that will be RETAINED (M1). A
-    # renumbered placed row must never be assigned one of these, or two rows on
-    # the same agent would share a port (the admin dials litellm by port).
-    retained_ghost_ports = {
-        inst.port
-        for def_id, inst in existing.items()
-        if def_id not in placed_ids and inst.backend_status in _LIVE_BACKEND_STATUSES
-    }
 
     added: list[str] = []
     removed: list[str] = []
     refused: list[dict[str, str]] = []
     row_for_def: dict[uuid.UUID, ProviderInstance] = {}
 
-    if renumber_ports:
-        # Registration: reassign every placed row to the next free offset,
-        # reserving retained busy-ghost ports (M1). With no ghosts this is
-        # exactly ``base_port + sorted-alias-index`` (stable across registrations).
-        reserved = set(retained_ghost_ports)
-        for definition in placed:
-            fp = compute_config_fingerprint(definition.backend_config)
-            port = _next_free_port(agent.base_port, reserved)
-            reserved.add(port)
-            inst = existing.get(definition.id)
-            if inst is None:
-                inst = ProviderInstance(
-                    agent_id=agent.id,
-                    provider_definition_id=definition.id,
-                    port=port,
-                    config_fingerprint=fp,
-                )
-                session.add(inst)
-                session.flush()
-                added.append(str(inst.id))
-            else:
-                inst.port = port
-                inst.config_fingerprint = fp
-                session.add(inst)
-            row_for_def[definition.id] = inst
-    else:
-        # Live push: existing rows keep their ports; new rows take the next free
-        # offset (reserved includes every existing port, incl. busy ghosts). The
-        # cross-agent port-clash guard (H1) runs in push_agent_assignments.
-        reserved = {inst.port for inst in existing.values()}
-        for definition in placed:
-            fp = compute_config_fingerprint(definition.backend_config)
-            inst = existing.get(definition.id)
-            if inst is None:
-                if not create_new:
-                    continue
-                port = _next_free_port(agent.base_port, reserved)
-                reserved.add(port)
-                inst = ProviderInstance(
-                    agent_id=agent.id,
-                    provider_definition_id=definition.id,
-                    port=port,
-                    config_fingerprint=fp,
-                )
-                session.add(inst)
-                session.flush()
-                added.append(str(inst.id))
-            else:
-                inst.config_fingerprint = fp
-                session.add(inst)
-            row_for_def[definition.id] = inst
+    for definition in placed:
+        fp = compute_config_fingerprint(definition.backend_config)
+        inst = existing.get(definition.id)
+        if inst is None:
+            if not create_new:
+                continue
+            inst = ProviderInstance(
+                agent_id=agent.id,
+                provider_definition_id=definition.id,
+                config_fingerprint=fp,
+            )
+            session.add(inst)
+            session.flush()
+            added.append(str(inst.id))
+        else:
+            inst.config_fingerprint = fp
+            session.add(inst)
+        row_for_def[definition.id] = inst
 
     for def_id, inst in existing.items():
         if def_id in placed_ids:
@@ -277,36 +205,7 @@ async def push_agent_assignments(
             agent,
             placed,
             create_new=connected,
-            renumber_ports=False,
         )
-        # H1: a newly-created backend must not collide with a connected peer
-        # agent's port on the same machine (the admin dials litellm by port).
-        # Roll back any colliding add (delete the just-created row) and report
-        # it refused — the live push has no HTTP status to surface a 409 with.
-        if diff.added:
-            new_rows = session.exec(
-                select(ProviderInstance).where(
-                    col(ProviderInstance.id).in_([uuid.UUID(i) for i in diff.added])
-                )
-            ).all()
-            for inst in new_rows:
-                if _connected_peer_port_clash(session, agent, inst.port) is None:
-                    continue
-                session.delete(inst)
-                diff.added.remove(str(inst.id))
-                diff.refused.append(
-                    {"instance_id": str(inst.id), "reason": "port_conflict"}
-                )
-                diff.assignments = [
-                    a for a in diff.assignments if a["instance_id"] != str(inst.id)
-                ]
-                logger.warning(
-                    "assignments push: refused new backend %s on agent %s — port %d "
-                    "already held by a connected peer on the machine",
-                    inst.id,
-                    agent_id,
-                    inst.port,
-                )
         ptype = session.exec(
             select(ProviderType).where(ProviderType.name == agent.provider_type)
         ).first()
