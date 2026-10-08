@@ -2,7 +2,7 @@
 
 import type { Client, Options as Options2, TDataShape } from './client';
 import { client } from './client.gen';
-import type { adminAdminHealthData, adminAdminHealthResponses, adminClearCacheData, adminClearCacheErrors, adminClearCacheResponses, adminCommitPendingData, adminCommitPendingErrors, adminCommitPendingResponses, adminCreateDefinitionData, adminCreateDefinitionErrors, adminCreateDefinitionResponses, adminCreateMachineData, adminCreateMachineErrors, adminCreateMachineResponses, adminDeleteDefinitionData, adminDeleteDefinitionErrors, adminDeleteDefinitionResponses, adminDeleteMachineData, adminDeleteMachineErrors, adminDeleteMachineResponses, adminDismissPendingData, adminDismissPendingErrors, adminDismissPendingResponses, adminGetAgentData, adminGetAgentErrors, adminGetAgentResponses, adminGetDefinitionData, adminGetDefinitionErrors, adminGetDefinitionResponses, adminGetInstanceData, adminGetInstanceErrors, adminGetInstanceLogsData, adminGetInstanceLogsErrors, adminGetInstanceLogsResponses, adminGetInstanceResponses, adminGetMachineData, adminGetMachineErrors, adminGetMachineResponses, adminGetProviderTypeData, adminGetProviderTypeErrors, adminGetProviderTypeResponses, adminInitializeInstanceData, adminInitializeInstanceErrors, adminInitializeInstanceResponses, adminListAgentsData, adminListAgentsResponses, adminListDefinitionsData, adminListDefinitionsResponses, adminListInstancesData, adminListInstancesResponses, adminListMachinesData, adminListMachinesResponses, adminListProviderTypesData, adminListProviderTypesResponses, adminListRepoFilesData, adminListRepoFilesErrors, adminListRepoFilesResponses, adminListResponsesData, adminListResponsesErrors, adminListResponsesResponses, adminOverviewStatsData, adminOverviewStatsResponses, adminPatchDefinitionData, adminPatchDefinitionErrors, adminPatchDefinitionResponses, adminPatchMachineData, adminPatchMachineErrors, adminPatchMachineResponses, adminPruneStorageData, adminPruneStorageErrors, adminPruneStorageResponses, adminRegisterProviderData, adminRegisterProviderErrors, adminRegisterProviderResponses, adminRestartBackendData, adminRestartBackendErrors, adminRestartBackendResponses, adminRotateMachineSecretData, adminRotateMachineSecretErrors, adminRotateMachineSecretResponses, adminSearchModelsData, adminSearchModelsErrors, adminSearchModelsResponses, adminStartBackendData, adminStartBackendErrors, adminStartBackendResponses, adminStopBackendData, adminStopBackendErrors, adminStopBackendResponses, adminUsageStatsData, adminUsageStatsErrors, adminUsageStatsResponses, chatCreateChatCompletionData, chatCreateChatCompletionResponses, modelsListModelsData, modelsListModelsResponses, responsesCreateResponseData, responsesCreateResponseResponses } from './types.gen';
+import type { adminAdminHealthData, adminAdminHealthResponses, adminClearCacheData, adminClearCacheErrors, adminClearCacheResponses, adminCommitPendingData, adminCommitPendingErrors, adminCommitPendingResponses, adminCreateDefinitionData, adminCreateDefinitionErrors, adminCreateDefinitionResponses, adminCreateMachineData, adminCreateMachineErrors, adminCreateMachineResponses, adminDeleteAgentData, adminDeleteAgentErrors, adminDeleteAgentResponses, adminDeleteDefinitionData, adminDeleteDefinitionErrors, adminDeleteDefinitionResponses, adminDeleteMachineData, adminDeleteMachineErrors, adminDeleteMachineResponses, adminDismissPendingData, adminDismissPendingErrors, adminDismissPendingResponses, adminGetAgentData, adminGetAgentErrors, adminGetAgentResponses, adminGetDefinitionData, adminGetDefinitionErrors, adminGetDefinitionResponses, adminGetInstanceData, adminGetInstanceErrors, adminGetInstanceLogsData, adminGetInstanceLogsErrors, adminGetInstanceLogsResponses, adminGetInstanceResponses, adminGetMachineData, adminGetMachineErrors, adminGetMachineResponses, adminGetProviderTypeData, adminGetProviderTypeErrors, adminGetProviderTypeResponses, adminInitializeInstanceData, adminInitializeInstanceErrors, adminInitializeInstanceResponses, adminListAgentsData, adminListAgentsResponses, adminListDefinitionsData, adminListDefinitionsResponses, adminListInstancesData, adminListInstancesResponses, adminListMachinesData, adminListMachinesResponses, adminListProviderTypesData, adminListProviderTypesResponses, adminListRepoFilesData, adminListRepoFilesErrors, adminListRepoFilesResponses, adminListResponsesData, adminListResponsesErrors, adminListResponsesResponses, adminOverviewStatsData, adminOverviewStatsResponses, adminPatchDefinitionData, adminPatchDefinitionErrors, adminPatchDefinitionResponses, adminPatchMachineData, adminPatchMachineErrors, adminPatchMachineResponses, adminPruneStorageData, adminPruneStorageErrors, adminPruneStorageResponses, adminRegisterProviderData, adminRegisterProviderErrors, adminRegisterProviderResponses, adminRestartBackendData, adminRestartBackendErrors, adminRestartBackendResponses, adminRotateMachineSecretData, adminRotateMachineSecretErrors, adminRotateMachineSecretResponses, adminSearchModelsData, adminSearchModelsErrors, adminSearchModelsResponses, adminStartBackendData, adminStartBackendErrors, adminStartBackendResponses, adminStopBackendData, adminStopBackendErrors, adminStopBackendResponses, adminUsageStatsData, adminUsageStatsErrors, adminUsageStatsResponses, chatCreateChatCompletionData, chatCreateChatCompletionResponses, modelsListModelsData, modelsListModelsResponses, responsesCreateResponseData, responsesCreateResponseResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -479,6 +479,29 @@ export class AdminService {
         return (options?.client ?? client).get<adminListAgentsResponses, unknown, ThrowOnError>({
             responseType: 'json',
             url: '/admin/api/agents',
+            ...options
+        });
+    }
+    
+    /**
+     * Delete Agent
+     *
+     * Delete a decommissioned/renamed provider agent (Phase 16).
+     *
+     * Safety gate: a **connected** agent is never deleted (409) — stop/redeploy
+     * the container first. A disconnected agent's backends are unschedulable
+     * ghosts regardless of their DB ``backend_status`` (the real-world case: a
+     * renamed container left ``running`` ghost rows), so they are removed with it.
+     *
+     * NOTE: agents are Phase-12 schema-consensus voters — deleting one drops its
+     * vote from any pending schema for its type. That is intended here: this is
+     * for renamed/decommissioned containers whose rows linger as ghosts and which
+     * operators previously had to clear via raw SQL + Redis.
+     */
+    public static deleteAgent<ThrowOnError extends boolean = true>(options: Options<adminDeleteAgentData, ThrowOnError>) {
+        return (options.client ?? client).delete<adminDeleteAgentResponses, adminDeleteAgentErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/admin/api/agents/{agent_id}',
             ...options
         });
     }

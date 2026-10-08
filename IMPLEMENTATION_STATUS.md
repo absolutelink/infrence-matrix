@@ -2,12 +2,15 @@
 
 **Overhaul branch:** `litellm-architecture-overhaul`
 **Last updated:** 2026-10-08 (**Phase 16 ✅ machine-scoped provider agents —
-slices 7 + 8 landed**: slice 7 = React Agents page + definition placement
-controls; **slice 8 = the remaining law docs rewritten to the agent model**
-(`docs/ws-protocol.md` full rewrite, `provider/README.md` agent-authoring
-guide, `admin/backend/docs/redis-keys.md` agent-keyed layout, `AGENTS.md`
-Architecture/Gotchas bullets) — documentation-only, no code/behavior change;
-admin suite still 330 green. Prior: **slice 6**: real-engine
+slices 7 + 8 landed + agent-delete follow-up**: slice 7 = React Agents page +
+definition placement controls; **slice 8 = the remaining law docs rewritten to
+the agent model** (`docs/ws-protocol.md` full rewrite, `provider/README.md`
+agent-authoring guide, `admin/backend/docs/redis-keys.md` agent-keyed layout,
+`AGENTS.md` Architecture/Gotchas bullets) — documentation-only; **follow-up:
+`DELETE /admin/api/agents/{agent_id}`** removes decommissioned/renamed agents
+(409 while connected; cascades backends + placement links, clears Redis WS/metrics
+keys, releases scheduler holds) + Agents-UI Delete button + `AdminService.deleteAgent`;
+admin suite now 334 green. Prior: **slice 6**: real-engine
 **multi-backend-per-process** hosting +
 per-port serving — each hardware provider (llama-cpp/gufo/halogen/halogen-flash)
 now builds a `BackendRegistry` of drivable lifecycles (one per placed backend),
@@ -1583,6 +1586,22 @@ Phase-14 shell/`registration_token`/`awaiting_config`/`no_config_nak` removed),
 `im:vram:total`/`im:metrics:instance`/`im:metrics:alias` removed;
 `im:logs:provider`/`im:logs:seq` re-keyed to agent), and `AGENTS.md`
 (Architecture/Gotchas bullets). No code changed; admin suite still 330 green.
+
+**Agent-delete path — landed (follow-up).** `DELETE /admin/api/agents/{agent_id}`
+removes a decommissioned/renamed `ProviderAgent` (previously operators had to
+clear the ghost row via raw SQL + Redis). Safety gate: **409 while
+`websocket_connected`** (never delete a live agent); a disconnected agent's
+backends are unschedulable ghosts regardless of `backend_status`, so they go
+with it. The endpoint deletes the agent's `ProviderInstance` + `DefinitionAgent`
+children **explicitly** (the ORM relationships carry no delete-orphan cascade /
+`passive_deletes`, so `session.delete` would try to NULL the non-nullable child
+FKs and fail before the DB `ON DELETE CASCADE` fires), clears the agent's Redis
+WS/metrics keys (`im:ws:secret|epoch|owner|presence`, `im:metrics:cats` — keyed
+by the PK uuid), and releases any in-process scheduler VRAM/`_booted` hold for
+the removed backends via the existing `note_backend_stopped` hook. Response:
+`{ok, agent_id, deleted_instances}`. The Agents UI gained a Delete danger button
+(disabled + tooltip while connected) with a confirm dialog. Client regenerated
+(`AdminService.deleteAgent`). Admin suite now **334 green** (4 new tests).
 
 Prior — **slice 5 (`agent.assignments.update` push + event-driven placement
 reconciliation) implemented.** The agent data model, migration, registration/

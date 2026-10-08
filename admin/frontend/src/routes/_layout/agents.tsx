@@ -1,9 +1,20 @@
+import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { createFileRoute, Link } from "@tanstack/react-router"
-import { ChevronDown, ChevronRight } from "lucide-react"
+import { ChevronDown, ChevronRight, Trash2 } from "lucide-react"
 import { useMemo, useState } from "react"
+import { AdminService } from "@/client"
 import { EmptyNudge } from "@/components/Common/EmptyNudge"
 import { ConnectionBadge, StatusBadge } from "@/components/Common/StatusBadge"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import {
   Table,
   TableBody,
@@ -13,10 +24,13 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import {
+  agentKeys,
   useAgents,
   useDefinitions,
   useProviderTypes,
 } from "@/hooks/useAdminData"
+import useCustomToast from "@/hooks/useCustomToast"
+import { extractError } from "@/lib/errors"
 import type { ProviderAgent, ProviderDefinition } from "@/types/admin"
 
 export const Route = createFileRoute("/_layout/agents")({
@@ -194,6 +208,7 @@ function AgentDetail({
   aliasById: Map<string, string>
   defById: Map<string, ProviderDefinition>
 }) {
+  const [deleting, setDeleting] = useState(false)
   // Which definitions are placed on this agent — mirrors the server's
   // _placed_definitions (providers.py): only ENABLED definitions, and in
   // BOTH branches (any_of_type of the type ∪ specific linking this agent).
@@ -308,8 +323,94 @@ function AgentDetail({
             {a.error_message}
           </p>
         )}
+        <div className="mt-4 flex items-center justify-between gap-2 border-t pt-3">
+          <p className="text-xs text-muted-foreground">
+            {a.websocket_connected
+              ? "Connected agents cannot be deleted — stop/redeploy the container first."
+              : "Remove this decommissioned/renamed agent and its ghost backends."}
+          </p>
+          <Button
+            type="button"
+            variant="destructive"
+            size="sm"
+            disabled={a.websocket_connected}
+            onClick={() => setDeleting(true)}
+            title={
+              a.websocket_connected
+                ? "connected — stop the agent first"
+                : "Delete this agent"
+            }
+          >
+            <Trash2 />
+            Delete
+          </Button>
+        </div>
       </div>
+      <DeleteAgentDialog
+        agent={a}
+        open={deleting}
+        onClose={() => setDeleting(false)}
+      />
     </div>
+  )
+}
+
+function DeleteAgentDialog({
+  agent,
+  open,
+  onClose,
+}: {
+  agent: ProviderAgent
+  open: boolean
+  onClose: () => void
+}) {
+  const queryClient = useQueryClient()
+  const { showErrorToast, showSuccessToast } = useCustomToast()
+
+  const mutation = useMutation({
+    mutationFn: async () =>
+      await AdminService.deleteAgent({ path: { agent_id: agent.id } }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: agentKeys.all })
+      showSuccessToast("Agent deleted")
+      onClose()
+    },
+    onError: (err: Error) => showErrorToast(extractError(err)),
+  })
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(o) => {
+        if (!o) onClose()
+      }}
+    >
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Delete agent</DialogTitle>
+          <DialogDescription>
+            Delete agent{" "}
+            <span className="font-mono font-semibold">{agent.agent_id}</span> (
+            {agent.provider_type})? This removes its{" "}
+            {agent.backends?.length ?? 0} backend row(s) and placement links.
+            This cannot be undone.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            variant="destructive"
+            disabled={mutation.isPending}
+            onClick={() => mutation.mutate()}
+          >
+            {mutation.isPending ? "Deleting…" : "Delete"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 

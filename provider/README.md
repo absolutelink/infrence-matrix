@@ -126,6 +126,17 @@ The agent persists this to `CACHE_DIR/provider_config.json` and builds **one
 hosted backend per `backends` entry** (each keyed by its `instance_id`, served
 on its `port`). A single-backend registration yields exactly one entry.
 
+### Decommissioning / renaming an agent
+
+When a container is renamed (`AGENT_ID` changed) or decommissioned, its old
+`ProviderAgent` row lingers as a ghost — its backends may still read `running`
+in the DB even though the socket is gone. Operators can delete it from the
+**Agents** page in the admin UI (`DELETE /admin/api/agents/{agent_id}`), which
+drops the agent, its backend rows, and its placement links, and clears its
+Redis WS/metrics keys. The delete is **refused (409) while the agent is still
+connected** — stop/redeploy the container first so you never delete a live
+agent.
+
 ### BackendRegistry + per-backend dispatch
 
 `provider_lib.registry.BackendRegistry` maps `instance_id -> BackendHandle`

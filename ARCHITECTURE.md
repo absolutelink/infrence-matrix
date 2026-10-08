@@ -431,6 +431,13 @@ Provider agent                      Admin
   become unschedulable while disconnected. The agent reconnects with
   exponential backoff (1s → 30s max). Each accepted reconnect gets a
   strictly greater **epoch**; the old socket is closed with code `4409`.
+- **Decommissioning / renaming:** a renamed (`AGENT_ID` changed) or
+  decommissioned container leaves a ghost `ProviderAgent` row (its backends may
+  still read `running` while disconnected). Operators delete it from the Agents
+  UI (`DELETE /admin/api/agents/{agent_id}`), which cascades the agent's
+  `ProviderInstance` + `DefinitionAgent` rows and clears its Redis WS/metrics
+  keys; the delete is **refused (409) while the agent is connected** — stop or
+  redeploy the container first.
 
 ### Frame envelope (both directions)
 ```json

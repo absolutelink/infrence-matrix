@@ -1313,6 +1313,40 @@ export type adminListAgentsResponses = {
 
 export type adminListAgentsResponse = adminListAgentsResponses[keyof adminListAgentsResponses];
 
+export type adminDeleteAgentData = {
+    body?: never;
+    path: {
+        /**
+         * Agent Id
+         */
+        agent_id: string;
+    };
+    query?: never;
+    url: '/admin/api/agents/{agent_id}';
+};
+
+export type adminDeleteAgentErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminDeleteAgentError = adminDeleteAgentErrors[keyof adminDeleteAgentErrors];
+
+export type adminDeleteAgentResponses = {
+    /**
+     * Response Admin-Delete Agent
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminDeleteAgentResponse = adminDeleteAgentResponses[keyof adminDeleteAgentResponses];
+
 export type adminGetAgentData = {
     body?: never;
     path: {
