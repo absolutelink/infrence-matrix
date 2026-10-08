@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { createFileRoute, Link } from "@tanstack/react-router"
 import {
+  ChevronDown,
   Eraser,
   HardDriveDownload,
   MoreVertical,
@@ -10,7 +11,7 @@ import {
   ScrollText,
   Square,
 } from "lucide-react"
-import { useState } from "react"
+import { Fragment, type ReactNode, useEffect, useState } from "react"
 
 import { AdminService } from "@/client"
 import { useLogsDock } from "@/components/Common/LogsDockContext"
@@ -46,13 +47,17 @@ import {
 import {
   definitionKeys,
   instanceKeys,
+  useInstanceStats,
   useInstances,
   useProviderTypes,
 } from "@/hooks/useAdminData"
 import useCustomToast from "@/hooks/useCustomToast"
 import { extractError } from "@/lib/errors"
+import { cn } from "@/lib/utils"
 import type {
   BackendActionResult,
+  InstanceStats,
+  InstanceWindowStats,
   ProviderInstance,
   StorageActionResult,
 } from "@/types/admin"
@@ -112,9 +117,61 @@ const BACKEND_ACTIONS: Record<
   },
 }
 
+// Number formatters for the stats block. Each degrades to an em dash when
+// the backend blanked the field (embedding instances null every LLM-only
+// metric) or when no data has accumulated yet.
+function fmtTokens(n: number | null | undefined): string {
+  return n == null ? "—" : n.toLocaleString()
+}
+function fmtTps(n: number | null | undefined): string {
+  return n == null ? "—" : `${n.toFixed(1)} t/s`
+}
+function fmtPct(n: number | null | undefined): string {
+  return n == null ? "—" : `${(n * 100).toFixed(1)}%`
+}
+function fmtMs(n: number | null | undefined): string {
+  return n == null ? "—" : `${Math.round(n)} ms`
+}
+
+interface StatRow {
+  label: string
+  get: (w: InstanceWindowStats) => string
+  // Embedding instances only produce prompt-side work — rows flagged here are
+  // the ones kept for them; the LLM-only rows (gen speed, cache hit, p50/p95,
+  // latency, error) are null and omitted.
+  embedding?: boolean
+}
+
+const LLM_STAT_ROWS: StatRow[] = [
+  { label: "Tokens generated", get: (w) => fmtTokens(w.completion_tokens) },
+  {
+    label: "Prompt tokens",
+    get: (w) => fmtTokens(w.prompt_tokens),
+    embedding: true,
+  },
+  {
+    label: "Cached tokens",
+    get: (w) => fmtTokens(w.cached_tokens),
+    embedding: true,
+  },
+  {
+    label: "Requests",
+    get: (w) => fmtTokens(w.request_count),
+    embedding: true,
+  },
+  { label: "Avg prompt speed", get: (w) => fmtTps(w.avg_prompt_tps) },
+  { label: "Avg gen speed", get: (w) => fmtTps(w.avg_gen_tps) },
+  { label: "Cache hit rate", get: (w) => fmtPct(w.cache_hit_rate) },
+  { label: "p50 gen speed", get: (w) => fmtTps(w.p50_gen_tps) },
+  { label: "p95 gen speed", get: (w) => fmtTps(w.p95_gen_tps) },
+  { label: "Avg gen latency", get: (w) => fmtMs(w.avg_predicted_ms) },
+  { label: "Error rate", get: (w) => fmtPct(w.error_rate) },
+]
+
 function InstancesPage() {
   const { data: instances = [], isLoading } = useInstances()
   const { data: providerTypes = [] } = useProviderTypes()
+  const { data: instanceStats = {} } = useInstanceStats()
   const committedByType = new Map(
     providerTypes.map((t) => [t.name, t.schema_fingerprint]),
   )
@@ -123,6 +180,26 @@ function InstancesPage() {
   const logsDock = useLogsDock()
   const [backendTarget, setBackendTarget] =
     useState<BackendActionTarget | null>(null)
+  const [openIds, setOpenIds] = useState<Set<string>>(new Set())
+
+  const toggleRow = (id: string) =>
+    setOpenIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+
+  // Prune ids that vanished from the list so the Set can't grow unbounded as
+  // instances go offline/are deleted. Returns the same reference when nothing
+  // dropped, so this never loops.
+  useEffect(() => {
+    setOpenIds((prev) => {
+      const live = new Set(instances.map((x) => x.id))
+      const next = new Set([...prev].filter((id) => live.has(id)))
+      return next.size === prev.size ? prev : next
+    })
+  }, [instances])
 
   return (
     <div className="flex flex-col gap-6">
@@ -158,131 +235,192 @@ function InstancesPage() {
                 <TableHead>Alias</TableHead>
                 <TableHead>Instance</TableHead>
                 <TableHead>Backend</TableHead>
-                <TableHead>WS</TableHead>
-                <TableHead>Version</TableHead>
-                <TableHead>Port</TableHead>
-                <TableHead>Epoch</TableHead>
-                <TableHead>Last seen</TableHead>
-                <TableHead>Last request</TableHead>
-                <TableHead>Config fp</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
+                <TableHead>Throughput</TableHead>
+                <TableHead className="w-10">
+                  <span className="sr-only">Details</span>
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {instances.map((i) => (
-                <TableRow key={i.id}>
-                  <TableCell className="font-mono text-xs">
-                    {i.machine_uid ?? "—"}
-                  </TableCell>
-                  <TableCell className="font-medium">{i.alias}</TableCell>
-                  <TableCell>
-                    <div className="flex flex-wrap items-center gap-1">
-                      <StatusBadge status={i.agent_status} />
-                      {(() => {
-                        const committed = i.provider_type
-                          ? committedByType.get(i.provider_type)
-                          : undefined
-                        if (
-                          committed &&
-                          committed !== PERMISSIVE_SCHEMA_FP &&
-                          i.reported_schema_fingerprint !== committed
-                        ) {
-                          return (
-                            <Link
-                              to="/provider-types"
-                              search={{ type: i.provider_type ?? "" }}
-                              title={`Reported schema ${
-                                i.reported_schema_fingerprint
-                                  ? `${i.reported_schema_fingerprint.slice(0, 8)}…`
-                                  : "none"
-                              } ≠ committed ${committed.slice(0, 8)}… — registration refused until consensus`}
-                            >
-                              <StatusBadge
-                                status="waiting_schema"
-                                className="border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400"
+              {instances.map((i) => {
+                const open = openIds.has(i.id)
+                const stats = instanceStats[i.id]
+                const tps = stats?.live_throughput_tps
+                return (
+                  <Fragment key={i.id}>
+                    <TableRow>
+                      <TableCell className="font-mono text-xs">
+                        {i.machine_uid ?? "—"}
+                      </TableCell>
+                      <TableCell className="font-medium">{i.alias}</TableCell>
+                      <TableCell>
+                        <div className="flex flex-wrap items-center gap-1">
+                          <StatusBadge status={i.agent_status} />
+                          {(() => {
+                            const committed = i.provider_type
+                              ? committedByType.get(i.provider_type)
+                              : undefined
+                            if (
+                              committed &&
+                              committed !== PERMISSIVE_SCHEMA_FP &&
+                              i.reported_schema_fingerprint !== committed
+                            ) {
+                              return (
+                                <Link
+                                  to="/provider-types"
+                                  search={{ type: i.provider_type ?? "" }}
+                                  title={`Reported schema ${
+                                    i.reported_schema_fingerprint
+                                      ? `${i.reported_schema_fingerprint.slice(0, 8)}…`
+                                      : "none"
+                                  } ≠ committed ${committed.slice(0, 8)}… — registration refused until consensus`}
+                                >
+                                  <StatusBadge
+                                    status="waiting_schema"
+                                    className="border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                                  />
+                                </Link>
+                              )
+                            }
+                            return null
+                          })()}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        {/* error_message carries the reason of the last status
+                            transition (incl. an initializing heartbeat's engine
+                            line and a failed boot's message). */}
+                        <span title={i.error_message ?? undefined}>
+                          <StatusBadge status={i.backend_status} />
+                        </span>
+                      </TableCell>
+                      <TableCell>
+                        {stats?.modality === "embedding" || tps == null ? (
+                          <span className="text-muted-foreground">—</span>
+                        ) : (
+                          <span className="font-mono text-xs">
+                            {tps.toFixed(1)} t/s
+                          </span>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-expanded={open}
+                          aria-controls={`inst-detail-${i.id}`}
+                          aria-label={open ? "Hide details" : "Show details"}
+                          onClick={() => toggleRow(i.id)}
+                        >
+                          <ChevronDown
+                            className={cn(
+                              "transition-transform",
+                              open && "rotate-180",
+                            )}
+                          />
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                    {open && (
+                      <TableRow id={`inst-detail-${i.id}`}>
+                        <TableCell colSpan={6} className="bg-muted/30">
+                          <div className="flex flex-col gap-4 py-2">
+                            <div className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4">
+                              <OpItem label="WS">
+                                <ConnectionBadge
+                                  connected={i.websocket_connected}
+                                />
+                              </OpItem>
+                              <OpItem label="Version">
+                                <span className="font-mono text-xs">
+                                  {i.version}
+                                </span>
+                              </OpItem>
+                              <OpItem label="Port">
+                                <span className="font-mono text-xs">
+                                  {i.port}
+                                </span>
+                              </OpItem>
+                              <OpItem label="Epoch">
+                                <span className="font-mono text-xs">
+                                  {i.epoch}
+                                </span>
+                              </OpItem>
+                              <OpItem label="Last seen">
+                                <span className="text-xs text-muted-foreground">
+                                  {relTime(i.last_seen)}
+                                </span>
+                              </OpItem>
+                              <OpItem label="Last request">
+                                <span className="text-xs text-muted-foreground">
+                                  {relTime(i.last_request_at)}
+                                </span>
+                              </OpItem>
+                              <OpItem label="Config fp">
+                                <code className="font-mono text-xs text-muted-foreground">
+                                  {i.config_fingerprint
+                                    ? `${i.config_fingerprint.slice(0, 8)}…`
+                                    : "—"}
+                                </code>
+                              </OpItem>
+                            </div>
+
+                            <div className="inline-flex flex-wrap gap-1">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => logsDock.openTab(i)}
+                                title="View backend + provider logs"
+                              >
+                                <ScrollText /> Logs
+                              </Button>
+                              <BackendActionMenu
+                                instance={i}
+                                onPick={(kind) =>
+                                  setBackendTarget({ kind, instance: i })
+                                }
                               />
-                            </Link>
-                          )
-                        }
-                        return null
-                      })()}
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    {/* error_message carries the reason of the last status
-                        transition (incl. an initializing heartbeat's engine
-                        line and a failed boot's message). */}
-                    <span title={i.error_message ?? undefined}>
-                      <StatusBadge status={i.backend_status} />
-                    </span>
-                  </TableCell>
-                  <TableCell>
-                    <ConnectionBadge connected={i.websocket_connected} />
-                  </TableCell>
-                  <TableCell className="font-mono text-xs">
-                    {i.version}
-                  </TableCell>
-                  <TableCell className="font-mono text-xs">{i.port}</TableCell>
-                  <TableCell className="font-mono text-xs">{i.epoch}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
-                    {relTime(i.last_seen)}
-                  </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
-                    {relTime(i.last_request_at)}
-                  </TableCell>
-                  <TableCell>
-                    <code className="font-mono text-xs text-muted-foreground">
-                      {i.config_fingerprint
-                        ? `${i.config_fingerprint.slice(0, 8)}…`
-                        : "—"}
-                    </code>
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <div className="inline-flex gap-1">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => logsDock.openTab(i)}
-                        title="View backend + provider logs"
-                      >
-                        <ScrollText /> Logs
-                      </Button>
-                      <BackendActionMenu
-                        instance={i}
-                        onPick={(kind) =>
-                          setBackendTarget({ kind, instance: i })
-                        }
-                      />
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={!i.websocket_connected}
-                        onClick={() => setCacheTarget(i)}
-                        title={
-                          i.websocket_connected
-                            ? "Clear prompt cache"
-                            : "Instance websocket is down"
-                        }
-                      >
-                        <Eraser /> Cache
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={!i.websocket_connected}
-                        onClick={() => setPruneTarget(i)}
-                        title={
-                          i.websocket_connected
-                            ? "Prune unused model files"
-                            : "Instance websocket is down"
-                        }
-                      >
-                        <HardDriveDownload /> Prune
-                      </Button>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))}
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={!i.websocket_connected}
+                                onClick={() => setCacheTarget(i)}
+                                title={
+                                  i.websocket_connected
+                                    ? "Clear prompt cache"
+                                    : "Instance websocket is down"
+                                }
+                              >
+                                <Eraser /> Cache
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={!i.websocket_connected}
+                                onClick={() => setPruneTarget(i)}
+                                title={
+                                  i.websocket_connected
+                                    ? "Prune unused model files"
+                                    : "Instance websocket is down"
+                                }
+                              >
+                                <HardDriveDownload /> Prune
+                              </Button>
+                            </div>
+
+                            <div>
+                              <h4 className="mb-2 text-sm font-semibold">
+                                Statistics
+                              </h4>
+                              <InstanceStatsBlock stats={stats} />
+                            </div>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </Fragment>
+                )
+              })}
             </TableBody>
           </Table>
         </div>
@@ -303,6 +441,56 @@ function InstancesPage() {
         onClose={() => setBackendTarget(null)}
       />
     </div>
+  )
+}
+
+function OpItem({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex flex-col gap-0.5">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className="text-sm">{children}</span>
+    </div>
+  )
+}
+
+function InstanceStatsBlock({ stats }: { stats: InstanceStats | undefined }) {
+  if (!stats) {
+    return <p className="text-sm text-muted-foreground">No stats yet.</p>
+  }
+  const isEmbedding = stats.modality === "embedding"
+  const rows = isEmbedding
+    ? LLM_STAT_ROWS.filter((r) => r.embedding)
+    : LLM_STAT_ROWS
+  const windows = [
+    ["24h", stats.windows["24h"]],
+    ["7d", stats.windows["7d"]],
+    ["30d", stats.windows["30d"]],
+  ] as const
+  return (
+    <table className="w-full max-w-xl text-sm">
+      <thead>
+        <tr className="text-muted-foreground">
+          <th className="py-1 pr-4 text-left font-medium">Metric</th>
+          {windows.map(([label]) => (
+            <th key={label} className="py-1 pr-4 text-right font-medium">
+              {label}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((row) => (
+          <tr key={row.label} className="border-t">
+            <td className="py-1 pr-4 text-muted-foreground">{row.label}</td>
+            {windows.map(([label, w]) => (
+              <td key={label} className="py-1 pr-4 text-right font-mono">
+                {row.get(w)}
+              </td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
   )
 }
 
