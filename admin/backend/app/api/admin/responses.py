@@ -18,17 +18,20 @@ Responses/Usage page, and settings overview:
   waiters for one alias or all (Phase 19).
 - ``GET /admin/api/stats/metrics`` — fleet VRAM/GPU rollup across every
   machine's merged metrics (Phase 19).
+- ``GET /admin/api/stats/instances`` — per-instance token/throughput rollups
+  (live tps + 24h/7d/30d windows) for the UI throughput column + stats block.
 
 These join the Phase 9 CRUD surfaces under ``/admin/api`` (trusted LAN,
 unauthenticated).
 """
 
 import logging
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
-from sqlalchemy import func
+from sqlalchemy import and_, case, func
 from sqlmodel import Session, select
 
 from app.api.admin.serializers import iso_utc
@@ -369,3 +372,246 @@ async def fleet_metrics(
         "gpu_utilization_percent": fleet_gpu,
         "machines": per_machine,
     }
+
+
+# ---------------------------------------------------------------------------
+# Slice 1 — per-instance token/throughput statistics
+# ---------------------------------------------------------------------------
+
+# Cumulative windows (each includes the narrower ones): a sample counts toward
+# "24h" if created_at >= now-24h, toward "7d" if >= now-7d, etc.
+_INSTANCE_STAT_WINDOWS: tuple[tuple[str, timedelta], ...] = (
+    ("24h", timedelta(hours=24)),
+    ("7d", timedelta(days=7)),
+    ("30d", timedelta(days=30)),
+)
+_LIVE_WINDOW = timedelta(minutes=5)
+_ERROR_STATUSES = ("failed", "incomplete")
+# LLM-only window fields blanked for embedding-modality instances.
+_LLM_ONLY_FIELDS = (
+    "avg_prompt_tps",
+    "avg_gen_tps",
+    "cache_hit_rate",
+    "avg_predicted_ms",
+    "p50_gen_tps",
+    "p95_gen_tps",
+)
+
+
+def _empty_instance_window() -> dict[str, Any]:
+    return {
+        "completion_tokens": 0,
+        "prompt_tokens": 0,
+        "cached_tokens": 0,
+        "request_count": 0,
+        "avg_prompt_tps": None,
+        "avg_gen_tps": None,
+        "cache_hit_rate": None,
+        "avg_predicted_ms": None,
+        "p50_gen_tps": None,
+        "p95_gen_tps": None,
+        "error_rate": None,
+    }
+
+
+@router.get("/stats/instances")
+def instance_stats(session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Per-instance token/throughput rollups for the UI throughput column +
+    collapsible stats block.
+
+    Returns an object keyed by provider instance id (string) with an entry for
+    **every** ``ProviderInstance`` (zero-sample instances appear with zero/null
+    stats). Each entry carries the definition ``modality``, a ``live_throughput_tps``
+    (mean ``predicted_per_second`` over the last 5 minutes), and cumulative
+    ``24h``/``7d``/``30d`` windows of token sums, request counts, mean rates,
+    cache-hit rate, generation-tps percentiles, and a ``ResponseRecord``-derived
+    ``error_rate``.
+
+    Embedding-modality instances blank every LLM-only field (they only write
+    prompt-token samples): ``live_throughput_tps`` and, per window,
+    ``avg_prompt_tps``/``avg_gen_tps``/``cache_hit_rate``/``avg_predicted_ms``/
+    ``p50_gen_tps``/``p95_gen_tps`` are ``null``.
+    """
+    now = datetime.now(UTC)
+    cutoffs = {name: now - delta for name, delta in _INSTANCE_STAT_WINDOWS}
+    live_cutoff = now - _LIVE_WINDOW
+    widest = cutoffs["30d"]
+
+    # Seed every instance (join the definition for its modality).
+    result: dict[str, dict[str, Any]] = {}
+    modalities: dict[str, str | None] = {}
+    for inst, modality in session.exec(
+        select(ProviderInstance, ProviderDefinition.modality).outerjoin(
+            ProviderDefinition,
+            ProviderInstance.provider_definition_id == ProviderDefinition.id,
+        )
+    ).all():
+        iid = str(inst.id)
+        modalities[iid] = modality
+        result[iid] = {
+            "modality": modality,
+            "live_throughput_tps": None,
+            "windows": {
+                name: _empty_instance_window() for name, _ in _INSTANCE_STAT_WINDOWS
+            },
+        }
+
+    if not result:
+        return result
+
+    # --- Token sums / counts / mean rates / percentiles (one grouped query) ---
+    agg_cols: list[Any] = []
+    agg_keys: list[tuple[str, str]] = []
+    for name, cutoff in cutoffs.items():
+        in_w = TokenUsageSample.created_at >= cutoff
+        gen_pos = TokenUsageSample.predicted_per_second > 0
+        agg_cols += [
+            func.coalesce(
+                func.sum(case((in_w, TokenUsageSample.completion_tokens), else_=0)), 0
+            ),
+            func.coalesce(
+                func.sum(case((in_w, TokenUsageSample.prompt_tokens), else_=0)), 0
+            ),
+            func.coalesce(
+                func.sum(case((in_w, TokenUsageSample.cached_tokens), else_=0)), 0
+            ),
+            func.coalesce(func.sum(case((in_w, 1), else_=0)), 0),
+            func.avg(
+                case(
+                    (
+                        and_(in_w, TokenUsageSample.prompt_per_second > 0),
+                        TokenUsageSample.prompt_per_second,
+                    )
+                )
+            ),
+            func.avg(
+                case(
+                    (
+                        and_(in_w, TokenUsageSample.predicted_per_second > 0),
+                        TokenUsageSample.predicted_per_second,
+                    )
+                )
+            ),
+            func.avg(
+                case(
+                    (
+                        and_(in_w, TokenUsageSample.predicted_ms > 0),
+                        TokenUsageSample.predicted_ms,
+                    )
+                )
+            ),
+            func.percentile_cont(0.5)
+            .within_group(TokenUsageSample.predicted_per_second)
+            .filter(and_(gen_pos, in_w)),
+            func.percentile_cont(0.95)
+            .within_group(TokenUsageSample.predicted_per_second)
+            .filter(and_(gen_pos, in_w)),
+        ]
+        agg_keys += [
+            (name, "completion_tokens"),
+            (name, "prompt_tokens"),
+            (name, "cached_tokens"),
+            (name, "request_count"),
+            (name, "avg_prompt_tps"),
+            (name, "avg_gen_tps"),
+            (name, "avg_predicted_ms"),
+            (name, "p50_gen_tps"),
+            (name, "p95_gen_tps"),
+        ]
+
+    # Live throughput: mean predicted_per_second over the last 5 minutes (one
+    # extra grouped aggregate column, appended after the per-window columns).
+    live_col = func.avg(TokenUsageSample.predicted_per_second).filter(
+        and_(
+            TokenUsageSample.predicted_per_second > 0,
+            TokenUsageSample.created_at >= live_cutoff,
+        )
+    )
+
+    for iid, *vals in session.exec(
+        select(TokenUsageSample.provider_instance_id, *agg_cols, live_col)
+        .where(
+            TokenUsageSample.provider_instance_id.is_not(None),
+            TokenUsageSample.created_at >= widest,
+        )
+        .group_by(TokenUsageSample.provider_instance_id)
+    ).all():
+        entry = result.get(str(iid))
+        if entry is None:
+            continue
+        live_val = vals[-1]
+        if live_val is not None:
+            entry["live_throughput_tps"] = round(float(live_val), 2)
+        for (name, field), val in zip(agg_keys, vals[:-1], strict=True):
+            entry["windows"][name][field] = val
+
+    # --- ResponseRecord error rates (naive timestamp column) ---
+    err_cutoffs = {
+        name: (now - delta).replace(tzinfo=None)
+        for name, delta in _INSTANCE_STAT_WINDOWS
+    }
+    err_cols: list[Any] = []
+    err_keys: list[tuple[str, str]] = []
+    for name, cutoff in err_cutoffs.items():
+        in_w = ResponseRecord.created_at >= cutoff
+        err_cols += [
+            func.coalesce(func.sum(case((in_w, 1), else_=0)), 0),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            and_(in_w, ResponseRecord.status.in_(_ERROR_STATUSES)),
+                            1,
+                        )
+                    )
+                ),
+                0,
+            ),
+        ]
+        err_keys += [(name, "total"), (name, "failed")]
+
+    err_counts: dict[str, dict[tuple[str, str], int]] = {}
+    for iid, *vals in session.exec(
+        select(ResponseRecord.provider_instance_id, *err_cols)
+        .where(
+            ResponseRecord.provider_instance_id.is_not(None),
+            ResponseRecord.created_at >= err_cutoffs["30d"],
+        )
+        .group_by(ResponseRecord.provider_instance_id)
+    ).all():
+        err_counts[str(iid)] = {
+            key: int(val or 0) for key, val in zip(err_keys, vals, strict=True)
+        }
+
+    # --- Assemble + apply modality blanking / rounding ---
+    for iid, entry in result.items():
+        embedding = modalities[iid] == "embedding"
+        if embedding:
+            entry["live_throughput_tps"] = None
+        for name, win in entry["windows"].items():
+            counts = err_counts.get(iid)
+            if counts:
+                total = counts.get((name, "total"), 0)
+                failed = counts.get((name, "failed"), 0)
+                win["error_rate"] = round(failed / total, 4) if total > 0 else None
+            if embedding:
+                for field in _LLM_ONLY_FIELDS:
+                    win[field] = None
+                continue
+            # LLM-only: cache-hit rate + round float fields (SQL may return
+            # Decimal for the aggregates/percentiles).
+            if win["prompt_tokens"] > 0:
+                win["cache_hit_rate"] = round(
+                    win["cached_tokens"] / win["prompt_tokens"], 4
+                )
+            for field in (
+                "avg_prompt_tps",
+                "avg_gen_tps",
+                "avg_predicted_ms",
+                "p50_gen_tps",
+                "p95_gen_tps",
+            ):
+                if win[field] is not None:
+                    win[field] = round(float(win[field]), 2)
+
+    return result

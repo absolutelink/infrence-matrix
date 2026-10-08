@@ -100,6 +100,9 @@ def instance_dict(inst: ProviderInstance) -> dict[str, Any]:
         "provider_type": (
             inst.provider_definition.provider_type if inst.provider_definition else None
         ),
+        "modality": (
+            inst.provider_definition.modality if inst.provider_definition else None
+        ),
         # Container-level state (denormalized from the owning agent).
         "version": agent.version if agent else None,
         "agent_status": agent.agent_status if agent else None,
