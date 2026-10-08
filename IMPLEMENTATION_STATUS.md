@@ -1,8 +1,14 @@
 # Inference Matrix — Implementation Status
 
 **Overhaul branch:** `litellm-architecture-overhaul`
-**Last updated:** 2026-10-07 (**Phase 16 🟡 machine-scoped provider agents —
-slice 6 implemented**: real-engine **multi-backend-per-process** hosting +
+**Last updated:** 2026-10-08 (**Phase 16 ✅ machine-scoped provider agents —
+slices 7 + 8 landed**: slice 7 = React Agents page + definition placement
+controls; **slice 8 = the remaining law docs rewritten to the agent model**
+(`docs/ws-protocol.md` full rewrite, `provider/README.md` agent-authoring
+guide, `admin/backend/docs/redis-keys.md` agent-keyed layout, `AGENTS.md`
+Architecture/Gotchas bullets) — documentation-only, no code/behavior change;
+admin suite still 330 green. Prior: **slice 6**: real-engine
+**multi-backend-per-process** hosting +
 per-port serving — each hardware provider (llama-cpp/gufo/halogen/halogen-flash)
 now builds a `BackendRegistry` of drivable lifecycles (one per placed backend),
 threads the assignment `port` into its engine driver so subprocess ports stay
@@ -1562,9 +1568,23 @@ dicts).
 
 ---
 
-## Phase 16 — Machine-scoped provider agents 🟡
+## Phase 16 — Machine-scoped provider agents ✅
 
-**Status: slice 5 (`agent.assignments.update` push + event-driven placement
+**Status: COMPLETE (slices 1–8 landed).** Slice 7 = React Agents page +
+definition placement controls. **Slice 8 = the remaining law docs rewritten to
+the agent model** (documentation-only): `docs/ws-protocol.md` (full rewrite —
+agent socket, `agent.assignments.update`, per-backend `instance_id`, agent-level
+`provider.status` vs `backend.status`, agent-keyed Redis), `provider/README.md`
+(agent authoring guide — env vars, registration flow + `backends` response,
+`BackendRegistry` + `make_handle` + `MultiPortServer`, `x-max-running-backends`;
+Phase-14 shell/`registration_token`/`awaiting_config`/`no_config_nak` removed),
+`admin/backend/docs/redis-keys.md` (every key re-addressed to the
+`ProviderAgent` PK uuid; owner no-TTL, presence 60s; phantom
+`im:vram:total`/`im:metrics:instance`/`im:metrics:alias` removed;
+`im:logs:provider`/`im:logs:seq` re-keyed to agent), and `AGENTS.md`
+(Architecture/Gotchas bullets). No code changed; admin suite still 330 green.
+
+Prior — **slice 5 (`agent.assignments.update` push + event-driven placement
 reconciliation) implemented.** The agent data model, migration, registration/
 auth, agent-level WS, scheduler joins, placement CRUD, config-push addressing,
 and the provider lib + all five provider packages speak the agent protocol; the
@@ -1601,8 +1621,9 @@ backends no longer clobber one dir); stale "single-backend-per-process" docstrin
 is stripped by the formatter, so clarity is added via inline comments instead; the five
 `run_async` clauses were simplified to `except asyncio.CancelledError:` (L1: with uvicorn
 signal capture disabled, SIGINT exits via `main()`, never reaching `await serve_task`).
-**Still deferred (later slices):** the full React Agents/placement UI (slice 7)
-and the `provider/README.md` + `docs/ws-protocol.md` rewrite (slice 8).
+**Landed since:** the React Agents/placement UI (slice 7) and the
+`provider/README.md` + `docs/ws-protocol.md` + `redis-keys.md` + `AGENTS.md`
+rewrite (slice 8).
 
 
 **Goal.** Stop binding a provider container to a single `ProviderDefinition`.
@@ -1663,7 +1684,7 @@ into one container per (machine, type) that owns its backends and one socket.
 
 ### Sub-tasks (implementation order)
 
-- [ ] **A. Remaining law docs** — `docs/ws-protocol.md` (§2 registration body
+- [x] **A. Remaining law docs** — `docs/ws-protocol.md` (§2 registration body
       + validation + response = agent/machine-secret/assignments; §3 connect
       = agent secret/epoch/presence; §4 add `agent.assignments.update`,
       per-backend `instance_id` addressing, `provider.status` agent-level vs
@@ -1672,7 +1693,8 @@ into one container per (machine, type) that owns its backends and one socket.
       (`im:ws:*`/`im:metrics:cats` → `{agent_id}`, `im:logs:provider` →
       `{agent_id}`), and **`AGENTS.md`** (its Architecture bullets still say
       "each own one inference backend" / "instance_secret" — must be
-      corrected to the agent model). *(deferred to the docs slice)*
+      corrected to the agent model). *(landed in slice 8 — all four docs
+      rewritten to the agent model; documentation-only, admin suite still 330)*
 - [x] **B. Models + migration** — add `ProviderAgent`, `definition_agents`;
       `Machine.registration_secret`; `ProviderType.max_running_backends`;
       `ProviderDefinition.agent_placement` (+ drop `registration_token`,
@@ -1800,7 +1822,7 @@ into one container per (machine, type) that owns its backends and one socket.
        per-backend `config.update`/`cache.clear` to the correct lifecycle;
        halogen-flash declares `x-max-running-backends: 1` so the admin places
        at most one backend per its agent. Single-backend behavior is unchanged.)*
-- [ ] **I. Admin UI** — Machines page: show/rotate secret. New **Agents**
+- [x] **I. Admin UI** — Machines page: show/rotate secret. New **Agents**
       page (or expand Machines): list agents per machine/type, hosted
       backends, `waiting_schema`. Definitions page: placement dropdown
       (any-of-type / pick agents). Instances page: group backends under their

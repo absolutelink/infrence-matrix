@@ -8,6 +8,14 @@ be rebuilt from Postgres + a fresh provider registration.
 All keys are namespaced under `im:` (Inference Matrix). TTLs are noted per
 key. `{...}` are placeholders.
 
+> **Phase 16 (machine-scoped agents).** The WebSocket is keyed by the
+> **`ProviderAgent` primary-key uuid** (`str(agent.id)`) — the value the admin
+> returns as `agent_id` in the registration response and the agent presents on
+> the WS query string. This is **not** the operator-supplied `AGENT_ID` string.
+> Throughout this doc `{agent_id}` means that PK uuid. `{machine_uid}` is the
+> `Machine.uid`; `{instance_id}` is a `ProviderInstance` (one backend) PK uuid.
+> The authoritative source is `app/services/redis_keys.py`.
+
 ## Scheduler
 
 The Phase 6 scheduler runs in the **single** admin uvicorn worker and keeps
@@ -38,6 +46,16 @@ still doesn't free enough, the head waits (up to `queue_timeout`) rather
 than busy-polling. On completion the request is removed from `active`;
 the booted instance's **VRAM hold is NOT released** (the backend is
 still loaded — only an actual stop clears it).
+
+**Agent-scoped admission (Phase 16).** Candidates for an alias are the
+`ProviderInstance` backends whose definition is placed on a **connected**
+agent. Before booting a backend of type `T` on agent `A`, the scheduler counts
+`A`'s backends of type `T` already `running`/`in_use`; at
+`ProviderType.max_running_backends` (e.g. `1` for halogen-flash) it **hot-swaps**
+(evicts the LRU running backend of that type on that agent, subject to the same
+busy/zero-active-slot guard as VRAM eviction) before admitting the new one. The
+whole evict+boot runs under one `im:sched:lock:{alias}` acquisition plus the
+in-process `_evicting` set.
 
 ### In-process vs Redis boundary
 
@@ -72,59 +90,59 @@ still loaded — only an actual stop clears it).
 
 | Key | Type | TTL | Purpose |
 |-----|------|-----|---------|
-| `im:vram:total:{machine_uid}` | String (int bytes) | 60s | Total VRAM budget, mirrored from Machine.total_vram_bytes; refreshed on heartbeat. |
-| `im:vram:used:{machine_uid}` | Hash: `{instance_id}` → bytes | 60s | VRAM held **per booted instance** on the machine — a loaded backend keeps its weights resident between requests, so the entry is written on **boot** (`_mark_booted`) and removed on **stop** (idle reaper, eviction, or an out-of-band `backend.status`/`provider.status` frame reporting `stopped`/`error`, which the connection manager prunes via `scheduler.note_backend_stopped`), *not* per request. Refreshed (value + TTL) on every boot/adopt; the idle reaper re-EXPIREs it each tick while the backend stays booted. If the admin crashes the key lapses in 60s and self-heals: the ledger is rebuilt from the DB (`backend_status` running/in_use × `vram_required_bytes`) on the next admission. |
+| `im:vram:used:{machine_uid}` | Hash: `{instance_id}` → bytes | 60s | VRAM held **per booted backend** on the machine — a loaded backend keeps its weights resident between requests, so the entry is written on **boot** (`_mark_booted`) and removed on **stop** (idle reaper, eviction, or an out-of-band `backend.status`/`provider.status` frame reporting `stopped`/`error`, which the connection manager prunes via `scheduler.note_backend_stopped`), *not* per request. Refreshed (value + TTL) on every boot/adopt; the idle reaper re-EXPIREs it each tick while the backend stays booted. If the admin crashes the key lapses in 60s and self-heals: the ledger is rebuilt from the DB (`backend_status` running/in_use × `vram_required_bytes`) on the next admission. |
 
 **Semantic change (Phase 6 close-out).** The earlier ledger recorded one
 entry per *request slot* and `hdel`-ed it on `release`, so a
 running-but-idle backend appeared to hold 0 VRAM. That is physically
 false (a booted llama-server keeps its weights) and made idle-backend
 eviction impossible — there was nothing recorded to free. VRAM is now
-accounted per booted instance; `release` frees only the capacity slot.
+accounted per booted backend; `release` frees only the capacity slot.
 `held_on(machine)` merges the mirror with `self._booted` and the DB's
 loaded-instance states (max per instance) so no hold is under-counted.
 
 Free VRAM for a machine = `total - sum(used)` (excluding the requesting
-target's own hold). Eviction picks a running-but-idle **different-alias**
-instance to stop when a boot needs the space.
+target's own hold), where `total` is read from `Machine.total_vram_bytes`
+in Postgres (there is **no** `im:vram:total` Redis key). Eviction picks a
+running-but-idle **different-alias** backend to stop when a boot needs the
+space.
 
 ## Live Metrics
 
-| Key | Type | TTL | Purpose |
-|-----|------|-----|---------|
-| `im:metrics:instance:{instance_id}` | Hash | 30s | Latest per-instance snapshot: `backend_status`, `active_requests`, `prompt_tps`, `gen_tps`, `vram_bytes`, `updated_at`. |
-| `im:metrics:machine:{machine_uid}` | Hash | 30s | Latest machine-level snapshot (aggregated across owned instances). |
-| `im:metrics:alias:{alias}` | Hash | 30s | Latest per-model (alias) snapshot for the /v1 UI: queue depth, active, avg latency. |
-
-Metrics are emitted by the admin (it owns inference accounting) and by
-providers over the WS. Machine-level metrics ownership is assigned via the
-`metrics.assign` WS command (Phase 5) so exactly one instance reports each
-machine's hardware.
-
-### Machine Metrics Ownership (Phase 5)
+Machine-level hardware metrics are emitted by **exactly one** connected
+provider **agent** per machine (multiple agents share a machine; each resource
+is reported once). The admin assigns ownership with a Redis lease.
 
 | Key | Type | TTL | Purpose |
 |-----|------|-----|---------|
-| `im:metrics:owner:{machine_uid}` | String (instance_id) | 30s | Which instance is the metrics reporter for the machine. SET NX at WS connect (or sweep reassignment); refreshed when the owner's `metrics.machine` events arrive; deleted on disconnect/stale sweep. |
+| `im:metrics:owner:{machine_uid}` | String (`agent_id`) | 30s | Which **agent** is the metrics reporter for the machine. Value is the `ProviderAgent` PK uuid. SET NX at WS connect (or sweep reassignment); refreshed when the owner's `metrics.machine` events arrive; deleted on disconnect/stale sweep. |
 | `im:metrics:machine:{machine_uid}` | String (JSON snapshot) | 30s | Latest machine-level snapshot stored from the owner's `metrics.machine` event. Non-owner events are dropped. |
-| `im:metrics:cats:{instance_id}` | String (JSON list) | none | Instance-declared metrics categories, written at registration, read at ownership assignment (`metrics.assign` payload). |
+| `im:metrics:cats:{agent_id}` | String (JSON list) | none | Agent-declared metrics categories, written at registration, read at ownership assignment (`metrics.assign` payload). |
 
-Flow: instance connects → admin reads `im:metrics:cats:{id}` → if
-non-empty, `SET im:metrics:owner:{machine_uid} <id> NX EX 30` → sends
+Flow (`app/services/metrics_service.py`): agent connects → admin reads
+`im:metrics:cats:{agent_id}` → if non-empty,
+`SET im:metrics:owner:{machine_uid} <agent_id> NX EX 30` → sends
 `metrics.assign {machine_uid, categories}` over the WS (rollback: lease
 released if the command fails). Owner emits `metrics.machine` every
 `MACHINE_METRICS_INTERVAL` (default 10s), refreshing the lease. On
 disconnect (`ws.py` finally) or stale sweep (`presence_sweep.py`) the
 lease is released; the sweep also reassigns ownerless machines that
-still have connected instances.
+still have connected agents.
+
+> **Inference metrics are not in Redis.** The `metrics.inference` frame kind is
+> defined but reserved (not yet emitted/handled — Phase 7/8); when it lands it
+> is always-on per backend and never deduped.
 
 ## WebSocket / Connection Bookkeeping
 
+All keyed by the `ProviderAgent` PK uuid (`{agent_id}`).
+
 | Key | Type | TTL | Purpose |
 |-----|------|-----|---------|
-| `im:ws:epoch:{instance_id}` | String (int) | none | Monotonic connection epoch. Bumped when the admin accepts a new provider socket. Frames with a stale epoch are dropped (fencing). Mirrored on ProviderInstance.epoch. |
-| `im:ws:owner:{instance_id}` | String (admin node id) | 30s | Which admin process currently holds the live socket. SET NX by the accepting admin; heartbeat refreshes TTL. Lets other admin nodes know not to expect this instance. |
-| `im:ws:presence:{instance_id}` | String | 30s | Liveness heartbeat marker. Missing/expired ⇒ instance considered disconnected. |
+| `im:ws:secret:{agent_id}` | String | 30d | Per-**agent** WS secret (plaintext, trusted LAN; minted at registration, never in Postgres). Read at WS auth. |
+| `im:ws:epoch:{agent_id}` | String (int) | none | Monotonic connection epoch. INCR when the admin accepts a new agent socket. Frames with a stale epoch are dropped (fencing). Mirrored on `ProviderAgent.epoch`. |
+| `im:ws:owner:{agent_id}` | String (connection token) | none | Connection token of the currently accepted socket. SET by the accepting admin; deleted on disconnect (only if still owned by the dying connection). Lets a future multi-worker admin route/verify without a schema change. |
+| `im:ws:presence:{agent_id}` | String (timestamp) | 60s | Liveness heartbeat marker, refreshed on every accepted inbound frame and outbound command/pong. Missing/expired ⇒ the sweep marks the agent `disconnected` (and its backends unschedulable). |
 
 For a single-worker admin (current), `ws:owner` is trivially the one node;
 it exists so a future multi-worker admin can route/verify without a schema
@@ -134,17 +152,22 @@ change.
 
 Backend/provider log tails are **Redis-only** — ephemeral ops telemetry,
 never persisted to Postgres. Newest lines are pushed to the left so
-`LRANGE 0 N` reads the tail.
+`LRANGE 0 N` reads the tail. Backend logs are **per backend** (keyed by
+`instance_id`); provider logs are **per agent** (keyed by `agent_id`).
 
 | Key | Type | TTL | Purpose |
 |-----|------|-----|---------|
-| `im:logs:backend:{instance_id}` | List (JSON-line entries) | 1h | Captured backend subprocess stdout/stderr. Each entry: `{"ts", "stream": "stdout"\|"stderr", "text"}`. Appended in batches from `backend.logs` events via LPUSH + LTRIM to a ~2000-line cap. Served by `GET /admin/api/instances/{id}/logs?kind=backend&since=&limit=`. |
-| `im:logs:provider:{instance_id}` | List (JSON-line entries) | 1h | The provider process's own logger output (same entry shape), from `provider.logs` events. Same cap/TTL. |
+| `im:logs:backend:{instance_id}` | List (JSON-line entries) | 1h | Captured backend subprocess stdout/stderr. Each entry: `{"seq", "ts", "stream": "stdout"\|"stderr", "text"}`. Appended in batches from `backend.logs` events via LPUSH + LTRIM to a ~2000-line cap. Served by `GET /admin/api/instances/{id}/logs?kind=backend&since=&limit=`. |
+| `im:logs:provider:{agent_id}` | List (JSON-line entries) | 1h | The agent process's own logger output (same entry shape), from `provider.logs` events. Same cap/TTL. |
+| `im:logs:seq:{agent_id}` | String (int) | 1h | Shared monotonic ingest cursor (`INCRBY`) across both kinds on one agent, so a single `kind=all` cursor orders the merged tail correctly. 1-based. |
+| `im:logs:dropped:{kind}:{id}` | String (int) | 1h | Latest provider-reported dropped-line counter per kind (`{id}` = `instance_id` for backend, `agent_id` for provider). |
 
-- **Cursor**: `since` in the read endpoint is the list index (or a
-  monotonic seq embedded in the entry); the UI polls with the last seen
-  cursor to tail. If the provider's ring is ahead of Redis (admin
-  restart / long gap), the admin can send `backend.logs.get` to catch up.
+- **Cursor**: `since` in the read endpoint is the **admin ingest seq**
+  (`im:logs:seq:{agent_id}`), *not* the provider-side ring sequence in the
+  `backend.logs.get` ack — the two are unrelated spaces and must never be mixed
+  by a client. The UI polls with the last seen cursor to tail; the response also
+  carries `gap`/`oldest_seq`/`unseen_total` so the UI can warn about dropped or
+  skipped lines.
 - **Flush**: On Redis flush the tail is empty until the next provider
   flush; the provider ring buffer (and `backend.logs.get`) is the catch-up
   source. Logs are best-effort and never block the request path.
@@ -155,9 +178,9 @@ never persisted to Postgres. Newest lines are pushed to the left so
 live on the `provider_types` Postgres row (`pending_schema`,
 `pending_fingerprint`, `pending_voters`, `status`) because the admin is a
 single writer and the consensus state must survive a Redis flush. Per-
-instance `reported_schema_fingerprint` is likewise a Postgres column.
-Registration-time consensus evaluation reads/writes that row directly
-(see `docs/ws-protocol.md` §2).
+**agent** `reported_schema_fingerprint` is likewise a Postgres column
+(`ProviderAgent.reported_schema_fingerprint`). Registration-time consensus
+evaluation reads/writes that row directly (see `docs/ws-protocol.md` §2).
 
 ## Notes
 

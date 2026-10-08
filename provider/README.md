@@ -1,41 +1,51 @@
 # Provider Authoring Guide
 
 This is the guide to the **provider** side of Inference Matrix: the
-hardware-local containers that each own one inference backend. Architecture
-context: [../ARCHITECTURE.md](../ARCHITECTURE.md); the admin ⇄ provider
-wire protocol: [../docs/ws-protocol.md](../docs/ws-protocol.md).
+hardware-local **agent** containers. Architecture context:
+[../ARCHITECTURE.md](../ARCHITECTURE.md); the admin ⇄ provider wire protocol:
+[../docs/ws-protocol.md](../docs/ws-protocol.md).
 
-A **provider instance** runs on a hardware machine, owns a real inference
-backend as a subprocess (or fake, for the mock), and exposes:
+A **provider agent** is bound to exactly one **machine** + one **provider
+type** + a stable operator-supplied **`AGENT_ID`**, and hosts **1..N
+backends** (one per placed `ProviderDefinition`, each a `ProviderInstance`) of
+that same type. It exposes:
 
-- An **OpenAI-compatible HTTP API on `PROVIDER_PORT`** (default 8081).
-  The admin's litellm client targets
-  `http://<machine.reachable_address()>:<PROVIDER_PORT>/v1/...`.
-- A **dial-out WebSocket** to the admin (`/provider/ws`) for lifecycle
-  commands/events.
+- **One dial-out WebSocket** to the admin (`/provider/ws`) that multiplexes
+  lifecycle commands/events for **all** of its backends; per-backend frames
+  carry the target `instance_id`.
+- **An OpenAI-compatible HTTP API per backend**, each on its own port
+  `PROVIDER_PORT + offset` (the agent's `PROVIDER_PORT` env is the base; the
+  first backend uses it, subsequent backends increment). The admin's litellm
+  client targets `http://<machine.reachable_address()>:<backend port>/v1/...`.
 
 `provider/lib/provider_lib` holds the generic machinery; each provider
 package (`provider/mock`, `provider/llama-cpp`, `provider/halogen`,
 `provider/halogen-flash`, `provider/gufo`) implements the per-type
-driver and overrides only what its backend does differently.
+driver and overrides only what its backend does differently. Since Phase 16
+slice 6 every package hosts N backends per process (a `BackendRegistry` of
+lifecycles served by a `MultiPortServer`); a single-backend agent is just the
+N=1 case and behaves byte-identically to the pre-agent design.
 
 ## What you get from the library vs. what you implement
 
 | Provided by `provider_lib` | You implement per provider type |
 | --- | --- |
-| Registration + WS client (`admin_client.py`) | `BackendDriver` (start/stop/health/list_models/stream_*) |
+| Agent registration + one multiplexed WS client (`admin_client.py`) | `BackendDriver` (start/stop/health/list_models/stream_*) |
 | Backend state machine + slot admission (`backend.py`) | Command/env construction for the real backend |
+| Per-backend dispatch registry (`registry.py`) | A `make_handle` factory that builds a `BackendHandle` from an assignment entry |
+| Multi-port HTTP serving (`serve.py`, `MultiPortServer`) | Wiring only — serve each hosted backend's `/v1` on its own port |
+| `agent.assignments.update` reconcile (`assignments.py`) | Wiring only — `install_backend_ops(..., make_handle=...)` installs it |
 | Provider-port FastAPI app + `/v1` surface (`app_factory.py`) | Translation of the backend's native output → spec |
 | Model downloader + progress events (`downloader.py`) | Artifact layout for your model files |
 | Metrics collectors (`metrics.py`) | Any provider-specific metric quirks |
 | Config fingerprint (`config.py`) | **Overrides** — e.g. halogen-flash `calculate_usage` |
-| Phase 9 shared command handlers (`config_update.py`) | Wiring only — `install_config_handlers(client, lifecycle, state, settings, extra_cache_dirs=...)` |
-| Phase 15 operator lifecycle commands (`ops.py`) | Wiring only — `install_backend_ops(client, lifecycle, backend_name=..., re_register=...)` + a `re_register` closure |
+| Phase 9 shared command handlers (`config_update.py`) | Wiring only — `install_config_handlers(client, registry, state, settings, extra_cache_dirs=...)` |
+| Phase 15/16 operator lifecycle commands (`ops.py`) | Wiring only — `install_backend_ops(client, registry, backend_name=..., re_register=..., make_handle=...)` + a `re_register` closure |
 
 The goal: a new provider type is usually just a `BackendDriver` subclass
-plus a `main.py` that wires it into `BackendLifecycle` and
-`create_provider_app`. If only one behavior differs (e.g. usage
-normalization), override just that.
+plus a `main.py` that wires it into a `BackendRegistry` (one lifecycle per
+placed backend) and serves it with `MultiPortServer`. If only one behavior
+differs (e.g. usage normalization), override just that.
 
 ## Writing a new provider type
 
@@ -43,52 +53,106 @@ normalization), override just that.
    depending on `provider_lib`), add it to the root
    `[tool.uv.workspace].members`.
 2. Implement a `BackendDriver` subclass (see next section).
-3. Add `main.py` mirroring `provider/mock/provider_mock/main.py`: build
-   the driver, wrap in `BackendLifecycle`, install WS command handlers,
-   register + connect, serve `create_provider_app(...)`.
-4. Set `PROVIDER_TYPE` for the package; the admin cross-checks it against
-    the registration token's definition. **Phase 14:** the definition may
-    be created as a *shell* (`provider_type` NULL) — the first
-    registration then adopts your reported type automatically (see
-    "Shell definitions" below), and the first registration of the type
-    also creates the `ProviderType` registry entry.
+3. Add `main.py` mirroring `provider/mock/provider_mock/main.py`: build a
+   driver + `BackendLifecycle` **per placed backend** into a
+   `BackendRegistry`, install WS command handlers
+   (`install_backend_ops` + `install_config_handlers`), register over HTTP,
+   then dial the WS with `AdminClient.run_forever()` and serve every
+   backend's port with `MultiPortServer`.
+4. Set `PROVIDER_TYPE` for the package (a constant, never from the
+   environment). The agent registers as a `(machine, provider_type,
+   agent_id)` triple; the admin resolves the definitions *placed* on this
+   agent and returns one backend per placed definition. The first
+   registration of a type also creates the admin's `ProviderType` registry
+   entry.
 5. **Ship `provider_<type>/schema.json`** (Phase 12) — a JSON Schema
-    (2020-12) describing this type's `backend_config`. See "Authoring
-    schema.json" below. `provider_lib` loads it and sends it in the
-    registration body; the first registration of a type creates the
-    admin's `ProviderType` registry entry.
+   (2020-12) describing this type's `backend_config`. See "Authoring
+   schema.json" below. `provider_lib` loads it and sends it in the
+   registration body. To cap how many backends of this type may run
+   **simultaneously on one agent**, add a top-level
+   `"x-max-running-backends": N` (e.g. `1` for a single-NPU engine; omit or
+   `0` = unlimited). The admin reads it into `ProviderType.max_running_backends`
+   and the scheduler enforces it per agent (hot-swap eviction).
 6. Add a `Dockerfile` and tests.
-7. Do **not** re-implement lifecycle/slot/WS semantics — they come from
-   the lib.
+7. Do **not** re-implement lifecycle/slot/WS/dispatch semantics — they come
+   from the lib.
 
-## Shell definitions (Phase 14)
+## The agent model (Phase 16)
 
-A definition may be created in the admin with **no `provider_type` and
-no `backend_config`** (a *shell*): alias + registration token +
-scheduler hints only. Your container then:
+One container = one **ProviderAgent** = `(machine, provider_type, AGENT_ID)`
+hosting 1..N backends. Everything the agent needs is derived from the
+environment plus the registration response — the agent has **no database**.
 
-1. Registers normally (token + `MACHINE_UID`). The admin **adopts** the
-   `provider_type` from the registration body and bootstraps/validates
-   the type registry from your shipped `schema.json`. The registration
-   response returns `"type_adopted": true` and `backend_config: null`
-   with `config_fingerprint: null` in the definition echo.
-2. Persists the config (null fingerprint is preserved — never coerced to
-   the hash of `{}`), and connects. The admin marks the instance
-   `awaiting_config`.
-3. Until the operator authors a `backend_config` (definitions UI; the
-   standard `provider.config.update` push applies it), no `backend.start`
-   arrives — and if one did (buggy admin), the handler NAKs
-   `{"ok": false, "error": "no_config", "detail": {"step": "validate"}}`
-   because `ConfigState.applied_fingerprint` is `None`. You get this for
-   free: `provider_lib.ops.install_backend_ops` reads
-   `client.no_config_nak` (installed by `install_config_handlers`) on
-   every `backend.start` / `backend.restart`, and `provider.initialize`
-   refreshes the registration without ever booting an unconfigured
-   definition (its ack carries `no_config: true`).
+### Environment (`provider_lib.config.ProviderSettings`)
 
-Registration on a shell never fails for schema reasons your type can't
-help — adopt happens before the schema-consensus gate consumes the type,
-so the adopted registration participates in consensus like any other.
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `MACHINE_UID` | yes | UID of the `Machine` this container runs on (pre-created in the admin UI). |
+| `MACHINE_SECRET` | yes | The shared `Machine.registration_secret` proving the container belongs to that machine. **Replaces the retired `PROVIDER_REGISTRATION_TOKEN`.** |
+| `AGENT_ID` | yes | Stable operator-set id discriminating multiple agents that share a `(machine, provider_type)`. |
+| `ADMIN_BASE_URL` | yes | e.g. `http://admin:8000`. The WS URL is derived by scheme swap (`http→ws`, `https→wss`) + `/provider/ws?agent_id=<PK uuid>`. |
+| `PROVIDER_TYPE` | (package constant) | The single backend type this agent runs. Set in the package (`provider_lib.config.PROVIDER_TYPE`), **never** from the environment. |
+| `PROVIDER_PORT` | no (8081) | **Base** port; the agent's backends listen on `PROVIDER_PORT + offset`. |
+| `CACHE_DIR` | yes (`/cache`) | Prompt caches + the persisted `provider_config.json`. |
+| `MODELS_DIR` | yes (`/models`) | Model artifact storage. |
+| `METRICS_CATEGORIES` | no | Space-delimited: `gpu_usage vram os_ram cpu storage`. Inference metrics are **always** enabled and must not appear here. |
+
+Backend binary paths (`LLAMA_SERVER_PATH`, `GUFO_SERVER_PATH`,
+`HALOGEN_SERVER_PATH`, `HALOGEN_FLASH_SERVER_PATH`, …) also come from the
+container environment, never from `backend_config`.
+
+### Registration flow + response
+
+`AdminClient.register(provider_type=..., version=..., base_port=...,
+hardware=..., schema=...)` POSTs `/admin/api/providers/register` with
+`machine_uid`, `machine_secret`, `agent_id`, `provider_type`, `version`,
+`base_port`, `hardware`, `metrics_categories`, and the shipped `schema`. The
+admin validates the machine secret + version, runs the schema-consensus gate,
+resolves the agent's placed definitions, and returns:
+
+```json
+{
+  "agent_id": "<ProviderAgent PK uuid>",
+  "agent_secret": "<WS bearer>",
+  "machine": { ... },
+  "backends": [
+    {"instance_id": "<uuid>", "port": 8081, "definition": { "alias": "...",
+     "backend_config": { }, "config_fingerprint": "...", "capacity": 1, ... }}
+  ]
+}
+```
+
+The agent persists this to `CACHE_DIR/provider_config.json` and builds **one
+hosted backend per `backends` entry** (each keyed by its `instance_id`, served
+on its `port`). A single-backend registration yields exactly one entry.
+
+### BackendRegistry + per-backend dispatch
+
+`provider_lib.registry.BackendRegistry` maps `instance_id -> BackendHandle`
+(a `BackendLifecycle` + its `ConfigState` + serve `port`). The shared command
+handlers installed by `install_backend_ops` and `install_config_handlers`
+route each per-backend frame to the correct lifecycle by the payload's
+`instance_id`; a frame naming an id this agent does not host is NAK'd
+`unknown_instance` rather than mis-served. A single-backend agent (one handle)
+is a transparent pass-through.
+
+To host N backends, supply a `make_handle` factory to `install_backend_ops`:
+it turns an `agent.assignments.update` entry into a fresh `BackendHandle`
+(new lifecycle + applied-config state seeded from the entry) so a live
+placement push can spawn a backend without a process restart. Every package
+supplies one since slice 6; an agent built without one defensively **refuses**
+an add it cannot serve rather than crashing.
+
+### MultiPortServer
+
+`provider_lib.serve.MultiPortServer` runs one uvicorn server per hosted
+backend in a single process, each serving that backend's normalized `/v1`
+surface on its assignment port. When an `agent.assignments.update` reconcile
+adds or drops a backend it fires the registry's change listeners and the
+server binds/unbinds the affected ports dynamically. A single-backend agent
+produces exactly one listener on `PROVIDER_PORT` — byte-identical to the
+pre-agent behavior. The control plane stays one agent WebSocket; only the data
+plane fans out across ports.
 
 
 ## Authoring schema.json (Phase 12)
@@ -109,7 +173,7 @@ driver:
 
 The schema is a **consensus contract**: the fingerprint of the committed
 schema gates registrations (see `docs/ws-protocol.md` §2). Changing it
-requires every known instance of the type to re-register with the new
+requires every known **agent** of the type to re-register with the new
 file, or an operator force-commit.
 
 ### Sections (collapseable groups)
@@ -365,10 +429,13 @@ the request carries a non-empty `tools` list it emits a canned
 `function_call` turn instead, so the tool-forwarding path is exercisable
 without a real model. Terminal response objects are spec-complete
 (`created_at`, `completed_at`, `usage` details, parameter echoes) so the
-conformance suite validates against them. `provider_mock.main` builds
-**one** `BackendLifecycle` shared between the admin WS command handlers
-(`backend.start`/`backend.stop` drive it) and the FastAPI `/v1` app. Boot
-is admin-driven: after connect the backend stays STOPPED.
+conformance suite validates against them. `provider_mock.main` builds a
+`BackendRegistry` with **one `BackendLifecycle` per placed backend** (from the
+registration response's `backends`), shared between the admin WS command
+handlers (`backend.start`/`backend.stop` route to the right lifecycle by
+`instance_id`) and the per-port `/v1` apps served by `MultiPortServer`. Boot
+is admin-driven: after connect the backends stay STOPPED until the scheduler
+(or a placement warm-up) boots them.
 
 The entrypoint registers over HTTP once (`register_provider`) and then
 keeps the admin WS alive with `AdminClient.run_forever()`, re-emitting
@@ -1006,21 +1073,19 @@ with one call in `install_command_handlers`:
 ```python
 from provider_lib.config_update import ConfigState, install_config_handlers
 
-state = ConfigState()  # applied-fingerprint tracker
-install_command_handlers(client, lifecycle, emitter, state)  # per-package
-# inside that:
+# one ConfigState per hosted backend (or a shared default for a single backend)
 install_config_handlers(
     client,
-    lifecycle,
+    registry,  # BackendRegistry (or a single BackendLifecycle)
     state,
     settings,
     extra_cache_dirs=[...],  # optional: engine cache dirs this provider owns
 )
 ```
 
-`apply_registration(...)` seeds `state.applied_fingerprint` from the
-registration response's `provider_definition.config_fingerprint`, so
-the provider and the admin start with the same view.
+Each backend's `ConfigState.applied_fingerprint` is seeded from its
+registration/assignment entry's `config_fingerprint`, so the provider and the
+admin start with the same view.
 
 ## Operator lifecycle commands (`provider_lib.ops`)
 
@@ -1029,9 +1094,13 @@ the provider and the admin start with the same view.
 your package's `install_command_handlers`. It replaces any local
 start/stop handler: the ack detail is built generically from
 `lifecycle.capacity` plus whichever of `effective_capacity`, `api_port`,
-`engine_port`, `backend_port` your driver exposes, and the Phase 14
-`client.no_config_nak` fence is read live (so install order does not
-matter).
+`engine_port`, `backend_port` your driver exposes. Pass a `BackendRegistry`
+(the agent model — one handle per placed backend) and `install_backend_ops`
+routes each per-backend command to the correct lifecycle by `instance_id`
+(NAKing `unknown_instance` for an id this agent does not host); a single
+`BackendLifecycle` is still accepted and treated as a one-handle registry.
+Supplying a `make_handle` factory lets a live `agent.assignments.update` push
+spawn/retire backends (see "The agent model" above).
 
 ```python
 from provider_lib.ops import install_backend_ops
@@ -1043,16 +1112,20 @@ async def re_register() -> dict[str, Any] | None:
     result = await client.register(
         provider_type=PROVIDER_TYPE,
         version=VERSION,
-        port=client.settings.PROVIDER_PORT,
+        base_port=client.settings.PROVIDER_PORT,
         hardware=hardware,
         schema=SCHEMA,
     )
-    apply_registration(lifecycle, result, resolved_state)
+    # adopt result.backends into the registry's handles ...
     return result.provider_definition
 
 
 install_backend_ops(
-    client, lifecycle, backend_name=PROVIDER_TYPE, re_register=re_register
+    client,
+    registry,
+    backend_name=PROVIDER_TYPE,
+    re_register=re_register,
+    make_handle=make_handle,
 )
 ```
 

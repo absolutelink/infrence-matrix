@@ -392,8 +392,8 @@ Provider agent                      Admin
    │      definition (agent_id, definition_id), stopped
    │    issue per-agent secret → Redis im:ws:secret:{agent_id}
    │ ◀──────────────────────────────
-   │  {agent_id, agent_secret, assignments:[{instance_id, definition
-   │   alias, backend_config, config_fingerprint, capacity, port}, ...]}
+   │  {agent_id, agent_secret, backends:[{instance_id, port,
+   │   definition:{alias, backend_config, config_fingerprint, ...}}, ...]}
    │ write provider_config.json to CACHE_DIR
    │ dial ws(s)://{admin}/provider/ws   (ONE socket for the agent)
    │   Authorization: Bearer {agent_secret}
