@@ -426,3 +426,54 @@ def test_mmproj_flag() -> None:
         {}, model_path="/m/x.gguf", port=1, mmproj_path="/m/mm.gguf"
     )
     assert cmd[cmd.index("--mmproj") + 1] == "/m/mm.gguf"
+
+
+def test_embedding_modality_adds_flag() -> None:
+    # Phase 18 slice 5: embedding modality auto-adds --embedding.
+    cmd = build_llama_command(
+        {}, model_path="/m/x.gguf", port=1, modality="embedding"
+    )
+    assert "--embedding" in cmd
+
+
+def test_llm_modality_omits_embedding_flag() -> None:
+    # Default (llm) and explicit "llm" never emit --embedding.
+    assert "--embedding" not in build_llama_command(
+        {}, model_path="/m/x.gguf", port=1
+    )
+    assert "--embedding" not in build_llama_command(
+        {}, model_path="/m/x.gguf", port=1, modality="llm"
+    )
+
+
+def test_pooling_value_flag_embedding_only() -> None:
+    # Phase 18 slice 5: --pooling applies ONLY to embedding backends.
+    cmd = build_llama_command(
+        {"server": {"pooling": "last"}},
+        model_path="/m/x.gguf",
+        port=1,
+        modality="embedding",
+    )
+    assert cmd[cmd.index("--pooling") + 1] == "last"
+
+
+def test_pooling_not_emitted_for_llm_backend() -> None:
+    # An llm backend with server.pooling set emits NO --pooling (embedding-only).
+    cmd = build_llama_command(
+        {"server": {"pooling": "last"}}, model_path="/m/x.gguf", port=1
+    )
+    assert "--pooling" not in cmd
+
+
+def test_pooling_absent_or_null_not_emitted() -> None:
+    # null / absent pooling emits nothing (server default), even for embedding.
+    assert "--pooling" not in build_llama_command(
+        {"server": {"pooling": None}},
+        model_path="/m/x.gguf",
+        port=1,
+        modality="embedding",
+    )
+    assert "--pooling" not in build_llama_command(
+        {}, model_path="/m/x.gguf", port=1, modality="embedding"
+    )
+

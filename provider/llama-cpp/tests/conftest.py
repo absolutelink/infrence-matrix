@@ -9,6 +9,7 @@ subprocess exactly like a real llama-server. It serves:
   GET  /v1/models           fixed OpenAI model list
   POST /v1/responses        SSE: created, N deltas, completed (usage)
   POST /v1/chat/completions SSE: chunks + data: [DONE]
+  POST /v1/embeddings       fixed CreateEmbeddingResponse (500 on __fail__)
 
 It records lifecycle markers into the state directory so tests can assert
 on server-side observations such as mid-stream client cancellation
@@ -134,6 +135,22 @@ FAKE_SCRIPT = textwrap.dedent(
                                            "finish_reason": "stop"}]})
                     yield b"data: [DONE]\\n\\n"
                 self._stream(frames, "chat_cancelled")
+            elif self.path == "/v1/embeddings":
+                if request.get("__fail__"):
+                    self._send(500, {"error": "embedding boom"})
+                else:
+                    inp = request.get("input", "")
+                    n = len(inp) if isinstance(inp, list) else 1
+                    self._send(200, {
+                        "object": "list",
+                        "data": [
+                            {"object": "embedding", "index": i,
+                             "embedding": [0.1, 0.2, 0.3]}
+                            for i in range(n)
+                        ],
+                        "model": "fake-llama-model",
+                        "usage": {"prompt_tokens": 3, "total_tokens": 3},
+                    })
             else:
                 self._send(404, {"error": "not found"})
 

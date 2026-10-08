@@ -155,12 +155,15 @@ def build_llama_command(
     binary: str = "llama-server",
     mmproj_path: str | None = None,
     draft_path: str | None = None,
+    modality: str = "llm",
 ) -> list[str]:
     """Build the llama-server argv from a sectioned backend_config dict.
 
     Values are read from the flattened sections (see `flatten_args`);
     `model_path` / `mmproj_path` / `draft_path` are the driver-resolved
-    local paths of the `artifacts` section descriptors.
+    local paths of the `artifacts` section descriptors. `modality` is the
+    endpoint kind this backend serves (Phase 18): `"embedding"` auto-adds
+    `--embedding`; anything else (default `"llm"`) does not.
     """
     args: dict[str, Any] = flatten_args(cfg)
 
@@ -208,6 +211,17 @@ def build_llama_command(
     flash = _flash_attn_value(args.get("flash_attn"))
     if flash is not None:
         cmd.extend(["--flash-attn", flash])
+
+    # Phase 18: embedding-modality backends boot llama-server in embedding
+    # mode. Derived from the driver's modality, never a user config field.
+    # --pooling is embedding-only: it selects the pooling type used to build
+    # the embedding vector, so it is meaningless (and rejected by some
+    # llama-server builds) for chat backends.
+    if modality == "embedding":
+        cmd.append("--embedding")
+        pooling = args.get("pooling")
+        if pooling is not None:
+            cmd.extend(["--pooling", str(pooling)])
 
     # Speculative decoding: an explicit draft artifact wins over MTP.
     # The MTP path is selected by the legacy `mtp_draft_max > 0` or an

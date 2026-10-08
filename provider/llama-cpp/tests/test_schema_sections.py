@@ -110,11 +110,39 @@ def schema_keys() -> list[str]:
     return list(SCHEMA["properties"])
 
 
+def test_shipped_schema_declares_serves_modalities() -> None:
+    # Phase 18 slice 5: llama-cpp hosts both chat and embedding backends.
+    assert SCHEMA.get("x-serves-modalities") == ["llm", "embedding"]
+
+
+def test_server_pooling_option_validates() -> None:
+    # Phase 18 slice 5: --pooling is a settable server option (embedding
+    # pooling type); null/absent leaves the server default.
+    for value in ("none", "cls", "last", "mean", "rank", "rank_cls", "auto"):
+        cfg = json.loads(json.dumps(CANONICAL_CONFIG))
+        cfg["server"]["pooling"] = value
+        assert validate_backend_config(SCHEMA, cfg) == [], value
+    # An unknown pooling value is rejected (enum).
+    cfg = json.loads(json.dumps(CANONICAL_CONFIG))
+    cfg["server"]["pooling"] = "median"
+    assert any("pooling" in e for e in validate_backend_config(SCHEMA, cfg))
+    # Explicit null is accepted (null ∈ enum): the Medium-fix guard.
+    null_cfg = {
+        **CANONICAL_CONFIG,
+        "server": {**CANONICAL_CONFIG["server"], "pooling": None},
+    }
+    assert validate_backend_config(SCHEMA, null_cfg) == []
+    # The pooling field maps to --pooling and defaults to null.
+    pooling = SCHEMA["properties"]["server"]["properties"]["pooling"]
+    assert pooling["x-flag"] == "--pooling"
+    assert pooling["default"] is None
+
+
 # Frozen fingerprint of the shipped provider_llama_cpp/schema.json — the
 # fleet consensus contract (docs/ws-protocol.md §2). If you change
 # schema.json, every known llama-cpp instance must re-register with the
 # new file (or the operator force-commits); update this pin deliberately.
-SHIPPED_SCHEMA_FP = "0af969e61cb3c535aadef910f78df51c408e5b880e315ad42aa2152f79e45cb6"
+SHIPPED_SCHEMA_FP = "03373ece382f8f14bcdc0a59f97a567b96f31514f4754e979480111f21b327ff"
 
 
 def test_schema_fingerprint_is_stable() -> None:

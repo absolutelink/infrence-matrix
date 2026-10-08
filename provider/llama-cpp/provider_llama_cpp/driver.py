@@ -180,6 +180,7 @@ class LlamaCppBackend(BackendDriver):
             binary=self._binary,
             mmproj_path=mmproj_path,
             draft_path=draft_path,
+            modality=self.modality,
         )
         logger.info("starting llama-server: %s", " ".join(cmd))
         try:
@@ -318,6 +319,25 @@ class LlamaCppBackend(BackendDriver):
             )
         data = resp.json().get("data", [])
         return list(data)
+
+    async def embeddings(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Proxy an OpenAI embeddings request to the upstream llama-server.
+
+        Phase 18: awaited by provider_lib's slot-admitted
+        ``POST /v1/embeddings`` route. The backend must have been booted
+        with ``--embedding`` (modality == "embedding") for the upstream to
+        serve this path. Returns the parsed spec CreateEmbeddingResponse.
+        """
+        client = self._http_client()
+        resp = await client.post(
+            f"{self.base_url}/v1/embeddings", json=request, timeout=120.0
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"upstream /v1/embeddings returned HTTP {resp.status_code}: "
+                f"{resp.text[:500]}"
+            )
+        return resp.json()
 
     def _http_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:

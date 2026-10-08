@@ -79,6 +79,34 @@ async def test_list_models_passthrough(
         await driver.aclose()
 
 
+async def test_embeddings_passthrough(
+    tmp_path, fake_llama_binary, local_model_file
+) -> None:
+    # Phase 18 slice 5: driver.embeddings proxies the request body to the
+    # upstream /v1/embeddings and returns the parsed spec response.
+    driver = _backend(tmp_path, fake_llama_binary, local_model_file)
+    try:
+        await driver.start()
+        result = await driver.embeddings({"model": "m", "input": "hello"})
+        assert result["object"] == "list"
+        assert result["data"][0]["embedding"] == [0.1, 0.2, 0.3]
+        assert result["usage"]["total_tokens"] == 3
+    finally:
+        await driver.aclose()
+
+
+async def test_embeddings_non_200_raises(
+    tmp_path, fake_llama_binary, local_model_file
+) -> None:
+    driver = _backend(tmp_path, fake_llama_binary, local_model_file)
+    try:
+        await driver.start()
+        with pytest.raises(RuntimeError, match="HTTP 500"):
+            await driver.embeddings({"model": "m", "input": "x", "__fail__": True})
+    finally:
+        await driver.aclose()
+
+
 async def test_stream_responses_yields_event_dicts_with_usage(
     tmp_path, fake_llama_binary, local_model_file
 ) -> None:

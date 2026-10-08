@@ -3,6 +3,7 @@
   "title": "llama.cpp backend_config",
   "description": "Sectioned backend_config for the llama-cpp provider (Phase 12). x-flag names the llama-server CLI flag; command.py remains the executable mapping. Fields not yet passed to llama-server carry x-supported: false (documented, disabled in the UI).",
   "type": "object",
+  "x-serves-modalities": ["llm", "embedding"],
   "additionalProperties": false,
   "properties": {
     "artifacts": {
@@ -1290,6 +1291,14 @@
           "description": "Tri-state flash attention (upstream default 'auto'). The driver normalizes booleans to on/off and passes 'auto' through.",
           "x-flag": "--flash-attn",
           "x-numeric-effect": "numeric"
+        },
+        "pooling": {
+          "type": ["string", "null"],
+          "title": "Pooling type",
+          "description": "Pooling type for embeddings (--pooling). null/absent leaves the llama-server default; only meaningful when the backend serves the embedding modality.",
+          "x-flag": "--pooling",
+          "enum": ["none", "cls", "last", "mean", "rank", "rank_cls", "auto", null],
+          "default": null
         },
         "sleep_idle_seconds": {
           "type": "integer",
