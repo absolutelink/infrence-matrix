@@ -1001,3 +1001,61 @@ def test_permissive_fingerprint_pinned_to_frontend_constant() -> None:
     assert PERMISSIVE_SCHEMA == {"type": "object"}
     assert PERMISSIVE_FINGERPRINT == canonical_json_sha256(PERMISSIVE_SCHEMA)
     assert PERMISSIVE_FINGERPRINT == FRONTEND_PERMISSIVE_FP
+
+
+def test_provider_type_detail_exposes_serves_modalities(
+    client: TestClient, session: Session
+) -> None:
+    # Phase 18: a schema declaring x-serves-modalities must surface the list on
+    # BOTH the list and the detail endpoint (mirrors x-max-running-backends).
+    schema = {
+        "type": "object",
+        "properties": {"delta_count": {"type": "integer"}},
+        "required": ["delta_count"],
+        "x-serves-modalities": ["llm", "embedding"],
+    }
+    _machine(session, "sm-m")
+    _definition(session)
+    assert _register(client, "sm-m", schema).status_code == 200
+
+    detail = client.get(f"/admin/api/provider-types/{TYPE_NAME}").json()
+    assert detail["serves_modalities"] == ["llm", "embedding"]
+    listed = client.get("/admin/api/provider-types").json()
+    assert listed[0]["serves_modalities"] == ["llm", "embedding"]
+    session.expire_all()
+    assert _get_type(session).serves_modalities == ["llm", "embedding"]
+
+
+def test_serves_modalities_defaults_to_llm(client: TestClient, session: Session) -> None:
+    # A schema with no x-serves-modalities falls back to ["llm"].
+    _machine(session, "sm-def")
+    _definition(session)
+    assert _register(client, "sm-def", SCHEMA_V1).status_code == 200
+    session.expire_all()
+    assert _get_type(session).serves_modalities == ["llm"]
+
+
+def test_serves_modalities_drops_unknown_values(
+    client: TestClient, session: Session
+) -> None:
+    # Unknown modalities (e.g. "audio", not yet accepted) are filtered out.
+    schema = dict(SCHEMA_V1)
+    schema["x-serves-modalities"] = ["embedding", "audio", "bogus"]
+    _machine(session, "sm-filter")
+    _definition(session)
+    assert _register(client, "sm-filter", schema).status_code == 200
+    session.expire_all()
+    assert _get_type(session).serves_modalities == ["embedding"]
+
+
+def test_serves_modalities_all_unknown_falls_back_to_llm(
+    client: TestClient, session: Session
+) -> None:
+    # If nothing known remains after filtering, fall back to ["llm"].
+    schema = dict(SCHEMA_V1)
+    schema["x-serves-modalities"] = ["audio"]
+    _machine(session, "sm-fallback")
+    _definition(session)
+    assert _register(client, "sm-fallback", schema).status_code == 200
+    session.expire_all()
+    assert _get_type(session).serves_modalities == ["llm"]

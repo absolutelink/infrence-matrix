@@ -189,6 +189,7 @@ def _gate_existing_type(
             ptype.schema_fingerprint = fp
             ptype.status = "active"
             _apply_max_running_from_schema(ptype, schema)
+            _apply_serves_modalities_from_schema(ptype, schema)
             return None
         # Stage the new schema; this agent is the first voter.
         ptype.pending_schema = schema
@@ -219,6 +220,7 @@ def _gate_existing_type(
             ptype.pending_voters = []
             ptype.status = "active"
             _apply_max_running_from_schema(ptype, ptype.schema)
+            _apply_serves_modalities_from_schema(ptype, ptype.schema)
             return None
         return _schema_refusal_detail(
             provider_type,
@@ -307,6 +309,39 @@ def _apply_max_running_from_schema(ptype: ProviderType, schema: dict[str, Any]) 
         ptype.max_running_backends = 0
 
 
+_KNOWN_MODALITIES = ("llm", "embedding")
+
+
+def _apply_serves_modalities_from_schema(
+    ptype: ProviderType, schema: dict[str, Any]
+) -> None:
+    """Sync ``ProviderType.serves_modalities`` from a committed schema.
+
+    Phase 18 slice 1: the endpoint kinds a type can host are declared as a
+    top-level ``x-serves-modalities`` key (a JSON array of strings) in the
+    type's shipped ``schema.json`` (default ``["llm"]``) — the exact mechanism
+    already used for ``x-max-running-backends``. Unknown values are dropped;
+    if nothing known remains, fall back to ``["llm"]``. The definition CRUD
+    validates a definition's ``modality`` against this column (422 otherwise).
+    Mutates ``ptype`` in the caller's session; the caller commits.
+    """
+    raw = (
+        schema.get("x-serves-modalities", ["llm"])
+        if isinstance(schema, dict)
+        else ["llm"]
+    )
+    if not isinstance(raw, list):
+        raw = ["llm"]
+    # Dedup while preserving order (e.g. ["llm", "llm"] -> ["llm"]); drop
+    # unknown values; fall back to ["llm"] if nothing known remains.
+    known: list[str] = []
+    for m in raw:
+        value = str(m)
+        if value in _KNOWN_MODALITIES and value not in known:
+            known.append(value)
+    ptype.serves_modalities = known or ["llm"]
+
+
 def _bootstrap_type(
     session: Session, provider_type: str, schema: dict[str, Any]
 ) -> ProviderType:
@@ -331,6 +366,7 @@ def _bootstrap_type(
     if ptype is None:  # pragma: no cover - only if the row vanished twice
         raise RuntimeError(f"provider type '{provider_type}' bootstrap failed")
     _apply_max_running_from_schema(ptype, schema)
+    _apply_serves_modalities_from_schema(ptype, schema)
     session.add(ptype)
     return ptype
 

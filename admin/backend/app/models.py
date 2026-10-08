@@ -1,4 +1,4 @@
-"""Inference Matrix admin data model (Phase 2; Phase 16 agents).
+"""Inference Matrix admin data model (Phase 2; Phase 16 agents; Phase 18 modality).
 
 Tables:
 
@@ -162,6 +162,15 @@ class ProviderType(SQLModel, table=True):
     # by the scheduler.
     max_running_backends: int = Field(default=0, ge=0)
 
+    # Phase 18: which client-facing endpoint kinds this type can host
+    # (`llm` | `embedding`; `audio` reserved). Declared in the shipped
+    # schema.json (`x-serves-modalities`, default ["llm"]); read into this
+    # column at every schema-commit point exactly like max_running_backends.
+    # A ProviderDefinition's `modality` must be in this list.
+    serves_modalities: list = Field(
+        default_factory=lambda: ["llm"], sa_column=Column(JSON, nullable=False)
+    )
+
     # Staged schema awaiting consensus (None when nothing is pending).
     pending_schema: dict | None = Field(default=None, sa_column=Column(JSON))
     pending_fingerprint: str | None = Field(default=None, max_length=64)
@@ -303,6 +312,12 @@ class ProviderDefinition(SQLModel, table=True):
     alias: str = Field(max_length=255, unique=True)
     # references ProviderType.name (Phase 12); required (no shells).
     provider_type: str = Field(max_length=64)
+
+    # Phase 18: the endpoint kind this definition serves — the admin's routing
+    # key. `llm` (default) | `embedding` (`audio` reserved). Must be in the
+    # ProviderType.serves_modalities list (create/PATCH 422 otherwise).
+    # Immutable while backends are attached (same gate as provider_type).
+    modality: str = Field(default="llm", max_length=32)
 
     # Everything the provider needs to start the backend. Schema documented
     # in provider/README.md and validated against the type's committed JSON

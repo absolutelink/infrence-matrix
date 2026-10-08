@@ -79,12 +79,19 @@ router = APIRouter(prefix="/admin/api/definitions", tags=["admin"])
 
 _VALID_PLACEMENTS = ("any_of_type", "specific")
 
+# Phase 18: modalities the admin accepts today. `audio` is reserved (the
+# /v1/audio/* landing spot) but NOT yet valid on a definition.
+_VALID_MODALITIES = ("llm", "embedding")
+
 
 class DefinitionCreate(BaseModel):
     alias: str = Field(min_length=1, max_length=255)
     # Phase 16: required (no shells). provider_type must be in the registry
     # and backend_config validates against its committed JSON Schema.
     provider_type: str = Field(min_length=1, max_length=64)
+    # Phase 18: endpoint kind this definition serves. Must be in the type's
+    # serves_modalities list (create/PATCH 422 otherwise).
+    modality: str = Field(default="llm", max_length=32)
     backend_config: dict[str, Any] = Field(default_factory=dict)
     vram_required_bytes: int = Field(default=0, ge=0)
     idle_timeout_seconds: int = Field(default=300, ge=0)
@@ -99,6 +106,9 @@ class DefinitionCreate(BaseModel):
 class DefinitionPatch(BaseModel):
     alias: str | None = Field(default=None, min_length=1, max_length=255)
     provider_type: str | None = Field(default=None, min_length=1, max_length=64)
+    # Phase 18: endpoint kind (see DefinitionCreate). Immutable while backends
+    # are attached (409), same gate as provider_type.
+    modality: str | None = Field(default=None, max_length=32)
     backend_config: dict[str, Any] | None = None
     vram_required_bytes: int | None = Field(default=None, ge=0)
     idle_timeout_seconds: int | None = Field(default=None, ge=0)
@@ -116,6 +126,7 @@ _NON_NULLABLE_FIELDS = frozenset(
     {
         "alias",
         "provider_type",
+        "modality",
         "backend_config",
         "vram_required_bytes",
         "idle_timeout_seconds",
@@ -192,6 +203,29 @@ def _validate_backend_config(
                     for err in errors
                 ],
             },
+        )
+
+
+def _validate_modality(ptype: ProviderType, modality: str) -> None:
+    """Phase 18: a definition's modality must be a known value AND be hosted
+    by its provider type. Refuses 422 when ``modality`` is not in
+    ``{"llm", "embedding"}`` (``audio`` reserved, not accepted yet) or not in
+    ``ptype.serves_modalities``."""
+    if modality not in _VALID_MODALITIES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"modality '{modality}' is not accepted; "
+                f"valid values: {list(_VALID_MODALITIES)}"
+            ),
+        )
+    if modality not in (ptype.serves_modalities or []):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"provider_type '{ptype.name}' does not serve modality "
+                f"'{modality}'; it serves {ptype.serves_modalities}"
+            ),
         )
 
 
@@ -288,6 +322,7 @@ def definition_dict(
         "id": str(definition.id),
         "alias": definition.alias,
         "provider_type": definition.provider_type,
+        "modality": definition.modality,
         "backend_config": definition.backend_config,
         "config_fingerprint": compute_config_fingerprint(definition.backend_config),
         "vram_required_bytes": definition.vram_required_bytes,
@@ -347,6 +382,8 @@ async def create_definition(
     # config against the type's committed schema before inserting.
     ptype = _get_provider_type(session, body.provider_type)
     _validate_backend_config(ptype, body.backend_config)
+    # Phase 18: the modality must be accepted and hosted by the type.
+    _validate_modality(ptype, body.modality)
     # Phase 16: validate placement + resolve specific agent ids (422 on an
     # unknown agent) BEFORE inserting, so a bad placement never persists.
     agent_ids = _resolve_placement_agents(
@@ -474,6 +511,36 @@ async def patch_definition(
                     f"definition '{definition.alias}' has "
                     f"{len(attached)} instance(s) attached; changing "
                     "provider_type would break their binding — delete "
+                    "the instances (or create a new definition) "
+                    "instead"
+                ),
+            )
+
+    # Phase 18: validate the EFFECTIVE modality against the EFFECTIVE type's
+    # serves_modalities — but ONLY when the modality or the type actually
+    # changes (mirrors the backend_config gating above). An unrelated PATCH
+    # (e.g. enabled=false) must stay allowed even if a later schema-consensus
+    # change dropped this definition's modality from its type, so the operator
+    # can always disable it.
+    if "modality" in changes or "provider_type" in changes:
+        effective_modality = changes.get("modality", definition.modality)
+        _validate_modality(ptype, effective_modality)
+    # Phase 18: modality is immutable while backends are attached (same gate as
+    # provider_type) — an engine booted for one endpoint kind cannot silently
+    # become another.
+    if "modality" in changes and changes["modality"] != definition.modality:
+        attached = session.exec(
+            select(ProviderInstance).where(
+                ProviderInstance.provider_definition_id == definition.id
+            )
+        ).all()
+        if attached:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"definition '{definition.alias}' has "
+                    f"{len(attached)} instance(s) attached; changing "
+                    "modality would break their binding — delete "
                     "the instances (or create a new definition) "
                     "instead"
                 ),

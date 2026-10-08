@@ -49,6 +49,10 @@ export type DefinitionCreate = {
      */
     provider_type: string;
     /**
+     * Modality
+     */
+    modality?: string;
+    /**
      * Backend Config
      */
     backend_config?: {
@@ -92,6 +96,10 @@ export type DefinitionPatch = {
      * Provider Type
      */
     provider_type?: string | null;
+    /**
+     * Modality
+     */
+    modality?: string | null;
     /**
      * Backend Config
      */

@@ -654,3 +654,146 @@ def test_patch_placement_prunes_stale_backend(
         )
     ).all()
     assert remaining == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 18 slice 1: modality on definitions
+# ---------------------------------------------------------------------------
+
+
+def _set_serves_modalities(session: Session, name: str, modalities: list[str]) -> None:
+    ptype = session.exec(select(ProviderType).where(ProviderType.name == name)).one()
+    ptype.serves_modalities = modalities
+    session.add(ptype)
+    session.commit()
+
+
+def test_create_default_modality_is_llm(client: TestClient) -> None:
+    created = _create(client, alias="mod-default")
+    assert created["modality"] == "llm"
+
+
+def test_create_embedding_rejected_when_type_lacks_it(client: TestClient) -> None:
+    # mock is seeded with serves_modalities=["llm"] (default).
+    resp = client.post(
+        "/admin/api/definitions",
+        json={
+            "alias": "mod-emb-deny",
+            "provider_type": "mock",
+            "backend_config": {"delta_count": 3},
+            "modality": "embedding",
+        },
+    )
+    assert resp.status_code == 422, resp.text
+    assert "embedding" in resp.json()["detail"]
+
+
+def test_create_embedding_allowed_when_type_serves_it(
+    client: TestClient, session: Session
+) -> None:
+    _set_serves_modalities(session, "mock", ["llm", "embedding"])
+    created = _create(client, alias="mod-emb-ok", modality="embedding")
+    assert created["modality"] == "embedding"
+
+
+def test_create_audio_rejected(client: TestClient, session: Session) -> None:
+    # audio is reserved but NOT accepted yet, even if a type declared it.
+    _set_serves_modalities(session, "mock", ["llm", "embedding", "audio"])
+    resp = client.post(
+        "/admin/api/definitions",
+        json={
+            "alias": "mod-audio",
+            "provider_type": "mock",
+            "backend_config": {"delta_count": 3},
+            "modality": "audio",
+        },
+    )
+    assert resp.status_code == 422, resp.text
+
+
+def test_patch_modality_allowed_without_instances(client: TestClient) -> None:
+    created = _create(client, alias="mod-patch-free")
+    resp = client.patch(
+        f"/admin/api/definitions/{created['id']}", json={"modality": "llm"}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["modality"] == "llm"
+
+
+def test_patch_modality_embedding_requires_type_support(
+    client: TestClient, session: Session
+) -> None:
+    created = _create(client, alias="mod-patch-emb")
+    # mock still serves only ["llm"] -> switching to embedding is 422.
+    resp = client.patch(
+        f"/admin/api/definitions/{created['id']}", json={"modality": "embedding"}
+    )
+    assert resp.status_code == 422, resp.text
+    # Now the type serves embedding too.
+    _set_serves_modalities(session, "mock", ["llm", "embedding"])
+    resp = client.patch(
+        f"/admin/api/definitions/{created['id']}", json={"modality": "embedding"}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["modality"] == "embedding"
+
+
+def test_patch_modality_refused_with_instances_attached(
+    client: TestClient, session: Session
+) -> None:
+    _set_serves_modalities(session, "mock", ["llm", "embedding"])
+    created = _create(client, alias="mod-patch-locked", modality="llm")
+    _connected_backend(session, created["id"], connected=False)
+    resp = client.patch(
+        f"/admin/api/definitions/{created['id']}", json={"modality": "embedding"}
+    )
+    assert resp.status_code == 409, resp.text
+    assert "attached" in resp.json()["detail"]
+
+
+def test_patch_retype_to_type_not_serving_modality_422(
+    client: TestClient, session: Session
+) -> None:
+    # Locks in the retype path: moving an embedding definition onto a type that
+    # does not serve embeddings is refused 422 (effective modality vs effective
+    # type's serves_modalities).
+    _set_serves_modalities(session, "mock", ["llm", "embedding"])
+    created = _create(client, alias="retype-deny", modality="embedding")
+    # llama-cpp is seeded with the default serves_modalities=["llm"].
+    resp = client.patch(
+        f"/admin/api/definitions/{created['id']}",
+        json={"provider_type": "llama-cpp"},
+    )
+    assert resp.status_code == 422, resp.text
+    assert "embedding" in resp.json()["detail"]
+
+
+def test_patch_retype_plus_modality_allowed(client: TestClient, session: Session) -> None:
+    # Combined retype + modality change onto a type that serves the new
+    # modality is allowed (200).
+    _set_serves_modalities(session, "llama-cpp", ["llm", "embedding"])
+    created = _create(client, alias="retype-ok", provider_type="mock")
+    resp = client.patch(
+        f"/admin/api/definitions/{created['id']}",
+        json={"provider_type": "llama-cpp", "modality": "embedding"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["modality"] == "embedding"
+    assert resp.json()["provider_type"] == "llama-cpp"
+
+
+def test_patch_unrelated_field_allowed_when_modality_orphaned(
+    client: TestClient, session: Session
+) -> None:
+    # Low-fix discriminator: a definition left in a modality its type no longer
+    # serves (e.g. after a schema-consensus change) must still accept an
+    # unrelated PATCH such as enabled=false — the operator can always disable.
+    _set_serves_modalities(session, "mock", ["llm", "embedding"])
+    created = _create(client, alias="orphan-mod", modality="embedding")
+    # Construct the orphan state directly: drop embedding from the type.
+    _set_serves_modalities(session, "mock", ["llm"])
+    resp = client.patch(
+        f"/admin/api/definitions/{created['id']}", json={"enabled": False}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["enabled"] is False
