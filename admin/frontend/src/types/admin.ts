@@ -238,6 +238,8 @@ export interface UsageSample {
   id: string
   provider_instance_id: string | null
   provider_definition_id: string | null
+  /** Phase 19: definition alias for per-model rollups (null if definition gone). */
+  alias: string | null
   prompt_tokens: number
   cached_tokens: number
   completion_tokens: number
@@ -358,4 +360,45 @@ export interface ProviderTypeDetail {
   consensus: ProviderTypeConsensus
   created_at: string
   updated_at: string | null
+}
+
+// Phase 19: scheduler queue observability (mirrors
+// admin/backend/app/api/admin/responses.py::scheduler_stats). Every
+// ProviderDefinition is listed (enabled or not); a definition with no
+// scheduler state reports {queued: 0, active: 0}.
+export interface SchedulerStatsDefinition {
+  alias: string
+  queued: number
+  active: number
+}
+
+export interface SchedulerStats {
+  definitions: SchedulerStatsDefinition[]
+  totals: { queued: number; active: number }
+}
+
+// Phase 19: operator queue-clear results (DELETE .../queue/{alias} and
+// DELETE .../queue). Admitted/active requests are untouched — only waiters.
+export interface ClearQueueResult {
+  ok: boolean
+  cleared: number
+  alias?: string
+}
+
+// Phase 19: fleet VRAM/GPU rollup (mirrors
+// admin/backend/app/api/admin/responses.py::fleet_metrics). VRAM is summed
+// fleet-wide; gpu_utilization_percent is the unweighted mean of per-machine
+// means. Machines with no fresh metrics degrade to zeros.
+export interface FleetMetricsMachine {
+  uid: string
+  name: string
+  vram_used_bytes: number
+  vram_total_bytes: number
+  gpu_utilization_percent: number
+}
+
+export interface FleetMetrics {
+  vram: { used_bytes: number; total_bytes: number }
+  gpu_utilization_percent: number
+  machines: FleetMetricsMachine[]
 }

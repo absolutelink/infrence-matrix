@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query"
 
 import { AdminService } from "@/client"
 import type {
+  FleetMetrics,
   LogKind,
   LogsResponse,
   Machine,
@@ -13,6 +14,7 @@ import type {
   ProviderTypeDetail,
   ProviderTypeSummary,
   ResponsesList,
+  SchedulerStats,
   UsageStats,
 } from "@/types/admin"
 
@@ -30,6 +32,9 @@ export const usageKeys = {
   withLimit: (limit: number) => ["stats", "usage", limit] as const,
 }
 export const overviewKeys = { all: ["stats", "overview"] as const }
+// Phase 19: live stats bar — scheduler queue snapshot + fleet VRAM/GPU rollup.
+export const schedulerStatsKeys = { all: ["stats", "scheduler"] as const }
+export const fleetMetricsKeys = { all: ["stats", "metrics"] as const }
 export const providerTypeKeys = {
   all: ["provider-types"] as const,
   detail: (name: string) => ["provider-types", name] as const,
@@ -140,6 +145,29 @@ export function useOverview(refetchInterval = 4000) {
     queryKey: overviewKeys.all,
     queryFn: async () =>
       cast<OverviewStats>((await AdminService.overviewStats()).data),
+    refetchInterval,
+  })
+}
+
+// Phase 19: authoritative in-process scheduler queue snapshot (per-definition
+// queued/active + totals) for the live stats bar. Polls faster than the
+// overview mirror because it drives the operator queue-clear affordance.
+export function useSchedulerStats(refetchInterval = 4000) {
+  return useQuery({
+    queryKey: schedulerStatsKeys.all,
+    queryFn: async () =>
+      cast<SchedulerStats>((await AdminService.schedulerStats()).data),
+    refetchInterval,
+  })
+}
+
+// Phase 19: fleet VRAM (summed) + GPU utilization (unweighted mean of
+// per-machine means) rollup for the live stats bar.
+export function useFleetMetrics(refetchInterval = 5000) {
+  return useQuery({
+    queryKey: fleetMetricsKeys.all,
+    queryFn: async () =>
+      cast<FleetMetrics>((await AdminService.fleetMetrics()).data),
     refetchInterval,
   })
 }

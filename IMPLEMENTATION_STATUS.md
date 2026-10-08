@@ -118,7 +118,7 @@ starting a feature, read the linked protocol/doc first.
 | 16 | Machine-scoped provider **agents**: one container → many same-type backends, placement, `max_running_backends` | 🟡 slices 1–6 landed (agents, placement, `max_running` hot-swap + proactive warm-up, `agent.assignments.update` push, real-engine multi-backend-per-process + per-port serving); 7–8 pending |
 | 17 | Per-GPU machine metrics + hardware union: device-isolated agents (one GPU each) merge into a full machine inventory and live snapshot | ✅ Complete |
 | 18 | Embeddings + modality-scoped endpoints: `ProviderDefinition.modality` (`llm`/`embedding`, `audio` reserved), `ProviderType.serves_modalities`, spec `POST /v1/embeddings` via litellm, llama-cpp `--embedding`/`--pooling` + mock fake embeddings | ✅ shipped (all 7 slices green + e2e verified vs local admin + mock) |
-| 19 | Live stats bar (tokens/sec, queue/active, VRAM/GPU + popovers incl. queue clear) + UI ergonomics: create/edit forms → right-side drawers, logs → bottom-docked tabbed panel | 🟡 S0–S2 landed |
+| 19 | Live stats bar (tokens/sec, queue/active, VRAM/GPU + popovers incl. queue clear) + UI ergonomics: create/edit forms → right-side drawers, logs → bottom-docked tabbed panel | 🟡 S0–S3 landed |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
 
@@ -2534,8 +2534,17 @@ as right-side drawers, and a bottom-docked tabbed logs panel.
       v1's `get_scheduler`. Admin suite 419 green (+13 tests); client
       regenerated, tsc + lint clean. Reviewer: CLEAN (Low/Nit polish
       applied: semantics docstring, dedupe, path cap).
-- [ ] **S3 — StatsBar UI** + `popover.tsx` primitive
-      (`@radix-ui/react-popover`) + per-model & per-definition popovers.
+- [x] **S3 — StatsBar UI:** DONE: `popover.tsx` primitive
+      (`@radix-ui/react-popover` dep, shadcn tokens) + `StatsBar` in the
+      `_layout.tsx` sticky header — rates segment (avg over last 50
+      samples, per-model popover grouped by `alias`), queue segment
+      (totals + per-definition rows with Clear buttons + pinned Clear
+      all, invalidates `schedulerStatsKeys`, sonner toasts), VRAM/GPU
+      segment (GiB rollup, mean GPU %). New `useSchedulerStats` (4s) /
+      `useFleetMetrics` (5s) hooks + `SchedulerStats`/`FleetMetrics`/
+      `ClearQueueResult` types + `UsageSample.alias`. Mobile hides VRAM +
+      prompt detail. tsc/lint/build green. Reviewer: CLEAN (Lows applied:
+      `ClearQueueResult` reuse, popover `aria-label`s).
 - [ ] **S4 — forms → right-side `Sheet` drawers.**
 - [ ] **S5 — bottom-docked tabbed logs panel.**
 
