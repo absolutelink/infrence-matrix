@@ -2,7 +2,7 @@
 
 import type { Client, Options as Options2, TDataShape } from './client';
 import { client } from './client.gen';
-import type { adminAdminHealthData, adminAdminHealthResponses, adminClearAllSchedulerQueuesData, adminClearAllSchedulerQueuesResponses, adminClearCacheData, adminClearCacheErrors, adminClearCacheResponses, adminClearSchedulerQueueData, adminClearSchedulerQueueErrors, adminClearSchedulerQueueResponses, adminCommitPendingData, adminCommitPendingErrors, adminCommitPendingResponses, adminCreateDefinitionData, adminCreateDefinitionErrors, adminCreateDefinitionResponses, adminCreateMachineData, adminCreateMachineErrors, adminCreateMachineResponses, adminDeleteAgentData, adminDeleteAgentErrors, adminDeleteAgentResponses, adminDeleteDefinitionData, adminDeleteDefinitionErrors, adminDeleteDefinitionResponses, adminDeleteMachineData, adminDeleteMachineErrors, adminDeleteMachineResponses, adminDismissPendingData, adminDismissPendingErrors, adminDismissPendingResponses, adminFleetMetricsData, adminFleetMetricsResponses, adminGetAgentData, adminGetAgentErrors, adminGetAgentResponses, adminGetDefinitionData, adminGetDefinitionErrors, adminGetDefinitionResponses, adminGetInstanceData, adminGetInstanceErrors, adminGetInstanceLogsData, adminGetInstanceLogsErrors, adminGetInstanceLogsResponses, adminGetInstanceResponses, adminGetMachineData, adminGetMachineErrors, adminGetMachineMetricsData, adminGetMachineMetricsErrors, adminGetMachineMetricsResponses, adminGetMachineResponses, adminGetProviderTypeData, adminGetProviderTypeErrors, adminGetProviderTypeResponses, adminInitializeInstanceData, adminInitializeInstanceErrors, adminInitializeInstanceResponses, adminListAgentsData, adminListAgentsResponses, adminListDefinitionsData, adminListDefinitionsResponses, adminListInstancesData, adminListInstancesResponses, adminListMachinesData, adminListMachinesResponses, adminListProviderTypesData, adminListProviderTypesResponses, adminListRepoFilesData, adminListRepoFilesErrors, adminListRepoFilesResponses, adminListResponsesData, adminListResponsesErrors, adminListResponsesResponses, adminOverviewStatsData, adminOverviewStatsResponses, adminPatchDefinitionData, adminPatchDefinitionErrors, adminPatchDefinitionResponses, adminPatchMachineData, adminPatchMachineErrors, adminPatchMachineResponses, adminPruneStorageData, adminPruneStorageErrors, adminPruneStorageResponses, adminRegisterProviderData, adminRegisterProviderErrors, adminRegisterProviderResponses, adminRestartBackendData, adminRestartBackendErrors, adminRestartBackendResponses, adminRotateMachineSecretData, adminRotateMachineSecretErrors, adminRotateMachineSecretResponses, adminSchedulerStatsData, adminSchedulerStatsResponses, adminSearchModelsData, adminSearchModelsErrors, adminSearchModelsResponses, adminStartBackendData, adminStartBackendErrors, adminStartBackendResponses, adminStopBackendData, adminStopBackendErrors, adminStopBackendResponses, adminUsageStatsData, adminUsageStatsErrors, adminUsageStatsResponses, chatCreateChatCompletionData, chatCreateChatCompletionResponses, embeddingsCreateEmbeddingData, embeddingsCreateEmbeddingResponses, modelsListModelsData, modelsListModelsResponses, responsesCreateResponseData, responsesCreateResponseResponses } from './types.gen';
+import type { adminAdminHealthData, adminAdminHealthResponses, adminClearAllSchedulerQueuesData, adminClearAllSchedulerQueuesResponses, adminClearCacheData, adminClearCacheErrors, adminClearCacheResponses, adminClearSchedulerQueueData, adminClearSchedulerQueueErrors, adminClearSchedulerQueueResponses, adminCommitPendingData, adminCommitPendingErrors, adminCommitPendingResponses, adminCreateDefinitionData, adminCreateDefinitionErrors, adminCreateDefinitionResponses, adminCreateMachineData, adminCreateMachineErrors, adminCreateMachineResponses, adminDeleteAgentData, adminDeleteAgentErrors, adminDeleteAgentResponses, adminDeleteDefinitionData, adminDeleteDefinitionErrors, adminDeleteDefinitionResponses, adminDeleteMachineData, adminDeleteMachineErrors, adminDeleteMachineResponses, adminDismissPendingData, adminDismissPendingErrors, adminDismissPendingResponses, adminFleetMetricsData, adminFleetMetricsResponses, adminGetAgentData, adminGetAgentErrors, adminGetAgentResponses, adminGetDefinitionData, adminGetDefinitionErrors, adminGetDefinitionResponses, adminGetInstanceData, adminGetInstanceErrors, adminGetInstanceLogsData, adminGetInstanceLogsErrors, adminGetInstanceLogsResponses, adminGetInstanceResponses, adminGetMachineData, adminGetMachineErrors, adminGetMachineMetricsData, adminGetMachineMetricsErrors, adminGetMachineMetricsResponses, adminGetMachineResponses, adminGetProviderTypeData, adminGetProviderTypeErrors, adminGetProviderTypeResponses, adminInitializeInstanceData, adminInitializeInstanceErrors, adminInitializeInstanceResponses, adminInstanceStatsData, adminInstanceStatsResponses, adminListAgentsData, adminListAgentsResponses, adminListDefinitionsData, adminListDefinitionsResponses, adminListInstancesData, adminListInstancesResponses, adminListMachinesData, adminListMachinesResponses, adminListProviderTypesData, adminListProviderTypesResponses, adminListRepoFilesData, adminListRepoFilesErrors, adminListRepoFilesResponses, adminListResponsesData, adminListResponsesErrors, adminListResponsesResponses, adminOverviewStatsData, adminOverviewStatsResponses, adminPatchDefinitionData, adminPatchDefinitionErrors, adminPatchDefinitionResponses, adminPatchMachineData, adminPatchMachineErrors, adminPatchMachineResponses, adminPruneStorageData, adminPruneStorageErrors, adminPruneStorageResponses, adminRegisterProviderData, adminRegisterProviderErrors, adminRegisterProviderResponses, adminRestartBackendData, adminRestartBackendErrors, adminRestartBackendResponses, adminRotateMachineSecretData, adminRotateMachineSecretErrors, adminRotateMachineSecretResponses, adminSchedulerStatsData, adminSchedulerStatsResponses, adminSearchModelsData, adminSearchModelsErrors, adminSearchModelsResponses, adminStartBackendData, adminStartBackendErrors, adminStartBackendResponses, adminStopBackendData, adminStopBackendErrors, adminStopBackendResponses, adminUsageStatsData, adminUsageStatsErrors, adminUsageStatsResponses, chatCreateChatCompletionData, chatCreateChatCompletionResponses, embeddingsCreateEmbeddingData, embeddingsCreateEmbeddingResponses, modelsListModelsData, modelsListModelsResponses, responsesCreateResponseData, responsesCreateResponseResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -554,6 +554,33 @@ export class AdminService {
         return (options?.client ?? client).get<adminFleetMetricsResponses, unknown, ThrowOnError>({
             responseType: 'json',
             url: '/admin/api/stats/metrics',
+            ...options
+        });
+    }
+    
+    /**
+     * Instance Stats
+     *
+     * Per-instance token/throughput rollups for the UI throughput column +
+     * collapsible stats block.
+     *
+     * Returns an object keyed by provider instance id (string) with an entry for
+     * **every** ``ProviderInstance`` (zero-sample instances appear with zero/null
+     * stats). Each entry carries the definition ``modality``, a ``live_throughput_tps``
+     * (mean ``predicted_per_second`` over the last 5 minutes), and cumulative
+     * ``24h``/``7d``/``30d`` windows of token sums, request counts, mean rates,
+     * cache-hit rate, generation-tps percentiles, and a ``ResponseRecord``-derived
+     * ``error_rate``.
+     *
+     * Embedding-modality instances blank every LLM-only field (they only write
+     * prompt-token samples): ``live_throughput_tps`` and, per window,
+     * ``avg_prompt_tps``/``avg_gen_tps``/``cache_hit_rate``/``avg_predicted_ms``/
+     * ``p50_gen_tps``/``p95_gen_tps`` are ``null``.
+     */
+    public static instanceStats<ThrowOnError extends boolean = true>(options?: Options<adminInstanceStatsData, ThrowOnError>) {
+        return (options?.client ?? client).get<adminInstanceStatsResponses, unknown, ThrowOnError>({
+            responseType: 'json',
+            url: '/admin/api/stats/instances',
             ...options
         });
     }

@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query"
 import { AdminService } from "@/client"
 import type {
   FleetMetrics,
+  InstanceStats,
   LogKind,
   LogsResponse,
   Machine,
@@ -35,6 +36,7 @@ export const overviewKeys = { all: ["stats", "overview"] as const }
 // Phase 19: live stats bar — scheduler queue snapshot + fleet VRAM/GPU rollup.
 export const schedulerStatsKeys = { all: ["stats", "scheduler"] as const }
 export const fleetMetricsKeys = { all: ["stats", "metrics"] as const }
+export const instanceStatsKeys = { all: ["stats", "instances"] as const }
 export const providerTypeKeys = {
   all: ["provider-types"] as const,
   detail: (name: string) => ["provider-types", name] as const,
@@ -145,6 +147,20 @@ export function useOverview(refetchInterval = 4000) {
     queryKey: overviewKeys.all,
     queryFn: async () =>
       cast<OverviewStats>((await AdminService.overviewStats()).data),
+    refetchInterval,
+  })
+}
+
+// Slice 2: per-instance token/throughput rollups (live tps + 24h/7d/30d
+// windows) keyed by provider instance id, for the Instances throughput
+// column + stats block.
+export function useInstanceStats(refetchInterval = 10000) {
+  return useQuery({
+    queryKey: instanceStatsKeys.all,
+    queryFn: async () =>
+      cast<Record<string, InstanceStats>>(
+        (await AdminService.instanceStats()).data,
+      ),
     refetchInterval,
   })
 }

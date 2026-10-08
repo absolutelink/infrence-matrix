@@ -1431,6 +1431,26 @@ export type adminFleetMetricsResponses = {
 
 export type adminFleetMetricsResponse = adminFleetMetricsResponses[keyof adminFleetMetricsResponses];
 
+export type adminInstanceStatsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/admin/api/stats/instances';
+};
+
+export type adminInstanceStatsResponses = {
+    /**
+     * Response Admin-Instance Stats
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminInstanceStatsResponse = adminInstanceStatsResponses[keyof adminInstanceStatsResponses];
+
 export type adminListAgentsData = {
     body?: never;
     path?: never;

@@ -193,6 +193,8 @@ export interface ProviderInstance {
   provider_definition_id: string
   alias: string | null
   provider_type: string | null
+  /** Phase 18: endpoint kind this instance's definition serves: 'llm' | 'embedding'. */
+  modality?: string | null
   port: number
   version: string
   agent_status: string
@@ -401,4 +403,34 @@ export interface FleetMetrics {
   vram: { used_bytes: number; total_bytes: number }
   gpu_utilization_percent: number
   machines: FleetMetricsMachine[]
+}
+
+// Slice 2: per-instance token/throughput rollups (mirrors
+// admin/backend/app/api/admin/responses.py::instance_stats). The endpoint
+// returns an object keyed by provider instance id; each entry carries the
+// definition ``modality``, a ``live_throughput_tps`` (mean predicted_per_second
+// over the last 5 minutes), and cumulative 24h/7d/30d windows. Embedding
+// instances blank every LLM-only field (null).
+export interface InstanceWindowStats {
+  completion_tokens: number
+  prompt_tokens: number
+  cached_tokens: number
+  request_count: number
+  avg_prompt_tps: number | null
+  avg_gen_tps: number | null
+  cache_hit_rate: number | null
+  avg_predicted_ms: number | null
+  p50_gen_tps: number | null
+  p95_gen_tps: number | null
+  error_rate: number | null
+}
+
+export interface InstanceStats {
+  modality: string | null
+  live_throughput_tps: number | null
+  windows: {
+    "24h": InstanceWindowStats
+    "7d": InstanceWindowStats
+    "30d": InstanceWindowStats
+  }
 }
