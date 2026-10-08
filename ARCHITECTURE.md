@@ -261,6 +261,7 @@ must reference a registered type.
 | `name` | Type id (`llama-cpp`, `halogen`, `halogen-flash`, `gufo`, `mock`, …). Unique. |
 | `schema` | Committed JSON Schema (2020-12) for this type's `backend_config`. Drives admin validation on write **and** the UI form render. |
 | `max_running_backends` | **Phase 16.** Per-agent cap on simultaneously `running` backends of this type, declared in the shipped `schema.json` (top-level `x-max-running-backends`, default unlimited). `1` for halogen-flash (single NPU). Enforced by the scheduler (§6). |
+| `serves_modalities` | **Phase 18.** Which client-facing endpoint kinds this type can host, declared in the shipped `schema.json` (top-level `x-serves-modalities`, default `["llm"]`). Values ∈ `llm` \| `embedding` (`audio` reserved). A `ProviderDefinition`'s `modality` must be in this list or create/PATCH is refused 422. `llama-cpp` (vulkan + cuda) declares `["llm","embedding"]`; every other type stays `["llm"]`. Read into the column at every schema-commit point exactly like `max_running_backends`. |
 | `schema_fingerprint` | SHA-256 of canonical `schema` (same canonicalization as `config_fingerprint`). |
 | `pending_schema` / `pending_fingerprint` | Staged schema awaiting consensus (null when none). |
 | `pending_voters` | JSON list of **agent ids** that have registered presenting `pending_fingerprint` (Phase 16: voters are agents, not backends). |
@@ -293,6 +294,7 @@ backend (`ProviderInstance`).
 | --- | --- |
 | `alias` | Public model name clients use in `/v1/models` and the `model` field. Unique. |
 | `provider_type` | Must reference a registered `ProviderType`. **Phase 16: required at create — the Phase 14 shell (NULL type adopted at registration) is removed.** A type change is refused 409 while backends are attached. |
+| `modality` | **Phase 18.** The endpoint kind this definition serves: `llm` (default) \| `embedding` (`audio` reserved). The admin's **routing key**: `/v1/embeddings` accepts only `embedding` aliases; `/v1/responses` + `/v1/chat/completions` accept only `llm` aliases (the other kind is a clean 404). Must be in the `ProviderType.serves_modalities` list or create/PATCH is refused 422. Pushed to the provider on the assignment / `provider.config.update` / registration payloads so the engine boots correctly (llama-cpp adds `--embedding` for `embedding`). Immutable while backends are attached (same gate as `provider_type`). |
 | `backend_config` | JSON handed to the agent to start a backend for this definition: model artifacts (main GGUF + mmproj + draft, each with source), engine args, engine options. **Validated against the committed JSON Schema of its `ProviderType` on create/PATCH (Phase 12)**; the UI form is rendered from that schema (collapseable sections, `hf-file` artifact widget). Required (no shells). |
 | `agent_placement` | **Phase 16.** `any_of_type` (host on every agent whose `provider_type` matches) or `specific` (host only on the agents listed in `definition_agents`). Drives which agents receive `agent.assignments.update` and which backends the scheduler may pick. |
 | `agents` (link) | **Phase 16.** `definition_agents` join table (`provider_definition_id`, `agent_id`) — populated only when `agent_placement = specific`. |
@@ -392,8 +394,8 @@ Provider agent                      Admin
    │      definition (agent_id, definition_id), stopped
    │    issue per-agent secret → Redis im:ws:secret:{agent_id}
    │ ◀──────────────────────────────
-   │  {agent_id, agent_secret, backends:[{instance_id, port,
-   │   definition:{alias, backend_config, config_fingerprint, ...}}, ...]}
+    │  {agent_id, agent_secret, backends:[{instance_id, port,
+    │   definition:{alias, modality, backend_config, config_fingerprint, ...}}, ...]}
    │ write provider_config.json to CACHE_DIR
    │ dial ws(s)://{admin}/provider/ws   (ONE socket for the agent)
    │   Authorization: Bearer {agent_secret}
@@ -517,7 +519,7 @@ Payload (admin → provider):
 {
   "assignments": [
     {"instance_id": "<uuid>", "provider_definition_id": "<uuid>",
-     "alias": "my-model", "backend_config": { }, "config_fingerprint": "<sha256>",
+     "alias": "my-model", "modality": "llm", "backend_config": { }, "config_fingerprint": "<sha256>",
      "port": 8081, "capacity": 1, "idle_timeout_seconds": 300,
      "vram_required_bytes": 0}
   ],
@@ -768,8 +770,9 @@ error contract is specific to `/v1/responses`; the Phase 7
 | --- | --- |
 | `/v1/responses` | **Full** (stream + non-stream) — Phase 6 |
 | `/v1/chat/completions` | **Full** (stream + non-stream) — Phase 7, via `litellm.acompletion`; admin-owned `chatcmpl-<uuid>` id on every chunk, data-only SSE, persisted as `ResponseRecord` with `parameters.api_format="chat_completions"` |
-| `/v1/models` | **Implemented** — Phase 7; derived from enabled `ProviderDefinition`s (alias asc, `owned_by`=provider_type, `model_metadata` merged) |
-| `/v1/embeddings`, `/v1/completions` (legacy), `/v1/rerank`, `/v1/moderations`, `/v1/decisions`, `/v1/audio/*`, `/v1/files`, `/v1/batches` | **501 stubs** — accepted regressions (§12) |
+| `/v1/models` | **Implemented** — Phase 7; derived from enabled `ProviderDefinition`s (alias asc, `owned_by`=provider_type, `model_metadata` merged). **Phase 18:** lists `llm` **and** `embedding` definitions; each object carries a `modality` marker so clients can filter. |
+| `/v1/embeddings` | **Implemented** — Phase 18; non-streaming only, via `litellm.aembedding` against the same scheduler admission + provider port. Accepts only `modality=embedding` aliases (an `llm` alias → 404). Returns the spec `CreateEmbeddingResponse`; persists a `TokenUsageSample` (prompt tokens) only — no `ResponseRecord` (embeddings are not conversation turns). |
+| `/v1/completions` (legacy), `/v1/rerank`, `/v1/moderations`, `/v1/decisions`, `/v1/audio/*`, `/v1/files`, `/v1/batches` | **501 stubs** — accepted regressions (§12). `/v1/audio/*` is the reserved landing spot for the future `audio` modality (§4). |
 | Responses-over-WebSocket transport | **Dropped** (not part of the OpenResponses spec) |
 | Benchmarks | **Dropped entirely** |
 
@@ -805,6 +808,42 @@ Same flow as §7 steps 5–10 with `aresponses` → `acompletion`, plus:
   honors `stream=false` by aggregating the driver's chunk stream into a
   `chat.completion` JSON (same fix class as Phase 6's responses
   non-stream path).
+
+### Embeddings specifics (Phase 18)
+
+`POST /v1/embeddings` is the first **non-chat modality** endpoint. It reuses
+the Phase 6/7 admission + litellm discipline but is **non-streaming only**
+(the OpenAI embeddings response is a single JSON object):
+
+1. Client `POST /v1/embeddings {model: alias, input: "text" | ["t1","t2"], dimensions?, user?}`.
+2. Admin resolves the enabled `ProviderDefinition` by alias; **404 if the
+   definition's `modality != embedding`** (an `llm` alias cannot embed).
+   Missing/empty `input` → 400.
+3. `ensure_registered(alias, mode="embedding")` — embeddings are a distinct
+   litellm `mode`; the alias registry keys its process cache by alias (an
+   alias is exactly one modality). litellm's `aembedding` for
+   `custom_llm_provider="openai"` posts to `{api_base}/embeddings` (verified
+   against litellm 1.103.2: `make_openai_embedding_request` →
+   `client.post("/embeddings", …)`), so the backend must serve that path.
+4. `scheduler.acquire(alias, request_id)` → `Admission` (identical FIFO +
+   VRAM + `max_running` path as chat; the embedding backend is just another
+   booted instance).
+5. `litellm.aembedding(model=alias, custom_llm_provider="openai",
+   api_key="unused", api_base=f"{admission.base_url}/v1", input=…, dimensions=…)`
+   → spec `CreateEmbeddingResponse`.
+6. Persist a `TokenUsageSample` from `usage.prompt_tokens` (embedding
+   telemetry only — **no `ResponseRecord`**, embeddings are not turns).
+7. `finally` (cancellation-safe, shielded): `scheduler.release`.
+8. Error contract mirrors the chat **non-stream** path (no SSE to frame):
+   pre-acquire 400/404, scheduler 503/504, upstream failure → 502 JSON with
+   the OpenAI error envelope.
+
+**Provider side**: `provider_lib` gains an optional `BackendDriver.embeddings()`
+(default raises `NotImplementedError` → 501) and a slot-admitted
+`POST /v1/embeddings` route on the backend port. llama-cpp boots
+`llama-server --embedding` (auto from the pushed `modality`) and proxies the
+upstream `/v1/embeddings`; `--pooling` is a schema option. The mock serves
+deterministic fake vectors so the whole path runs with no GPU.
 
 ---
 
@@ -951,8 +990,9 @@ operation:
 
 1. Trusted-LAN only (§12).
 2. Version hard-fail requires coordinated admin+provider deploys (§10).
-3. Embeddings, legacy completions, rerank, moderations, decisions, audio,
-   files, batches: 501 stubs (§7). **Do not "restore" old
+3. Legacy completions, rerank, moderations, decisions, audio,
+   files, batches: 501 stubs (§7). **Embeddings landed in Phase 18**
+   (`/v1/embeddings`, `modality=embedding`). **Do not "restore" old
    implementations from git history** — re-implement against the new
    provider/scheduler model when needed.
 4. No prompt-cache tracking table; cache is provider-local via
