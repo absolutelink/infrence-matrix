@@ -99,7 +99,7 @@ starting a feature, read the linked protocol/doc first.
 | 14 | Shell definitions: deferred typing + `awaiting_config` pre-state | ✅ Complete (superseded by 16) |
 | 15 | Manual backend control + `provider.initialize` + download-bound boot budget | ✅ Complete |
 | 16 | Machine-scoped provider **agents**: one container → many same-type backends, placement, `max_running_backends` | 🟡 slices 1–6 landed (agents, placement, `max_running` hot-swap + proactive warm-up, `agent.assignments.update` push, real-engine multi-backend-per-process + per-port serving); 7–8 pending |
-| 17 | Per-GPU machine metrics + hardware union: device-isolated agents (one GPU each) merge into a full machine inventory and live snapshot | 🟡 slice 1 (admin hardware union) + slice 2 (provider GPU scoping + split emitter) landed; 3–6 pending |
+| 17 | Per-GPU machine metrics + hardware union: device-isolated agents (one GPU each) merge into a full machine inventory and live snapshot | ✅ Complete |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
 
@@ -1904,7 +1904,33 @@ into one container per (machine, type) that owns its backends and one socket.
 
 ---
 
-## Phase 17 — Per-GPU machine metrics + hardware union ⬜ (planned)
+## Phase 17 — Per-GPU machine metrics + hardware union ✅
+
+**Phase 17 landed (slices 1–6).** Device-isolated agents (one GPU each) now
+merge into a full machine inventory and live snapshot:
+
+- **Admin hardware union (slice 1):** per-GPU-uuid union at registration
+  (`merge_hardware_union`, `normalize_gpu_uuids`) with survivor-aware stale-drop
+  and `machine.total_vram_bytes` as the auto-sum of the union; `assigned_gpus`
+  normalized to uuid strings; agent DELETE recomputes the union + re-sums VRAM.
+- **Provider GPU-scoped split emitter (slice 2):** `ASSIGNED_GPU_UUIDS` env
+  (implicit visible==owned + explicit), `GPU_CATEGORIES`/`MACHINE_WIDE_CATEGORIES`
+  split, `filter_gpus`/`parse_gpu_assignment`/`gpu_uuid`, AMD stable PCI-slot
+  uuid; the emitter loop runs from connect and `set_owned` toggles only the
+  machine-wide categories.
+- **Admin per-GPU metrics merge (slice 3):** GPU categories accepted from every
+  agent into per-agent partials `im:metrics:machine:{uid}:agent:{id}`,
+  machine-wide owner-gated, merged on read (`read_machine_metrics`) + new
+  `GET /admin/api/machines/{id}/metrics`.
+- **UI (slice 4):** live per-GPU metrics panel + read-only auto-sum VRAM field.
+- **Mock + compose (slice 5):** synthetic two-GPU emitter + `two-gpu` compose
+  profile for end-to-end demo with no GPU present.
+- **Law docs (slice 6):** this section + `AGENTS.md`, `ARCHITECTURE.md`
+  §4/§8/§9/§13, `docs/ws-protocol.md`, `admin/backend/docs/redis-keys.md`,
+  `provider/README.md` rewritten to the shipped split model.
+
+**Final test counts:** admin 364 · provider lib 159 · mock 42 · llama-cpp 72 ·
+gufo 78 · halogen 80 · halogen-flash 167.
 
 **Goal.** On a machine whose provider agents each see only a **subset** of the
 GPUs (device-isolated containers — one dedicated GPU per agent, the production
@@ -2065,11 +2091,11 @@ agent's GPU entries in the machine union.
     now disabled/read-only on edit with the auto-sum `FormDescription` and is
     omitted from the PATCH body (still editable on create; zod unchanged).
     Client already had `getMachineMetrics` — no regen needed.
-- [ ] **E. Mock provider + compose e2e**
+- [x] **E. Mock provider + compose e2e** ✅ (Slice 5 landed)
   - Mock supports a fake two-GPU inventory + `ASSIGNED_GPU_UUIDS` filtering,
     so compose can run two mock agents on one machine (distinct `AGENT_ID`,
     one fake GPU each) and the UI must show 2 GPUs / summed VRAM.
-- [ ] **F. Law docs**
+- [x] **F. Law docs** ✅ (Slice 6 landed)
   - `ARCHITECTURE.md` §4 (union semantics, auto-sum, `assigned_gpus` = UUIDs),
     §8 rewrite (per-GPU merge + owner-gated machine-wide), §9 key table,
     §13 known limitations (overlapping-visibility last-writer-wins note).

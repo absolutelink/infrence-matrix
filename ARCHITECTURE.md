@@ -223,8 +223,8 @@ any agent registers against its `uid`.**
 | `name` | Display name. Unique. |
 | `registration_secret` | **Phase 16.** Shared secret every agent on this machine authenticates registration with (replaces the per-definition `registration_token`). Shown/rotated in the UI. |
 | `host` / `dns` / `ip` | How the admin reaches backends on this machine. |
-| `total_vram_bytes` | Admission budget; merged/refreshed from agent-reported hardware. |
-| `hardware` | JSON inventory: `{"gpus": [{"uuid","vendor","name","total_vram_bytes"}, ...], "cpu": {...}, "ram": {...}}`. Union of reports from all agents on the machine. |
+| `total_vram_bytes` | Admission budget; the **auto-sum of the `hardware.gpus` union** (recomputed on each registration and on agent delete). A manually-set value survives only until an agent reports a `gpus` list. |
+| `hardware` | JSON inventory: `{"gpus": [{"uuid","vendor","name","total_vram_bytes"}, ...], "cpu": {...}, "ram": {...}}`. `gpus` is the **union by uuid across every agent on the machine** (latest report wins per uuid); `cpu`/`ram` stay last-writer-wins. |
 
 An agent registering with an unknown `MACHINE_UID` is **rejected (404)**; a
 wrong `registration_secret` is **rejected (401)**. UIDs must not be reused
@@ -245,7 +245,7 @@ single type and holds the one WebSocket the admin commands it over.
 | `agent_status` | `registering` `initializing` `running` `unhealthy` `error` `disconnected` — the container-level state (was the old per-instance `instance_status`). |
 | `websocket_connected` / `epoch` / `last_seen` | Agent-level WS liveness mirror (authoritative liveness is the Redis presence key). |
 | `reported_schema_fingerprint` | Schema fingerprint presented at the agent's last registration attempt (drives `waiting_schema` + the consensus voter roster). |
-| `assigned_gpus` | Agent-reported GPU UUIDs; VRAM accounting + metrics dedup. |
+| `assigned_gpus` | Agent-reported GPU uuid strings; used for the machine `hardware.gpus` union / survivor-aware stale-drop — not full descriptors. |
 
 The agent's per-connection secret (`im:ws:secret:{agent_id}`) is minted at
 registration and stored in Redis only (see §5, §9, §12).
@@ -322,7 +322,7 @@ the per-backend state the scheduler and lifecycle act on.
 | `last_request_at` | Idle tracking (liveness is the agent's). |
 | `backend_loaded_at` | When the backend last entered `running`/`in_use` (stamped by the status ingest on transition; cleared when it leaves the loaded set or the agent's socket dies). The idle reaper's window baseline is `max(last_request_at, backend_loaded_at)` so a freshly booted, never-requested backend is not reaped against a stale clock. |
 | `config_fingerprint` | SHA-256 of the applied `backend_config`; drives auto cache-clear and the `provider.config.update` push (admin PATCH + reconnect self-heal). |
-| `assigned_gpus` | GPU UUIDs this backend is bound to; VRAM accounting + metrics dedup. |
+| `assigned_gpus` | Reserved — currently unused (VRAM is accounted per booted instance; metrics attribution is per-agent). |
 
 ### ResponseRecord
 Stored OpenResponses turn (spec `ResponseResource`), chained by
@@ -810,15 +810,27 @@ Same flow as §7 steps 5–10 with `aresponses` → `acompletion`, plus:
 
 ## 8. Metrics
 
-### Machine-level metrics (deduped)
-Multiple provider agents share one machine; each hardware resource is
-emitted by **exactly one** connected agent. `metrics_service.py`
-manages ownership via Redis `im:metrics:owner:{machine_uid}` (SET NX, TTL
-30s, refreshed on each `metrics.machine` receipt). On connect the admin
-assigns unowned resources (subject to the agent's declared
-`im:metrics:cats:{agent_id}`); on expiry/disconnect another agent
-on the same machine can take over. Epoch fencing makes failover safe
-against half-open sockets.
+### Machine metrics (split by category)
+Multiple provider agents share one machine; categories split into two
+ownership classes (Phase 17):
+
+* **GPU categories** (`vram` / `gpu_usage`) are per-device. On a
+  device-isolated box each container sees only its own GPUs, so **every**
+  agent that declares them emits them, filtered to its assigned GPUs
+  (`ASSIGNED_GPU_UUIDS`; empty = implicit visible==owned). The admin stores
+  each frame as a per-agent partial `im:metrics:machine:{machine_uid}:agent:{agent_id}`
+  (TTL 30s) and **merges them per-GPU-uuid on read** (`read_machine_metrics`,
+  served by `GET /admin/api/machines/{id}/metrics`); a dead agent's partial
+  self-expires with its TTL.
+* **Machine-wide categories** (`os_ram` / `cpu` / `storage`) are visible from
+  any container and stay single-owner. `metrics_service.py` assigns ownership
+  via Redis `im:metrics:owner:{machine_uid}` (SET NX, TTL 30s, refreshed on
+  each owner `metrics.machine` receipt) — but only when the agent declares a
+  machine-wide category (a GPU-only agent never claims the lease). The owner's
+  snapshot is stored at `im:metrics:machine:{machine_uid}`; non-owner
+  machine-wide sections are dropped. On connect the admin assigns the lease
+  (subject to `im:metrics:cats:{agent_id}`); on expiry/disconnect another agent
+  can take over. Epoch fencing makes failover safe against half-open sockets.
 
 ### Inference metrics (never deduped)
 The `metrics.inference` frame kind is **defined and reserved** (available
@@ -866,8 +878,9 @@ a fresh provider registration. All keys namespaced `im:`. Full table in
 | `im:ws:epoch:{agent_id}` | Counter | none | Monotonic connection epoch (INCR per accepted socket) |
 | `im:ws:owner:{agent_id}` | String | none | Connection token of the currently accepted socket |
 | `im:ws:presence:{agent_id}` | String | 60s | Liveness marker; absence ⇒ sweep marks the agent disconnected |
-| `im:metrics:owner:{machine_uid}` | String | 30s | Which **agent** emits machine-level metrics for the machine |
-| `im:metrics:machine:{machine_uid}` | String | 30s | Latest machine-level snapshot JSON |
+| `im:metrics:owner:{machine_uid}` | String | 30s | Which **agent** emits the **machine-wide** metrics (`os_ram`/`cpu`/`storage`) for the machine (GPU categories are not gated by this lease) |
+| `im:metrics:machine:{machine_uid}` | String | 30s | Latest **machine-wide** owner snapshot JSON |
+| `im:metrics:machine:{machine_uid}:agent:{agent_id}` | String | 30s | Per-agent **GPU** partial JSON (`vram`/`gpu_usage`), written by every agent that reports them; merged per-GPU-uuid on read |
 | `im:metrics:cats:{agent_id}` | String | — | Agent's declared metrics categories (JSON list) |
 | `im:sched:queue:{alias}` | List | — | Queued request ids (mirror of in-process deque) |
 | `im:sched:wait:{req_id}` | Hash | 1h | position / enqueued_at / status |
@@ -977,6 +990,11 @@ operation:
     a provider that stays busy past the retries surfaces the failure in
     the PATCH response and relies on the reconnect/sweep self-heal for
     eventual consistency. The admin does not queue config pushes.
+13. **Overlapping GPU visibility (Phase 17).** Two agents that both see the
+    same GPU uuid (e.g. both `--gpus all`) with no `ASSIGNED_GPU_UUIDS`
+    resolve by per-uuid last-writer-wins — values stay correct (same physical
+    GPU) but attribution may flap between reporters. The explicit
+    `ASSIGNED_GPU_UUIDS` env disambiguates which agent owns which GPU.
 
 ---
 

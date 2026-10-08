@@ -109,25 +109,35 @@ space.
 
 ## Live Metrics
 
-Machine-level hardware metrics are emitted by **exactly one** connected
-provider **agent** per machine (multiple agents share a machine; each resource
-is reported once). The admin assigns ownership with a Redis lease.
+Machine hardware metrics split by category (Phase 17). **GPU categories**
+(`vram`/`gpu_usage`) are emitted by **every** connected agent that declares
+them, each filtered to its assigned GPUs (`ASSIGNED_GPU_UUIDS`; empty =
+implicit visible==owned), and merged per-GPU-uuid by the admin on read.
+**Machine-wide categories** (`os_ram`/`cpu`/`storage`) are visible from any
+container and stay single-owner: the admin assigns ownership with a Redis
+lease.
 
 | Key | Type | TTL | Purpose |
 |-----|------|-----|---------|
-| `im:metrics:owner:{machine_uid}` | String (`agent_id`) | 30s | Which **agent** is the metrics reporter for the machine. Value is the `ProviderAgent` PK uuid. SET NX at WS connect (or sweep reassignment); refreshed when the owner's `metrics.machine` events arrive; deleted on disconnect/stale sweep. |
-| `im:metrics:machine:{machine_uid}` | String (JSON snapshot) | 30s | Latest machine-level snapshot stored from the owner's `metrics.machine` event. Non-owner events are dropped. |
+| `im:metrics:owner:{machine_uid}` | String (`agent_id`) | 30s | Which **agent** is the **machine-wide** metrics reporter (`os_ram`/`cpu`/`storage`). Value is the `ProviderAgent` PK uuid. SET NX at WS connect only when the agent declares a machine-wide category (or sweep reassignment); refreshed when the owner's `metrics.machine` events arrive; deleted on disconnect/stale sweep. GPU categories are NOT gated by this lease. |
+| `im:metrics:machine:{machine_uid}` | String (JSON snapshot) | 30s | Latest **machine-wide** owner snapshot (`os_ram`/`cpu`/`storage` + `owner_agent_id`) stored from the owner's `metrics.machine` event. Non-owner machine-wide sections are dropped. |
+| `im:metrics:machine:{machine_uid}:agent:{agent_id}` | String (JSON partial) | 30s | Per-agent **GPU** partial (`vram`/`gpu_usage`), written by **every** agent that reports GPU categories regardless of ownership; refreshed each frame. Merged per-GPU-uuid on read (`read_machine_metrics`); a dead agent's partial self-expires with its TTL. |
 | `im:metrics:cats:{agent_id}` | String (JSON list) | none | Agent-declared metrics categories, written at registration, read at ownership assignment (`metrics.assign` payload). |
 
-Flow (`app/services/metrics_service.py`): agent connects → admin reads
-`im:metrics:cats:{agent_id}` → if non-empty,
+Flow (`app/services/metrics_service.py`): every agent's emitter loop runs from
+connect and writes its GPU partial (`im:metrics:machine:{uid}:agent:{id}`) on
+each `metrics.machine` frame regardless of ownership. For the machine-wide
+lease: agent connects → admin reads `im:metrics:cats:{agent_id}` → if it
+declares a machine-wide category,
 `SET im:metrics:owner:{machine_uid} <agent_id> NX EX 30` → sends
 `metrics.assign {machine_uid, categories}` over the WS (rollback: lease
-released if the command fails). Owner emits `metrics.machine` every
-`MACHINE_METRICS_INTERVAL` (default 10s), refreshing the lease. On
+released if the command fails). The owner's frames refresh the lease and write
+`im:metrics:machine:{uid}`. On
 disconnect (`ws.py` finally) or stale sweep (`presence_sweep.py`) the
 lease is released; the sweep also reassigns ownerless machines that
-still have connected agents.
+still have connected agents. Reads (`read_machine_metrics`, served by
+`GET /admin/api/machines/{id}/metrics`) union the live GPU partials per uuid
+and overlay the owner machine-wide snapshot.
 
 > **Inference metrics are not in Redis.** The `metrics.inference` frame kind is
 > defined but reserved (not yet emitted/handled — Phase 7/8); when it lands it

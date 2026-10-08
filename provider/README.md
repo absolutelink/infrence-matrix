@@ -96,6 +96,7 @@ environment plus the registration response — the agent has **no database**.
 | `CACHE_DIR` | yes (`/cache`) | Prompt caches + the persisted `provider_config.json`. |
 | `MODELS_DIR` | yes (`/models`) | Model artifact storage. |
 | `METRICS_CATEGORIES` | no | Space-delimited: `gpu_usage vram os_ram cpu storage`. Inference metrics are **always** enabled and must not appear here. |
+| `ASSIGNED_GPU_UUIDS` | no | Space-delimited GPU scope: each token is a full GPU `uuid` (case-insensitive) or a decimal GPU index. Empty (default) = implicit — the agent reports every GPU its container sees (device isolation makes visible == owned). Set it to narrow a container that sees all GPUs down to a subset. Applies to both the registration hardware report and the live GPU-category metrics (`vram`/`gpu_usage`). |
 
 Backend binary paths (`LLAMA_SERVER_PATH`, `GUFO_SERVER_PATH`,
 `HALOGEN_SERVER_PATH`, `HALOGEN_FLASH_SERVER_PATH`, …) also come from the
@@ -589,12 +590,22 @@ Spawn env: `LD_LIBRARY_PATH` defaults to the binary's directory
 - `provider_lib.metrics.collect_machine_snapshot(categories, ...)` —
   `vram`/`gpu_usage` (shared nvidia-smi/AMD-sysfs sampler), `os_ram`
   (/proc/meminfo), `cpu` (loadavg), `storage` (disk_usage). Never
-  raises; failed collectors omit their key.
-- `provider_lib.metrics.MachineMetricsEmitter` — sends
-  `metrics.machine` every `MACHINE_METRICS_INTERVAL` (default 10s)
-  **only while the admin has assigned ownership** via the
-  `metrics.assign` WS command (revoked by `metrics.unassign`).
-  Admin-side ownership lease: see `admin/backend/docs/redis-keys.md`.
+  raises; failed collectors omit their key. AMD cards have no NVML uuid, so
+  their uuid is derived from the PCI slot (`amd-<PCI_SLOT_NAME>`) — stable and
+  host-unique, never the container-local index (which is `0` for every
+  device-isolated container and would collide in the admin's union-by-uuid).
+- `provider_lib.metrics.MachineMetricsEmitter` — categories split into
+  `GPU_CATEGORIES` (`vram`/`gpu_usage`) and `MACHINE_WIDE_CATEGORIES`
+  (`os_ram`/`cpu`/`storage`). The emitter loop runs from connect (every
+  `MACHINE_METRICS_INTERVAL`, default 10s) regardless of ownership: **GPU
+  categories are always emitted**, filtered to the agent's
+  `ASSIGNED_GPU_UUIDS` (empty = implicit visible==owned), with `assigned_gpus`
+  in the payload; **machine-wide categories are included only while the admin
+  has assigned ownership** via `metrics.assign` (`set_owned(True)`), revoked
+  by `metrics.unassign` (`set_owned(False)` — the loop keeps running so GPU
+  telemetry keeps flowing). A frame whose composed snapshot is empty is
+  skipped. Admin-side merge + lease: see
+  `admin/backend/docs/redis-keys.md`.
 
 ## Overriding usage normalization (the `calculate_usage` pattern)
 
