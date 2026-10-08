@@ -239,7 +239,11 @@ def build_llama_command(
         if n_max:
             cmd.extend(["--spec-draft-n-max", str(int(n_max))])
 
-    if args.get("jinja", True):
+    # --jinja applies the model's embedded chat template to inputs. That is
+    # correct for chat backends but wrong for embeddings, which embed raw text
+    # (the template tokens would pollute the vector). Default ON for llm
+    # (unchanged), OFF for embedding; an explicit `jinja` config value wins.
+    if args.get("jinja", modality != "embedding"):
         cmd.append("--jinja")
 
     if mmproj_path:

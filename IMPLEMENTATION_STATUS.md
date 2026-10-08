@@ -2306,6 +2306,14 @@ the data model again.
 - **Local dev note:** the schema-consensus gate correctly 409-`schema_pending`
   when ghost agent rows from prior dev sessions pin the old fingerprint; resolve
   with `POST /admin/api/provider-types/{name}/pending/commit` (or a fresh DB).
+- **Production follow-up (`--jinja` gating):** a real embedding backend
+  (`rocinante-embed`, llama-cpp) booted with `--embedding` **and** `--jinja`.
+  `--jinja` applies the model's chat template to inputs, which is wrong for
+  embeddings (template tokens pollute the vector). `command.py` now defaults
+  `--jinja` **OFF** for `modality=="embedding"` (explicit `jinja: true` still
+  wins; llm behavior unchanged). Command-construction only — `schema.json`
+  untouched, so **no fingerprint/consensus bump**; the llama-cpp provider image
+  just needs a rebuild + recreate.
 
 ### Accepted risks / notes
 

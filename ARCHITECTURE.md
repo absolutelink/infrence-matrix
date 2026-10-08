@@ -856,8 +856,10 @@ the Phase 6/7 admission + litellm discipline but is **non-streaming only**
 `POST /v1/embeddings` route on the agent's env-port `/v1` surface (routed to
 the backend by model). llama-cpp boots
 `llama-server --embedding` (auto from the pushed `modality`) and proxies the
-upstream `/v1/embeddings`; `--pooling` is a schema option. The mock serves
-deterministic fake vectors so the whole path runs with no GPU.
+upstream `/v1/embeddings`; `--pooling` is a schema option. `--jinja` (the chat
+template) is suppressed by default for `embedding` backends — it would wrap the
+input in a chat template and pollute the vector — while llm backends keep it on.
+The mock serves deterministic fake vectors so the whole path runs with no GPU.
 
 ---
 

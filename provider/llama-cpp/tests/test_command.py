@@ -421,6 +421,24 @@ def test_jinja_default_true() -> None:
     )
 
 
+def test_jinja_default_off_for_embedding() -> None:
+    # Phase 18: --jinja (chat template) is wrong for embeddings, so it
+    # defaults OFF for embedding modality but an explicit value still wins.
+    assert "--jinja" not in build_llama_command(
+        {}, model_path="/m/x.gguf", port=1, modality="embedding"
+    )
+    assert "--jinja" in build_llama_command(
+        {"reasoning": {"jinja": True}},
+        model_path="/m/x.gguf",
+        port=1,
+        modality="embedding",
+    )
+    # llm modality is unchanged: still defaults ON.
+    assert "--jinja" in build_llama_command(
+        {}, model_path="/m/x.gguf", port=1, modality="llm"
+    )
+
+
 def test_mmproj_flag() -> None:
     cmd = build_llama_command(
         {}, model_path="/m/x.gguf", port=1, mmproj_path="/m/mm.gguf"
