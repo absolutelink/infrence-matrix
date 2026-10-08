@@ -1,7 +1,7 @@
 """501 stubs for out-of-scope public endpoints (Phase 7).
 
 These existed pre-overhaul and are consciously dropped (ARCHITECTURE.md
-§7/§13): embeddings, legacy text completions, rerank, moderations,
+§7/§13): legacy text completions, rerank, moderations,
 decisions, audio, files, and batches. Every stub answers with the OpenAI
 error envelope::
 
@@ -24,7 +24,6 @@ router = APIRouter(tags=["stubs"])
 # included so DELETE/GET/cancel on a resource id also answer "not
 # supported" rather than 404.
 STUBBED_ENDPOINTS: tuple[tuple[str, str], ...] = (
-    ("POST", "/v1/embeddings"),
     ("POST", "/v1/completions"),
     ("POST", "/v1/rerank"),
     ("POST", "/v1/moderations"),

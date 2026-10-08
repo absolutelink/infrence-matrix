@@ -1455,6 +1455,22 @@ export type chatCreateChatCompletionResponses = {
     200: unknown;
 };
 
+export type embeddingsCreateEmbeddingData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/embeddings';
+};
+
+export type embeddingsCreateEmbeddingResponses = {
+    /**
+     * Response Embeddings-Create Embedding
+     *
+     * Successful Response
+     */
+    200: unknown;
+};
+
 export type modelsListModelsData = {
     body?: never;
     path?: never;

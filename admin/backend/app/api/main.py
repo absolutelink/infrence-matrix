@@ -10,6 +10,7 @@ from app.api.admin.provider_types import router as admin_provider_types_router
 from app.api.admin.providers import router as admin_providers_router
 from app.api.admin.responses import router as admin_responses_router
 from app.api.v1.chat_completions import router as v1_chat_router
+from app.api.v1.embeddings import router as v1_embeddings_router
 from app.api.v1.models import router as v1_models_router
 from app.api.v1.responses import router as v1_responses_router
 from app.api.v1.stubs import router as v1_stubs_router
@@ -35,6 +36,7 @@ api_router.include_router(admin_agents_router)
 # Public OpenAI-compatible inference API lives at /v1 (NOT under /admin/api).
 api_router.include_router(v1_responses_router)
 api_router.include_router(v1_chat_router)
+api_router.include_router(v1_embeddings_router)
 api_router.include_router(v1_models_router)
 # 501 stubs for dropped endpoints (registered last; explicit paths only).
 api_router.include_router(v1_stubs_router)

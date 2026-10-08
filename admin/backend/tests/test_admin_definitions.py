@@ -157,7 +157,7 @@ def test_create_warms_alias_registry(client: TestClient, monkeypatch) -> None:
     monkeypatch.setattr(
         definitions_mod.alias_registry,
         "ensure_registered",
-        lambda alias: warmed.append(alias),
+        lambda alias, mode="chat": warmed.append(alias),
     )
     _create(client, alias="warm-me")
     assert "warm-me" in warmed

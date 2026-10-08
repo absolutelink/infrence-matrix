@@ -409,7 +409,10 @@ async def create_definition(
         ) from None
     session.refresh(definition)
     # Warm the litellm alias registration before first use (checklist 4).
-    alias_registry.ensure_registered(definition.alias)
+    alias_registry.ensure_registered(
+        definition.alias,
+        mode="embedding" if definition.modality == "embedding" else "chat",
+    )
     # Phase 16 slice 5: a new definition is a placement change for every agent
     # of its type — push the updated assignment set to the live ones (an
     # any_of_type def now includes them; a specific def reaches only its links,
@@ -593,7 +596,10 @@ async def patch_definition(
             provider_type,
             scheduler=getattr(request.app.state, "scheduler", None),
         )
-    alias_registry.ensure_registered(definition.alias)
+    alias_registry.ensure_registered(
+        definition.alias,
+        mode="embedding" if definition.modality == "embedding" else "chat",
+    )
 
     # The provider-visible state: the config (fingerprint) or a capacity
     # change. A type-only change with the SAME config is not a push trigger

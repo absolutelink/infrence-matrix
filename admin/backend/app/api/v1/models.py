@@ -37,10 +37,13 @@ def model_object(definition: ProviderDefinition) -> dict[str, Any]:
         "object": "model",
         "created": int(definition.created_at.timestamp()),
         "owned_by": definition.provider_type,
+        # Phase 18: core routing marker so clients can filter by endpoint
+        # family (llm | embedding). Authoritative from the definition row.
+        "modality": definition.modality,
     }
     metadata = definition.model_metadata or {}
     for key, value in metadata.items():
-        if key in ("id", "object", "created", "owned_by"):
+        if key in ("id", "object", "created", "owned_by", "modality"):
             continue
         obj[key] = value
     return obj

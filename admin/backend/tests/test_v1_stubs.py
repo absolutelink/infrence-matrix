@@ -26,3 +26,11 @@ def test_stub_returns_501_envelope(client: TestClient, method: str, path: str) -
     assert body["error"]["code"] == "endpoint_not_supported"
     assert request_path in body["error"]["param"]
     assert "not supported" in body["error"]["message"]
+
+
+def test_embeddings_no_longer_stubbed(client: TestClient) -> None:
+    """Phase 18: /v1/embeddings is a real endpoint, not a 501 stub. A request
+    missing 'model' now reaches the route and answers 400 (not 501)."""
+    assert ("POST", "/v1/embeddings") not in STUBBED_ENDPOINTS
+    resp = client.post("/v1/embeddings", json={})
+    assert resp.status_code == 400

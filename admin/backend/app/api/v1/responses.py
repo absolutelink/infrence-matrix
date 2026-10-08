@@ -305,6 +305,11 @@ async def create_response(request: Request) -> Any:
             raise HTTPException(
                 status_code=404, detail=f"model alias '{alias}' is disabled"
             )
+        if definition.modality != "llm":
+            raise HTTPException(
+                status_code=404,
+                detail=f"model alias '{alias}' is not a chat model",
+            )
         definition_id = definition.id
         base_params: dict[str, Any] = {
             "model": alias,

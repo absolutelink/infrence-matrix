@@ -41,42 +41,70 @@ import litellm
 
 logger = logging.getLogger("admin.alias_registry")
 
-# Aliases already registered in this process. litellm.register_model is
-# idempotent, but the cache keeps the call off the hot path.
-_registered: set[str] = set()
+# Aliases already registered in this process, mapped to the mode they were
+# registered with. litellm.register_model is idempotent, but the cache keeps
+# the call off the hot path. The value matters: a definition's modality can be
+# PATCHed (llm<->embedding) while no backends are attached, so a cached entry
+# must be re-registered when the requested mode differs (a stale chat entry
+# would leave an embedding alias mis-declared, and — worse — a stale embedding
+# entry lacks supports_native_streaming, so the first chat/responses call
+# fake-streams into the APIError this registry exists to prevent).
+_registered: dict[str, str] = {}
 
 
-def ensure_registered(alias: str) -> None:
-    """Register ``alias`` for native streaming on BOTH /v1/responses and
-    /v1/chat/completions (idempotent).
+def ensure_registered(alias: str, mode: str = "chat") -> None:
+    """Register ``alias`` with litellm (idempotent per ``(alias, mode)``).
 
-    ``mode: "chat"`` is deliberate: it is inert for the responses API
-    (which keys off ``supports_native_streaming`` only) and it prevents
-    ``acompletion`` from bridging the request to ``/v1/responses``.
+    ``mode`` selects the endpoint family the alias serves (Phase 18):
+
+    - ``"chat"`` (default): native streaming on BOTH /v1/responses and
+      /v1/chat/completions. ``mode: "chat"`` is deliberate: it is inert for
+      the responses API (which keys off ``supports_native_streaming`` only)
+      and it prevents ``acompletion`` from bridging the request to
+      ``/v1/responses``.
+    - ``"embedding"``: /v1/embeddings. Embeddings are non-streaming, so no
+      ``supports_native_streaming`` / ``supports_reasoning`` are declared;
+      ``mode: "embedding"`` keeps ``aembedding`` on the native embedding
+      path.
+
+    The cache is keyed by alias but stores the registered mode: a modality
+    change re-registers (litellm overwrites) rather than early-returning.
     """
-    if alias in _registered:
+    if _registered.get(alias) == mode:
         return
-    litellm.register_model(
-        {
-            alias: {
-                "supports_native_streaming": True,
-                "litellm_provider": "openai",
-                "mode": "chat",
-                "input_cost_per_token": 0,
-                "output_cost_per_token": 0,
-                # Declare reasoning support: litellm refuses `reasoning.*`
-                # params with UnsupportedParamsError when the model info
-                # lacks `supports_reasoning` (production: /v1/responses
-                # reasoning.effort -> 502 on a perfectly healthy backend).
-                # Self-hosted backends accept-and-ignore the param, so
-                # blanket-declaring it is safe; reasoning models then get
-                # real effort control and instruct models simply ignore it.
-                "supports_reasoning": True,
+    if mode == "embedding":
+        litellm.register_model(
+            {
+                alias: {
+                    "litellm_provider": "openai",
+                    "mode": "embedding",
+                    "input_cost_per_token": 0,
+                    "output_cost_per_token": 0,
+                }
             }
-        }
-    )
-    _registered.add(alias)
-    logger.debug("registered litellm model alias %s", alias)
+        )
+    else:
+        litellm.register_model(
+            {
+                alias: {
+                    "supports_native_streaming": True,
+                    "litellm_provider": "openai",
+                    "mode": "chat",
+                    "input_cost_per_token": 0,
+                    "output_cost_per_token": 0,
+                    # Declare reasoning support: litellm refuses `reasoning.*`
+                    # params with UnsupportedParamsError when the model info
+                    # lacks `supports_reasoning` (production: /v1/responses
+                    # reasoning.effort -> 502 on a perfectly healthy backend).
+                    # Self-hosted backends accept-and-ignore the param, so
+                    # blanket-declaring it is safe; reasoning models then get
+                    # real effort control and instruct models simply ignore it.
+                    "supports_reasoning": True,
+                }
+            }
+        )
+    _registered[alias] = mode
+    logger.debug("registered litellm model alias %s (mode=%s)", alias, mode)
 
 
 def registered_aliases() -> set[str]:

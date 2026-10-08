@@ -56,8 +56,19 @@ def test_enabled_listed_fields_and_metadata_merge(
     assert entry["object"] == "model"
     assert entry["owned_by"] == "llama-cpp"
     assert entry["created"] == int(definition.created_at.timestamp())
+    # Phase 18: modality marker present (default llm), authoritative.
+    assert entry["modality"] == "llm"
     assert entry["context_length"] == 8192
     assert entry["capabilities"] == ["tools"]
+
+
+def test_embedding_modality_marker(client: TestClient, session: Session) -> None:
+    _mk_def(session, "mm-emb", modality="embedding")
+    _mk_def(session, "mm-llm")
+    resp = client.get("/v1/models")
+    by_id = {d["id"]: d for d in resp.json()["data"]}
+    assert by_id["mm-emb"]["modality"] == "embedding"
+    assert by_id["mm-llm"]["modality"] == "llm"
 
 
 def test_disabled_excluded(client: TestClient, session: Session) -> None:
