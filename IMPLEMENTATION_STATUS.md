@@ -99,6 +99,7 @@ starting a feature, read the linked protocol/doc first.
 | 14 | Shell definitions: deferred typing + `awaiting_config` pre-state | ✅ Complete (superseded by 16) |
 | 15 | Manual backend control + `provider.initialize` + download-bound boot budget | ✅ Complete |
 | 16 | Machine-scoped provider **agents**: one container → many same-type backends, placement, `max_running_backends` | 🟡 slices 1–6 landed (agents, placement, `max_running` hot-swap + proactive warm-up, `agent.assignments.update` push, real-engine multi-backend-per-process + per-port serving); 7–8 pending |
+| 17 | Per-GPU machine metrics + hardware union: device-isolated agents (one GPU each) merge into a full machine inventory and live snapshot | ⬜ Planned |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
 
@@ -1900,6 +1901,156 @@ into one container per (machine, type) that owns its backends and one socket.
   bound keeps it from looping (stop at first non-fit).
 - **Phase 14 reversal.** Removing shells/`awaiting_config` reverts part of
   Phase 14; its tests are deleted/rewritten, not kept.
+
+---
+
+## Phase 17 — Per-GPU machine metrics + hardware union ⬜ (planned)
+
+**Goal.** On a machine whose provider agents each see only a **subset** of the
+GPUs (device-isolated containers — one dedicated GPU per agent, the production
+layout on the provider host), the machine inventory and live metrics show
+**all** GPUs, and `machine.total_vram_bytes` (the scheduler's admission
+budget) reflects the full union instead of a single agent's view.
+
+**Why now.** The deployment runs two agents on one machine, each pinned to its
+own GPU. Each container's `nvidia-smi`/sysfs only sees its own device, and two
+coupled bugs collapse the machine to 1 GPU:
+
+1. **Registration hardware merge is last-writer-wins per top-level key**
+   (`app/api/admin/providers.py` step 5): `merged.update(body.hardware)`
+   replaces the whole `gpus` list and overwrites `total_vram_bytes` with the
+   last registrant's single-GPU report. The inline comment claims UNION, but
+   only top-level keys (`cpu`, `ram`) survive from earlier agents. Side
+   effect: the scheduler's VRAM budget
+   (`machine.total_vram_bytes - held_on(machine)`, `scheduler.py`) is
+   **halved** on a 2-GPU box — admission is wrong, not just display.
+2. **Machine-metrics ownership is all-or-nothing** (`services/metrics_service.py`):
+   exactly one owner agent per machine emits the full snapshot and
+   `handle_machine_metrics` **drops** frames from every other agent. The
+   owner's `vram`/`gpu_usage` sections only ever contain its own GPU.
+   `ProviderAgent.assigned_gpus` is persisted at registration and documented
+   as "VRAM accounting + metrics dedup" but is used by neither.
+
+Related gaps found while diagnosing: the live snapshot
+`im:metrics:machine:{machine_uid}` has **no reader** (no admin endpoint or UI
+consumes it — the machines page renders only the Postgres `hardware`
+inventory); `assigned_gpus` is typed `list[str]` (UUIDs) in `models.py` but
+registration stores full GPU dicts; `agents.py` DELETE leaves the dead
+agent's GPU entries in the machine union.
+
+### Locked decisions (from operator Q&A)
+
+1. **GPU ownership = implicit + explicit override.** By default an agent
+   reports exactly the GPUs it can see inside its container (device
+   isolation makes visible == owned — zero new config for this deployment).
+   Optional `ASSIGNED_GPU_UUIDS` env (space-delimited UUIDs or indices,
+   `METRICS_CATEGORIES` style) filters the report for containers that see all
+   GPUs but should own a subset.
+2. **`machine.total_vram_bytes` = auto-sum** of the unioned per-GPU
+   `total_vram_bytes`, recomputed on every hardware merge at registration.
+   The UI field becomes read-only display (it already advertises "refreshed
+   from provider hardware").
+3. **Split category ownership.** `cpu` / `os_ram` / `storage` are machine-wide
+   and visible from any container → keep the existing single-owner lease
+   (`im:metrics:owner:{machine_uid}`). `vram` / `gpu_usage` are per-GPU →
+   emitted by **every** agent that declares them (filtered to its assigned
+   GPUs) and merged per-GPU-UUID by the admin.
+
+### Sub-tasks (implementation order)
+
+- [ ] **A. Provider lib — GPU scoping + split emitter**
+  - `ProviderSettings`: new optional `ASSIGNED_GPU_UUIDS` env (space-delimited
+    GPU UUIDs or decimal indices).
+  - `metrics.py`: `filter_gpus(sample, assignment)` — empty assignment =
+    pass-through (implicit); otherwise keep GPUs whose `uuid` or `id` matches.
+    Category split constants: `GPU_CATEGORIES = {vram, gpu_usage}`,
+    `MACHINE_WIDE_CATEGORIES = {os_ram, cpu, storage}`.
+  - `MachineMetricsEmitter`: GPU categories emit from **every** agent that
+    declares them (filtered), independent of ownership; machine-wide
+    categories only between `metrics.assign`/`unassign` (unchanged lease
+    semantics). Payload gains `assigned_gpus: [uuid, ...]` for attribution.
+  - `build_hardware_report` in every hardware provider (llama-cpp, gufo,
+    halogen, halogen-flash) + mock: filter `gpus` through the assignment;
+    per-agent `total_vram_bytes` = sum of the filtered list.
+- [x] **B. Admin — hardware union at registration** ✅ (Slice 1 landed)
+  - `providers.py` step 5: merge `machine.hardware["gpus"]` **by UUID**
+    (latest report wins per UUID; never erases other agents' entries);
+    recompute `machine.total_vram_bytes = sum(g["total_vram_bytes"])`;
+    `cpu`/`ram` top-level keys keep last-writer-wins.
+  - Normalize `ProviderAgent.assigned_gpus` to UUID **strings** (matches the
+    `list[str]` model + ARCHITECTURE §4; today dicts are stored).
+  - `agents.py` DELETE: recompute the machine union (and VRAM sum) from the
+    remaining agents' `assigned_gpus`; delete the agent's metrics partial.
+  - **Slice 1 note:** the registration union (`merge_hardware_union`),
+    `assigned_gpus` UUID normalization (`normalize_gpu_uuids`), and the
+    `agents.py` DELETE union recompute are landed and covered by new admin
+    tests. The pure helpers live in `app/services/hardware.py` (shared by the
+    registration and delete paths). Two review fixes landed: the registration
+    stale-drop is **survivor-aware** (a GPU another agent still claims is never
+    dropped by one agent's re-registration, mirroring the DELETE path), and the
+    auto-sum only overwrites `total_vram_bytes` when a GPU list is actually in
+    play — a report with no `gpus` key against a machine with a manually-set
+    budget and no existing union **preserves** that budget (consistent with the
+    DELETE no-op). The "delete the agent's metrics partial" sub-step is deferred
+    to Slice 3 (Redis metrics keys) — the DELETE endpoint does not touch Redis
+    metrics keys yet.
+- [ ] **C. Admin — per-GPU metrics merge**
+  - `metrics_service.handle_machine_metrics`: accept GPU-category sections
+    from any connected agent (no owner gate); store per-source partial
+    `im:metrics:machine:{machine_uid}:agent:{agent_id}` (TTL 30s, refreshed
+    per frame). Machine-wide sections stay owner-gated and refresh the lease
+    as today.
+  - Merge-on-read helper: union per-GPU entries across live partials;
+    recompute aggregates (`vram.total/used/free/gpu_count`, `gpu_usage`
+    average + per-GPU list).
+  - New read path: `GET /admin/api/machines/{id}/metrics` returning the
+    merged snapshot with per-GPU `agent_id` attribution (the snapshot
+    finally gets a consumer).
+- [ ] **D. Admin UI + client regen**
+  - `bash scripts/generate-client.sh` after the new route.
+  - `machines.tsx`: verify the GPU panel shows both GPUs post-merge; surface
+    live per-GPU used/total + utilization from the new endpoint.
+  - Machine edit dialog: `total_vram_bytes` read-only with an auto-sum hint.
+- [ ] **E. Mock provider + compose e2e**
+  - Mock supports a fake two-GPU inventory + `ASSIGNED_GPU_UUIDS` filtering,
+    so compose can run two mock agents on one machine (distinct `AGENT_ID`,
+    one fake GPU each) and the UI must show 2 GPUs / summed VRAM.
+- [ ] **F. Law docs**
+  - `ARCHITECTURE.md` §4 (union semantics, auto-sum, `assigned_gpus` = UUIDs),
+    §8 rewrite (per-GPU merge + owner-gated machine-wide), §9 key table,
+    §13 known limitations (overlapping-visibility last-writer-wins note).
+  - `docs/ws-protocol.md` (`metrics.machine` payload + `assigned_gpus`,
+    split assignment semantics), `admin/backend/docs/redis-keys.md`
+    (new `im:metrics:machine:{uid}:agent:{id}` partial),
+    `provider/README.md` (`ASSIGNED_GPU_UUIDS` env), `AGENTS.md`
+    (metrics gotcha: "exactly one agent per machine" → machine-wide only).
+
+### Tests
+
+- Admin: two-agent registration union (2 GPUs, `total_vram_bytes` = sum);
+  `assigned_gpus` UUID normalization; agent-delete recompute;
+  `handle_machine_metrics` accepts non-owner GPU frames but still drops
+  non-owner machine-wide frames; merge-on-read aggregates; new metrics
+  endpoint. Update `test_metrics_ownership.py` + `test_registration.py` for
+  the split semantics.
+- Provider lib: `filter_gpus` implicit/explicit (uuid + index forms); emitter
+  gating (GPU categories without ownership, machine-wide only while owned).
+- Mock: two-agent split-machine scenario via compose.
+
+### Accepted risks / notes
+
+- **Version hard-fail applies**: deploy the admin first, then recreate both
+  agents (standard order).
+- **No Alembic migration** — JSON columns unchanged; the `assigned_gpus`
+  content fix self-heals at each agent's next registration.
+- **Overlapping visibility misconfig** (two agents with `--gpus all` and no
+  `ASSIGNED_GPU_UUIDS`): both report the same UUIDs → per-UUID
+  last-writer-wins, values still correct (same physical GPU); attribution
+  may flap between the two reporters. Documented; the explicit env resolves
+  it.
+- **Out of scope**: per-GPU VRAM admission (the scheduler still budgets per
+  machine — correct once the union is fixed); per-backend
+  `ProviderInstance.assigned_gpus` stays unused.
 
 ---
 

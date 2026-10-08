@@ -22,8 +22,9 @@ from sqlmodel import Session, col, delete, select
 from app.api.admin.serializers import iso_utc
 from app.core.db import get_session
 from app.core.redis import get_redis
-from app.models import DefinitionAgent, ProviderAgent, ProviderInstance
+from app.models import DefinitionAgent, Machine, ProviderAgent, ProviderInstance
 from app.services import redis_keys
+from app.services.hardware import normalize_gpu_uuids, sum_gpu_vram
 
 logger = logging.getLogger("admin.agents")
 
@@ -84,6 +85,36 @@ def _definition_count(session: Session, agent_id: uuid.UUID) -> int:
             select(DefinitionAgent).where(DefinitionAgent.agent_id == agent_id)
         ).all()
     )
+
+
+def _recompute_machine_union(
+    session: Session,
+    machine: Machine,
+    deleted_uuids: set[str],
+    surviving_uuids: set[str],
+) -> None:
+    """Drop a deleted agent's GPUs from the machine union (Phase 17 B).
+
+    A GPU is removed only when no *remaining* agent on the machine still claims
+    it (``deleted_uuids - surviving_uuids``), then ``total_vram_bytes`` is
+    recomputed as the auto-sum over the surviving list. No-op when the machine
+    carries no ``gpus`` list (nothing to prune, and a directly-set budget is
+    preserved). Redis metrics partials are out of scope (Slice 3).
+    """
+    hardware = dict(machine.hardware or {})
+    gpus = hardware.get("gpus")
+    if not isinstance(gpus, list):
+        return
+    to_remove = deleted_uuids - surviving_uuids
+    survivors = [
+        g for g in gpus if not (isinstance(g, dict) and g.get("uuid") in to_remove)
+    ]
+    total = sum_gpu_vram(survivors)
+    hardware["gpus"] = survivors
+    hardware["total_vram_bytes"] = total
+    machine.hardware = hardware
+    machine.total_vram_bytes = total
+    session.add(machine)
 
 
 @router.get("")
@@ -174,7 +205,21 @@ async def delete_agent(
         )
 
     agent_uuid = str(agent.id)
-    machine_uid = agent.machine.uid if agent.machine else None
+    machine = agent.machine
+    machine_uid = machine.uid if machine else None
+    # Phase 17 B: capture the deleted agent's GPU attribution and the union of
+    # every *other* agent on the machine so the machine inventory can be
+    # recomputed after the delete (a GPU is dropped only if no survivor claims it).
+    deleted_uuids = set(normalize_gpu_uuids(agent.assigned_gpus))
+    surviving_uuids: set[str] = set()
+    if machine is not None:
+        for other in session.exec(
+            select(ProviderAgent).where(
+                ProviderAgent.machine_id == machine.id,
+                ProviderAgent.id != agent.id,
+            )
+        ).all():
+            surviving_uuids.update(normalize_gpu_uuids(other.assigned_gpus))
     instance_ids = [
         str(i.id)
         for i in session.exec(
@@ -214,6 +259,11 @@ async def delete_agent(
     session.exec(delete(DefinitionAgent).where(DefinitionAgent.agent_id == agent.id))
     session.exec(delete(ProviderInstance).where(ProviderInstance.agent_id == agent.id))
     session.delete(agent)
+    # Recompute the machine GPU union in the SAME transaction as the delete so a
+    # committed 200 always implies the inventory no longer credits the removed
+    # agent's GPUs (unless a survivor still claims them).
+    if machine is not None:
+        _recompute_machine_union(session, machine, deleted_uuids, surviving_uuids)
     session.commit()
 
     # Scheduler hygiene: free any in-process VRAM/_booted hold the removed

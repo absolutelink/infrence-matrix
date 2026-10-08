@@ -48,6 +48,7 @@ from app.models import (
 )
 from app.services import redis_keys
 from app.services.assignments import reconcile_agent_placement
+from app.services.hardware import merge_hardware_union, normalize_gpu_uuids
 from app.services.hashing import canonical_json_sha256
 
 logger = logging.getLogger("admin.providers")
@@ -502,30 +503,46 @@ async def register_provider(
             provider_type=body.provider_type,
             agent_id=body.agent_id,
         )
+    # Prior attribution (uuid strings) is captured BEFORE overwrite so the
+    # hardware union below can drop GPUs this agent stopped reporting.
+    prior_assigned_uuids = normalize_gpu_uuids(agent.assigned_gpus)
     agent.base_port = body.base_port
     agent.version = body.version
     agent.agent_status = "registering"
-    gpus = body.hardware.get("gpus")
-    if isinstance(gpus, list):
-        # L5: store the structured GPU descriptors (dicts), not str(dict).
-        agent.assigned_gpus = gpus
+    # assigned_gpus is a list of GPU uuid strings (ARCHITECTURE.md §4):
+    # normalize the structured report down to uuids ([] when no gpus list).
+    agent.assigned_gpus = normalize_gpu_uuids(body.hardware.get("gpus"))
     session.add(agent)
     # L3: flush so the voter-universe query inside the gate sees this row
     # even with autoflush disabled (the id itself is known pre-flush).
     session.flush()
 
-    # 5. Merge the hardware report into the machine (latest report wins per
-    #    key — ARCHITECTURE.md §4). Done BEFORE the gate and inside the same
-    #    commit — the box is real and its hardware report is valid regardless
-    #    of the schema consensus outcome, so a refused registration still
-    #    refreshes it. A UNION (not a replace) so a partial report from one
-    #    agent never erases keys another agent contributed.
-    merged = dict(machine.hardware or {})
-    merged.update(body.hardware)
-    machine.hardware = merged
-    reported_total = body.hardware.get("total_vram_bytes")
-    if isinstance(reported_total, int):
-        machine.total_vram_bytes = reported_total
+    # 5. Merge the hardware report into the machine as a per-GPU UNION
+    #    (ARCHITECTURE.md §4, Phase 17 B): GPUs are unioned by uuid across every
+    #    agent on the box, machine.total_vram_bytes is the auto-sum of the union
+    #    (the scheduler's admission budget), and cpu/ram stay last-writer-wins.
+    #    Done BEFORE the gate and inside the same commit — the box is real and its
+    #    hardware report is valid regardless of the schema consensus outcome, so a
+    #    refused registration still refreshes it. A UNION (not a replace) so a
+    #    partial report from one agent never erases GPUs another contributed.
+    #
+    #    Survivor-aware stale-drop (symmetric with the DELETE path): GPUs claimed
+    #    by any *other* agent on this machine are never dropped by this agent's
+    #    re-registration, even if this agent previously reported them too.
+    other_agent_uuids: set[str] = set()
+    for other in session.exec(
+        select(ProviderAgent).where(
+            ProviderAgent.machine_id == machine.id,
+            ProviderAgent.id != agent.id,
+        )
+    ).all():
+        other_agent_uuids.update(normalize_gpu_uuids(other.assigned_gpus))
+    merged_hardware, new_total = merge_hardware_union(
+        machine.hardware, body.hardware, prior_assigned_uuids, sorted(other_agent_uuids)
+    )
+    machine.hardware = merged_hardware
+    if new_total is not None:
+        machine.total_vram_bytes = new_total
     session.add(machine)
 
     # 6. Schema consensus gate (Phase 12). Runs before the secret mint: a

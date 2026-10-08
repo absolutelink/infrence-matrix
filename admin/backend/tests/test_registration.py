@@ -310,21 +310,251 @@ def test_register_version_mismatch(client: TestClient, session: Session) -> None
     assert "version mismatch" in resp.json()["detail"]
 
 
-def test_register_hardware_without_total_keeps_machine_vram(
+def test_register_hardware_total_is_auto_sum(
     client: TestClient, session: Session
 ) -> None:
+    """The union sum is authoritative — a mismatched reported total is ignored."""
     machine = _machine(session)
     machine.total_vram_bytes = 99 * 1024**3
     session.add(machine)
     session.commit()
     _definition(session)
 
-    body = _body(hardware={"gpus": []})
+    body = _body(
+        hardware={
+            "gpus": [{"uuid": "gpu-1", "total_vram_bytes": 24 * 1024**3}],
+            "total_vram_bytes": 1,  # bogus: must be overridden by the GPU sum
+        }
+    )
     resp = client.post("/admin/api/providers/register", json=body)
     assert resp.status_code == 200
     session.refresh(machine)
+    assert machine.total_vram_bytes == 24 * 1024**3
+    assert machine.hardware["total_vram_bytes"] == 24 * 1024**3
+
+
+def test_register_two_agents_union_gpus(client: TestClient, session: Session) -> None:
+    """Two device-isolated agents each see one GPU → the machine shows the union."""
+    machine = _machine(session)
+    _definition(session)
+
+    r1 = client.post(
+        "/admin/api/providers/register",
+        json=_body(
+            agent_id="a1",
+            hardware={
+                "gpus": [{"uuid": "gpu-1", "total_vram_bytes": 24 * 1024**3}],
+                "total_vram_bytes": 24 * 1024**3,
+            },
+        ),
+    )
+    assert r1.status_code == 200
+    r2 = client.post(
+        "/admin/api/providers/register",
+        json=_body(
+            agent_id="a2",
+            hardware={
+                "gpus": [{"uuid": "gpu-2", "total_vram_bytes": 16 * 1024**3}],
+                "total_vram_bytes": 16 * 1024**3,
+            },
+        ),
+    )
+    assert r2.status_code == 200
+
+    session.refresh(machine)
+    assert {g["uuid"] for g in machine.hardware["gpus"]} == {"gpu-1", "gpu-2"}
+    assert machine.total_vram_bytes == (24 + 16) * 1024**3
+    assert machine.hardware["total_vram_bytes"] == (24 + 16) * 1024**3
+
+
+def test_register_reregister_drops_stale_gpu_keeps_other_agent(
+    client: TestClient, session: Session
+) -> None:
+    """Re-registering an agent with a changed GPU set drops only ITS stale GPUs."""
+    machine = _machine(session)
+    _definition(session)
+    client.post(
+        "/admin/api/providers/register",
+        json=_body(
+            agent_id="a1",
+            hardware={
+                "gpus": [{"uuid": "gpu-1", "total_vram_bytes": 24 * 1024**3}],
+                "total_vram_bytes": 24 * 1024**3,
+            },
+        ),
+    )
+    client.post(
+        "/admin/api/providers/register",
+        json=_body(
+            agent_id="a2",
+            hardware={
+                "gpus": [{"uuid": "gpu-2", "total_vram_bytes": 16 * 1024**3}],
+                "total_vram_bytes": 16 * 1024**3,
+            },
+        ),
+    )
+    # a1 now sees gpu-3 instead of gpu-1 (e.g. the container was re-pinned).
+    client.post(
+        "/admin/api/providers/register",
+        json=_body(
+            agent_id="a1",
+            hardware={
+                "gpus": [{"uuid": "gpu-3", "total_vram_bytes": 8 * 1024**3}],
+                "total_vram_bytes": 8 * 1024**3,
+            },
+        ),
+    )
+
+    session.refresh(machine)
+    assert {g["uuid"] for g in machine.hardware["gpus"]} == {"gpu-2", "gpu-3"}
+    assert machine.total_vram_bytes == (16 + 8) * 1024**3
+
+
+def test_register_assigned_gpus_are_uuid_strings(
+    client: TestClient, session: Session
+) -> None:
+    """assigned_gpus is normalized to a list of uuid strings, not GPU dicts."""
+    _machine(session)
+    _definition(session)
+    resp = client.post("/admin/api/providers/register", json=_body())
+    assert resp.status_code == 200
+    agent = session.exec(select(ProviderAgent)).one()
+    assert agent.assigned_gpus == ["gpu-1"]
+    assert all(isinstance(x, str) for x in agent.assigned_gpus)
+
+
+def test_register_missing_gpus_key_preserves_existing_union(
+    client: TestClient, session: Session
+) -> None:
+    """A report with NO gpus key never erases GPUs another agent contributed."""
+    machine = _machine(session)
+    _definition(session)
+    client.post(
+        "/admin/api/providers/register",
+        json=_body(
+            agent_id="a1",
+            hardware={
+                "gpus": [{"uuid": "gpu-1", "total_vram_bytes": 24 * 1024**3}],
+                "total_vram_bytes": 24 * 1024**3,
+            },
+        ),
+    )
+    # a2 reports no gpus key at all, only a cpu section.
+    r2 = client.post(
+        "/admin/api/providers/register",
+        json=_body(agent_id="a2", hardware={"cpu": {"cores": 8}}),
+    )
+    assert r2.status_code == 200
+
+    session.refresh(machine)
+    assert [g["uuid"] for g in machine.hardware["gpus"]] == ["gpu-1"]
+    assert machine.total_vram_bytes == 24 * 1024**3
+    assert machine.hardware["cpu"] == {"cores": 8}
+    a2 = session.exec(
+        select(ProviderAgent).where(ProviderAgent.agent_id == "a2")
+    ).one()
+    assert a2.assigned_gpus == []
+
+
+def test_register_empty_gpus_list_recomputes_surviving_union(
+    client: TestClient, session: Session
+) -> None:
+    """A report WITH an empty gpus list against an existing union recomputes to
+    the surviving sum (the union base survives; total is the surviving auto-sum).
+    """
+    machine = _machine(session)
+    _definition(session)
+    client.post(
+        "/admin/api/providers/register",
+        json=_body(
+            agent_id="a1",
+            hardware={
+                "gpus": [{"uuid": "gpu-1", "total_vram_bytes": 24 * 1024**3}],
+                "total_vram_bytes": 24 * 1024**3,
+            },
+        ),
+    )
+    r2 = client.post(
+        "/admin/api/providers/register",
+        json=_body(agent_id="a2", hardware={"gpus": [], "total_vram_bytes": 0}),
+    )
+    assert r2.status_code == 200
+
+    session.refresh(machine)
+    assert [g["uuid"] for g in machine.hardware["gpus"]] == ["gpu-1"]
+    assert machine.total_vram_bytes == 24 * 1024**3
+    assert machine.hardware["total_vram_bytes"] == 24 * 1024**3
+
+
+def test_register_no_gpus_report_preserves_manual_budget(
+    client: TestClient, session: Session
+) -> None:
+    """L1: a report with no gpus key on a machine with a manually-set budget and
+    no existing gpus list must PRESERVE that budget (not clobber it with 0)."""
+    machine = _machine(session)
+    machine.total_vram_bytes = 99 * 1024**3
+    session.add(machine)
+    session.commit()
+    _definition(session)
+
+    resp = client.post(
+        "/admin/api/providers/register",
+        json=_body(hardware={"cpu": {"cores": 8}}),
+    )
+    assert resp.status_code == 200
+    session.refresh(machine)
     assert machine.total_vram_bytes == 99 * 1024**3
-    assert machine.hardware == {"gpus": []}
+    assert "gpus" not in machine.hardware
+    assert machine.hardware["cpu"] == {"cores": 8}
+
+
+def test_register_reregister_keeps_gpu_still_claimed_by_other_agent(
+    client: TestClient, session: Session
+) -> None:
+    """M1: a GPU another agent still claims survives this agent dropping it."""
+    machine = _machine(session)
+    _definition(session)
+    # Overlapping visibility: a1 sees gpu-1 + gpu-2, a2 also sees gpu-1.
+    client.post(
+        "/admin/api/providers/register",
+        json=_body(
+            agent_id="a1",
+            hardware={
+                "gpus": [
+                    {"uuid": "gpu-1", "total_vram_bytes": 24 * 1024**3},
+                    {"uuid": "gpu-2", "total_vram_bytes": 8 * 1024**3},
+                ],
+                "total_vram_bytes": 32 * 1024**3,
+            },
+        ),
+    )
+    client.post(
+        "/admin/api/providers/register",
+        json=_body(
+            agent_id="a2",
+            hardware={
+                "gpus": [{"uuid": "gpu-1", "total_vram_bytes": 24 * 1024**3}],
+                "total_vram_bytes": 24 * 1024**3,
+            },
+        ),
+    )
+    # a1 re-registers now seeing only gpu-3 (dropped both gpu-1 and gpu-2).
+    client.post(
+        "/admin/api/providers/register",
+        json=_body(
+            agent_id="a1",
+            hardware={
+                "gpus": [{"uuid": "gpu-3", "total_vram_bytes": 16 * 1024**3}],
+                "total_vram_bytes": 16 * 1024**3,
+            },
+        ),
+    )
+
+    session.refresh(machine)
+    uuids = {g["uuid"] for g in machine.hardware["gpus"]}
+    # gpu-1 kept (a2 still claims it), gpu-2 dropped (only a1 had it), gpu-3 added.
+    assert uuids == {"gpu-1", "gpu-3"}
+    assert machine.total_vram_bytes == (24 + 16) * 1024**3
 
 
 # ============================================================================

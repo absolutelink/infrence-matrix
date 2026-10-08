@@ -242,3 +242,87 @@ def test_delete_agent_running_ghost_disconnected(
     session.expire_all()
     assert session.get(ProviderAgent, agent_pk) is None
     assert session.get(ProviderInstance, inst_pk) is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 17 B: machine GPU-union recompute on delete
+# ---------------------------------------------------------------------------
+
+
+def _machine_with_union(session: Session) -> Machine:
+    m = _machine(session)
+    m.hardware = {
+        "gpus": [
+            {"uuid": "gpu-1", "total_vram_bytes": 24 * 1024**3},
+            {"uuid": "gpu-2", "total_vram_bytes": 16 * 1024**3},
+        ],
+        "total_vram_bytes": 40 * 1024**3,
+    }
+    m.total_vram_bytes = 40 * 1024**3
+    session.add(m)
+    session.commit()
+    session.refresh(m)
+    return m
+
+
+def test_delete_agent_removes_only_its_gpu_and_resums(
+    client: TestClient, session: Session
+) -> None:
+    m = _machine_with_union(session)
+    a1 = _agent(session, m, "a1")
+    a1.assigned_gpus = ["gpu-1"]
+    a2 = _agent(session, m, "a2")
+    a2.assigned_gpus = ["gpu-2"]
+    session.add(a1)
+    session.add(a2)
+    session.commit()
+
+    resp = client.delete(f"/admin/api/agents/{a1.id}")
+    assert resp.status_code == 200
+
+    session.expire_all()
+    session.refresh(m)
+    assert [g["uuid"] for g in m.hardware["gpus"]] == ["gpu-2"]
+    assert m.hardware["total_vram_bytes"] == 16 * 1024**3
+    assert m.total_vram_bytes == 16 * 1024**3
+
+
+def test_delete_agent_keeps_gpu_still_claimed_by_survivor(
+    client: TestClient, session: Session
+) -> None:
+    # Overlapping-visibility misconfig: both agents claim gpu-1. Deleting one
+    # must NOT drop the GPU (a survivor still reports it).
+    m = _machine_with_union(session)
+    a1 = _agent(session, m, "a1")
+    a1.assigned_gpus = ["gpu-1"]
+    a2 = _agent(session, m, "a2")
+    a2.assigned_gpus = ["gpu-1", "gpu-2"]
+    session.add(a1)
+    session.add(a2)
+    session.commit()
+
+    resp = client.delete(f"/admin/api/agents/{a1.id}")
+    assert resp.status_code == 200
+
+    session.expire_all()
+    session.refresh(m)
+    assert [g["uuid"] for g in m.hardware["gpus"]] == ["gpu-1", "gpu-2"]
+    assert m.total_vram_bytes == 40 * 1024**3
+
+
+def test_delete_agent_no_hardware_union_is_noop(client: TestClient, session: Session) -> None:
+    # A machine with a directly-set budget but no gpus list is left untouched.
+    m = _machine(session)
+    m.total_vram_bytes = 99 * 1024**3
+    session.add(m)
+    session.commit()
+    a = _agent(session, m, "solo")
+    a.assigned_gpus = ["gpu-x"]
+    session.add(a)
+    session.commit()
+
+    resp = client.delete(f"/admin/api/agents/{a.id}")
+    assert resp.status_code == 200
+    session.expire_all()
+    session.refresh(m)
+    assert m.total_vram_bytes == 99 * 1024**3

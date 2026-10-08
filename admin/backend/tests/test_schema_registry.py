@@ -656,14 +656,16 @@ def test_hardware_merged_on_schema_pending_409(
 
     machine_b = _machine(session, "hw-b")
     _definition(session)
-    new_hw = {"gpus": [{"uuid": "g2"}], "total_vram_bytes": 222}
+    new_hw = {"gpus": [{"uuid": "g2", "total_vram_bytes": 222}], "total_vram_bytes": 222}
     resp = _register(client, "hw-b", SCHEMA_V2, hardware=new_hw)
     assert resp.status_code == 409
     assert resp.json()["detail"]["error"] == "schema_pending"
 
     session.expire_all()
     machine_b = session.get(Machine, machine_b.id)
-    assert machine_b.hardware == new_hw
+    # Merged despite the refusal (the box is real); total is the union auto-sum.
+    assert machine_b.hardware["gpus"] == [{"uuid": "g2", "total_vram_bytes": 222}]
+    assert machine_b.hardware["total_vram_bytes"] == 222
     assert machine_b.total_vram_bytes == 222
 
 
