@@ -35,6 +35,7 @@ from provider_lib.backend import (
     BackendNotReady,
 )
 from provider_lib.config import ProviderSettings
+from provider_lib.registry import BackendRegistry
 from provider_lib.wire import BackendStatusValue
 
 logger = logging.getLogger("provider.app_factory")
@@ -50,12 +51,14 @@ class BackendOverrides:
       registration.
     - ``calculate_usage``: per-type usage computation (kept from
       Phase 3; unused by the generic /v1 layer).
-    - ``lifecycle``: a `BackendLifecycle` wrapping the provider's
-      `BackendDriver`. When present the /v1 surface is mounted; when
-      ``None`` the /v1 endpoints answer 503 (backend machinery not
-      wired). The provider package constructs the driver and the
-      lifecycle once and shares the same instance between the admin WS
-      command handlers (backend.start/stop) and this app.
+    - ``lifecycle``: a single `BackendLifecycle` (the pre-overhaul /
+      single-backend path). When present (and ``registry`` is ``None``) the /v1
+      surface mounts on it; when both are ``None`` the /v1 endpoints answer 503.
+    - ``registry``: a :class:`~provider_lib.registry.BackendRegistry` of hosted
+      backends (port model overhaul). When present the agent serves ONE ``/v1``
+      surface and routes each request to the backend whose ``alias`` equals the
+      request's ``model`` field (``registry.resolve_by_model``); an unknown
+      model is a 404. Takes precedence over ``lifecycle``.
     """
 
     def __init__(
@@ -65,11 +68,13 @@ class BackendOverrides:
         version: str,
         calculate_usage: Callable[[Any], dict[str, int]] | None = None,
         lifecycle: BackendLifecycle | None = None,
+        registry: BackendRegistry | None = None,
     ) -> None:
         self.provider_type = provider_type
         self.version = version
         self.calculate_usage = calculate_usage
         self.lifecycle = lifecycle
+        self.registry = registry
 
 
 def _sse(event: dict[str, Any]) -> str:
@@ -94,6 +99,20 @@ def create_provider_app(
             "version": overrides.version,
             "machine_uid": settings.MACHINE_UID,
         }
+        if overrides.registry is not None:
+            # Agent-level health for the single-env-port multiplexing surface:
+            # a per-backend summary (no single backend_status applies to all).
+            body["backends"] = [
+                {
+                    "instance_id": h.instance_id,
+                    "alias": h.alias,
+                    "backend_status": h.lifecycle.backend_status,
+                    "in_flight": h.lifecycle.in_flight,
+                    "capacity": h.lifecycle.capacity,
+                }
+                for h in overrides.registry.handles()
+            ]
+            return body
         if overrides.lifecycle is not None:
             body["backend_status"] = overrides.lifecycle.backend_status
             body["in_flight"] = overrides.lifecycle.in_flight
@@ -104,6 +123,26 @@ def create_provider_app(
         if overrides.lifecycle is None:
             raise HTTPException(status_code=503, detail="backend lifecycle not wired")
         return overrides.lifecycle
+
+    def _resolve_lifecycle(body: dict[str, Any]) -> BackendLifecycle:
+        """Pick the lifecycle that serves this request.
+
+        Registry (single-env-port) path: route by the request's ``model`` (=
+        definition alias); an unknown/absent model is a 404. A non-object body
+        is a 400 (a JSON array/string would otherwise raise inside ``body.get``).
+        Single-lifecycle path: the one wired lifecycle (unchanged behavior).
+        """
+        if overrides.registry is not None:
+            if not isinstance(body, dict):
+                raise HTTPException(
+                    status_code=400, detail="request body must be a JSON object"
+                )
+            model = body.get("model")
+            handle = overrides.registry.resolve_by_model(model)
+            if handle is None:
+                raise HTTPException(status_code=404, detail=f"unknown model '{model}'")
+            return handle.lifecycle
+        return _require_lifecycle()
 
     async def _stream_or_error(
         stream: AsyncIterator[dict[str, Any]], terminator: bool
@@ -132,6 +171,36 @@ def create_provider_app(
 
     @app.get("/v1/models")
     async def list_models() -> dict[str, Any]:
+        if overrides.registry is not None:
+            # Aggregate the model list across every hosted backend that is
+            # currently serving (running/in_use), unioned by model id. A
+            # per-backend scrape failure is skipped (best-effort) so one bad
+            # engine never blanks the whole agent's listing.
+            data: list[dict[str, Any]] = []
+            seen: set[Any] = set()
+            for handle in overrides.registry.handles():
+                lifecycle = handle.lifecycle
+                if lifecycle.backend_status not in (
+                    BackendStatusValue.RUNNING,
+                    BackendStatusValue.IN_USE,
+                ):
+                    continue
+                try:
+                    models = await lifecycle.driver.list_models()
+                except Exception:  # noqa: BLE001 - one backend must not fail all
+                    logger.warning(
+                        "list_models failed for backend %s",
+                        handle.instance_id or "?",
+                        exc_info=True,
+                    )
+                    continue
+                for model in models:
+                    key = model.get("id") if isinstance(model, dict) else model
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    data.append(model)
+            return {"object": "list", "data": data}
         lifecycle = _require_lifecycle()
         # Models are only listable while the backend is serving; a stopped
         # backend has no cheap source of truth, so report 503 and let the
@@ -152,8 +221,8 @@ def create_provider_app(
 
     @app.post("/v1/responses")
     async def responses(request: Request) -> Response:
-        lifecycle = _require_lifecycle()
         body = await request.json()
+        lifecycle = _resolve_lifecycle(body)
         try:
             # Eager acquire inside: BackendBusy/BackendNotReady surface
             # here, before any bytes are committed to the client.
@@ -191,8 +260,8 @@ def create_provider_app(
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request) -> Response:
-        lifecycle = _require_lifecycle()
         body = await request.json()
+        lifecycle = _resolve_lifecycle(body)
         if not body.get("stream"):
             # Non-stream (spec default): the upstream llama.cpp chat SSE
             # only carries a usage chunk when stream_options.include_usage
@@ -237,8 +306,8 @@ def create_provider_app(
 
     @app.post("/v1/embeddings")
     async def embeddings(request: Request) -> JSONResponse:
-        lifecycle = _require_lifecycle()
         body = await request.json()
+        lifecycle = _resolve_lifecycle(body)
         try:
             result = await lifecycle.embeddings(body)
         except BackendBusy as exc:

@@ -26,12 +26,18 @@ from provider_lib.backend import BackendLifecycle
 
 
 class BackendHandle:
-    """One hosted backend: its lifecycle + applied-config state + serve port.
+    """One hosted backend: its lifecycle + applied-config state + identity.
 
-    ``port`` is the backend's admin-facing HTTP port (``base_port + offset``,
-    from the assignment/registration entry). The multi-port server (slice 6)
-    binds this backend's ``/v1`` surface to it; ``None`` falls back to the
-    agent's base ``PROVIDER_PORT`` (single-backend convenience).
+    ``alias`` is the ``ProviderDefinition.alias`` this backend serves. The
+    agent's single ``/v1`` surface routes an inbound request to this handle by
+    matching the request's ``model`` field against it (port model overhaul).
+    ``None`` for handles built before an alias is known (single-backend
+    convenience / pre-registration placeholder).
+
+    ``port`` is retained for the not-yet-migrated providers that still serve each
+    backend on its own admin-facing port via ``MultiPortServer``; the new
+    single-env-port model does not use it (the agent publishes one
+    ``PROVIDER_PORT`` and routes by model). ``None`` is the default.
     """
 
     def __init__(
@@ -40,15 +46,22 @@ class BackendHandle:
         lifecycle: BackendLifecycle,
         config_state: Any = None,
         port: int | None = None,
+        alias: str | None = None,
     ) -> None:
         self.instance_id = instance_id
         self.lifecycle = lifecycle
         self.config_state = config_state
         self.port = port
+        self.alias = alias
 
 
 class BackendRegistry:
     """``instance_id -> BackendHandle`` with single-backend convenience.
+
+    Also maintains an ``alias -> BackendHandle`` index so the agent's single
+    ``/v1`` surface can resolve the target backend from a request's ``model``
+    field (port model overhaul). The index is kept in sync by :meth:`add` /
+    :meth:`remove`.
 
     Slice 6: the registry also carries an optional set of async *change
     listeners* the multi-port server registers so it can start/stop per-backend
@@ -60,6 +73,7 @@ class BackendRegistry:
 
     def __init__(self) -> None:
         self._handles: dict[str, BackendHandle] = {}
+        self._by_alias: dict[str, BackendHandle] = {}
         self._change_listeners: list[Callable[[], Awaitable[None]]] = []
 
     def add_change_listener(self, listener: Callable[[], Awaitable[None]]) -> None:
@@ -81,6 +95,8 @@ class BackendRegistry:
 
     def add(self, handle: BackendHandle) -> None:
         self._handles[handle.instance_id] = handle
+        if handle.alias:
+            self._by_alias[handle.alias] = handle
 
     def remove(self, instance_id: str) -> BackendHandle | None:
         """Drop a hosted handle by its key (slice 5 assignments reconcile).
@@ -89,7 +105,13 @@ class BackendRegistry:
         ``instance_id``). The caller is responsible for having stopped the
         lifecycle first (busy-safe removal is enforced upstream).
         """
-        return self._handles.pop(str(instance_id), None)
+        handle = self._handles.pop(str(instance_id), None)
+        if handle is not None and handle.alias:
+            # Only clear the alias index if it still points at this handle (a
+            # later add of the same alias would have replaced it).
+            if self._by_alias.get(handle.alias) is handle:
+                del self._by_alias[handle.alias]
+        return handle
 
     def get(self, instance_id: str) -> BackendHandle | None:
         return self._handles.get(instance_id)
@@ -107,6 +129,19 @@ class BackendRegistry:
         if len(self._handles) == 1:
             return next(iter(self._handles.values()))
         return None
+
+    def resolve_by_model(self, model: str | None) -> BackendHandle | None:
+        """Resolve the handle that serves an inbound request's ``model`` field
+        (the port model overhaul: one agent ``/v1`` surface routes by alias).
+
+        ``None`` model, a non-string model, or an alias this agent does not host
+        -> ``None`` (the caller answers 404). The non-string guard keeps a
+        malformed request (e.g. ``model`` as a list/int) from raising inside
+        ``dict.get`` — it degrades to a clean 404 instead of a 500.
+        """
+        if not isinstance(model, str) or not model:
+            return None
+        return self._by_alias.get(model)
 
     def resolve_target(self, instance_id: str | None) -> BackendHandle | None:
         """Resolve the handle a per-backend command targets, honoring a

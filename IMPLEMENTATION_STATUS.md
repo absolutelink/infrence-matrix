@@ -2,7 +2,8 @@
 
 **Overhaul branch:** `litellm-architecture-overhaul`
 **Last updated:** 2026-10-08 (**Port model overhaul — agent-owned ports +
-model-routed `/v1`: Slices 0–1 DONE (docs + admin cutover), Slices 2–5 PLANNED.**
+model-routed `/v1`: Slices 0–2 DONE (docs + admin cutover + provider_lib
+multiplexing core + mock reference), Slices 3–5 PLANNED.**
 Fixes the production `port_conflict` cross-agent collision by moving to one
 published `PROVIDER_PORT` per agent that routes `/v1` by model; the admin stops
 allocating/policing ports and `ProviderInstance.port` is dropped (migration
@@ -2327,16 +2328,20 @@ the data model again.
 
 ## Port model overhaul — agent-owned ports + model-routed `/v1` (2026-10-08)
 
-**Status: IN PROGRESS — Slices 0–1 DONE (docs + admin cutover); Slices 2–5
-PLANNED.** Slice 1 landed the admin half: the admin no longer allocates or
-polices per-backend ports, dials `machine.reachable_address():agent.base_port`,
-and the `ProviderInstance.port` column is dropped (Alembic `b7d3f0a1c9e2`). The
-provider side still runs the per-backend `MultiPortServer` until Slice 2 lands
-(the admin now sends no `port`, and the provider falls back to its env
-`PROVIDER_PORT`, so the wire stays compatible). `ARCHITECTURE.md` is rewritten to
-the new model; `docs/ws-protocol.md` and `provider/README.md` still describe the
-old `base_port + offset` / `MultiPortServer` per-port scheme and are updated in
-Slice 5.
+**Status: IN PROGRESS — Slices 0–2 DONE; Slices 3–5 PLANNED.** Slice 1 landed the
+admin half: the admin no longer allocates or polices per-backend ports, dials
+`machine.reachable_address():agent.base_port`, and the `ProviderInstance.port`
+column is dropped (Alembic `b7d3f0a1c9e2`). Slice 2 landed the provider_lib
+multiplexing core + the mock reference cutover: `BackendRegistry` indexes handles
+by alias (`resolve_by_model`), `create_provider_app` routes `/v1` by the request
+`model` when a registry is supplied (single-`lifecycle` path kept for
+backward-compat), and a new `AgentServer` serves one `/v1` on the env
+`PROVIDER_PORT`. The four real providers (llama-cpp, halogen, halogen-flash,
+gufo) still run the per-backend `MultiPortServer` until Slices 3/4 migrate them
+(the new path is additive, so all suites stay green). `ARCHITECTURE.md` is
+rewritten to the new model; `docs/ws-protocol.md` and `provider/README.md` still
+describe the old `base_port + offset` / `MultiPortServer` per-port scheme and are
+updated in Slice 5.
 
 **The production bug.** Adding a 2nd `ProviderDefinition` to an agent that shares
 a machine with another agent fails with
@@ -2393,10 +2398,14 @@ admin-facing port `base_port + offset` and enforces machine-wide uniqueness
       + Alembic migration `b7d3f0a1c9e2`; pointed litellm's `api_base` at the
       agent's env port (`machine.reachable_address():agent.base_port`) with the
       alias as the model. Admin tests updated (396 green); client regenerated.
-- [ ] **Slice 2 — provider_lib single env-port listener + model routing.**
-      Replace the per-backend `MultiPortServer` with one `/v1` listener on the
-      agent's env `PROVIDER_PORT` that dispatches to the target backend by the
-      request's `model` (= alias).
+- [x] **Slice 2 — provider_lib single env-port listener + model routing.** DONE:
+      `BackendRegistry` gained an alias index + `resolve_by_model`;
+      `create_provider_app` routes `/v1` by the request `model` when a registry
+      is supplied (404 unknown model, 400 non-object body; single-`lifecycle`
+      path preserved for backward-compat); new `AgentServer` serves one `/v1` on
+      the env `PROVIDER_PORT` (no per-backend listener churn). Mock cut over to
+      `AgentServer` + alias-carrying handles. provider_lib 184 + mock 51 green;
+      the four un-migrated providers stay green (additive).
 - [ ] **Slice 3 — llama-cpp random engine port + schema field removal.** Bind
       `127.0.0.1:0` and read back the OS-assigned engine port; remove the
       operator-facing port fields from the llama-cpp `schema.json` (Vulkan +
@@ -2410,10 +2419,11 @@ admin-facing port `base_port + offset` and enforces machine-wide uniqueness
       `deployment.md` (one published `PROVIDER_PORT` per agent container);
       `bash scripts/generate-client.sh`.
 
-**Not yet done:** the provider-side model routing (Slice 2), llama-cpp random
-engine port + schema field removal (Slice 3), halogen-flash schema field removal
-(Slice 4), and the `docs/ws-protocol.md` / `provider/README.md` / `deployment.md`
-rewrites (Slice 5).
+**Not yet done:** migrating llama-cpp (Slice 3) and halogen/halogen-flash/gufo
+(Slice 4) to `AgentServer` + model routing + unique local engine ports + schema
+port-field removal, and the `docs/ws-protocol.md` / `provider/README.md` /
+`deployment.md` rewrites + `MultiPortServer`/`BackendHandle.port` cleanup
+(Slice 5).
 
 ---
 

@@ -35,7 +35,7 @@ from provider_lib.log_stream import install_log_streaming
 from provider_lib.metrics import filter_gpus, parse_gpu_assignment
 from provider_lib.ops import emit_backend_status_snapshot, install_backend_ops
 from provider_lib.registry import BackendHandle, BackendRegistry
-from provider_lib.serve import MultiPortServer
+from provider_lib.serve import AgentServer
 from provider_lib.wire import Frame, InstanceStatusValue
 
 from provider_mock.backend import SCHEMA, MockBackend
@@ -136,12 +136,15 @@ def build_registry(client: AdminClient, result: RegistrationResult) -> BackendRe
         iid = backend.get("instance_id")
         if iid is None:  # pragma: no cover - admin always assigns an id
             continue
-        port = backend.get("port")
-        serve_port = port if isinstance(port, int) else None
+        definition = backend.get("definition") or {}
+        raw_alias = definition.get("alias")
+        alias = raw_alias if isinstance(raw_alias, str) else None
         lifecycle = make_lifecycle(client, instance_id=iid)
         config_state = ConfigState()
         _apply_backend(lifecycle, backend, config_state)
-        registry.add(BackendHandle(str(iid), lifecycle, config_state, port=serve_port))
+        # Port model overhaul: the handle carries its alias so the agent's single
+        # /v1 surface routes by model; no per-backend port.
+        registry.add(BackendHandle(str(iid), lifecycle, config_state, alias=alias))
     return registry
 
 
@@ -199,12 +202,13 @@ def install_command_handlers(
 
         def make_handle(entry: dict[str, Any]) -> BackendHandle:
             iid = str(entry["instance_id"])
-            port = entry.get("port")
-            serve_port = port if isinstance(port, int) else None
+            raw_alias = entry.get("alias")
+            alias = raw_alias if isinstance(raw_alias, str) else None
             lifecycle = make_lifecycle(client, instance_id=iid)
             config_state = ConfigState()
             _apply_assignment(lifecycle, entry, config_state)
-            return BackendHandle(iid, lifecycle, config_state, port=serve_port)
+            # Port model overhaul: alias for model routing; no per-backend port.
+            return BackendHandle(iid, lifecycle, config_state, alias=alias)
 
     install_backend_ops(
         client,
@@ -455,10 +459,11 @@ async def run_async() -> None:
             on_disconnected=on_disconnected,
         )
     )
-    # Slice 6: serve each hosted backend's /v1 on its own port (base_port +
-    # offset). A single-backend agent yields exactly one listener on
-    # PROVIDER_PORT — identical to the pre-slice-6 behavior.
-    server = MultiPortServer(settings, PROVIDER_TYPE, VERSION, registry)
+    # Port model overhaul: serve the agent's single /v1 surface on
+    # settings.PROVIDER_PORT and route each request to a backend by model (the
+    # request's `model` == the definition alias). One listener, no per-backend
+    # port churn — a backend added by an assignments push is routable immediately.
+    server = AgentServer(settings, PROVIDER_TYPE, VERSION, registry)
     serve_task = asyncio.create_task(server.serve_forever())
     try:
         await serve_task

@@ -184,4 +184,83 @@ class MultiPortServer:
             await self.aclose()
 
 
-__all__ = ["MultiPortServer"]
+class AgentServer:
+    """Serve the agent's ONE admin-facing ``/v1`` surface on ``PROVIDER_PORT``.
+
+    Port model overhaul: instead of one listener per backend (``MultiPortServer``)
+    the agent publishes a single uvicorn server bound to its env ``PROVIDER_PORT``
+    whose app resolves the target backend per request from the live registry (by
+    the request's ``model`` = definition alias). Because resolution happens at
+    request time against the shared registry, there is NO per-backend listener
+    churn and NO registry change-listener sync — a backend added by an
+    ``agent.assignments.update`` push is immediately routable on the same port.
+
+    The uvicorn server is driven through its startup/main_loop/shutdown phases
+    (via :class:`_BackendListener`) so no process signal handlers are installed —
+    the owning process handles shutdown; cancelling :meth:`serve_forever` (or
+    calling :meth:`aclose`) tears the socket down cleanly.
+    """
+
+    def __init__(
+        self,
+        settings: ProviderSettings,
+        provider_type: str,
+        version: str,
+        registry: BackendRegistry,
+        *,
+        calculate_usage: Any | None = None,
+        host: str = "0.0.0.0",
+        log_level: str = "info",
+    ) -> None:
+        self._settings = settings
+        self._provider_type = provider_type
+        self._version = version
+        self._registry = registry
+        self._calculate_usage = calculate_usage
+        self._host = host
+        self._log_level = log_level
+        self._listener: _BackendListener | None = None
+
+    def _build_app(self) -> Any:
+        overrides = BackendOverrides(
+            provider_type=self._provider_type,
+            version=self._version,
+            calculate_usage=self._calculate_usage,
+            registry=self._registry,
+        )
+        return create_provider_app(self._settings, overrides)
+
+    @property
+    def port(self) -> int:
+        return int(self._settings.PROVIDER_PORT)
+
+    async def serve_forever(self) -> None:
+        """Bind the single env-port listener and block until cancelled."""
+        # Build + start into locals first so a startup failure never leaves a
+        # half-initialized listener behind; log and re-raise cleanly instead.
+        try:
+            listener = _BackendListener(
+                self._build_app(), self._host, self.port, self._log_level
+            )
+            listener.start()
+        except Exception:
+            logger.exception("agent /v1 surface failed to start on port %s", self.port)
+            self._listener = None
+            raise
+        self._listener = listener
+        logger.info("agent /v1 surface serving on port %s", self.port)
+        try:
+            # The never-set event is the idiomatic "wait forever"; the caller
+            # cancels this task to stop serving.
+            await asyncio.Event().wait()
+        finally:
+            await self.aclose()
+
+    async def aclose(self) -> None:
+        """Stop the listener (process shutdown)."""
+        if self._listener is not None:
+            await self._listener.stop()
+            self._listener = None
+
+
+__all__ = ["MultiPortServer", "AgentServer"]

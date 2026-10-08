@@ -13,6 +13,7 @@ from provider_lib.app_factory import (
 )
 from provider_lib.backend import BackendDriver, BackendLifecycle
 from provider_lib.config import ProviderSettings
+from provider_lib.registry import BackendHandle, BackendRegistry
 
 
 class EndpointDriver(BackendDriver):
@@ -403,3 +404,186 @@ async def test_no_lifecycle_wired_returns_503() -> None:
         assert (await client.post("/v1/responses", json={})).status_code == 503
         assert (await client.post("/v1/chat/completions", json={})).status_code == 503
         assert (await client.post("/v1/embeddings", json={})).status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# Port model overhaul: single /v1 surface multiplexed by request `model`.
+# ---------------------------------------------------------------------------
+
+
+class RoutingDriver(BackendDriver):
+    """Fake driver that stamps its ``tag`` into every response so a test can
+    tell which hosted backend served a request."""
+
+    def __init__(self, tag: str, *, models: list[str] | None = None) -> None:
+        self.tag = tag
+        self._models = models if models is not None else [tag]
+        self.embed_calls = 0
+
+    async def start(self) -> None:
+        pass
+
+    async def stop(self) -> None:
+        pass
+
+    async def health(self) -> bool:
+        return True
+
+    async def list_models(self) -> list[dict[str, Any]]:
+        return [{"id": m, "object": "model"} for m in self._models]
+
+    def stream_responses(
+        self, request: dict[str, Any]
+    ) -> AsyncIterator[dict[str, Any]]:
+        async def gen() -> AsyncIterator[dict[str, Any]]:
+            yield {
+                "type": "response.completed",
+                "response": {"id": self.tag, "status": "completed", "tag": self.tag},
+            }
+
+        return gen()
+
+    def stream_chat_completions(
+        self, request: dict[str, Any]
+    ) -> AsyncIterator[dict[str, Any]]:
+        async def gen() -> AsyncIterator[dict[str, Any]]:
+            yield {
+                "id": self.tag,
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {"content": self.tag}}],
+            }
+            yield {
+                "id": self.tag,
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            }
+
+        return gen()
+
+    async def embeddings(self, request: dict[str, Any]) -> dict[str, Any]:
+        self.embed_calls += 1
+        return {
+            "object": "list",
+            "data": [{"object": "embedding", "index": 0, "embedding": [0.1]}],
+            "model": self.tag,
+            "usage": {"prompt_tokens": 1, "total_tokens": 1},
+        }
+
+
+def _registry_app(
+    handles: list[BackendHandle],
+) -> tuple[BackendRegistry, httpx.AsyncClient]:
+    reg = BackendRegistry()
+    for h in handles:
+        reg.add(h)
+    app = create_provider_app(
+        _settings(),
+        BackendOverrides(provider_type="test", version="v", registry=reg),
+    )
+    return reg, httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://provider"
+    )
+
+
+async def _running_handle(iid: str, alias: str, tag: str) -> BackendHandle:
+    lifecycle = BackendLifecycle(RoutingDriver(tag), instance_id=iid)
+    await lifecycle.start()
+    return BackendHandle(iid, lifecycle, None, alias=alias)
+
+
+async def test_registry_routes_responses_by_model() -> None:
+    a = await _running_handle("i1", "alpha", "A")
+    b = await _running_handle("i2", "beta", "B")
+    _reg, client = _registry_app([a, b])
+    async with client:
+        ra = await client.post("/v1/responses", json={"model": "alpha"})
+        rb = await client.post("/v1/responses", json={"model": "beta"})
+        assert ra.json()["tag"] == "A"
+        assert rb.json()["tag"] == "B"
+        # Each backend served exactly one request; slots released.
+        assert a.lifecycle.in_flight == 0 and b.lifecycle.in_flight == 0
+
+
+async def test_registry_unknown_model_is_404() -> None:
+    a = await _running_handle("i1", "alpha", "A")
+    _reg, client = _registry_app([a])
+    async with client:
+        assert (
+            await client.post("/v1/responses", json={"model": "nope"})
+        ).status_code == 404
+        # Missing model field is also a 404 (not a fallback to the sole handle).
+        assert (await client.post("/v1/responses", json={})).status_code == 404
+
+
+async def test_registry_routes_chat_and_embeddings_by_model() -> None:
+    a = await _running_handle("i1", "alpha", "A")
+    b = await _running_handle("i2", "beta", "B")
+    _reg, client = _registry_app([a, b])
+    async with client:
+        chat = await client.post(
+            "/v1/chat/completions",
+            json={"model": "beta", "messages": [{"role": "user", "content": "x"}]},
+        )
+        assert chat.status_code == 200
+        assert chat.json()["choices"][0]["message"]["content"] == "B"
+
+        emb = await client.post("/v1/embeddings", json={"model": "alpha", "input": "x"})
+        assert emb.status_code == 200
+        assert emb.json()["model"] == "A"
+        # The chat hit beta's driver only; the embedding hit alpha's driver only.
+        assert a.lifecycle.driver.embed_calls == 1
+        assert b.lifecycle.driver.embed_calls == 0
+
+
+async def test_registry_models_aggregates_running_backends() -> None:
+    a = await _running_handle("i1", "alpha", "A")
+    b = await _running_handle("i2", "beta", "B")
+    # A stopped backend contributes nothing to the aggregate.
+    stopped = BackendLifecycle(RoutingDriver("C", models=["gamma"]), instance_id="i3")
+    c = BackendHandle("i3", stopped, None, alias="gamma")
+    _reg, client = _registry_app([a, b, c])
+    async with client:
+        body = (await client.get("/v1/models")).json()
+        ids = {m["id"] for m in body["data"]}
+        assert ids == {"A", "B"}  # "gamma" excluded (backend stopped)
+
+
+async def test_registry_health_reports_backends() -> None:
+    a = await _running_handle("i1", "alpha", "A")
+    _reg, client = _registry_app([a])
+    async with client:
+        body = (await client.get("/health")).json()
+        assert body["status"] == "ok"
+        assert body["provider_type"] == "test"
+        summary = {b["alias"]: b for b in body["backends"]}
+        assert summary["alpha"]["backend_status"] == "running"
+
+
+async def test_registry_non_object_body_is_400() -> None:
+    """L1: a JSON array/string body reaches ``_resolve_lifecycle``; it must be a
+    clean 400, not an AttributeError->500 from ``body.get``."""
+    a = await _running_handle("i1", "alpha", "A")
+    _reg, client = _registry_app([a])
+    async with client:
+        for bad in ([1, 2], "a string", 123):
+            resp = await client.post("/v1/responses", json=bad)
+            assert resp.status_code == 400, bad
+            assert resp.json()["detail"] == "request body must be a JSON object"
+        # Same guard on the chat surface.
+        assert (
+            await client.post("/v1/chat/completions", json=[1, 2])
+        ).status_code == 400
+
+
+async def test_registry_non_string_model_is_404() -> None:
+    """L1: a non-string ``model`` (list/int) degrades to a clean 404 via the
+    registry's non-string guard, not a TypeError from ``dict.get``."""
+    a = await _running_handle("i1", "alpha", "A")
+    _reg, client = _registry_app([a])
+    async with client:
+        assert (
+            await client.post("/v1/responses", json={"model": ["x"]})
+        ).status_code == 404
+        assert (
+            await client.post("/v1/responses", json={"model": 123})
+        ).status_code == 404

@@ -15,7 +15,7 @@ from typing import Any
 
 from provider_lib.config import ProviderSettings
 from provider_lib.registry import BackendHandle, BackendRegistry
-from provider_lib.serve import MultiPortServer
+from provider_lib.serve import AgentServer, MultiPortServer
 
 
 def _settings(tmp_path: Path) -> ProviderSettings:
@@ -136,3 +136,32 @@ async def test_sync_one_bad_backend_does_not_strand_others(tmp_path: Path) -> No
     assert set(server._listeners) == {8391, 8393}
     await server.aclose()
     assert server._listeners == {}
+
+
+# ---------------------------------------------------------------------------
+# Port model overhaul: AgentServer runs ONE listener on the env PROVIDER_PORT.
+# ---------------------------------------------------------------------------
+
+
+async def test_agent_server_binds_single_env_port(tmp_path: Path) -> None:
+    """Regardless of how many backends the registry hosts, AgentServer runs a
+    single uvicorn listener on ``settings.PROVIDER_PORT`` (the agent routes by
+    model at request time — no per-backend listener churn)."""
+    import asyncio
+
+    settings = _settings(tmp_path)  # PROVIDER_PORT = 8300
+    registry = BackendRegistry()
+    registry.add(_handle("i1", None))
+    registry.add(_handle("i2", None))
+    server = AgentServer(settings, "mock", "dev", registry)
+    server._build_app = lambda: _noop_app  # type: ignore[method-assign]
+
+    task = asyncio.create_task(server.serve_forever())
+    while server._listener is None:
+        await asyncio.sleep(0.01)
+    assert server._listener.port == settings.PROVIDER_PORT == 8300
+
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    # aclose() (run in serve_forever's finally) tears the listener down.
+    assert server._listener is None
