@@ -247,3 +247,50 @@ async def test_repeated_update_stops_previous_backend(settings: Any) -> None:
     assert ack["ok"] is True
     assert driver.stop_calls == 1
     assert lifecycle.backend_status == BackendStatusValue.RUNNING
+
+
+async def test_config_update_sets_driver_modality(settings: Any) -> None:
+    """Phase 18 slice 3: a config.update carrying modality stamps it on the
+    driver and the applied-config state before apply_config runs."""
+    client, _lc, driver, state = _stack(settings)
+    ack = await client.dispatch(
+        "provider.config.update",
+        {
+            "backend_config": {"a": 1},
+            "config_fingerprint": "fp-new",
+            "modality": "embedding",
+        },
+    )
+    assert ack["ok"] is True
+    assert driver.modality == "embedding"
+    assert state.modality == "embedding"
+
+
+async def test_config_update_absent_modality_defaults_llm(settings: Any) -> None:
+    """Phase 18 slice 3: an absent modality coerces the driver back to "llm"."""
+    client, _lc, driver, state = _stack(settings)
+    driver.modality = "embedding"  # prove absent overrides a prior value
+    ack = await client.dispatch(
+        "provider.config.update",
+        {"backend_config": {"a": 1}, "config_fingerprint": "fp-new"},
+    )
+    assert ack["ok"] is True
+    assert driver.modality == "llm"
+    assert state.modality == "llm"
+
+
+async def test_config_update_adopts_modality_on_noop(settings: Any) -> None:
+    """Phase 18 slice 3: modality is adopted even on a same-fingerprint noop
+    (the admin may push a modality-only change; the driver must reflect it)."""
+    client, _lc, driver, _state = _stack(settings, applied_fp="fp-same")
+    ack = await client.dispatch(
+        "provider.config.update",
+        {
+            "backend_config": {"a": 1},
+            "config_fingerprint": "fp-same",
+            "modality": "embedding",
+        },
+    )
+    assert ack["ok"] is True
+    assert ack["detail"]["noop"] is True
+    assert driver.modality == "embedding"

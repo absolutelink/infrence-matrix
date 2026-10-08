@@ -81,8 +81,10 @@ def _build_payload(definition: ProviderDefinition, new_fp: str) -> dict[str, Any
     """The provider.config.update payload derived from a definition.
 
     Includes the fields the provider actually consumes:
-    ``backend_config`` + ``config_fingerprint`` (restart-worthy change)
-    and ``capacity`` (adopted at the provider without restart).
+    ``backend_config`` + ``config_fingerprint`` (restart-worthy change),
+    ``modality`` (Phase 18: the endpoint kind, so the engine boots correctly
+    — llama-cpp adds ``--embedding`` for ``embedding``) and ``capacity``
+    (adopted at the provider without restart).
     ``idle_timeout_seconds`` is carried for observability only — the idle
     reaper is admin-side (``InferenceScheduler._idle_reaper``); the
     provider does not adopt it. The target ``instance_id`` is added by the
@@ -91,6 +93,7 @@ def _build_payload(definition: ProviderDefinition, new_fp: str) -> dict[str, Any
     return {
         "backend_config": definition.backend_config,
         "config_fingerprint": new_fp,
+        "modality": definition.modality,
         "idle_timeout_seconds": definition.idle_timeout_seconds,
         "capacity": definition.capacity,
     }

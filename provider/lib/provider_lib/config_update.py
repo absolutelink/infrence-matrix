@@ -89,6 +89,11 @@ class ConfigState:
 
     def __init__(self, applied_fingerprint: str | None = None) -> None:
         self.applied_fingerprint = applied_fingerprint
+        # Phase 18 slice 3: the endpoint kind currently applied to this
+        # backend (mirrors the driver's ``modality``). Seeded from the
+        # registration definition and updated on every ``provider.config.update``
+        # so the provider's own view stays consistent with the driver.
+        self.modality: str = "llm"
 
 
 def prompt_cache_root(settings: ProviderSettings) -> Path:
@@ -311,6 +316,25 @@ def install_config_handlers(
                 "error": "invalid payload: backend_config must be an object",
                 "detail": {"step": _STEP_VALIDATE},
             }
+
+        # Phase 18 slice 3: adopt the endpoint kind from the wire BEFORE the
+        # noop/drain gates so a modality change always reaches the driver
+        # (and the applied-config state), even when the backend_config
+        # fingerprint is unchanged. Coerce to str; absent/unknown -> "llm".
+        #
+        # ORDERING NOTE: stamping the driver before the drain gate is safe ONLY
+        # because the admin refuses a modality change while backends are
+        # attached (definitions.py immutability gate), so a pushed modality
+        # always equals the current one and never mutates a live engine's kind
+        # mid-stream. Slice 5 must either move this adoption to AFTER a
+        # successful drain (like apply_config) or keep that admin gate airtight
+        # — including the operator force-commit path.
+        raw_modality = payload.get("modality")
+        modality = (
+            raw_modality if isinstance(raw_modality, str) and raw_modality else "llm"
+        )
+        lifecycle.driver.modality = modality
+        cfg_state.modality = modality
 
         # 2. Adopt capacity whenever it differs. Capacity is enforced at
         #    the provider and needs no restart, so this runs before the

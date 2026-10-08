@@ -120,6 +120,36 @@ def test_make_handle_builds_drivable_backend_for_new_assignment(
     assert handle.config_state.applied_fingerprint == f"fp-{INSTANCE_C}"
 
 
+def test_modality_threads_into_driver(
+    tmp_path: Path, fake_llama_binary: str, local_model_file: str
+) -> None:
+    """Phase 18 slice 3: the definition/entry modality reaches the built driver
+    (assignment entry via make_handle, registration definition via
+    build_registry); an absent modality defaults to "llm". No command flags are
+    asserted here — that is Slice 5."""
+    settings = make_settings(tmp_path, fake_llama_binary)
+    client = AdminClient(settings)
+
+    # Assignment entry -> make_handle.
+    emb_handle = make_handle(
+        client, _entry(INSTANCE_C, 8190, local_model_file, modality="embedding")
+    )
+    assert emb_handle.lifecycle.driver.modality == "embedding"
+    assert emb_handle.config_state.modality == "embedding"
+    # Absent modality -> llm default.
+    default_handle = make_handle(client, _entry(INSTANCE_A, 8191, local_model_file))
+    assert default_handle.lifecycle.driver.modality == "llm"
+
+    # Registration definition -> build_registry.
+    reg_entry = _reg_entry(INSTANCE_B, 8182, local_model_file)
+    reg_entry["definition"]["modality"] = "embedding"
+    registry = build_registry(client, _FakeResult([reg_entry]))
+    hb = registry.get(INSTANCE_B)
+    assert hb is not None
+    assert hb.lifecycle.driver.modality == "embedding"
+    assert hb.config_state.modality == "embedding"
+
+
 async def test_assignments_add_and_remove_on_two_agent(
     tmp_path: Path, fake_llama_binary: str, local_model_file: str
 ) -> None:

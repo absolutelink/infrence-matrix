@@ -186,6 +186,7 @@ async def test_push_creates_new_row_and_warms(session: Session, monkeypatch) -> 
     assert payload["max_running_backends"] == 0
     entry = next(e for e in payload["assignments"] if e["alias"] == "brand-new")
     assert entry["provider_definition_id"] == str(new.id)
+    assert entry["modality"] == "llm"  # Phase 18 slice 3: default modality
     assert entry["backend_config"] == {"delta_count": 3}
     assert entry["config_fingerprint"] == compute_config_fingerprint({"delta_count": 3})
     assert entry["capacity"] == 1
@@ -441,6 +442,22 @@ async def test_push_refuses_port_collision_with_connected_peer(
         ).first()
         is None
     )
+
+
+def test_build_assignment_entry_carries_modality(session: Session) -> None:
+    """Phase 18 slice 3: the assignment entry mirrors the definition's modality
+    (single source of truth = the definition row)."""
+    from tests.helpers import get_or_create_machine, make_agent, make_definition
+
+    machine = get_or_create_machine(session, uid="entry-mod", total_vram=1000)
+    agent = make_agent(session, machine, provider_type="mock", connected=True)
+    emb = make_definition(session, alias="emb-entry", modality="embedding")
+    emb_row = _row(session, agent, emb, status="stopped")
+    assert asg.build_assignment_entry(emb_row, emb)["modality"] == "embedding"
+
+    llm = make_definition(session, alias="llm-entry")  # default modality llm
+    llm_row = _row(session, agent, llm, status="stopped")
+    assert asg.build_assignment_entry(llm_row, llm)["modality"] == "llm"
 
 
 async def test_renumber_avoids_retained_busy_ghost(session: Session) -> None:

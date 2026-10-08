@@ -108,6 +108,7 @@ def _definition_dict(
         "id": str(definition.id),
         "alias": definition.alias,
         "provider_type": definition.provider_type,
+        "modality": definition.modality,
         "backend_config": definition.backend_config,
         "config_fingerprint": config_fingerprint,
         "idle_timeout_seconds": definition.idle_timeout_seconds,

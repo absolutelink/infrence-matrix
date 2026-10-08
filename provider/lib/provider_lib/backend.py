@@ -78,6 +78,16 @@ class BackendDriver(ABC):
     background producer task and observe their close semantics.
     """
 
+    # Phase 18 slice 3: the endpoint kind this backend serves ("llm" |
+    # "embedding"; "audio" reserved). Set by provider_lib from the wire
+    # (the registration definition, the ``provider.config.update`` payload,
+    # and the ``agent.assignments.update`` entry all carry ``modality``) at
+    # every apply point; drivers read it to decide engine behavior (e.g.
+    # llama-cpp boots ``llama-server --embedding`` for ``embedding``).
+    # Defaults to ``"llm"`` so a package that never receives the field (or a
+    # driver constructed directly in tests) behaves as a chat backend.
+    modality: str = "llm"
+
     @abstractmethod
     async def start(self) -> None:
         """Bring the backend up. Idempotent-ish; raises on failure."""

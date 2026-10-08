@@ -162,9 +162,17 @@ def _apply_backend(
         backend_config = definition.get("backend_config")
         if isinstance(backend_config, dict):
             driver.apply_config(backend_config)
+    # Phase 18 slice 3: adopt the endpoint kind from the registration
+    # definition so the driver can decide engine behavior (Slice 5 boots
+    # ``--embedding``). Coerce to str; absent/unknown -> "llm".
+    raw_modality = definition.get("modality")
+    driver.modality = (
+        raw_modality if isinstance(raw_modality, str) and raw_modality else "llm"
+    )
     if config_state is not None:
         fp = definition.get("config_fingerprint")
         config_state.applied_fingerprint = fp if isinstance(fp, str) else None
+        config_state.modality = driver.modality
 
 
 def _apply_assignment(
@@ -185,8 +193,17 @@ def _apply_assignment(
         backend_config = entry.get("backend_config")
         if isinstance(backend_config, dict):
             driver.apply_config(backend_config)
+    # Phase 18 slice 3: adopt the endpoint kind from the assignment entry.
+    # The shared assignments reconcile also stamps this after ``make_handle``
+    # returns; setting it here keeps a directly-built handle (tests, re-register)
+    # consistent too. Coerce to str; absent/unknown -> "llm".
+    raw_modality = entry.get("modality")
+    driver.modality = (
+        raw_modality if isinstance(raw_modality, str) and raw_modality else "llm"
+    )
     fp = entry.get("config_fingerprint")
     config_state.applied_fingerprint = fp if isinstance(fp, str) else None
+    config_state.modality = driver.modality
 
 
 def build_registry(client: AdminClient, result: RegistrationResult) -> BackendRegistry:
@@ -347,9 +364,16 @@ def apply_registration(
     driver = lifecycle.driver
     if isinstance(backend_config, dict) and isinstance(driver, LlamaCppBackend):
         driver.apply_config(backend_config)
+    # Phase 18 slice 3: adopt the endpoint kind from the (first) registration
+    # definition. Coerce to str; absent/unknown -> "llm".
+    raw_modality = definition.get("modality")
+    driver.modality = (
+        raw_modality if isinstance(raw_modality, str) and raw_modality else "llm"
+    )
     if config_state is not None:
         fp = definition.get("config_fingerprint")
         config_state.applied_fingerprint = fp if isinstance(fp, str) else None
+        config_state.modality = driver.modality
 
 
 async def emit_provider_status(

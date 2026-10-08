@@ -168,6 +168,27 @@ async def test_invalid_payload_naks() -> None:
     assert ack["detail"]["step"] == "validate"
 
 
+async def test_add_sets_driver_modality() -> None:
+    """Phase 18 slice 3: an assignment entry's modality reaches the created
+    handle's driver AND its config_state; an absent modality defaults to "llm"."""
+    client, registry, _created = _registry_client()
+    await client.dispatch(
+        "agent.assignments.update",
+        {
+            "assignments": [
+                _entry("i1", modality="embedding"),
+                _entry("i2"),  # no modality -> llm
+            ]
+        },
+    )
+    h1 = registry.get("i1")
+    h2 = registry.get("i2")
+    assert h1 is not None and h1.lifecycle.driver.modality == "embedding"
+    assert h1.config_state is not None and h1.config_state.modality == "embedding"
+    assert h2 is not None and h2.lifecycle.driver.modality == "llm"
+    assert h2.config_state is not None and h2.config_state.modality == "llm"
+
+
 async def test_max_running_callback_invoked() -> None:
     client = RecordingClient(ProviderSettings())
     registry = BackendRegistry()

@@ -97,6 +97,7 @@ def test_register_success(client: TestClient, session: Session, clean_redis) -> 
     backend = data["backends"][0]
     assert backend["definition"]["alias"] == definition.alias
     assert backend["definition"]["provider_type"] == "mock"
+    assert backend["definition"]["modality"] == "llm"  # Phase 18 slice 3
     assert backend["definition"]["idle_timeout_seconds"] == 123
     assert backend["definition"]["capacity"] == 2
     assert backend["definition"]["vram_required_bytes"] == 8 * 1024**3
@@ -133,6 +134,29 @@ def test_register_success(client: TestClient, session: Session, clean_redis) -> 
     session.refresh(machine)
     assert machine.hardware == _body()["hardware"]
     assert machine.total_vram_bytes == 24 * 1024**3
+
+
+def test_register_definition_dict_carries_modality(
+    client: TestClient, session: Session
+) -> None:
+    """Phase 18 slice 3: the registration ``backends[].definition`` carries the
+    definition's modality so the provider learns the endpoint kind at boot."""
+    _machine(session)
+    emb = ProviderDefinition(
+        alias="emb-reg",
+        provider_type="mock",
+        backend_config={"model": {"file": "e.gguf"}},
+        modality="embedding",
+    )
+    session.add(emb)
+    session.commit()
+
+    resp = client.post("/admin/api/providers/register", json=_body())
+    assert resp.status_code == 200, resp.text
+    entry = next(
+        b for b in resp.json()["backends"] if b["definition"]["alias"] == "emb-reg"
+    )
+    assert entry["definition"]["modality"] == "embedding"
 
 
 def test_register_reregister_reuses_rows(client: TestClient, session: Session) -> None:

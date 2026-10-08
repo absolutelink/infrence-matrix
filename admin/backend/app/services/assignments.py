@@ -108,6 +108,7 @@ def build_assignment_entry(
         "instance_id": str(instance.id),
         "provider_definition_id": str(definition.id),
         "alias": definition.alias,
+        "modality": definition.modality,
         "backend_config": definition.backend_config,
         "config_fingerprint": compute_config_fingerprint(definition.backend_config),
         "port": instance.port,

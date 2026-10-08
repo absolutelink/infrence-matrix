@@ -128,6 +128,7 @@ def test_patch_pushes_config_update_and_acks(
         assert frame.payload["instance_id"] == instance_id
         assert frame.payload["backend_config"] == {"delta_count": 7}
         assert frame.payload["config_fingerprint"] == new_fp
+        assert frame.payload["modality"] == "llm"  # Phase 18 slice 3
         assert frame.payload["capacity"] == 1
         assert frame.payload["idle_timeout_seconds"] == 300
         assert frame.epoch == hello.epoch
@@ -667,3 +668,22 @@ def test_patch_push_slower_than_idle_tx_timeout_still_200(
         )
     ).first()
     assert inst is not None and inst.config_fingerprint == expected
+
+
+def test_build_payload_carries_modality() -> None:
+    """Phase 18 slice 3: the provider.config.update payload mirrors the
+    definition's modality so the provider boots the right endpoint kind."""
+    from app.services.config_update import _build_payload
+
+    emb = ProviderDefinition(
+        alias="emb-cu",
+        provider_type="llama-cpp",
+        backend_config={"artifacts": {}},
+        modality="embedding",
+    )
+    payload = _build_payload(emb, "fp-x")
+    assert payload["modality"] == "embedding"
+    assert payload["config_fingerprint"] == "fp-x"
+
+    llm = ProviderDefinition(alias="llm-cu", provider_type="mock", backend_config={})
+    assert _build_payload(llm, "fp-y")["modality"] == "llm"

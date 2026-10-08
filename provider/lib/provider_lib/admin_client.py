@@ -189,6 +189,12 @@ class AdminClient:
 
     def _persist_config(self, result: RegistrationResult) -> None:
         self.settings.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        # Phase 18 slice 3: each backend's ``definition`` dict (persisted
+        # verbatim below) carries ``modality`` alongside ``backend_config`` /
+        # ``config_fingerprint``. This is for parity/inspection only — the
+        # cached JSON is NOT the re-apply path: on restart the agent always
+        # re-registers and re-derives modality from the fresh registration
+        # response (which always precedes serving), never from this file.
         payload = {
             "agent_id": result.agent_id,
             "machine": result.machine,

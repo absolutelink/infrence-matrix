@@ -116,6 +116,22 @@ def install_assignment_handler(
                 logger.exception("assignments: add failed for %s", iid)
                 refused.append({"instance_id": iid, "reason": f"add_failed: {exc}"})
                 continue
+            # Phase 18 slice 3: thread the entry's endpoint kind onto the new
+            # handle's driver so every provider package gets it without each
+            # factory re-reading the field. Coerce to str; absent/unknown ->
+            # "llm" (the BackendDriver default). Also mirror it onto the
+            # handle's applied-config state (when present) so a package that
+            # relies solely on this shared stamp keeps config_state consistent.
+            raw_modality = entry.get("modality")
+            modality = (
+                raw_modality
+                if isinstance(raw_modality, str) and raw_modality
+                else "llm"
+            )
+            handle.lifecycle.driver.modality = modality
+            cfg_state = getattr(handle, "config_state", None)
+            if cfg_state is not None:
+                cfg_state.modality = modality
             registry.add(handle)
             added.append(iid)
 

@@ -41,6 +41,42 @@ def test_provider_config_path() -> None:
     assert s.provider_config_path.name == "provider_config.json"
 
 
+def test_persist_config_carries_modality(tmp_path: object) -> None:
+    """Phase 18 slice 3: the persisted provider_config.json keeps each backend's
+    definition.modality (parity/inspection — the authoritative re-apply is the
+    fresh registration, not this cached file)."""
+    import json
+
+    from provider_lib.admin_client import AdminClient, RegistrationResult
+
+    s = _settings(
+        CACHE_DIR=str(tmp_path) + "/cache", MODELS_DIR=str(tmp_path) + "/models"
+    )
+    client = AdminClient(s)
+    result = RegistrationResult(
+        {
+            "agent_id": "a1",
+            "agent_secret": "secret",
+            "machine": {},
+            "backends": [
+                {
+                    "instance_id": "i1",
+                    "port": 8081,
+                    "definition": {
+                        "alias": "emb",
+                        "modality": "embedding",
+                        "backend_config": {},
+                        "config_fingerprint": "fp",
+                    },
+                }
+            ],
+        }
+    )
+    client._persist_config(result)
+    saved = json.loads(s.provider_config_path.read_text())
+    assert saved["backends"][0]["definition"]["modality"] == "embedding"
+
+
 def test_app_factory_health() -> None:
     from fastapi.testclient import TestClient
 
