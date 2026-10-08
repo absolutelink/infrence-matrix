@@ -152,6 +152,22 @@ async def test_stop_terminates_process(
     await driver.stop()
 
 
+async def test_backend_port_none_until_start_and_after_stop(
+    tmp_path, fake_llama_binary, local_model_file
+) -> None:
+    """Port model overhaul: the engine port is OS-assigned at start and cleared
+    on stop, so the "None until start" invariant holds across a boot cycle."""
+    driver = _backend(tmp_path, fake_llama_binary, local_model_file)
+    assert driver.backend_port is None
+    try:
+        await driver.start()
+        assert isinstance(driver.backend_port, int) and driver.backend_port > 0
+    finally:
+        await driver.stop()
+    assert driver.backend_port is None
+    await driver.aclose()
+
+
 async def test_missing_local_model_file_raises(tmp_path, fake_llama_binary) -> None:
     driver = _backend(tmp_path, fake_llama_binary, "/definitely/not/here.gguf")
     with pytest.raises(Exception, match="not found"):

@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import signal
+import socket
 import subprocess
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -46,21 +47,22 @@ _STDERR_TAIL_LINES = 5
 SCHEMA: dict[str, Any] = load_schema("provider_llama_cpp")
 
 
-def _read_backend_port(
-    cfg: dict[str, Any], settings: ProviderSettings, serve_port: int | None = None
-) -> int:
-    """Resolve the llama-server port: `server.backend_port` (Phase 12),
-    the legacy top-level `backend_port`, or ``serve_port + 1`` (the agent's
-    assignment port for this backend, slice 6) falling back to
-    ``PROVIDER_PORT + 1`` when no serve port is threaded (single-backend /
-    direct construction)."""
-    port = (cfg.get("server") or {}).get("backend_port")
-    if port is None:
-        port = cfg.get("backend_port")
-    if port is not None:
-        return int(port)
-    base = serve_port if serve_port is not None else settings.PROVIDER_PORT
-    return base + 1
+def _pick_free_port() -> int:
+    """Ask the OS for a free loopback port (bind ``127.0.0.1:0``, read back,
+    release).
+
+    Port model overhaul: each backend's llama-server engine binds a private
+    local port inside the container that the admin never learns or dials. The
+    agent's single ``/v1`` surface (``PROVIDER_PORT``) routes requests to this
+    backend by model, so the engine port is an internal detail. A tiny TOCTOU
+    window exists between releasing the probed port and the engine binding it;
+    if the port is stolen the engine fails to bind and exits early, surfacing as
+    a boot error that the admin scheduler re-drives on the next ``backend.start``
+    (which re-picks a fresh port).
+    """
+    with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 class LlamaCppBackend(BackendDriver):
@@ -72,18 +74,15 @@ class LlamaCppBackend(BackendDriver):
         backend_config: dict[str, Any],
         *,
         progress_cb: ProgressCallback | None = None,
-        serve_port: int | None = None,
     ) -> None:
         self._settings = settings
         self._config = backend_config or {}
         self._progress_cb = progress_cb
         self._binary = settings.LLAMA_SERVER_PATH
-        # Slice 6: the backend's admin-facing port (base_port + offset). The
-        # engine subprocess binds to ``serve_port + 1`` so two backends on one
-        # agent never collide; ``None`` keeps the single-backend default
-        # (``PROVIDER_PORT + 1``).
-        self._serve_port = serve_port
-        self.backend_port = _read_backend_port(self._config, settings, serve_port)
+        # Port model overhaul: the engine's private local port is allocated at
+        # start (OS-assigned free port), NOT derived from config or the agent's
+        # env port. ``None`` until :meth:`start` binds it.
+        self.backend_port: int | None = None
         self._proc: subprocess.Popen[str] | None = None
         self._log_ring = CursorLogRing(_LOG_BUFFER_LINES)
         self._log_readers: list[asyncio.Task[None]] = []
@@ -102,9 +101,8 @@ class LlamaCppBackend(BackendDriver):
         self._config = backend_config or {}
         for err in validate_backend_config(SCHEMA, self._config):
             logger.warning("backend_config schema violation: %s", err)
-        self.backend_port = _read_backend_port(
-            self._config, self._settings, self._serve_port
-        )
+        # The engine port is allocated at start (OS-assigned free port), never
+        # read from config — nothing to recompute here.
         # Config changed: previously resolved artifacts are stale.
         self.resolved_artifacts = []
 
@@ -169,10 +167,21 @@ class LlamaCppBackend(BackendDriver):
     # Lifecycle
     # ------------------------------------------------------------------
     async def start(self) -> None:
-        """Resolve model files, spawn llama-server, wait for /health."""
+        """Resolve model files, allocate a free engine port, spawn llama-server,
+        wait for /health.
+
+        Port model overhaul: the engine binds an OS-assigned private loopback
+        port (the admin never learns it). A tiny TOCTOU race exists between
+        probing the free port and the engine binding it; if the port is stolen
+        the engine fails to bind and exits early, which surfaces here as a boot
+        error. That rare race is deliberately NOT retried in-process — the admin
+        scheduler re-drives ``backend.start`` (which re-picks a fresh port) on
+        the next boot attempt.
+        """
         if self._proc is not None and self._proc.poll() is None:
             return
         model_path, mmproj_path, draft_path = await self._resolve_artifacts()
+        self.backend_port = _pick_free_port()
         cmd = build_llama_command(
             self._config,
             model_path=model_path,
@@ -183,12 +192,22 @@ class LlamaCppBackend(BackendDriver):
             modality=self.modality,
         )
         logger.info("starting llama-server: %s", " ".join(cmd))
+        self._spawn(cmd)
+        self._start_log_readers()
+        try:
+            await self._wait_for_health()
+        except BaseException:
+            await self.stop()
+            raise
+
+    def _spawn(self, cmd: list[str]) -> None:
+        """Popen the llama-server subprocess (raises OSError on exec failure)."""
         try:
             env = dict(os.environ)
             # Vulkan/containers may not provide LD_LIBRARY_PATH; default it
             # to the binary's directory (legacy behavior).
             env.setdefault("LD_LIBRARY_PATH", str(Path(self._binary).parent))
-            proc = subprocess.Popen(
+            self._proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -199,14 +218,6 @@ class LlamaCppBackend(BackendDriver):
             raise RuntimeError(
                 f"failed to spawn llama-server ({self._binary}): {exc}"
             ) from exc
-
-        self._proc = proc
-        self._start_log_readers()
-        try:
-            await self._wait_for_health()
-        except BaseException:
-            await self.stop()
-            raise
 
     async def _wait_for_health(self) -> None:
         timeout = float(self._settings.SERVER_START_HEALTH_TIMEOUT)
@@ -392,6 +403,9 @@ class LlamaCppBackend(BackendDriver):
     async def stop(self) -> None:
         proc = self._proc
         self._proc = None
+        # Port model overhaul: the engine port is allocated per start, so clear
+        # it here to keep the "None until start" invariant between boots.
+        self.backend_port = None
         if proc is not None and proc.poll() is None:
             with contextlib.suppress(ProcessLookupError):
                 proc.send_signal(signal.SIGTERM)

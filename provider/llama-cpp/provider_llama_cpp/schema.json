@@ -1206,14 +1206,6 @@
       "x-order": 10,
       "additionalProperties": false,
       "properties": {
-        "backend_port": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 65535,
-          "title": "Backend port",
-          "description": "llama-server listen port. Relocated here from the old top-level 'backend_port'; when absent the driver uses PROVIDER_PORT + 1 from the container env (no schema default).",
-          "x-flag": "--port"
-        },
         "threads": {
           "type": "integer",
           "default": -1,

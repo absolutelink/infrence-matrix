@@ -60,7 +60,6 @@ CANONICAL_CONFIG: dict[str, Any] = {
     "reasoning": {"reasoning": "on", "reasoning_budget": -1, "jinja": True},
     "vision": {"image_max_tokens": 1024},
     "server": {
-        "backend_port": 9999,
         "threads": -1,
         "batch_size": 2048,
         "ubatch_size": 512,
@@ -142,7 +141,9 @@ def test_server_pooling_option_validates() -> None:
 # fleet consensus contract (docs/ws-protocol.md §2). If you change
 # schema.json, every known llama-cpp instance must re-register with the
 # new file (or the operator force-commits); update this pin deliberately.
-SHIPPED_SCHEMA_FP = "03373ece382f8f14bcdc0a59f97a567b96f31514f4754e979480111f21b327ff"
+# Port model overhaul: the operator-facing `server.backend_port` field was
+# removed (the engine now binds an OS-assigned private port), bumping the fp.
+SHIPPED_SCHEMA_FP = "a695f7defbc88db5b9b895f75a7239d6250e651af44b5c1444d94e32cbeaf22c"
 
 
 def test_schema_fingerprint_is_stable() -> None:
@@ -231,8 +232,7 @@ def test_every_field_has_description_and_flag_or_supported() -> None:
         for key, field in section["properties"].items():
             label = f"{section_name}.{key}"
             assert field.get("description"), label
-            # backend_port has no schema default (env-derived PROVIDER_PORT+1).
-            assert "default" in field or "$ref" in field or key == "backend_port", label
+            assert "default" in field or "$ref" in field, label
             if section_name != "artifacts":
                 assert field.get("x-flag"), label
 
@@ -282,13 +282,23 @@ def test_driver_reads_nested_sections(tmp_path) -> None:
     driver = _driver_with_schema(settings)
     driver.apply_config(CANONICAL_CONFIG)
     assert driver._config == CANONICAL_CONFIG
-    # backend_port relocated under `server`.
-    assert driver.backend_port == 9999
+    # Port model overhaul: the engine port is NOT config-derived anymore — it is
+    # allocated (OS-assigned free port) at start, so it stays None until then.
+    assert driver.backend_port is None
     driver.apply_config({"context": {"ctx": 512}})
-    assert driver.backend_port == settings.PROVIDER_PORT + 1
-    # Legacy top-level backend_port still honored.
-    driver.apply_config({"backend_port": 7777})
-    assert driver.backend_port == 7777
+    assert driver.backend_port is None
+
+
+def test_schema_rejects_server_backend_port() -> None:
+    """Port model overhaul: `server.backend_port` is no longer an accepted
+    schema property (the engine binds an OS-assigned private port). The `server`
+    section's additionalProperties:false rejects it."""
+    cfg = json.loads(json.dumps(CANONICAL_CONFIG))
+    cfg["server"]["backend_port"] = 9999
+    errors = validate_backend_config(SCHEMA, cfg)
+    assert any("backend_port" in e for e in errors)
+    # And it is genuinely absent from the schema's server properties.
+    assert "backend_port" not in SCHEMA["properties"]["server"]["properties"]
 
 
 def _driver_with_schema(settings: Any) -> Any:
