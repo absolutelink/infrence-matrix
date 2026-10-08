@@ -195,7 +195,9 @@ duplicates the frame shape from `provider_lib.wire` (keep them in sync;
 | `/admin/api/instances/{id}/backend/start` `.../backend/stop` `.../backend/restart` `/admin/api/instances/{id}/initialize` | admin | none (trusted LAN) | Manual control of **one backend** (`ProviderInstance`), routed over its **agent's** WS (`provider_lib.ops`): start/restart/initialize answer **202 accepted** by default and the transition runs at the agent (body `{"wait_for_running": true}` waits instead, bounded by `BACKEND_BOOT_TIMEOUT_SECONDS`); the agent's `backend_in_use` / `boot_in_progress` NAKs surface as 502 with `step` + `retry_after` |
 | `/admin/api/instances` `/admin/api/instances/{id}` | admin | none (trusted LAN) | Provider-instance reads for the UI (Phase 10) |
 | `/admin/api/instances/{id}/logs` | admin | none (trusted LAN) | Backend/provider log tail (Phase 13; Redis-backed, `kind`/`since`/`limit` cursor) |
-| `/admin/api/responses` `/admin/api/stats/usage` `/admin/api/stats/overview` | admin | none (trusted LAN) | Response log + usage/dashboard reads (Phase 10; overview reads the scheduler Redis mirror, observability only) |
+| `/admin/api/responses` `/admin/api/stats/usage` `/admin/api/stats/overview` | admin | none (trusted LAN) | Response log + usage/dashboard reads (Phase 10; overview reads the scheduler Redis mirror, observability only). **Phase 19:** `stats/usage` samples carry the definition `alias` for per-model rollups. |
+| `/admin/api/stats/scheduler` `/admin/api/stats/scheduler/queue/{alias}` `/admin/api/stats/scheduler/queue` | admin | none (trusted LAN) | **Phase 19.** `GET stats/scheduler` → per-definition `{alias, queued, active}` + totals from the authoritative in-process scheduler state (§6); `DELETE .../queue/{alias}` / `DELETE .../queue` clear queued waiters for one alias or all (§6 queue-clear). |
+| `/admin/api/stats/metrics` | admin | none (trusted LAN) | **Phase 19.** Fleet VRAM/GPU rollup: per-machine `vram.used/total` + `gpu_usage` percent via `read_machine_metrics`, summed/averaged fleet-wide for the UI stats bar. |
 | `/v1/*` | admin | none (trusted LAN) | Public OpenAI-compatible inference |
 | `/provider/ws` | admin | bearer (**agent secret**) | Provider **agents** dial in — one socket per agent, frames addressed by backend `ProviderInstance` id (§5) |
 
@@ -656,6 +658,24 @@ transiently oversubscribe).
 releases and wakes the next waiter). It does **not** clear the booted
 instance's VRAM hold.
 
+### Queue observability & operator clear (Phase 19)
+
+The scheduler exposes its **authoritative in-process state** (never the
+Redis mirror) for the UI stats bar:
+
+- `queue_snapshot()` → per-alias `{queued, active}` read under each
+  alias's state lock, joined with definitions by the admin route.
+- `clear_queue(alias | None)` → operator drain: under the alias's state
+  lock, every waiter is popped from the deque, its mirror entries
+  (`im:sched:queue`, `im:sched:wait`) removed, the state generation
+  bumped, and all waiters woken so each blocked `acquire` raises
+  **`QueueCleared`** (a `SchedulerError`). The v1 routes map it to
+  **503** (pre-stream JSON; in-stream on `/v1/responses` it surfaces as
+  the spec `response.failed` terminal frames with code `queue_cleared`).
+  Already-**admitted** requests are untouched — clearing only cancels
+  waiters, never slots, boots, or VRAM holds. `alias=None` clears every
+  alias's queue (clear-all).
+
 ### Agent-scoped admission & `max_running` (Phase 16)
 
 Candidates for an alias are the `ProviderInstance` backends whose
@@ -729,8 +749,9 @@ Example: streamed Responses API against `https://matrix.thelink.family`.
    serves both public APIs (see §7 chat specifics).
 5. scheduler.acquire(alias, request_id) → Admission with base_url.
    Transport-specific error contract (Phase 6 keepalive):
-   - **Non-stream:** `NoProviderAvailable` → 503, `QueueTimeout` → 504
-     (JSON; the stream never starts).
+    - **Non-stream:** `NoProviderAvailable` → 503, `QueueCleared` → 503
+      (operator cleared the queue — §6), `QueueTimeout` → 504
+      (JSON; the stream never starts).
    - **Stream:** the SSE response starts immediately and emits
      `: keep-alive` comment lines every `KEEPALIVE_INTERVAL_SECONDS`
      (default 10s) while `acquire` blocks on a cold boot (download +

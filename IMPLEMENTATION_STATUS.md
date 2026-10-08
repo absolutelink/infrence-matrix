@@ -118,6 +118,7 @@ starting a feature, read the linked protocol/doc first.
 | 16 | Machine-scoped provider **agents**: one container → many same-type backends, placement, `max_running_backends` | 🟡 slices 1–6 landed (agents, placement, `max_running` hot-swap + proactive warm-up, `agent.assignments.update` push, real-engine multi-backend-per-process + per-port serving); 7–8 pending |
 | 17 | Per-GPU machine metrics + hardware union: device-isolated agents (one GPU each) merge into a full machine inventory and live snapshot | ✅ Complete |
 | 18 | Embeddings + modality-scoped endpoints: `ProviderDefinition.modality` (`llm`/`embedding`, `audio` reserved), `ProviderType.serves_modalities`, spec `POST /v1/embeddings` via litellm, llama-cpp `--embedding`/`--pooling` + mock fake embeddings | ✅ shipped (all 7 slices green + e2e verified vs local admin + mock) |
+| 19 | Live stats bar (tokens/sec, queue/active, VRAM/GPU + popovers incl. queue clear) + UI ergonomics: create/edit forms → right-side drawers, logs → bottom-docked tabbed panel | 🟡 planned (S0 landed) |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
 
@@ -2460,6 +2461,68 @@ admin-facing port `base_port + offset` and enforces machine-wide uniqueness
 `server.backend_port` (unused — the mock has no subprocess); `development.md`
 still references the retired `PROVIDER_REGISTRATION_TOKEN`; `deployment.md`'s
 idle-eviction note predates Phase 6. None affect the shipped port model.
+
+---
+
+## Phase 19 — Live stats bar + UI ergonomics 🟡
+
+**Goal:** a global statistics bar in the admin UI header, create/edit forms
+as right-side drawers, and a bottom-docked tabbed logs panel.
+
+**Features:**
+
+1. **Stats bar** (`_layout.tsx` header, new `StatsBar` component):
+   - current `tok/s` + `prompt tok/s` (rolling avg over the last ~50
+     `TokenUsageSample`s via `stats/usage?limit=50`); click → popover
+     with per-model rates/token rollups.
+   - queued / processing counts; click → popover with per-definition
+     queue + active rows, a **Clear** button per definition, and a
+     **Clear all** button at the bottom.
+   - fleet VRAM `used/total` + GPU utilization %.
+2. **Forms → drawers:** every create/edit form (`DefinitionFormDialog`,
+   `MachineFormDialog`, `StorageActionDialog`, `BackendActionDialog`,
+   provider-type schema dialog) moves from centered `Dialog` to a
+   scrollable right-side `Sheet`. Delete confirmations stay dialogs.
+3. **Logs → bottom-docked tabbed panel:** `LogsSheet` refactored into a
+   reusable `LogsPanel` mounted in a **non-modal** dock in `_layout.tsx`
+   (flex sibling above `<main>` — page content is pushed up, not
+   overlaid). One tab per open instance, add/close tabs, fixed default
+   height + drag resize, tabs persist for the session (in-memory).
+
+**Locked decisions (operator Q&A):**
+
+- Queue clear cancels **waiters only** — admitted/active requests, boots,
+  and VRAM holds are untouched. Cleared clients get **503 `queue
+  cleared`** (pre-stream JSON; in-stream `response.failed` with code
+  `queue_cleared` on `/v1/responses`). New `QueueCleared(SchedulerError)`
+  + `InferenceScheduler.queue_snapshot()` / `clear_queue(alias|None)` —
+  authoritative in-process state, never the Redis mirror.
+- Rates window = last ~50 completed requests (no time-filter backend
+  change).
+- Logs dock: fixed height + drag resize; session-persistent tabs (not
+  localStorage).
+- Orchestrator auto-commits each slice at green+CLEAN and continues;
+  law docs are updated by the orchestrator only (S0 first).
+
+**Slices (delegated-slice-delivery loop per slice):**
+
+- [x] **S0 — law docs (this).** Phase 19 planned in
+      `IMPLEMENTATION_STATUS.md`; `ARCHITECTURE.md` updated: §3 URL rows
+      for `stats/scheduler` (+queue clear) and `stats/metrics`, §6
+      "Queue observability & operator clear", §7 non-stream error
+      mapping gains `QueueCleared` → 503. No code.
+- [ ] **S1 — scheduler:** `queue_snapshot()`, `clear_queue(alias|None)`,
+      `QueueCleared` → 503 in `/v1/responses` (pre-stream + in-stream
+      framing), `/v1/chat/completions`, `/v1/embeddings`; tests.
+- [ ] **S2 — admin stats endpoints:** `GET /admin/api/stats/scheduler`,
+      `DELETE /admin/api/stats/scheduler/queue/{alias}`,
+      `DELETE /admin/api/stats/scheduler/queue`,
+      `GET /admin/api/stats/metrics` (fleet VRAM/GPU rollup), `alias` on
+      `stats/usage` samples; tests + client regen.
+- [ ] **S3 — StatsBar UI** + `popover.tsx` primitive
+      (`@radix-ui/react-popover`) + per-model & per-definition popovers.
+- [ ] **S4 — forms → right-side `Sheet` drawers.**
+- [ ] **S5 — bottom-docked tabbed logs panel.**
 
 ---
 
