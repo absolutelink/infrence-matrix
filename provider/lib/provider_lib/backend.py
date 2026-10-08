@@ -125,6 +125,14 @@ class BackendDriver(ABC):
         """
         raise NotImplementedError("this backend has no chat/completions stream")
 
+    async def embeddings(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Return a spec CreateEmbeddingResponse dict for an embedding request.
+
+        Optional; providers without an embeddings surface leave the default
+        (raises NotImplementedError -> HTTP 501).
+        """
+        raise NotImplementedError("this backend has no embeddings surface")
+
     def apply_config(self, backend_config: dict[str, Any]) -> None:  # noqa: B027
         """Adopt a (possibly updated) backend_config.
 
@@ -375,6 +383,27 @@ class BackendLifecycle:
             await self.release_slot()
             raise
         return self._owned_stream(upstream)
+
+    async def embeddings(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Slot-admitted, non-streaming embeddings call.
+
+        The non-streaming counterpart of `stream_responses` /
+        `stream_chat_completions`: a single awaited driver call returns a
+        spec `CreateEmbeddingResponse` dict, so no pump/`_owned_stream`
+        machinery is needed. The slot is acquired eagerly (so
+        `BackendBusy` / `BackendNotReady` surface as real HTTP statuses
+        before any bytes are committed) and released in a `finally` on
+        every exit path, including a driver exception.
+        """
+        await self.acquire_slot()
+        try:
+            return await self._driver.embeddings(request)
+        finally:
+            # Deliberate simplification vs the streaming `_pump` shielded
+            # release: a non-streaming call completes within this single
+            # awaited driver call, so a plain `await release_slot()` here is
+            # sufficient -- no lingering downstream consumer can hold the slot.
+            await self.release_slot()
 
     def _owned_stream(
         self, upstream: AsyncIterator[dict[str, Any]]

@@ -71,6 +71,33 @@ class EndpointDriver(BackendDriver):
         return gen()
 
 
+EMBEDDING_RESPONSE: dict[str, Any] = {
+    "object": "list",
+    "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
+    "model": "m",
+    "usage": {"prompt_tokens": 3, "total_tokens": 3},
+}
+
+
+class EmbeddingsDriver(EndpointDriver):
+    """EndpointDriver that also implements the embeddings surface."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.embed_calls = 0
+
+    async def embeddings(self, request: dict[str, Any]) -> dict[str, Any]:
+        self.embed_calls += 1
+        return dict(EMBEDDING_RESPONSE)
+
+
+class FailingEmbeddingsDriver(EndpointDriver):
+    """Embeddings-capable driver whose embeddings() raises a generic error."""
+
+    async def embeddings(self, request: dict[str, Any]) -> dict[str, Any]:
+        raise RuntimeError("boom")
+
+
 def _settings() -> ProviderSettings:
     return ProviderSettings(  # type: ignore[call-arg]
         MACHINE_UID="m-v1",
@@ -298,6 +325,64 @@ async def test_chat_completions_501_when_unsupported() -> None:
         assert lifecycle.in_flight == 0
 
 
+async def test_embeddings_ok() -> None:
+    driver = EmbeddingsDriver()
+    lifecycle, client = await _make(driver)
+    async with client:
+        resp = await client.post("/v1/embeddings", json={"input": "hi", "model": "m"})
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("application/json")
+        assert resp.json() == EMBEDDING_RESPONSE
+        # slot acquired + released exactly once (driver ran once, none held)
+        assert driver.embed_calls == 1
+        assert lifecycle.in_flight == 0
+
+
+async def test_embeddings_501_when_unsupported() -> None:
+    # EndpointDriver has no embeddings() override -> default ABC raises -> 501
+    lifecycle, client = await _make(EndpointDriver())
+    async with client:
+        resp = await client.post("/v1/embeddings", json={"input": "hi"})
+        assert resp.status_code == 501
+        assert lifecycle.in_flight == 0
+
+
+async def test_embeddings_429_at_capacity() -> None:
+    lifecycle, client = await _make(EmbeddingsDriver(), capacity=1)
+    async with client:
+        await lifecycle.acquire_slot()  # occupy the only slot
+        resp = await client.post("/v1/embeddings", json={"input": "hi"})
+        assert resp.status_code == 429
+        assert lifecycle.in_flight == 1  # the busy request leaked nothing
+        await lifecycle.release_slot()
+
+
+async def test_embeddings_503_when_not_started() -> None:
+    lifecycle, client = await _make(EmbeddingsDriver(), started=False)
+    async with client:
+        resp = await client.post("/v1/embeddings", json={"input": "hi"})
+        assert resp.status_code == 503
+        assert lifecycle.in_flight == 0
+
+
+async def test_embeddings_500_on_driver_error() -> None:
+    # A generic (non-NotImplementedError) driver failure surfaces as 500 and
+    # still releases the slot via the lifecycle's `finally`.
+    lifecycle = BackendLifecycle(FailingEmbeddingsDriver(), capacity=1)
+    await lifecycle.start()
+    app = create_provider_app(
+        _settings(),
+        BackendOverrides(provider_type="test", version="v", lifecycle=lifecycle),
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://provider",
+    ) as client:
+        resp = await client.post("/v1/embeddings", json={"input": "hi"})
+        assert resp.status_code == 500
+        assert lifecycle.in_flight == 0
+
+
 async def test_health_reports_backend_state() -> None:
     lifecycle, client = await _make(EndpointDriver())
     async with client:
@@ -317,3 +402,4 @@ async def test_no_lifecycle_wired_returns_503() -> None:
         assert (await client.get("/v1/models")).status_code == 503
         assert (await client.post("/v1/responses", json={})).status_code == 503
         assert (await client.post("/v1/chat/completions", json={})).status_code == 503
+        assert (await client.post("/v1/embeddings", json={})).status_code == 503

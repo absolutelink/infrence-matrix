@@ -6,6 +6,8 @@ Every provider type gets a base app that serves:
   - POST /v1/responses   OpenResponses SSE stream (slot-admitted)
   - POST /v1/chat/completions  OpenAI chat.completions (SSE or JSON,
     slot-admitted; non-stream aggregates the driver's chunk stream)
+  - POST /v1/embeddings  OpenAI embeddings (single JSON response,
+    slot-admitted; non-streaming only)
 
 Admin's litellm client targets ``http://<machine>:<PROVIDER_PORT>/v1``;
 the provider normalizes its backend into a clean OpenAI-compatible
@@ -232,6 +234,20 @@ def create_provider_app(
                 status_code=502, detail="backend stream ended without a chunk"
             )
         return JSONResponse(content=completion)
+
+    @app.post("/v1/embeddings")
+    async def embeddings(request: Request) -> JSONResponse:
+        lifecycle = _require_lifecycle()
+        body = await request.json()
+        try:
+            result = await lifecycle.embeddings(body)
+        except BackendBusy as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        except BackendNotReady as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except NotImplementedError as exc:
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
+        return JSONResponse(content=result)
 
     return app
 
