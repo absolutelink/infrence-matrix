@@ -2,7 +2,7 @@
 
 import type { Client, Options as Options2, TDataShape } from './client';
 import { client } from './client.gen';
-import type { adminAdminHealthData, adminAdminHealthResponses, adminClearCacheData, adminClearCacheErrors, adminClearCacheResponses, adminCommitPendingData, adminCommitPendingErrors, adminCommitPendingResponses, adminCreateDefinitionData, adminCreateDefinitionErrors, adminCreateDefinitionResponses, adminCreateMachineData, adminCreateMachineErrors, adminCreateMachineResponses, adminDeleteAgentData, adminDeleteAgentErrors, adminDeleteAgentResponses, adminDeleteDefinitionData, adminDeleteDefinitionErrors, adminDeleteDefinitionResponses, adminDeleteMachineData, adminDeleteMachineErrors, adminDeleteMachineResponses, adminDismissPendingData, adminDismissPendingErrors, adminDismissPendingResponses, adminGetAgentData, adminGetAgentErrors, adminGetAgentResponses, adminGetDefinitionData, adminGetDefinitionErrors, adminGetDefinitionResponses, adminGetInstanceData, adminGetInstanceErrors, adminGetInstanceLogsData, adminGetInstanceLogsErrors, adminGetInstanceLogsResponses, adminGetInstanceResponses, adminGetMachineData, adminGetMachineErrors, adminGetMachineMetricsData, adminGetMachineMetricsErrors, adminGetMachineMetricsResponses, adminGetMachineResponses, adminGetProviderTypeData, adminGetProviderTypeErrors, adminGetProviderTypeResponses, adminInitializeInstanceData, adminInitializeInstanceErrors, adminInitializeInstanceResponses, adminListAgentsData, adminListAgentsResponses, adminListDefinitionsData, adminListDefinitionsResponses, adminListInstancesData, adminListInstancesResponses, adminListMachinesData, adminListMachinesResponses, adminListProviderTypesData, adminListProviderTypesResponses, adminListRepoFilesData, adminListRepoFilesErrors, adminListRepoFilesResponses, adminListResponsesData, adminListResponsesErrors, adminListResponsesResponses, adminOverviewStatsData, adminOverviewStatsResponses, adminPatchDefinitionData, adminPatchDefinitionErrors, adminPatchDefinitionResponses, adminPatchMachineData, adminPatchMachineErrors, adminPatchMachineResponses, adminPruneStorageData, adminPruneStorageErrors, adminPruneStorageResponses, adminRegisterProviderData, adminRegisterProviderErrors, adminRegisterProviderResponses, adminRestartBackendData, adminRestartBackendErrors, adminRestartBackendResponses, adminRotateMachineSecretData, adminRotateMachineSecretErrors, adminRotateMachineSecretResponses, adminSearchModelsData, adminSearchModelsErrors, adminSearchModelsResponses, adminStartBackendData, adminStartBackendErrors, adminStartBackendResponses, adminStopBackendData, adminStopBackendErrors, adminStopBackendResponses, adminUsageStatsData, adminUsageStatsErrors, adminUsageStatsResponses, chatCreateChatCompletionData, chatCreateChatCompletionResponses, embeddingsCreateEmbeddingData, embeddingsCreateEmbeddingResponses, modelsListModelsData, modelsListModelsResponses, responsesCreateResponseData, responsesCreateResponseResponses } from './types.gen';
+import type { adminAdminHealthData, adminAdminHealthResponses, adminClearAllSchedulerQueuesData, adminClearAllSchedulerQueuesResponses, adminClearCacheData, adminClearCacheErrors, adminClearCacheResponses, adminClearSchedulerQueueData, adminClearSchedulerQueueErrors, adminClearSchedulerQueueResponses, adminCommitPendingData, adminCommitPendingErrors, adminCommitPendingResponses, adminCreateDefinitionData, adminCreateDefinitionErrors, adminCreateDefinitionResponses, adminCreateMachineData, adminCreateMachineErrors, adminCreateMachineResponses, adminDeleteAgentData, adminDeleteAgentErrors, adminDeleteAgentResponses, adminDeleteDefinitionData, adminDeleteDefinitionErrors, adminDeleteDefinitionResponses, adminDeleteMachineData, adminDeleteMachineErrors, adminDeleteMachineResponses, adminDismissPendingData, adminDismissPendingErrors, adminDismissPendingResponses, adminFleetMetricsData, adminFleetMetricsResponses, adminGetAgentData, adminGetAgentErrors, adminGetAgentResponses, adminGetDefinitionData, adminGetDefinitionErrors, adminGetDefinitionResponses, adminGetInstanceData, adminGetInstanceErrors, adminGetInstanceLogsData, adminGetInstanceLogsErrors, adminGetInstanceLogsResponses, adminGetInstanceResponses, adminGetMachineData, adminGetMachineErrors, adminGetMachineMetricsData, adminGetMachineMetricsErrors, adminGetMachineMetricsResponses, adminGetMachineResponses, adminGetProviderTypeData, adminGetProviderTypeErrors, adminGetProviderTypeResponses, adminInitializeInstanceData, adminInitializeInstanceErrors, adminInitializeInstanceResponses, adminListAgentsData, adminListAgentsResponses, adminListDefinitionsData, adminListDefinitionsResponses, adminListInstancesData, adminListInstancesResponses, adminListMachinesData, adminListMachinesResponses, adminListProviderTypesData, adminListProviderTypesResponses, adminListRepoFilesData, adminListRepoFilesErrors, adminListRepoFilesResponses, adminListResponsesData, adminListResponsesErrors, adminListResponsesResponses, adminOverviewStatsData, adminOverviewStatsResponses, adminPatchDefinitionData, adminPatchDefinitionErrors, adminPatchDefinitionResponses, adminPatchMachineData, adminPatchMachineErrors, adminPatchMachineResponses, adminPruneStorageData, adminPruneStorageErrors, adminPruneStorageResponses, adminRegisterProviderData, adminRegisterProviderErrors, adminRegisterProviderResponses, adminRestartBackendData, adminRestartBackendErrors, adminRestartBackendResponses, adminRotateMachineSecretData, adminRotateMachineSecretErrors, adminRotateMachineSecretResponses, adminSchedulerStatsData, adminSchedulerStatsResponses, adminSearchModelsData, adminSearchModelsErrors, adminSearchModelsResponses, adminStartBackendData, adminStartBackendErrors, adminStartBackendResponses, adminStopBackendData, adminStopBackendErrors, adminStopBackendResponses, adminUsageStatsData, adminUsageStatsErrors, adminUsageStatsResponses, chatCreateChatCompletionData, chatCreateChatCompletionResponses, embeddingsCreateEmbeddingData, embeddingsCreateEmbeddingResponses, modelsListModelsData, modelsListModelsResponses, responsesCreateResponseData, responsesCreateResponseResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -482,6 +482,78 @@ export class AdminService {
         return (options?.client ?? client).get<adminOverviewStatsResponses, unknown, ThrowOnError>({
             responseType: 'json',
             url: '/admin/api/stats/overview',
+            ...options
+        });
+    }
+    
+    /**
+     * Scheduler Stats
+     *
+     * Per-definition queue/active counts from the authoritative in-process
+     * scheduler state (never the Redis mirror). Every ``ProviderDefinition`` is
+     * listed — enabled or not — so the operator sees all queues; a definition
+     * with no scheduler state reports ``{queued: 0, active: 0}``.
+     */
+    public static schedulerStats<ThrowOnError extends boolean = true>(options?: Options<adminSchedulerStatsData, ThrowOnError>) {
+        return (options?.client ?? client).get<adminSchedulerStatsResponses, unknown, ThrowOnError>({
+            responseType: 'json',
+            url: '/admin/api/stats/scheduler',
+            ...options
+        });
+    }
+    
+    /**
+     * Clear All Scheduler Queues
+     *
+     * Operator drain: cancel every queued waiter across all aliases.
+     *
+     * Admitted/active requests, boots, and VRAM holds are untouched (see
+     * ``InferenceScheduler.clear_queue``).
+     */
+    public static clearAllSchedulerQueues<ThrowOnError extends boolean = true>(options?: Options<adminClearAllSchedulerQueuesData, ThrowOnError>) {
+        return (options?.client ?? client).delete<adminClearAllSchedulerQueuesResponses, unknown, ThrowOnError>({
+            responseType: 'json',
+            url: '/admin/api/stats/scheduler/queue',
+            ...options
+        });
+    }
+    
+    /**
+     * Clear Scheduler Queue
+     *
+     * Operator drain for a single alias's queue. 404 when no definition has
+     * that alias; otherwise clears its waiters (admitted slots untouched).
+     */
+    public static clearSchedulerQueue<ThrowOnError extends boolean = true>(options: Options<adminClearSchedulerQueueData, ThrowOnError>) {
+        return (options.client ?? client).delete<adminClearSchedulerQueueResponses, adminClearSchedulerQueueErrors, ThrowOnError>({
+            responseType: 'json',
+            url: '/admin/api/stats/scheduler/queue/{alias}',
+            ...options
+        });
+    }
+    
+    /**
+     * Fleet Metrics
+     *
+     * Fleet VRAM/GPU rollup for the UI stats bar.
+     *
+     * For every machine, read its merged live metrics via the same path as
+     * ``GET /admin/api/machines/{id}/metrics`` (``read_machine_metrics``), then
+     * sum VRAM and average GPU utilization fleet-wide. Machines with no fresh
+     * metrics degrade to zeros (VRAM total falls back to the DB
+     * ``Machine.total_vram_bytes``); a metrics read failure never crashes the
+     * route.
+     *
+     * ``gpu_utilization_percent`` is the **unweighted mean of the per-machine
+     * means** (each machine's own value is already the mean across its GPUs),
+     * deliberately — every machine counts equally regardless of GPU count, which
+     * is what the stats bar wants. Machines that report no ``gpu_usage`` are
+     * excluded from the mean (0.0 when none report).
+     */
+    public static fleetMetrics<ThrowOnError extends boolean = true>(options?: Options<adminFleetMetricsData, ThrowOnError>) {
+        return (options?.client ?? client).get<adminFleetMetricsResponses, unknown, ThrowOnError>({
+            responseType: 'json',
+            url: '/admin/api/stats/metrics',
             ...options
         });
     }

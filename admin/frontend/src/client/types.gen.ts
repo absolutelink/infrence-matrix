@@ -1337,6 +1337,100 @@ export type adminOverviewStatsResponses = {
 
 export type adminOverviewStatsResponse = adminOverviewStatsResponses[keyof adminOverviewStatsResponses];
 
+export type adminSchedulerStatsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/admin/api/stats/scheduler';
+};
+
+export type adminSchedulerStatsResponses = {
+    /**
+     * Response Admin-Scheduler Stats
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminSchedulerStatsResponse = adminSchedulerStatsResponses[keyof adminSchedulerStatsResponses];
+
+export type adminClearAllSchedulerQueuesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/admin/api/stats/scheduler/queue';
+};
+
+export type adminClearAllSchedulerQueuesResponses = {
+    /**
+     * Response Admin-Clear All Scheduler Queues
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminClearAllSchedulerQueuesResponse = adminClearAllSchedulerQueuesResponses[keyof adminClearAllSchedulerQueuesResponses];
+
+export type adminClearSchedulerQueueData = {
+    body?: never;
+    path: {
+        /**
+         * Alias
+         */
+        alias: string;
+    };
+    query?: never;
+    url: '/admin/api/stats/scheduler/queue/{alias}';
+};
+
+export type adminClearSchedulerQueueErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminClearSchedulerQueueError = adminClearSchedulerQueueErrors[keyof adminClearSchedulerQueueErrors];
+
+export type adminClearSchedulerQueueResponses = {
+    /**
+     * Response Admin-Clear Scheduler Queue
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminClearSchedulerQueueResponse = adminClearSchedulerQueueResponses[keyof adminClearSchedulerQueueResponses];
+
+export type adminFleetMetricsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/admin/api/stats/metrics';
+};
+
+export type adminFleetMetricsResponses = {
+    /**
+     * Response Admin-Fleet Metrics
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminFleetMetricsResponse = adminFleetMetricsResponses[keyof adminFleetMetricsResponses];
+
 export type adminListAgentsData = {
     body?: never;
     path?: never;

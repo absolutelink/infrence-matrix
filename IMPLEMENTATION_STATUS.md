@@ -118,7 +118,7 @@ starting a feature, read the linked protocol/doc first.
 | 16 | Machine-scoped provider **agents**: one container → many same-type backends, placement, `max_running_backends` | 🟡 slices 1–6 landed (agents, placement, `max_running` hot-swap + proactive warm-up, `agent.assignments.update` push, real-engine multi-backend-per-process + per-port serving); 7–8 pending |
 | 17 | Per-GPU machine metrics + hardware union: device-isolated agents (one GPU each) merge into a full machine inventory and live snapshot | ✅ Complete |
 | 18 | Embeddings + modality-scoped endpoints: `ProviderDefinition.modality` (`llm`/`embedding`, `audio` reserved), `ProviderType.serves_modalities`, spec `POST /v1/embeddings` via litellm, llama-cpp `--embedding`/`--pooling` + mock fake embeddings | ✅ shipped (all 7 slices green + e2e verified vs local admin + mock) |
-| 19 | Live stats bar (tokens/sec, queue/active, VRAM/GPU + popovers incl. queue clear) + UI ergonomics: create/edit forms → right-side drawers, logs → bottom-docked tabbed panel | 🟡 S0–S1 landed |
+| 19 | Live stats bar (tokens/sec, queue/active, VRAM/GPU + popovers incl. queue clear) + UI ergonomics: create/edit forms → right-side drawers, logs → bottom-docked tabbed panel | 🟡 S0–S2 landed |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
 
@@ -2523,11 +2523,17 @@ as right-side drawers, and a bottom-docked tabbed logs panel.
       (+10 tests: scheduler +6, responses +2, chat +1, embeddings +1);
       all provider suites green; ruff clean. Reviewer: CLEAN (2 nits,
       pre-existing lock-site pattern only).
-- [ ] **S2 — admin stats endpoints:** `GET /admin/api/stats/scheduler`,
-      `DELETE /admin/api/stats/scheduler/queue/{alias}`,
-      `DELETE /admin/api/stats/scheduler/queue`,
-      `GET /admin/api/stats/metrics` (fleet VRAM/GPU rollup), `alias` on
-      `stats/usage` samples; tests + client regen.
+- [x] **S2 — admin stats endpoints:** DONE: `GET /admin/api/stats/scheduler`
+      (every definition listed, zero-state defaults, totals),
+      `DELETE /admin/api/stats/scheduler/queue/{alias}` (404 unknown alias,
+      `max_length=200`) + `DELETE .../queue` (clear-all),
+      `GET /admin/api/stats/metrics` (fleet VRAM sum + GPU % = unweighted
+      mean of per-machine means — deliberate, documented; degrade-to-zeros
+      on stale/failed reads, VRAM total falls back to DB), `alias` added to
+      `stats/usage` samples via outerjoin (backward-compatible). Reuses
+      v1's `get_scheduler`. Admin suite 419 green (+13 tests); client
+      regenerated, tsc + lint clean. Reviewer: CLEAN (Low/Nit polish
+      applied: semantics docstring, dedupe, path cap).
 - [ ] **S3 — StatsBar UI** + `popover.tsx` primitive
       (`@radix-ui/react-popover`) + per-model & per-definition popovers.
 - [ ] **S4 — forms → right-side `Sheet` drawers.**
