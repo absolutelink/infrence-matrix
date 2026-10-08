@@ -44,7 +44,11 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { machineKeys, useMachines } from "@/hooks/useAdminData"
+import {
+  machineKeys,
+  useMachineMetrics,
+  useMachines,
+} from "@/hooks/useAdminData"
 import { useCopyToClipboard } from "@/hooks/useCopyToClipboard"
 import useCustomToast from "@/hooks/useCustomToast"
 import { extractError } from "@/lib/errors"
@@ -156,9 +160,7 @@ function MachineRow({
 }) {
   const [expanded, setExpanded] = useState(false)
   const address = machine.dns || machine.host || machine.ip || "—"
-  const vramGb = machine.total_vram_bytes
-    ? `${(machine.total_vram_bytes / 1024 ** 3).toFixed(1)} GiB`
-    : "0"
+  const vramGb = formatGiB(machine.total_vram_bytes)
 
   return (
     <>
@@ -203,6 +205,7 @@ function MachineRow({
               <MachineSecretPanel machine={machine} />
             </div>
             <HardwareView machine={machine} />
+            <LiveMetricsPanel machine={machine} expanded={expanded} />
           </TableCell>
         </TableRow>
       )}
@@ -272,6 +275,114 @@ function KvList({
         </li>
       ))}
     </ul>
+  )
+}
+
+function formatGiB(bytes?: number): string {
+  return bytes ? `${(bytes / 1024 ** 3).toFixed(1)} GiB` : "0 GiB"
+}
+
+// Render any ``*_bytes`` value in a machine-wide metrics section as GiB so it
+// matches the per-GPU display; non-byte keys (cpu cores/load) pass through.
+function formatByteValues(
+  obj: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!obj) return obj
+  return Object.fromEntries(
+    Object.entries(obj).map(([k, v]) =>
+      k.endsWith("_bytes") && typeof v === "number"
+        ? [k, formatGiB(v)]
+        : [k, v],
+    ),
+  )
+}
+
+// Phase 17: live per-GPU + machine-wide metrics merged on read from every
+// agent's partial. Only polls while the row is expanded.
+function LiveMetricsPanel({
+  machine,
+  expanded,
+}: {
+  machine: Machine
+  expanded: boolean
+}) {
+  const { data } = useMachineMetrics(machine.id, { enabled: expanded })
+  const gpus = data?.vram?.gpus ?? []
+  const hasLive = gpus.length > 0 || data?.cpu != null || data?.os_ram != null
+
+  return (
+    <div className="mt-4 rounded-md border bg-background p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h4 className="text-sm font-semibold">Live metrics</h4>
+        {data?.owner_agent_id && (
+          <span className="text-xs text-muted-foreground">
+            machine-wide owner{" "}
+            <code className="font-mono">{data.owner_agent_id.slice(0, 8)}</code>
+          </span>
+        )}
+      </div>
+      {!hasLive ? (
+        <p className="text-xs text-muted-foreground">
+          No live metrics yet — agents report every ~10s.
+        </p>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-3">
+          <div className="md:col-span-2">
+            <div className="mb-1 text-xs text-muted-foreground">
+              {data?.vram?.gpu_count ?? gpus.length} GPU(s) ·{" "}
+              {formatGiB(data?.vram?.used_bytes)} /{" "}
+              {formatGiB(data?.vram?.total_bytes)} used
+            </div>
+            {gpus.length === 0 ? (
+              <p className="text-xs text-muted-foreground">
+                No per-GPU report yet.
+              </p>
+            ) : (
+              <ul className="space-y-1">
+                {gpus.map((g, idx) => {
+                  const util = g.utilization
+                  return (
+                    <li
+                      key={g.uuid ?? idx}
+                      className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs"
+                    >
+                      <span className="font-medium">{g.name ?? "GPU"}</span>{" "}
+                      <StatusBadge status={g.vendor ?? "unknown"} />
+                      <span className="font-mono">
+                        {formatGiB(g.vram_used)} / {formatGiB(g.vram_total)}
+                      </span>
+                      {util != null && (
+                        <span className="font-mono text-muted-foreground">
+                          {util.toFixed(0)}% util
+                        </span>
+                      )}
+                      {g.agent_id && (
+                        <span className="font-mono text-muted-foreground">
+                          {g.agent_id.slice(0, 8)}
+                        </span>
+                      )}
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </div>
+          <div className="space-y-3">
+            <div>
+              <h5 className="mb-1 text-xs font-semibold">CPU</h5>
+              <KvList obj={data?.cpu} empty="No CPU metrics." />
+            </div>
+            <div>
+              <h5 className="mb-1 text-xs font-semibold">OS RAM</h5>
+              <KvList
+                obj={formatByteValues(data?.os_ram)}
+                empty="No RAM metrics."
+              />
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -397,8 +508,9 @@ function MachineFormDialog({
         total_vram_bytes: Number(values.total_vram_bytes),
       }
       if (isEdit && machine) {
-        // uid is immutable server-side; don't send it.
-        const { uid: _uid, ...patch } = body
+        // uid is immutable server-side and total_vram_bytes is auto-summed
+        // from provider GPU reports (Phase 17) — send neither on edit.
+        const { uid: _uid, total_vram_bytes: _vram, ...patch } = body
         return await AdminService.patchMachine({
           path: { machine_id: machine.id },
           body: patch,
@@ -518,11 +630,19 @@ function MachineFormDialog({
                 <FormItem>
                   <FormLabel>Total VRAM (bytes)</FormLabel>
                   <FormControl>
-                    <Input type="number" min={0} step={1024 ** 3} {...field} />
+                    <Input
+                      type="number"
+                      min={0}
+                      step={1024 ** 3}
+                      {...field}
+                      disabled={isEdit}
+                      className={isEdit ? "opacity-60" : ""}
+                    />
                   </FormControl>
                   <FormDescription>
-                    Scheduler admission budget. Refreshed from provider hardware
-                    reports.
+                    {isEdit
+                      ? "Auto-summed from provider GPU reports (union across agents on this machine)."
+                      : "Scheduler admission budget. Refreshed from provider hardware reports."}
                   </FormDescription>
                   <FormMessage />
                 </FormItem>

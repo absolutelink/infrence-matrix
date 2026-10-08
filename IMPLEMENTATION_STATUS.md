@@ -2045,11 +2045,26 @@ agent's GPU entries in the machine union.
     (a GPU-only agent no longer starves the lease); `release_ownership` is
     unchanged. No Alembic migration. Law-doc updates (redis-keys.md §,
     ws-protocol.md, ARCHITECTURE §8/§9) are deferred to Slice 6.
-- [ ] **D. Admin UI + client regen**
+- [x] **D. Admin UI + client regen** ✅ (Slice 4 landed)
   - `bash scripts/generate-client.sh` after the new route.
   - `machines.tsx`: verify the GPU panel shows both GPUs post-merge; surface
     live per-GPU used/total + utilization from the new endpoint.
   - Machine edit dialog: `total_vram_bytes` read-only with an auto-sum hint.
+  - **Slice 4 note (frontend-only):** `types/admin.ts` gains a hand-written
+    `MachineMetrics` shape (loose `vram`/`gpu_usage`/`os_ram`/`cpu`/`storage`/
+    `owner_agent_id`/`reporting_agents` mirroring `read_machine_metrics`).
+    `useAdminData.ts` gains `machineKeys.metrics(machineId)` +
+    `useMachineMetrics(machineId, { enabled, refetchInterval })` (default 5s,
+    gated on `machineId != null`). `machines.tsx` adds a `LiveMetricsPanel` in
+    the expanded row (fetches only while expanded) showing per-GPU
+    name/vendor + used/total GiB + utilization % (vram `utilization` or
+    `gpu_usage` matched by uuid) + contributing `agent_id` (short), the
+    `gpu_count`/machine totals, machine-wide `cpu`/`os_ram` via `KvList`, the
+    `owner_agent_id`, and a muted "No live metrics yet — agents report every
+    ~10s." fallback (never crashes on missing sections). `total_vram_bytes` is
+    now disabled/read-only on edit with the auto-sum `FormDescription` and is
+    omitted from the PATCH body (still editable on create; zod unchanged).
+    Client already had `getMachineMetrics` — no regen needed.
 - [ ] **E. Mock provider + compose e2e**
   - Mock supports a fake two-GPU inventory + `ASSIGNED_GPU_UUIDS` filtering,
     so compose can run two mock agents on one machine (distinct `AGENT_ID`,

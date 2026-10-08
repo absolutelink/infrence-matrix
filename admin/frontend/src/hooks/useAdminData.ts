@@ -5,6 +5,7 @@ import type {
   LogKind,
   LogsResponse,
   Machine,
+  MachineMetrics,
   OverviewStats,
   ProviderAgent,
   ProviderDefinition,
@@ -15,7 +16,10 @@ import type {
   UsageStats,
 } from "@/types/admin"
 
-export const machineKeys = { all: ["machines"] as const }
+export const machineKeys = {
+  all: ["machines"] as const,
+  metrics: (machineId: string) => ["machine-metrics", machineId] as const,
+}
 export const definitionKeys = { all: ["definitions"] as const }
 export const instanceKeys = { all: ["instances"] as const }
 export const agentKeys = { all: ["agents"] as const }
@@ -48,6 +52,28 @@ export function useMachines(refetchInterval = 5000) {
     queryFn: async () =>
       cast<Machine[]>((await AdminService.listMachines()).data),
     refetchInterval,
+  })
+}
+
+// Phase 17: merged live machine metrics (per-GPU union across every agent
+// partial + the owner-gated machine-wide snapshot). Callers gate the query on
+// row expansion via ``enabled`` so the panel only polls while visible.
+export function useMachineMetrics(
+  machineId: string | undefined,
+  opts: { enabled?: boolean; refetchInterval?: number } = {},
+) {
+  return useQuery({
+    queryKey: machineKeys.metrics(machineId ?? ""),
+    queryFn: async () =>
+      cast<MachineMetrics>(
+        (
+          await AdminService.getMachineMetrics({
+            path: { machine_id: machineId as string },
+          })
+        ).data,
+      ),
+    enabled: (opts.enabled ?? true) && machineId != null,
+    refetchInterval: opts.refetchInterval ?? 5000,
   })
 }
 

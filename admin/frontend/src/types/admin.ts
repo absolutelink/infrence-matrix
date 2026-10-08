@@ -21,6 +21,74 @@ export interface MachineHardware {
   [key: string]: unknown
 }
 
+// Phase 17: merged live machine metrics (mirrors
+// admin/backend/app/services/metrics_service.py::read_machine_metrics). The
+// per-GPU ``vram``/``gpu_usage`` sections union across every agent partial;
+// ``os_ram``/``cpu``/``storage`` come from the single machine-wide owner.
+// Sections are omitted when no agent has reported them yet.
+export interface MetricsGpuEntry {
+  uuid?: string
+  id?: number
+  name?: string
+  vendor?: string
+  backend?: string
+  vram_total?: number
+  vram_used?: number
+  vram_free?: number
+  utilization?: number
+  temperature?: number
+  memory_type?: string
+  /** Agent that contributed this GPU (attribution from the merge-on-read). */
+  agent_id?: string
+  [key: string]: unknown
+}
+
+export interface MetricsVramSection {
+  total_bytes?: number
+  used_bytes?: number
+  free_bytes?: number
+  gpu_count?: number
+  gpus?: MetricsGpuEntry[]
+}
+
+export interface MetricsGpuUsageEntry {
+  uuid?: string
+  id?: number
+  utilization?: number
+  agent_id?: string
+}
+
+export interface MetricsGpuUsageSection {
+  utilization_percent?: number
+  gpus?: MetricsGpuUsageEntry[]
+}
+
+export interface MetricsOsRamSection {
+  total_bytes?: number
+  available_bytes?: number
+  used_bytes?: number
+  [key: string]: unknown
+}
+
+export interface MetricsCpuSection {
+  cores?: number
+  load_1m?: number
+  load_5m?: number
+  load_15m?: number
+  [key: string]: unknown
+}
+
+export interface MachineMetrics {
+  machine_uid: string
+  vram?: MetricsVramSection
+  gpu_usage?: MetricsGpuUsageSection
+  os_ram?: MetricsOsRamSection
+  cpu?: MetricsCpuSection
+  storage?: Record<string, unknown>
+  owner_agent_id?: string
+  reporting_agents?: string[]
+}
+
 export interface Machine {
   id: string
   uid: string
