@@ -278,6 +278,21 @@ def test_no_connected_provider_503(client: TestClient, session: Session) -> None
     assert resp.status_code == 503
 
 
+def test_queue_cleared_503(client: TestClient, session: Session, monkeypatch) -> None:
+    """QueueCleared on the embeddings path -> 503 JSON."""
+    from app.services.scheduler import QueueCleared
+
+    seed_embedding_instance(session, alias="emb-qc", machine_uid="emb-qc-m")
+    scheduler = client.app.state.scheduler
+
+    async def cleared_acquire(alias, request_id):  # noqa: ARG001
+        raise QueueCleared("the 'emb-qc' queue was cleared by an operator")
+
+    monkeypatch.setattr(scheduler, "acquire", cleared_acquire)
+    resp = client.post("/v1/embeddings", json={"model": "emb-qc", "input": "x"})
+    assert resp.status_code == 503
+
+
 # ---------------------------------------------------------------------------
 # Upstream failure -> 502 JSON + slot released
 # ---------------------------------------------------------------------------

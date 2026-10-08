@@ -118,7 +118,7 @@ starting a feature, read the linked protocol/doc first.
 | 16 | Machine-scoped provider **agents**: one container → many same-type backends, placement, `max_running_backends` | 🟡 slices 1–6 landed (agents, placement, `max_running` hot-swap + proactive warm-up, `agent.assignments.update` push, real-engine multi-backend-per-process + per-port serving); 7–8 pending |
 | 17 | Per-GPU machine metrics + hardware union: device-isolated agents (one GPU each) merge into a full machine inventory and live snapshot | ✅ Complete |
 | 18 | Embeddings + modality-scoped endpoints: `ProviderDefinition.modality` (`llm`/`embedding`, `audio` reserved), `ProviderType.serves_modalities`, spec `POST /v1/embeddings` via litellm, llama-cpp `--embedding`/`--pooling` + mock fake embeddings | ✅ shipped (all 7 slices green + e2e verified vs local admin + mock) |
-| 19 | Live stats bar (tokens/sec, queue/active, VRAM/GPU + popovers incl. queue clear) + UI ergonomics: create/edit forms → right-side drawers, logs → bottom-docked tabbed panel | 🟡 planned (S0 landed) |
+| 19 | Live stats bar (tokens/sec, queue/active, VRAM/GPU + popovers incl. queue clear) + UI ergonomics: create/edit forms → right-side drawers, logs → bottom-docked tabbed panel | 🟡 S0–S1 landed |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
 
@@ -2511,9 +2511,18 @@ as right-side drawers, and a bottom-docked tabbed logs panel.
       for `stats/scheduler` (+queue clear) and `stats/metrics`, §6
       "Queue observability & operator clear", §7 non-stream error
       mapping gains `QueueCleared` → 503. No code.
-- [ ] **S1 — scheduler:** `queue_snapshot()`, `clear_queue(alias|None)`,
-      `QueueCleared` → 503 in `/v1/responses` (pre-stream + in-stream
-      framing), `/v1/chat/completions`, `/v1/embeddings`; tests.
+- [x] **S1 — scheduler:** DONE: `QueueCleared(SchedulerError)` +
+      `_AliasState.cleared` set (waiter re-check at top of the acquire loop;
+      `_drop_waiter` is the single cleanup point); `queue_snapshot()` →
+      per-alias `{alias, queued, active}` from in-process state;
+      `clear_queue(alias|None)` pops waiters under `state.lock` (never
+      races a mid-admission head), bumps `changed` + `notify_all`, removes
+      mirror keys best-effort; admitted slots/`_booted`/VRAM untouched.
+      Routes: 503 in responses (pre-stream) / chat / embeddings; in-stream
+      `response.failed` code `queue_cleared`. Admin suite 406 green
+      (+10 tests: scheduler +6, responses +2, chat +1, embeddings +1);
+      all provider suites green; ruff clean. Reviewer: CLEAN (2 nits,
+      pre-existing lock-site pattern only).
 - [ ] **S2 — admin stats endpoints:** `GET /admin/api/stats/scheduler`,
       `DELETE /admin/api/stats/scheduler/queue/{alias}`,
       `DELETE /admin/api/stats/scheduler/queue`,

@@ -423,6 +423,25 @@ def test_no_connected_provider_503(client: TestClient, session: Session) -> None
     assert resp.status_code == 503
 
 
+def test_non_stream_queue_cleared_503(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    """QueueCleared on the non-stream path -> 503 JSON (never a stream)."""
+    from app.services.scheduler import QueueCleared
+
+    seed_instance(session, alias="rt-qc", machine_uid="rt-qc-m")
+    scheduler = client.app.state.scheduler
+
+    async def cleared_acquire(alias, request_id):  # noqa: ARG001
+        raise QueueCleared("the 'rt-qc' queue was cleared by an operator")
+
+    monkeypatch.setattr(scheduler, "acquire", cleared_acquire)
+    resp = client.post(
+        "/v1/responses", json={"model": "rt-qc", "input": "x", "stream": False}
+    )
+    assert resp.status_code == 503
+
+
 def test_missing_fields_400(client: TestClient) -> None:
     resp = client.post("/v1/responses", json={"model": "x"})
     assert resp.status_code == 400
@@ -750,6 +769,64 @@ async def test_stream_noprovider_after_precheck_surfaces_as_failed(
     failed = next(p for t, p in frames if t == "response.failed")
     assert failed["response"]["error"]["code"] == "no_provider"
     assert [t for t, _ in frames][-1] == "__done__"
+    await aredis.aclose()
+
+
+async def test_stream_queue_cleared_surfaces_as_failed_frames(
+    session, monkeypatch
+) -> None:
+    """QueueCleared inside the stream -> response.failed with code
+    queue_cleared + failed record persisted (no HTTP status once streaming)."""
+    import redis.asyncio as aioredis
+
+    from app.api.v1 import responses as route_mod
+    from app.services.scheduler import InferenceScheduler, QueueCleared
+
+    seed_instance(session, alias="qc-a", machine_uid="qc-m")
+    definition_id = (
+        session.query(ProviderDefinition)
+        .filter(ProviderDefinition.alias == "qc-a")
+        .first()
+        .id
+    )
+    aredis = aioredis.from_url(
+        __import__("os").environ["TEST_REDIS_URL"], decode_responses=True
+    )
+    scheduler = InferenceScheduler(aredis)
+
+    async def cleared_acquire(alias, request_id):  # noqa: ARG001
+        raise QueueCleared("the 'qc-a' queue was cleared by an operator")
+
+    monkeypatch.setattr(scheduler, "acquire", cleared_acquire)
+
+    agen = route_mod._stream_response(
+        scheduler=scheduler,
+        alias="qc-a",
+        request_id="req-qc",
+        client_response_id="resp_qc000",
+        previous_response_id=None,
+        input_items_for_record=[{"role": "user", "content": "x"}],
+        definition_id=definition_id,
+        litellm_input=[{"role": "user", "content": "x"}],
+        passthrough={},
+        base_params={"model": "qc-a", "provider_type": "mock"},
+        store=True,
+    )
+    body = "".join([chunk async for chunk in agen])
+    frames = parse_sse(body)
+    types = [t for t, _ in frames]
+    assert "response.failed" in types
+    assert types[-1] == "__done__"
+    failed = next(p for t, p in frames if t == "response.failed")
+    assert failed["response"]["id"] == "resp_qc000"
+    assert failed["response"]["error"]["code"] == "queue_cleared"
+    with Session(engine) as check:
+        rec = check.exec(
+            select(ResponseRecord).where(ResponseRecord.response_id == "resp_qc000")
+        ).first()
+        assert rec is not None
+        assert rec.status == "failed"
+        assert rec.error_code == "queue_cleared"
     await aredis.aclose()
 
 

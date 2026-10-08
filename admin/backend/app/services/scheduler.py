@@ -132,6 +132,14 @@ class QueueTimeout(SchedulerError):
     """Waited in the FIFO longer than queue_timeout -> HTTP 504."""
 
 
+class QueueCleared(SchedulerError):
+    """An operator cleared the queue while this request was waiting -> HTTP 503.
+
+    Only *waiters* are cleared: already-admitted requests, boots, and VRAM
+    holds are never touched (ARCHITECTURE.md §6 queue-clear).
+    """
+
+
 @dataclass
 class Admission:
     """A granted inference slot for one request."""
@@ -167,6 +175,12 @@ class _AliasState:
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
     waiters: deque[str] = field(default_factory=deque)
     active: dict[str, _Slot] = field(default_factory=dict)
+    # Request ids an operator cleared out of the FIFO (Phase 19 queue-clear).
+    # Consulted by each blocked ``acquire`` after every wake so it raises
+    # ``QueueCleared``; entries are discarded again in ``_drop_waiter`` so the
+    # set never leaks (covers the cancel-mid-clear race where the waiter's
+    # top-of-loop check never runs).
+    cleared: set[str] = field(default_factory=set)
     # Bumped whenever queue/active state changes so waiters can detect
     # progress without lost wakeups across the attempt/release boundary.
     changed: int = 0
@@ -229,6 +243,14 @@ class InferenceScheduler:
         try:
             while True:
                 async with state.condition:
+                    if request_id in state.cleared:
+                        # Operator cleared this waiter (Phase 19). The
+                        # ``except BaseException`` unwind below runs the
+                        # shielded ``_drop_waiter`` (mirror cleanup + discard
+                        # from ``cleared``), same as the timeout/cancel paths.
+                        raise QueueCleared(
+                            f"the '{alias}' queue was cleared by an operator"
+                        )
                     seen = state.changed
 
                 async with state.lock:
@@ -333,6 +355,74 @@ class InferenceScheduler:
         happens inside the stream behind keepalives.
         """
         return bool(self._candidates(alias))
+
+    # ------------------------------------------------------------------
+    # Queue observability & operator clear (Phase 19)
+    # ------------------------------------------------------------------
+    async def queue_snapshot(self) -> list[dict[str, object]]:
+        """Authoritative per-alias queue depth from in-process state.
+
+        Returns ``{alias, queued, active}`` for every alias that currently
+        has scheduler state (an alias that has never been acquired has no
+        state and is omitted — the admin route joins with definitions).
+        Reads each alias's waiter count and in-process active-slot count
+        under its own condition lock; never touches the Redis mirror.
+        """
+        snapshot: list[dict[str, object]] = []
+        for alias, state in list(self._states.items()):
+            async with state.condition:
+                snapshot.append(
+                    {
+                        "alias": alias,
+                        "queued": len(state.waiters),
+                        "active": len(state.active),
+                    }
+                )
+        return snapshot
+
+    async def clear_queue(self, alias: str | None = None) -> int:
+        """Operator drain: cancel every *waiter* and return how many cleared.
+
+        With ``alias`` set, clears that alias's queue; with ``None``, clears
+        every alias's queue (clear-all). For each target, under the alias's
+        admission lock: pop every waiter id, record it in ``state.cleared``
+        so its blocked ``acquire`` raises ``QueueCleared`` on the next wake,
+        then bump the state generation and ``notify_all`` on the condition so
+        waiters wake promptly. Redis mirror entries (``im:sched:queue`` +
+        each ``im:sched:wait``) are removed best-effort.
+
+        Already-admitted requests, boots, and VRAM holds are NEVER touched —
+        clearing only cancels waiters. Clearing an empty (or unknown) queue
+        is a no-op returning 0; the operation is idempotent.
+        """
+        if alias is None:
+            targets = list(self._states.items())
+        else:
+            state = self._states.get(alias)
+            targets = [(alias, state)] if state is not None else []
+
+        total = 0
+        for target_alias, state in targets:
+            # Under the admission lock so a concurrent head-admission (which
+            # holds this same lock across its head-check + popleft) can never
+            # race the pop. Lock order matches the acquire path (lock then
+            # condition) — never the reverse — so no deadlock.
+            async with state.lock:
+                cleared_ids = list(state.waiters)
+                if not cleared_ids:
+                    continue
+                for request_id in cleared_ids:
+                    state.cleared.add(request_id)
+                state.waiters.clear()
+            async with state.condition:
+                state.changed += 1
+                state.condition.notify_all()
+            total += len(cleared_ids)
+            with contextlib.suppress(Exception):
+                await self._redis.delete(redis_keys.sched_queue_key(target_alias))
+                for request_id in cleared_ids:
+                    await self._redis.delete(redis_keys.sched_wait_key(request_id))
+        return total
 
     # ------------------------------------------------------------------
     # Admission attempt (head waiter only, under the per-alias lock)
@@ -1161,6 +1251,10 @@ class InferenceScheduler:
         if state is None:
             return
         async with state.condition:
+            # A cleared id that reaches this path (normal clear unwind, or a
+            # cancel that raced a clear before its top-of-loop check ran) must
+            # not linger in ``cleared`` — this is the single cleanup point.
+            state.cleared.discard(request_id)
             if request_id in state.waiters:
                 state.waiters.remove(request_id)
                 state.changed += 1

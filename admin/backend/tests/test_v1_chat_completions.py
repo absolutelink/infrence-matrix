@@ -540,6 +540,24 @@ def test_no_connected_provider_503(client: TestClient, session: Session) -> None
     assert resp.status_code == 503
 
 
+def test_queue_cleared_503(client: TestClient, session: Session, monkeypatch) -> None:
+    """QueueCleared on the chat path -> 503 JSON (same as no provider)."""
+    from app.services.scheduler import QueueCleared
+
+    seed_instance(session, alias="ct-qc", machine_uid="ct-qc-m")
+    scheduler = client.app.state.scheduler
+
+    async def cleared_acquire(alias, request_id):  # noqa: ARG001
+        raise QueueCleared("the 'ct-qc' queue was cleared by an operator")
+
+    monkeypatch.setattr(scheduler, "acquire", cleared_acquire)
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"model": "ct-qc", "messages": [{"role": "user", "content": "x"}]},
+    )
+    assert resp.status_code == 503
+
+
 @pytest.mark.parametrize(
     "body",
     [

@@ -58,6 +58,7 @@ from app.services.scheduler import (
     Admission,
     InferenceScheduler,
     NoProviderAvailable,
+    QueueCleared,
     QueueTimeout,
 )
 from app.services.sse import to_dict
@@ -226,6 +227,8 @@ async def create_chat_completion(request: Request) -> Any:
     try:
         admission = await scheduler.acquire(alias, request_id)
     except NoProviderAvailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except QueueCleared as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except QueueTimeout as exc:
         raise HTTPException(status_code=504, detail=str(exc)) from exc

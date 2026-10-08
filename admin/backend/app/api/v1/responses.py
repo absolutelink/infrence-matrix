@@ -23,7 +23,8 @@ Flow:
 6. ``scheduler.acquire(alias, request_id)`` -> ``Admission`` with the
    instance base URL. **Error contract differs by transport (Phase 6):**
 
-   * Non-stream: ``NoProviderAvailable`` -> 503, ``QueueTimeout`` -> 504
+   * Non-stream: ``NoProviderAvailable`` -> 503, ``QueueCleared`` -> 503
+     (operator cleared the queue), ``QueueTimeout`` -> 504
      (JSON, since the stream never starts).
    * Stream: the response starts immediately with SSE keepalive comments
      while ``acquire`` blocks (cold boot + FIFO wait can take minutes and
@@ -71,6 +72,7 @@ from app.services.scheduler import (
     Admission,
     InferenceScheduler,
     NoProviderAvailable,
+    QueueCleared,
     QueueTimeout,
     SchedulerError,
 )
@@ -379,6 +381,8 @@ async def create_response(request: Request) -> Any:
         admission = await scheduler.acquire(alias, request_id)
     except NoProviderAvailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except QueueCleared as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except QueueTimeout as exc:
         raise HTTPException(status_code=504, detail=str(exc)) from exc
 
@@ -486,13 +490,17 @@ async def _stream_response(
             yield emitter.done()
     except SchedulerError as exc:
         # Admission failed after the SSE response started: NoProvider-
-        # Available / QueueTimeout surface as the spec terminal failed
-        # frames (the admin synthesizes terminal frames — FINDINGS §2);
+        # Available / QueueTimeout / QueueCleared surface as the spec terminal
+        # failed frames (the admin synthesizes terminal frames — FINDINGS §2);
         # an HTTP status is no longer possible.
         failed_error = {
             "type": "server_error",
             "code": (
-                "queue_timeout" if isinstance(exc, QueueTimeout) else "no_provider"
+                "queue_timeout"
+                if isinstance(exc, QueueTimeout)
+                else "queue_cleared"
+                if isinstance(exc, QueueCleared)
+                else "no_provider"
             ),
             "message": str(exc),
         }

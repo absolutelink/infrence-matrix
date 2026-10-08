@@ -8,6 +8,7 @@ test DB with ``websocket_connected=True``.
 """
 
 import asyncio
+import contextlib
 import inspect
 import time
 import uuid
@@ -30,6 +31,7 @@ from app.services.connection_manager import manager
 from app.services.scheduler import (
     InferenceScheduler,
     NoProviderAvailable,
+    QueueCleared,
     QueueTimeout,
 )
 from app.services.wire import BackendStatusValue, Frame, FrameKind
@@ -2052,3 +2054,156 @@ async def test_warm_up_stops_when_agent_disconnects_mid_pass(
     assert starts == [str(insts["dca"].id)]
     assert str(insts["dcb"].id) not in scheduler._booted
     assert str(insts["dcc"].id) not in scheduler._booted
+
+
+# ---------------------------------------------------------------------------
+# Queue observability & operator clear (Phase 19 S1)
+#
+# ``queue_snapshot`` reads the authoritative in-process state; ``clear_queue``
+# drains *waiters only* (admitted slots, boots, and VRAM holds untouched) and
+# wakes each blocked ``acquire`` to raise ``QueueCleared``.
+# ---------------------------------------------------------------------------
+def _snapshot_for(snapshot: list[dict], alias: str) -> dict:
+    return next(row for row in snapshot if row["alias"] == alias)
+
+
+async def test_queue_snapshot_counts_queued_and_active(
+    session: Session, aredis, boot_calls  # noqa: ARG001
+) -> None:
+    make_stack(session, machine_uid="sch-snap", alias="snap-a", capacity=1)
+    scheduler = InferenceScheduler(aredis)
+    # An alias with no state is absent from the snapshot.
+    assert await scheduler.queue_snapshot() == []
+
+    await scheduler.acquire("snap-a", "r1")  # active
+    r2_task = asyncio.create_task(scheduler.acquire("snap-a", "r2"))
+    await wait_until(lambda: "r2" in scheduler._states["snap-a"].waiters)
+
+    snapshot = await scheduler.queue_snapshot()
+    row = _snapshot_for(snapshot, "snap-a")
+    assert row == {"alias": "snap-a", "queued": 1, "active": 1}
+
+    r2_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await r2_task
+
+async def test_clear_queue_wakes_waiter_with_queue_cleared(
+    session: Session, aredis, boot_calls  # noqa: ARG001
+) -> None:
+    make_stack(session, machine_uid="sch-clr", alias="clr-a", capacity=1)
+    scheduler = InferenceScheduler(aredis)
+    await scheduler.acquire("clr-a", "r1")  # admitted (untouched by clear)
+    r2_task = asyncio.create_task(scheduler.acquire("clr-a", "r2"))
+    await wait_until(lambda: "r2" in scheduler._states["clr-a"].waiters)
+
+    cleared = await scheduler.clear_queue("clr-a")
+    assert cleared == 1
+
+    with pytest.raises(QueueCleared):
+        await asyncio.wait_for(r2_task, timeout=3)
+
+    # Admitted slot survives; only the waiter was drained.
+    assert scheduler.active_count("clr-a") == 1
+    assert await aredis.smembers(redis_keys.sched_active_key("clr-a")) == {"r1"}
+    # No leaked waiter, no leaked cleared id (single cleanup point in
+    # _drop_waiter).
+    state = scheduler._states["clr-a"]
+    assert list(state.waiters) == []
+    assert state.cleared == set()
+    await scheduler.release("clr-a", "r1")
+
+
+async def test_clear_queue_all_across_aliases(
+    session: Session, aredis, boot_calls  # noqa: ARG001
+) -> None:
+    make_stack(session, machine_uid="sch-clrall-1", alias="clra-1", capacity=1)
+    make_stack(session, machine_uid="sch-clrall-2", alias="clra-2", capacity=1)
+    scheduler = InferenceScheduler(aredis)
+    await scheduler.acquire("clra-1", "a1")
+    await scheduler.acquire("clra-2", "b1")
+    ta = asyncio.create_task(scheduler.acquire("clra-1", "a2"))
+    tb = asyncio.create_task(scheduler.acquire("clra-2", "b2"))
+    await wait_until(lambda: "a2" in scheduler._states["clra-1"].waiters)
+    await wait_until(lambda: "b2" in scheduler._states["clra-2"].waiters)
+
+    assert await scheduler.clear_queue() == 2  # alias=None -> clear-all
+
+    with pytest.raises(QueueCleared):
+        await asyncio.wait_for(ta, timeout=3)
+    with pytest.raises(QueueCleared):
+        await asyncio.wait_for(tb, timeout=3)
+    assert scheduler.active_count("clra-1") == 1
+    assert scheduler.active_count("clra-2") == 1
+    await scheduler.release("clra-1", "a1")
+    await scheduler.release("clra-2", "b1")
+
+
+async def test_clear_empty_or_unknown_queue_is_noop(
+    session: Session, aredis, boot_calls  # noqa: ARG001
+) -> None:
+    make_stack(session, machine_uid="sch-clrempty", alias="clre-a", capacity=1)
+    scheduler = InferenceScheduler(aredis)
+    # Unknown alias (no state) -> 0.
+    assert await scheduler.clear_queue("ghost") == 0
+    # Admitted but no waiters -> 0 (empty queue).
+    await scheduler.acquire("clre-a", "r1")
+    assert await scheduler.clear_queue("clre-a") == 0
+    assert scheduler.active_count("clre-a") == 1
+    # Idempotent: a second clear is still 0.
+    assert await scheduler.clear_queue("clre-a") == 0
+    await scheduler.release("clre-a", "r1")
+
+
+async def test_clear_queue_removes_redis_mirror_entries(
+    session: Session, aredis, boot_calls  # noqa: ARG001
+) -> None:
+    make_stack(session, machine_uid="sch-clrmir", alias="clrm-a", capacity=1)
+    scheduler = InferenceScheduler(aredis)
+    await scheduler.acquire("clrm-a", "r1")
+    r2_task = asyncio.create_task(scheduler.acquire("clrm-a", "r2"))
+    await wait_until(lambda: "r2" in scheduler._states["clrm-a"].waiters)
+
+    # Mirror populated before the clear.
+    async def queue_mirrored() -> bool:
+        return await aredis.lrange(redis_keys.sched_queue_key("clrm-a"), 0, -1) == [
+            "r2"
+        ]
+
+    await wait_until(queue_mirrored)
+    assert await aredis.exists(redis_keys.sched_wait_key("r2"))
+
+    assert await scheduler.clear_queue("clrm-a") == 1
+    with pytest.raises(QueueCleared):
+        await asyncio.wait_for(r2_task, timeout=3)
+
+    # Queue mirror + per-request wait key removed.
+    assert await aredis.lrange(redis_keys.sched_queue_key("clrm-a"), 0, -1) == []
+    assert not await aredis.exists(redis_keys.sched_wait_key("r2"))
+    # Admitted r1's active set untouched.
+    assert await aredis.smembers(redis_keys.sched_active_key("clrm-a")) == {"r1"}
+    await scheduler.release("clrm-a", "r1")
+
+
+async def test_queue_still_functional_after_clear(
+    session: Session, aredis, boot_calls  # noqa: ARG001
+) -> None:
+    _, _, instance = make_stack(
+        session, machine_uid="sch-clrreuse", alias="clrr-a", capacity=1
+    )
+    scheduler = InferenceScheduler(aredis)
+    await scheduler.acquire("clrr-a", "r1")
+    r2_task = asyncio.create_task(scheduler.acquire("clrr-a", "r2"))
+    await wait_until(lambda: "r2" in scheduler._states["clrr-a"].waiters)
+    assert await scheduler.clear_queue("clrr-a") == 1
+    with pytest.raises(QueueCleared):
+        await asyncio.wait_for(r2_task, timeout=3)
+
+    # A fresh request after the clear queues normally and is admitted when the
+    # held slot frees.
+    r3_task = asyncio.create_task(scheduler.acquire("clrr-a", "r3"))
+    await wait_until(lambda: "r3" in scheduler._states["clrr-a"].waiters)
+    await scheduler.release("clrr-a", "r1")
+    admission = await asyncio.wait_for(r3_task, timeout=3)
+    assert admission.instance_id == str(instance.id)
+    assert scheduler.active_count("clrr-a") == 1
+    await scheduler.release("clrr-a", "r3")

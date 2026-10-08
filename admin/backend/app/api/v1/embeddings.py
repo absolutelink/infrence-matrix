@@ -37,7 +37,7 @@ from app.api.v1.responses import get_scheduler, map_exception_to_error
 from app.core.db import engine
 from app.models import ProviderDefinition, TokenUsageSample
 from app.services.alias_registry import ensure_registered
-from app.services.scheduler import NoProviderAvailable, QueueTimeout
+from app.services.scheduler import NoProviderAvailable, QueueCleared, QueueTimeout
 from app.services.sse import to_dict
 
 logger = logging.getLogger("admin.v1.embeddings")
@@ -125,6 +125,8 @@ async def create_embedding(request: Request) -> Any:
     try:
         admission = await scheduler.acquire(alias, request_id)
     except NoProviderAvailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except QueueCleared as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except QueueTimeout as exc:
         raise HTTPException(status_code=504, detail=str(exc)) from exc
