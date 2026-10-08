@@ -2571,6 +2571,45 @@ as right-side drawers, and a bottom-docked tabbed logs panel.
 
 ---
 
+## Instances token/throughput stats + list-group UI (2026-10-08) ✅
+
+**Goal:** surface per-instance token/throughput statistics on the admin
+Instances page and restructure its table into a collapsible list-group.
+
+**Slices:**
+
+- [x] **S1 — backend (`512d6cf`).** `instance_dict` now exposes `modality`;
+      new `GET /admin/api/stats/instances` returns, keyed by every
+      `ProviderInstance` id, `{modality, live_throughput_tps,
+      windows:{24h,7d,30d}}`. `live_throughput_tps` = mean
+      `predicted_per_second` over the last 5 min. Each window carries
+      completion/prompt/cached token sums, `request_count`,
+      `avg_prompt_tps`/`avg_gen_tps`, `cache_hit_rate`,
+      `p50_gen_tps`/`p95_gen_tps`, `avg_predicted_ms`, and a
+      `ResponseRecord`-derived `error_rate`. Embedding-modality instances
+      blank the LLM-only fields. Percentiles + live mean are SQL grouped
+      aggregates (`percentile_cont`/`avg` with FILTER).
+- [x] **S2 — plumbing (`f64f5c5`).** Regenerated the API client
+      (`AdminService.instanceStats`), added hand-written
+      `InstanceStats`/`InstanceWindowStats` types + `ProviderInstance.modality`,
+      and a `useInstanceStats()` hook (10s poll).
+- [x] **S3 — frontend (`4f95dbc`).** Instances table is now a collapsible
+      list-group: header row = Machine · Alias · Instance · Backend ·
+      **Throughput** (live `x.x t/s`, em-dash for embeddings/no data) ·
+      expand control. Former post-"Backend" columns (WS, version, port,
+      epoch, last seen/request, config fp) + action buttons moved into an
+      expandable detail row that also renders a `Metric | 24h | 7d | 30d`
+      statistics grid (embeddings show only prompt/cached/requests).
+
+**Verification:** backend `pytest` 425 passed; frontend `tsc` + `vite build`
+and biome lint green; each slice `@code-reviewer` CLEAN.
+
+**Design decisions:** live throughput = avg gen t/s over the last 5 min; the
+table is kept as expandable detail rows rather than cards; embedding instances
+blank LLM-only stats.
+
+---
+
 ## Accepted Regressions (do NOT restore from `legacy/`)
 
 These existed in the pre-overhaul system and are intentionally removed or
