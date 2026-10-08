@@ -1,15 +1,15 @@
 # Inference Matrix — Implementation Status
 
 **Overhaul branch:** `litellm-architecture-overhaul`
-**Last updated:** 2026-10-08 (**Phase 18 🟡 embeddings + modality-scoped
-endpoints — PLANNED (design locked via operator Q&A; implementation delegated
-slice-by-slice). Adds `ProviderDefinition.modality` (`llm`|`embedding`, `audio`
+**Last updated:** 2026-10-08 (**Phase 18 ✅ embeddings + modality-scoped
+endpoints — SHIPPED (all 7 slices green + verified end-to-end against a local
+admin + mock). Adds `ProviderDefinition.modality` (`llm`|`embedding`, `audio`
 reserved) as the admin routing key, `ProviderType.serves_modalities` (declared
 via top-level `x-serves-modalities` in `schema.json`, mirroring
 `x-max-running-backends`), a spec `POST /v1/embeddings` route driven by
 `litellm.aembedding`, `modality` pushed to the provider on the wire, and
 llama-cpp `--embedding`/`--pooling` engine support + mock fake embeddings. See
-the Phase 18 section below for the full slice plan.** Prior: **Phase 16 ✅
+the Phase 18 section below for the shipped details + verification.** Prior: **Phase 16 ✅
 machine-scoped provider agents —
 slices 7 + 8 landed + agent-delete follow-up**: slice 7 = React Agents page +
 definition placement controls; **slice 8 = the remaining law docs rewritten to
@@ -109,7 +109,7 @@ starting a feature, read the linked protocol/doc first.
 | 15 | Manual backend control + `provider.initialize` + download-bound boot budget | ✅ Complete |
 | 16 | Machine-scoped provider **agents**: one container → many same-type backends, placement, `max_running_backends` | 🟡 slices 1–6 landed (agents, placement, `max_running` hot-swap + proactive warm-up, `agent.assignments.update` push, real-engine multi-backend-per-process + per-port serving); 7–8 pending |
 | 17 | Per-GPU machine metrics + hardware union: device-isolated agents (one GPU each) merge into a full machine inventory and live snapshot | ✅ Complete |
-| 18 | Embeddings + modality-scoped endpoints: `ProviderDefinition.modality` (`llm`/`embedding`, `audio` reserved), `ProviderType.serves_modalities`, spec `POST /v1/embeddings` via litellm, llama-cpp `--embedding`/`--pooling` + mock fake embeddings | 🟡 Planned (design locked; slices pending) |
+| 18 | Embeddings + modality-scoped endpoints: `ProviderDefinition.modality` (`llm`/`embedding`, `audio` reserved), `ProviderType.serves_modalities`, spec `POST /v1/embeddings` via litellm, llama-cpp `--embedding`/`--pooling` + mock fake embeddings | ✅ shipped (all 7 slices green + e2e verified vs local admin + mock) |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
 
@@ -2144,14 +2144,15 @@ agent's GPU entries in the machine union.
 
 ---
 
-## Phase 18 — Embeddings + modality-scoped endpoints 🟡
+## Phase 18 — Embeddings + modality-scoped endpoints ✅
 
-**Status: PLANNED (design locked via operator Q&A 2026-10-08); implementation
-delegated slice-by-slice via the `delegated-slice-delivery` skill.** Adds the
-first non-chat modality: OpenAI-spec `POST /v1/embeddings`, served through
-litellm exactly like `/v1/responses`/`/v1/chat/completions`, and the
-**modality** concept that scopes which definition serves which endpoint family
-(so `/v1/audio/*` can land later without a second redesign).
+**Status: SHIPPED (2026-10-08; design locked via operator Q&A, implemented
+slice-by-slice via the `delegated-slice-delivery` skill, all 7 slices green +
+verified end-to-end against a local admin + mock).** Adds the first non-chat
+modality: OpenAI-spec `POST /v1/embeddings`, served through litellm exactly
+like `/v1/responses`/`/v1/chat/completions`, and the **modality** concept that
+scopes which definition serves which endpoint family (so `/v1/audio/*` can land
+later without a second redesign).
 
 **Goal.** Let an operator publish an embedding model (e.g. a GGUF `bge-m3`)
 as a normal `ProviderDefinition` and serve `POST /v1/embeddings` to spec.
@@ -2211,7 +2212,7 @@ the data model again.
 
 ### Sub-tasks (implementation order — additive; each slice leaves the tree green)
 
-- [ ] **Slice 1 — Admin model + type capability (no behavior change).**
+- [x] **Slice 1 — Admin model + type capability (no behavior change).**
       `ProviderDefinition.modality` (default `llm`, NOT NULL) +
       `ProviderType.serves_modalities` (default `["llm"]`) columns; Alembic
       migration (additive, backfills existing rows to `llm`; downgrade safe).
@@ -2223,7 +2224,7 @@ the data model again.
       modality change 409 while backends attached. `scripts/generate-client.sh`.
       Tests: migration up/down/check, validation matrix, serves_modalities
       sync, immutability gate.
-- [ ] **Slice 2 — litellm embedding registration + `/v1/embeddings` route.**
+- [x] **Slice 2 — litellm embedding registration + `/v1/embeddings` route.**
       `alias_registry.ensure_registered(alias, mode="chat")` gains a `mode`
       param (`"embedding"` registers `mode: "embedding"`). New
       `app/api/v1/embeddings.py`: resolve definition, 404 unless
@@ -2238,7 +2239,7 @@ the data model again.
       `scripts/generate-client.sh`. Tests: happy path (fake/mock upstream),
       both-direction type gating, usage persistence, error contract, models
       marker.
-- [ ] **Slice 3 — Wire: push modality to the provider.** Add `modality` to the
+- [x] **Slice 3 — Wire: push modality to the provider.** Add `modality` to the
       assignment entry (`app/services/assignments.py`), the
       `provider.config.update` payload (`app/services/config_update.py`), and
       the registration `backends[].definition` (`app/api/admin/providers.py`);
@@ -2247,13 +2248,13 @@ the data model again.
       per-backend handle. FrameKind unchanged (payload field only) — wire drift
       guard stays green. Tests: payload round-trip carries modality; provider
       persists it; drift guard.
-- [ ] **Slice 4 — provider_lib embeddings surface.** `BackendDriver.embeddings()`
+- [x] **Slice 4 — provider_lib embeddings surface.** `BackendDriver.embeddings()`
       ABC default raises `NotImplementedError` (→ 501); `BackendLifecycle.embeddings()`
       slot-admitted wrapper (acquire → await driver → release in `finally`,
       BackendBusy/NotReady → 429/503); `app_factory.py` `POST /v1/embeddings`
       route. Tests: 501 when driver lacks it, slot acquire/release on a fake
       driver, busy/not-ready mapping.
-- [ ] **Slice 5 — llama-cpp embeddings.** `schema.json`: add top-level
+- [x] **Slice 5 — llama-cpp embeddings.** `schema.json`: add top-level
       `x-serves-modalities: ["llm","embedding"]` + a `--pooling` option
       (`x-flag: --pooling`); bump the pinned fingerprint in
       `test_schema_sections.py`. `command.py`: `build_llama_command` adds
@@ -2261,18 +2262,42 @@ the data model again.
       when set. `driver.py`: read modality, add `embeddings()` proxying
       upstream `/v1/embeddings`. Tests: command emits flags, driver proxy,
       fingerprint pin.
-- [ ] **Slice 6 — mock embeddings.** Mock driver implements `embeddings()`
+- [x] **Slice 6 — mock embeddings.** Mock driver implements `embeddings()`
       (deterministic fake vectors, spec `CreateEmbeddingResponse` + usage);
       mock `schema.json` declares `x-serves-modalities: ["llm","embedding"]`.
       Enables full local e2e via `./scripts/dev.sh`. Tests: mock embeddings
       shape + determinism.
-- [ ] **Slice 7 — Frontend + docs-to-shipped + conformance.** Definitions
+- [x] **Slice 7 — Frontend + docs-to-shipped + conformance.** Definitions
       create/edit: modality selector gated by the chosen provider type's
       `serves_modalities`; Provider Types page shows `serves_modalities`;
       `/v1/models` display shows modality. `scripts/generate-client.sh`.
       Re-run openresponses conformance (chat/responses must not regress) +
       an embeddings integration check against the deployed admin + mock.
       Rewrite this Phase 18 section + ARCHITECTURE.md to the shipped state.
+
+### Shipped verification (2026-10-08)
+
+- **Clean-env suites (all green together):** admin **399**, provider/lib **169**,
+  mock **49**, llama-cpp **82**, gufo **78**, halogen **80**, halogen-flash
+  **167**.
+- **Schema fingerprints bumped** (fleet re-present required): llama-cpp
+  `03373ece…` (`x-serves-modalities` + `server.pooling`, enum includes `null`,
+  `--pooling` gated to embedding modality only), mock `017addc9…`
+  (`x-serves-modalities`).
+- **End-to-end (local `dev.sh` admin + mock):** created a `modality=embedding`
+  mock definition → `POST /v1/embeddings` returns a spec `CreateEmbeddingResponse`
+  (deterministic 8-dim vectors; `str` and `list` inputs → correct indices);
+  `TokenUsageSample` written with `prompt_tokens` and `completion_tokens=0`;
+  **no** `responses` row created. Type-gating both directions → 404
+  (`/v1/responses` on an embedding alias, `/v1/embeddings` on an llm alias).
+  `/v1/models` carries the `modality` marker per object.
+- **Frontend:** definitions create/edit modality selector gated by the chosen
+  type's `serves_modalities` (locked while backends attached), Modality column +
+  detail, provider-types Serves column, playground `/v1/models` marker.
+  `bun run build` + biome lint clean.
+- **Local dev note:** the schema-consensus gate correctly 409-`schema_pending`
+  when ghost agent rows from prior dev sessions pin the old fingerprint; resolve
+  with `POST /admin/api/provider-types/{name}/pending/commit` (or a fresh DB).
 
 ### Accepted risks / notes
 
