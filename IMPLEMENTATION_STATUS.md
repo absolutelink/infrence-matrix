@@ -1,7 +1,14 @@
 # Inference Matrix — Implementation Status
 
 **Overhaul branch:** `litellm-architecture-overhaul`
-**Last updated:** 2026-10-08 (**Phase 18 ✅ embeddings + modality-scoped
+**Last updated:** 2026-10-08 (**Port model overhaul — agent-owned ports +
+model-routed `/v1`: Slice 0 (docs/spec) DONE, Slices 1–5 PLANNED — no code
+changed yet.** Fixes the production `port_conflict` cross-agent collision by
+moving to one published `PROVIDER_PORT` per agent that routes `/v1` by model;
+the admin stops allocating/policing ports and `ProviderInstance.port` is dropped.
+`ARCHITECTURE.md` rewritten to the new model; see the "Port model overhaul"
+section below for the locked decisions + slice plan. Prior: **Phase 18 ✅
+embeddings + modality-scoped
 endpoints — SHIPPED (all 7 slices green + verified end-to-end against a local
 admin + mock). Adds `ProviderDefinition.modality` (`llm`|`embedding`, `audio`
 reserved) as the admin routing key, `ProviderType.serves_modalities` (declared
@@ -2314,6 +2321,93 @@ the data model again.
   instances (VRAM + `max_running` + idle reaper all apply unchanged).
 - **`audio` is reserved, not built**: the enum + `serves_modalities` list make
   a future `/v1/audio/*` phase additive; nothing in Phase 18 emits audio.
+
+---
+
+## Port model overhaul — agent-owned ports + model-routed `/v1` (2026-10-08)
+
+**Status: IN PROGRESS — Slice 0 (docs/spec) DONE; Slices 1–5 PLANNED (no code
+changed yet).** This section records the locked target model and the slice plan;
+the code still reflects the old admin-allocated per-backend-port scheme until
+Slices 1–4 land. `ARCHITECTURE.md` has been rewritten to the new model (this
+slice); `docs/ws-protocol.md` and `provider/README.md` still describe the old
+`base_port + offset` / `MultiPortServer` per-port scheme and are updated in
+Slice 5.
+
+**The production bug.** Adding a 2nd `ProviderDefinition` to an agent that shares
+a machine with another agent fails with
+`assignments push: refused new backend ... — port 8082 already held by a
+connected peer on the machine`. Root cause: the admin allocates each backend an
+admin-facing port `base_port + offset` and enforces machine-wide uniqueness
+(cross-agent clash guards on both registration and the live
+`agent.assignments.update` push). Two agents on one machine with overlapping
+`base_port` ranges collide, so a legitimate second placement is refused.
+
+**The new canonical model (locked decisions).**
+
+1. **Admin dials the agent's env-driven port.** Each provider agent publishes
+   exactly **one** admin-facing HTTP port = its container env `PROVIDER_PORT`
+   (recorded on the agent as `base_port`). The admin reaches every backend of
+   that agent at `http://{machine.reachable_address()}:{agent.base_port}/v1/...`.
+   There is **no** per-backend admin-facing port and **no** `base_port + offset`
+   scheme.
+2. **The agent routes `/v1` by model.** The agent serves a single
+   OpenAI/OpenResponses-compliant `/v1` surface on its env port and dispatches
+   each request to the correct backend by the request's `model` field (which
+   equals the `ProviderDefinition.alias`). The admin carries **zero**
+   provider-specific logic — it just points litellm at the agent's env port with
+   the alias as the model.
+3. **Engine (backend) ports are the agent's private concern.** Each backend's
+   engine process (llama-server, halogen, gufo, …) binds a **local** port inside
+   the container. Default allocation = ask the OS for a free port (bind
+   `127.0.0.1:0`, read back the assigned port). The admin never learns or dials
+   these.
+4. **The admin stops policing ports entirely.** No `port_conflict` 409 at
+   registration; no cross-agent clash refusal on the live
+   `agent.assignments.update` push. The `ProviderInstance.port` column is being
+   **dropped** (Alembic migration lands in Slice 1).
+5. **Schema port config is removed** from llama-cpp (Vulkan + CUDA share one
+   schema) and halogen-flash. halogen-flash keeps its existing env/`MACHINE_UID`-
+   derived static `(api_port, engine_port)` pair (one-per-machine, deterministic)
+   — that logic is unchanged; only the operator-facing schema fields go away.
+6. **Bridge networking with published ports remains the deployment model:** one
+   published `PROVIDER_PORT` per agent container.
+
+### Slices
+
+- [x] **Slice 0 — docs / spec (this).** `ARCHITECTURE.md` rewritten to the new
+      model (data-plane diagram, components table, key invariant 4, URL-layout
+      register row + paragraph, Machine/Agent/ProviderInstance tables — `port`
+      row removed, env table `PROVIDER_PORT`, registration sequence diagram,
+      `agent.assignments.update` prose + payload, §7 flow steps, §13 known
+      limitation). This IMPLEMENTATION_STATUS.md section added. **No code,
+      schema, test, or other-doc changes.**
+- [ ] **Slice 1 — admin stops allocating/policing ports.** Remove the
+      `base_port + offset` allocation, the registration `port_conflict` 409
+      (`_reject_port_clash`), and the cross-agent clash refusal on the
+      `agent.assignments.update` push; drop the `ProviderInstance.port` column +
+      Alembic migration; point litellm's `api_base` at the agent's env port
+      (`machine.reachable_address():agent.base_port`) with the alias as the
+      model. Update admin tests.
+- [ ] **Slice 2 — provider_lib single env-port listener + model routing.**
+      Replace the per-backend `MultiPortServer` with one `/v1` listener on the
+      agent's env `PROVIDER_PORT` that dispatches to the target backend by the
+      request's `model` (= alias).
+- [ ] **Slice 3 — llama-cpp random engine port + schema field removal.** Bind
+      `127.0.0.1:0` and read back the OS-assigned engine port; remove the
+      operator-facing port fields from the llama-cpp `schema.json` (Vulkan +
+      CUDA share one schema); bump the pinned fingerprint.
+- [ ] **Slice 4 — halogen-flash schema field removal.** Remove the
+      operator-facing `networking.api_port`/`engine_port` schema fields while
+      keeping the env/`MACHINE_UID`-derived static `(api_port, engine_port)`
+      pair (one-per-machine, deterministic) unchanged.
+- [ ] **Slice 5 — deployment.md + provider README + client regen.** Rewrite
+      `docs/ws-protocol.md` and `provider/README.md` to the new model; update
+      `deployment.md` (one published `PROVIDER_PORT` per agent container);
+      `bash scripts/generate-client.sh`.
+
+**Not yet done:** every code/schema/migration/test change above (Slices 1–5).
+This slice is documentation-only.
 
 ---
 

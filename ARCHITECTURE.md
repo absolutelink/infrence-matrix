@@ -46,33 +46,39 @@ cleanup and lives in git history only.
                              │  /provider/ws  (one socket per AGENT)
          ┌───────────────────┼───────────────────────┐
          ▼                   ▼                       ▼
-   ┌───────────────┐   ┌───────────────┐      ┌───────────────┐
-   │  MACHINE A    │   │  MACHINE B    │      │  MACHINE N    │
-   │  agent(t1)    │   │  agent(t1)    │      │  agent(tX)    │
-   │  ┌────┐┌────┐ │   │  ┌────┐       │      │  ┌────┐       │
-   │  │bknd││bknd│ │   │  │bknd│       │      │  │bknd│       │
-   │  │ :p0││ :p1│ │   │  │ :p0│       │      │  │ :p0│       │
-   │  └────┘└────┘ │   │  └────┘       │      │  └────┘       │
-   │  (same type)  │   │  (+ agent(t2))│      │               │
-   └───────┬───────┘   └──────┬────────┘      └───────┬───────┘
-           │  litellm targets http://<machine>:<backend port>/v1
-           └──────────────────────────────────────────┘
+    ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐
+    │  MACHINE A       │   │  MACHINE B       │   │  MACHINE N       │
+    │  agent(t1) :P1   │   │  agent(t1) :P1   │   │  agent(tX) :P1   │
+    │   ┌────┐ ┌────┐  │   │   ┌────┐         │   │   ┌────┐         │
+    │   │bknd│ │bknd│  │   │   │bknd│         │   │   │bknd│         │
+    │   │:i0 │ │:i1 │  │   │   │:i0 │         │   │   │:i0 │         │
+    │   └────┘ └────┘  │   │   └────┘         │   │   └────┘         │
+    │  (same type)     │   │  (+agent(t2):P2) │   │                  │
+    └────────┬─────────┘   └──────────────────┘   └──────────────────┘
+             │  litellm → http://<machine>:<agent PROVIDER_PORT>/v1
+             │  (the agent routes each request to a backend by model)
+             └──────────────────────────────────────────────────────
 ```
 
 A **machine** may host several **agents** (one per `provider_type`, and even
 several of the same type — discriminated by `AGENT_ID`). Each agent runs
-1..N **backends** (one per assigned `ProviderDefinition`), each backend
-listening on its own port (`base_port + offset`). The single agent WebSocket
-multiplexes commands/events for all of its backends, addressed by the
-per-backend `ProviderInstance` id.
+1..N **backends** (one per assigned `ProviderDefinition`) but publishes
+exactly **one** admin-facing HTTP port — its container env `PROVIDER_PORT`
+(recorded on the agent as `base_port`). The agent serves a single
+OpenAI/OpenResponses-compliant `/v1` surface on that port and dispatches each
+request to the correct backend by the request's `model` field (which equals the
+`ProviderDefinition.alias`); each backend's engine process binds a **private
+internal port** inside the container that the admin never learns or dials. The
+single agent WebSocket multiplexes commands/events for all of its backends,
+addressed by the per-backend `ProviderInstance` id.
 
 ### Components
 
 | Component | Role |
 | --- | --- |
 | **Admin** (`admin/backend`) | Owns Postgres + Redis, the scheduler, conversation state, the client-facing `/v1` API, the admin UI/API, and the provider-agent WebSocket registry. Runs **litellm** to drive inference. Knows **nothing** provider-specific. |
-| **Provider agent** (`provider/<type>`) | Hardware-local container tied to **one machine + one provider type** (and a stable `AGENT_ID`). Owns 1..N backend subprocesses of that type, their lifecycles, metrics, logs, and downloads. Serves a fully OpenAI/OpenResponses-spec-compliant HTTP API per backend on `base_port + offset` and dials the admin over **one** WebSocket. |
-| **Backend** (`ProviderInstance`) | One inference process (llama-server, halogen, halogen-flash, gufo) for one `ProviderDefinition` on one agent. A private detail of the agent; the admin reaches it only over the agent's WS (control) or its own port (litellm data). |
+| **Provider agent** (`provider/<type>`) | Hardware-local container tied to **one machine + one provider type** (and a stable `AGENT_ID`). Owns 1..N backend subprocesses of that type, their lifecycles, metrics, logs, and downloads. Serves a **single** fully OpenAI/OpenResponses-spec-compliant `/v1` HTTP surface on its env `PROVIDER_PORT` and routes each request to the right backend by the `model` field (= the definition `alias`); each backend's engine binds a private internal port the admin never sees. Dials the admin over **one** WebSocket. |
+| **Backend** (`ProviderInstance`) | One inference process (llama-server, halogen, gufo, …) for one `ProviderDefinition` on one agent. A private detail of the agent; the admin reaches it only over the agent's WS (control) or the agent's single `/v1` listener (data, routed by model) — **never** a per-backend port. |
 | **Machine** | A physical/virtual host with a unique `uid`, pre-registered in the admin UI, holding the shared **machine registration secret** agents authenticate with, and VRAM capacity tracked for scheduler admission. |
 | **Redis** | Scheduler queues/mirrors, VRAM ledger, WS presence/secrets/epochs (agent-level), metrics-ownership leases. |
 | **Postgres** | Source of truth for configuration (machines, agents, provider definitions, backend instances) and stored responses. |
@@ -94,8 +100,10 @@ per-backend `ProviderInstance` id.
 4. The admin never proxies raw provider-quirk traffic. Everything between
    admin and agent is either (a) the WS control protocol (one socket per
    agent, frames addressed by backend `ProviderInstance` id) or (b)
-   standard OpenAI-compatible HTTP driven by litellm against the backend's
-   spec-compliant port.
+   standard OpenAI-compatible HTTP driven by litellm against the **agent's
+   single env-port `/v1` listener**, which multiplexes to the correct backend
+   internally by the request's `model`. The admin carries zero
+   provider-specific routing logic and never dials a per-backend port.
 5. The client-facing `/v1/responses` SSE stream must pass the
    openresponses.org conformance suite. That client boundary is the
    fidelity contract; internal layers are free as long as it holds.
@@ -138,7 +146,7 @@ provider/
                           dial multiplexing N backends, bearer auth, backoff
       wire.py             Canonical wire envelope (Frame, FrameKind, Ack)
       backend.py          BackendDriver ABC + BackendLifecycle (slot mgmt)
-      app_factory.py      FastAPI app serving each backend's port + /v1 surface
+      app_factory.py      FastAPI app: the agent's single env-port /v1 surface, routed to a backend by model
       config.py           ProviderSettings (env-derived)
       downloader.py       Model downloads with progress events
       metrics.py          GPU / RAM / CPU / storage collectors
@@ -176,7 +184,7 @@ duplicates the frame shape from `provider_lib.wire` (keep them in sync;
 | `/openapi.json` | admin | none | Full OpenAPI schema of the admin app |
 | `/admin/*` | admin (static SPA) | none | React UI, Vite `base: "/admin"` |
 | `/admin/api/health` | admin | none | Health check (used by compose healthcheck) |
-| `/admin/api/providers/register` | admin | **machine secret** | Provider **agent** registration (§5). Body carries `machine_uid`, `agent_id`, `provider_type`, `version`, `base_port`, `hardware`, `metrics_categories`, `schema`. Authenticated by the shared `Machine.registration_secret` (not a per-definition token). Refused **409 `port_conflict`** when another *connected* backend on the same machine already claims a port the agent's backends would use — the admin addresses backends as `machine address:backend port`, so a clash silently serves one alias from another backend's engine. |
+| `/admin/api/providers/register` | admin | **machine secret** | Provider **agent** registration (§5). Body carries `machine_uid`, `agent_id`, `provider_type`, `version`, `base_port`, `hardware`, `metrics_categories`, `schema`. Authenticated by the shared `Machine.registration_secret` (not a per-definition token). `base_port` is the agent's single published admin-facing `/v1` port (its env `PROVIDER_PORT`); the admin does **not** police port uniqueness — each agent owns its own env port and routes to its backends internally by model. |
 | `/admin/api/machines*` | admin | none (trusted LAN) | Machine CRUD (Phase 9; delete refused while agents attached). Phase 16: the machine row carries the shared `registration_secret` shown/rotated here. |
 | `/admin/api/agents*` | admin | none (trusted LAN) | **ProviderAgent** reads + placement (Phase 16): list agents per machine/type, see hosted backends. Cherry-picked definition placement targets reference agent ids here. |
 | `/admin/api/definitions*` | admin | none (trusted LAN) | ProviderDefinition CRUD (Phase 9; `backend_config`/`capacity` PATCH pushes `provider.config.update` to the backends hosting it; explicit null on required fields → 422; Phase 12: `backend_config` validated against the committed JSON Schema of its `ProviderType` → 422 with per-field errors). **Phase 16:** `provider_type` is required at create (no shells); placement is `any_of_type` or an explicit set of `agent_ids` (link table); placement/config edits push `agent.assignments.update` / `provider.config.update` over the affected agents' sockets. |
@@ -191,10 +199,13 @@ duplicates the frame shape from `provider_lib.wire` (keep them in sync;
 | `/v1/*` | admin | none (trusted LAN) | Public OpenAI-compatible inference |
 | `/provider/ws` | admin | bearer (**agent secret**) | Provider **agents** dial in — one socket per agent, frames addressed by backend `ProviderInstance` id (§5) |
 
-Each **backend** on an agent serves its own OpenAI-compatible HTTP API on
-`base_port + offset` (the agent's `PROVIDER_PORT` env is the base; the first
-backend uses it, subsequent backends increment), reachable from the admin at
-`http://{machine.reachable_address()}:{backend_port}/v1/...`. `Machine` exposes
+Each **agent** publishes exactly **one** admin-facing OpenAI-compatible HTTP
+port — its container env `PROVIDER_PORT`, recorded on the agent as `base_port`
+— reachable from the admin at `http://{machine.reachable_address()}:{agent.base_port}/v1/...`.
+The agent serves a single `/v1` surface on that port and dispatches each request
+to the correct backend by the request's `model` field (the definition `alias`);
+each backend's engine process binds a private internal port inside the container
+that the admin never learns or dials. `Machine` exposes
 `dns`/`host`/`ip`; `reachable_address()` prefers `dns or host or ip`.
 
 ---
@@ -222,7 +233,7 @@ any agent registers against its `uid`.**
 | `uid` | Stable identifier supplied by the operator, referenced by the agent's `MACHINE_UID` env. Unique. |
 | `name` | Display name. Unique. |
 | `registration_secret` | **Phase 16.** Shared secret every agent on this machine authenticates registration with (replaces the per-definition `registration_token`). Shown/rotated in the UI. |
-| `host` / `dns` / `ip` | How the admin reaches backends on this machine. |
+| `host` / `dns` / `ip` | How the admin reaches the agents (and thus their backends, via each agent's single env-port `/v1`) on this machine. |
 | `total_vram_bytes` | Admission budget; the **auto-sum of the `hardware.gpus` union** (recomputed on each registration and on agent delete). A manually-set value survives only until an agent reports a `gpus` list. |
 | `hardware` | JSON inventory: `{"gpus": [{"uuid","vendor","name","total_vram_bytes"}, ...], "cpu": {...}, "ram": {...}}`. `gpus` is the **union by uuid across every agent on the machine** (latest report wins per uuid); `cpu`/`ram` stay last-writer-wins. |
 
@@ -240,7 +251,7 @@ single type and holds the one WebSocket the admin commands it over.
 | `machine_id` | FK → Machine. The host this agent runs on. |
 | `provider_type` | FK → ProviderType. **All** the agent's backends are this type. Immutable while backends are attached. |
 | `agent_id` | Operator-supplied stable id (the container's `AGENT_ID` env) that discriminates multiple agents sharing a `(machine, provider_type)`. Unique on `(machine_id, provider_type, agent_id)`. |
-| `base_port` | The agent's `PROVIDER_PORT` env; backends take `base_port + offset`. |
+| `base_port` | The agent's **single** published admin-facing `/v1` port (its container env `PROVIDER_PORT`). The admin reaches every backend of this agent at `machine.reachable_address():base_port` and the agent routes by model. No per-backend offsets. |
 | `version` | Agent version (commit id until first release); hard-fail gate vs admin `VERSION`. |
 | `agent_status` | `registering` `initializing` `running` `unhealthy` `error` `disconnected` — the container-level state (was the old per-instance `instance_status`). |
 | `websocket_connected` / `epoch` / `last_seen` | Agent-level WS liveness mirror (authoritative liveness is the Redis presence key). |
@@ -319,7 +330,6 @@ the per-backend state the scheduler and lifecycle act on.
 | Field | Notes |
 | --- | --- |
 | `agent_id` | FK → ProviderAgent (was `machine_id`). The backend's owning container. |
-| `port` | This backend's HTTP port = `agent.base_port + offset`. |
 | `backend_status` | `stopped` `initializing` `starting` `running` `in_use` `stopping` `error` |
 | `last_request_at` | Idle tracking (liveness is the agent's). |
 | `backend_loaded_at` | When the backend last entered `running`/`in_use` (stamped by the status ingest on transition; cleared when it leaves the loaded set or the agent's socket dies). The idle reaper's window baseline is `max(last_request_at, backend_loaded_at)` so a freshly booted, never-requested backend is not reaped against a stale clock. |
@@ -365,7 +375,7 @@ Summary:
 | `AGENT_ID` | yes | Stable operator-set id discriminating multiple agents that share a `(machine, provider_type)` |
 | `PROVIDER_TYPE` | yes | The single backend type this agent runs (must match a registered `ProviderType`) |
 | `ADMIN_BASE_URL` | yes | e.g. `http://admin:8000` |
-| `PROVIDER_PORT` | no (8081) | **Base** port; the agent's backends listen on `PROVIDER_PORT + offset` |
+| `PROVIDER_PORT` | no (8081) | The agent's **single** admin-facing `/v1` port (published to the bridge network). The agent routes each request to a backend by model on this one port. Engine (backend) ports are internal to the container and OS-assigned by default (bind `127.0.0.1:0`); the admin never learns or dials them. |
 | `CACHE_DIR` | yes (`/cache`) | Prompt caches, persisted `provider_config.json` |
 | `MODELS_DIR` | yes (`/models`) | Model artifact storage |
 | `METRICS_CATEGORIES` | no | Space-delimited: `gpu_usage vram os_ram cpu storage`. Inference metrics are **always** enabled and must not appear here. |
@@ -387,15 +397,14 @@ Provider agent                      Admin
     │    schema consensus gate                      (Phase 12; voters =
     │      agents of the type; mismatch → 409 schema_pending/conflict)
     │    version == admin settings.VERSION   (HARD FAIL 409)
-    │    base_port (+ per-backend offsets) free on the machine (409)
    │  effects:
    │    merge hardware into Machine; upsert ProviderAgent
    │    resolve placement → upsert one ProviderInstance per assigned
    │      definition (agent_id, definition_id), stopped
    │    issue per-agent secret → Redis im:ws:secret:{agent_id}
    │ ◀──────────────────────────────
-    │  {agent_id, agent_secret, backends:[{instance_id, port,
-    │   definition:{alias, modality, backend_config, config_fingerprint, ...}}, ...]}
+     │  {agent_id, agent_secret, backends:[{instance_id,
+     │   definition:{alias, modality, backend_config, config_fingerprint, ...}}, ...]}
    │ write provider_config.json to CACHE_DIR
    │ dial ws(s)://{admin}/provider/ws   (ONE socket for the agent)
    │   Authorization: Bearer {agent_secret}
@@ -507,7 +516,8 @@ per-instance in-flight push guard). Full semantics in
 counterpart to `provider.config.update`: when a definition's placement changes
 (created / PATCHed `agent_placement`/`agents`/`enabled`/`alias`), the admin
 recomputes the agent's placed set, reconciles its `ProviderInstance` rows
-(create stopped rows for newly-placed defs at `base_port + next free offset`;
+(create stopped rows for newly-placed defs — the assignment carries only
+alias/modality/config, the agent binds its own internal engine port;
 retire de-placed rows **busy-safe** — a `running`/`in_use` row is left in place
 and reported refused, pruned only once it stops), and pushes the **full**
 current assignment set over the socket. Config edits to an already-assigned
@@ -520,7 +530,7 @@ Payload (admin → provider):
   "assignments": [
     {"instance_id": "<uuid>", "provider_definition_id": "<uuid>",
      "alias": "my-model", "modality": "llm", "backend_config": { }, "config_fingerprint": "<sha256>",
-     "port": 8081, "capacity": 1, "idle_timeout_seconds": 300,
+     "capacity": 1, "idle_timeout_seconds": 300,
      "vram_required_bytes": 0}
   ],
   "max_running_backends": 0
@@ -637,7 +647,9 @@ transiently oversubscribe).
 6. Waiting is bounded by `queue_timeout` (default 300s) → `QueueTimeout`
    (504).
 7. Admission records `im:sched:active` and returns an
-   `Admission{instance_id, base_url, machine_uid}`.
+   `Admission{instance_id, base_url, machine_uid}`, where `base_url` is the
+   **agent's** env-port base (`http://{machine.reachable_address()}:{agent.base_port}`)
+   — litellm then routes to the specific backend by the `model` (= alias).
 
 `release(alias, request_id)` is idempotent and cancellation-safe
 (`asyncio.shield` around cleanup so a client-disconnect-mid-stream still
@@ -734,9 +746,10 @@ Example: streamed Responses API against `https://matrix.thelink.family`.
  6. litellm.aresponses(model=alias,
       api_base=f"{admission.base_url}/v1", custom_llm_provider="openai",
       stream=True, tools=[client tools + platform local tools], input=...)
-7. Provider translation layer normalizes the backend's output to spec on
-   the instance port; the slot is held for the inbound connection
-   lifetime; backend.status → in_use.
+ 7. The agent routes the request (by `model`) to the target backend, whose
+    translation layer normalizes its output to spec on the agent's single
+    env-port `/v1` surface; the slot is held for the inbound connection
+    lifetime; backend.status → in_use.
 8. Admin's SSEEmitter re-frames litellm events for the client:
    - replaces response.id with the admin-owned resp_<uuid> on every
      lifecycle frame (created/in_progress/completed/failed/incomplete),
@@ -771,7 +784,7 @@ error contract is specific to `/v1/responses`; the Phase 7
 | `/v1/responses` | **Full** (stream + non-stream) — Phase 6 |
 | `/v1/chat/completions` | **Full** (stream + non-stream) — Phase 7, via `litellm.acompletion`; admin-owned `chatcmpl-<uuid>` id on every chunk, data-only SSE, persisted as `ResponseRecord` with `parameters.api_format="chat_completions"` |
 | `/v1/models` | **Implemented** — Phase 7; derived from enabled `ProviderDefinition`s (alias asc, `owned_by`=provider_type, `model_metadata` merged). **Phase 18:** lists `llm` **and** `embedding` definitions; each object carries a `modality` marker so clients can filter. |
-| `/v1/embeddings` | **Implemented** — Phase 18; non-streaming only, via `litellm.aembedding` against the same scheduler admission + provider port. Accepts only `modality=embedding` aliases (an `llm` alias → 404). Returns the spec `CreateEmbeddingResponse`; persists a `TokenUsageSample` (prompt tokens) only — no `ResponseRecord` (embeddings are not conversation turns). |
+| `/v1/embeddings` | **Implemented** — Phase 18; non-streaming only, via `litellm.aembedding` against the same scheduler admission + the agent's env-port `/v1` surface. Accepts only `modality=embedding` aliases (an `llm` alias → 404). Returns the spec `CreateEmbeddingResponse`; persists a `TokenUsageSample` (prompt tokens) only — no `ResponseRecord` (embeddings are not conversation turns). |
 | `/v1/completions` (legacy), `/v1/rerank`, `/v1/moderations`, `/v1/decisions`, `/v1/audio/*`, `/v1/files`, `/v1/batches` | **501 stubs** — accepted regressions (§12). `/v1/audio/*` is the reserved landing spot for the future `audio` modality (§4). |
 | Responses-over-WebSocket transport | **Dropped** (not part of the OpenResponses spec) |
 | Benchmarks | **Dropped entirely** |
@@ -804,8 +817,8 @@ Same flow as §7 steps 5–10 with `aresponses` → `acompletion`, plus:
   JSON for upstream failures on the non-stream path); mid-stream errors →
   chat-style `data: {"error": {...}}` + `data: [DONE]` (no
   `response.failed` — that's the responses spec).
-- **Provider side**: the provider-port `/v1/chat/completions` now
-  honors `stream=false` by aggregating the driver's chunk stream into a
+- **Provider side**: the agent's env-port `/v1/chat/completions` surface now
+   honors `stream=false` by aggregating the driver's chunk stream into a
   `chat.completion` JSON (same fix class as Phase 6's responses
   non-stream path).
 
@@ -840,7 +853,8 @@ the Phase 6/7 admission + litellm discipline but is **non-streaming only**
 
 **Provider side**: `provider_lib` gains an optional `BackendDriver.embeddings()`
 (default raises `NotImplementedError` → 501) and a slot-admitted
-`POST /v1/embeddings` route on the backend port. llama-cpp boots
+`POST /v1/embeddings` route on the agent's env-port `/v1` surface (routed to
+the backend by model). llama-cpp boots
 `llama-server --embedding` (auto from the pushed `modality`) and proxies the
 upstream `/v1/embeddings`; `--pooling` is a schema option. The mock serves
 deterministic fake vectors so the whole path runs with no GPU.
@@ -1007,13 +1021,15 @@ operation:
    (agent row never deleted) blocks consensus forever unless the operator
    **force-commits** the pending schema. Stale agent rows should be deleted
    when hardware is decommissioned.
-12. **Phase 16 — agent fan-out & ports.** Multiple agents may share a
-   `(machine, provider_type)`; they are discriminated only by the operator-
-   supplied `AGENT_ID`, and their backend ports are `base_port + offset`
-   with the base set per container via env. Nothing stops an operator from
-   configuring two agents on one machine with colliding base ports — the
-   admin's `port_conflict` guard rejects the second registration, but the
-   base-port plan is a manual, per-deployment responsibility.
+ 12. **Phase 16 / port-model overhaul — agent fan-out & ports.** Multiple
+    agents may share a `(machine, provider_type)`; they are discriminated only
+    by the operator-supplied `AGENT_ID`. Each agent publishes exactly **one**
+    admin-facing `/v1` port (its env `PROVIDER_PORT`, recorded as `base_port`)
+    and routes to its backends internally by model; engine ports are private to
+    the container and OS-assigned by default. The admin no longer allocates or
+    polices ports (no `port_conflict` rejection). Ensuring two agents on one
+    machine publish distinct `PROVIDER_PORT`s (bridge networking) is a manual,
+    per-deployment responsibility.
 8. Scheduler VRAM eviction is implemented (§6): idle different-alias
    backends are stopped LRU-first to make room. Remaining nuance:
    eviction is per-machine (no cross-machine rebalancing) and victims are
@@ -1023,8 +1039,8 @@ operation:
 9. The idle-timeout reaper is implemented (§6). Remaining nuance: idle
    detection is admin-side from the idle clock
    (`max(last_request_at, backend_loaded_at)`) + in-process slot
-   counts, so a backend kept busy by traffic that bypasses the admin
-   (direct provider-port calls) is invisible to the reaper.
+    counts, so a backend kept busy by traffic that bypasses the admin
+    (direct agent env-port calls) is invisible to the reaper.
 10. Benchmarks removed; performance testing is out-of-band.
 11. Config-update retry is bounded (3 attempts for drain-refused only);
     a provider that stays busy past the retries surfaces the failure in
