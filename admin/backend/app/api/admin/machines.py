@@ -20,6 +20,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
@@ -27,7 +28,9 @@ from sqlmodel import Session, func, select
 
 from app.api.admin.serializers import iso_utc
 from app.core.db import get_session
+from app.core.redis import get_redis
 from app.models import Machine, ProviderAgent
+from app.services import metrics_service
 
 logger = logging.getLogger("admin.machines")
 
@@ -123,6 +126,19 @@ def get_machine(
 ) -> dict[str, Any]:
     machine = _get_machine(session, machine_id)
     return machine_dict(machine, agent_count=_agent_count(session, machine.id))
+
+
+@router.get("/{machine_id}/metrics")
+async def get_machine_metrics(
+    machine_id: str,
+    session: Session = Depends(get_session),
+    redis_client: aioredis.Redis = Depends(get_redis),
+) -> dict[str, Any]:
+    """Merged live machine metrics (Phase 17): per-GPU union across every
+    agent's partial + the owner-gated machine-wide snapshot, computed on read.
+    """
+    machine = _get_machine(session, machine_id)
+    return await metrics_service.read_machine_metrics(redis_client, machine.uid)
 
 
 @router.patch("/{machine_id}")

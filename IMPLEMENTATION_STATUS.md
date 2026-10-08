@@ -2009,7 +2009,7 @@ agent's GPU entries in the machine union.
     DELETE no-op). The "delete the agent's metrics partial" sub-step is deferred
     to Slice 3 (Redis metrics keys) — the DELETE endpoint does not touch Redis
     metrics keys yet.
-- [ ] **C. Admin — per-GPU metrics merge**
+- [x] **C. Admin — per-GPU metrics merge** ✅ (Slice 3 landed)
   - `metrics_service.handle_machine_metrics`: accept GPU-category sections
     from any connected agent (no owner gate); store per-source partial
     `im:metrics:machine:{machine_uid}:agent:{agent_id}` (TTL 30s, refreshed
@@ -2021,6 +2021,30 @@ agent's GPU entries in the machine union.
   - New read path: `GET /admin/api/machines/{id}/metrics` returning the
     merged snapshot with per-GPU `agent_id` attribution (the snapshot
     finally gets a consumer).
+  - **Slice 3 note (admin-side only):** `redis_keys` gains
+    `metrics_agent_partial_key`/`metrics_agent_partial_prefix`
+    (`im:metrics:machine:{uid}:agent:{id}`, nested under the machine
+    snapshot namespace). `handle_machine_metrics` now splits the frame:
+    GPU categories (`GPU_CATEGORIES = {vram, gpu_usage}`) are written to a
+    minimal per-agent partial regardless of ownership (`assigned_gpus` is
+    NOT stored — attribution comes from the unioned `vram.gpus` uuids);
+    machine-wide categories (`MACHINE_WIDE_CATEGORIES = {os_ram, cpu,
+    storage}`) stay owner-gated and refresh the lease + write
+    `im:metrics:machine:{uid}` (with `owner_agent_id`). A non-owner's
+    GPU-only frame is now stored (previously the whole frame was dropped);
+    a non-owner's machine-only frame is still dropped. `read_machine_metrics`
+    SCANs the partials, unions GPUs by their real `uuid` (entries without a
+    uuid are skipped, matching `hardware.merge_hardware_union`; latest-writer-
+    wins per uuid, each tagged with its `agent_id`), recomputes
+    `vram`/`gpu_usage` from the union with defensive numeric coercion,
+    overlays the owner machine-wide snapshot, and lists only agents that
+    actually contributed a GPU in `reporting_agents`. New endpoint
+    `GET /admin/api/machines/{machine_id}/metrics` (in `machines.py`) exposes
+    it; the client was regenerated. `assign_ownership` now claims the
+    machine-wide lease ONLY when the agent declares a machine-wide category
+    (a GPU-only agent no longer starves the lease); `release_ownership` is
+    unchanged. No Alembic migration. Law-doc updates (redis-keys.md §,
+    ws-protocol.md, ARCHITECTURE §8/§9) are deferred to Slice 6.
 - [ ] **D. Admin UI + client regen**
   - `bash scripts/generate-client.sh` after the new route.
   - `machines.tsx`: verify the GPU panel shows both GPUs post-merge; surface

@@ -20,15 +20,25 @@ operator-supplied ``agent_id`` string. The admin resolves the operator
   im:ws:presence:{agent_id}     TTL key refreshed on every frame received /
                                 pong sent; absence => connection is dead
 
-Machine metrics ownership (Phase 5), prefixed ``im:metrics:``:
+Machine metrics ownership (Phase 5; per-GPU split in Phase 17), prefixed
+``im:metrics:``:
 
-  im:metrics:owner:{machine_uid}  agent_id of the single provider
-                                  agent reporting machine-level
-                                  metrics for that machine (SET NX, TTL
-                                  METRICS_OWNER_TTL_SECONDS; refreshed
-                                  on each metrics.machine receipt)
-  im:metrics:machine:{machine_uid} latest machine-level snapshot JSON
-                                  (TTL METRICS_OWNER_TTL_SECONDS)
+  im:metrics:owner:{machine_uid}  agent_id of the single provider agent
+                                  reporting the MACHINE-WIDE metrics
+                                  (os_ram/cpu/storage) for that machine
+                                  (SET NX, TTL METRICS_OWNER_TTL_SECONDS;
+                                  refreshed on each owner metrics.machine
+                                  receipt). GPU categories are NOT gated
+                                  by this lease.
+  im:metrics:machine:{machine_uid} latest machine-wide snapshot JSON
+                                  (owner-gated; TTL METRICS_OWNER_TTL_SECONDS)
+  im:metrics:machine:{machine_uid}:agent:{agent_id}
+                                  per-agent GPU partial JSON (vram/gpu_usage
+                                  + assigned_gpus), written by EVERY agent
+                                  that reports GPU categories regardless of
+                                  ownership (TTL METRICS_OWNER_TTL_SECONDS).
+                                  Merged per-GPU-UUID on read; a dead agent's
+                                  partial self-expires with its TTL.
   im:metrics:cats:{agent_id}      JSON list of the agent's declared
                                   metrics categories (written at
                                   registration, read at assignment)
@@ -54,6 +64,9 @@ PRESENCE_PREFIX = "im:ws:presence"
 METRICS_OWNER_PREFIX = "im:metrics:owner"
 METRICS_MACHINE_PREFIX = "im:metrics:machine"
 METRICS_CATS_PREFIX = "im:metrics:cats"
+# Per-agent GPU partials live NESTED under the machine snapshot namespace:
+# ``{METRICS_MACHINE_PREFIX}:{machine_uid}:agent:{agent_id}`` (Phase 17).
+METRICS_AGENT_PARTIAL_INFIX = "agent"
 
 SCHED_QUEUE_PREFIX = "im:sched:queue"
 SCHED_WAIT_PREFIX = "im:sched:wait"
@@ -107,6 +120,15 @@ def metrics_owner_key(machine_uid: str) -> str:
 
 def metrics_machine_key(machine_uid: str) -> str:
     return f"{METRICS_MACHINE_PREFIX}:{machine_uid}"
+
+
+def metrics_agent_partial_prefix(machine_uid: str) -> str:
+    """Prefix for every per-agent GPU partial on a machine (for SCAN)."""
+    return f"{METRICS_MACHINE_PREFIX}:{machine_uid}:{METRICS_AGENT_PARTIAL_INFIX}:"
+
+
+def metrics_agent_partial_key(machine_uid: str, agent_id: str) -> str:
+    return f"{metrics_agent_partial_prefix(machine_uid)}{agent_id}"
 
 
 def metrics_cats_key(agent_id: str) -> str:

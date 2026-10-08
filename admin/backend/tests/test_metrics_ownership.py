@@ -191,7 +191,9 @@ def test_takeover_after_owner_disconnects(
 ) -> None:
     _make_stack(session, "mm-take")
     reg_a = _register(client, "mm-take", "agent-a", ["cpu"])
-    reg_b = _register(client, "mm-take", "agent-b", ["vram"])
+    # Phase 17 M1: only a machine-wide-capable agent can take over the owner
+    # lease (a vram-only agent no longer claims it), so B declares cpu.
+    reg_b = _register(client, "mm-take", "agent-b", ["cpu"])
 
     with _connect(client, reg_a) as ws:
         ws.receive_text()
@@ -203,7 +205,7 @@ def test_takeover_after_owner_disconnects(
         ws_b.receive_text()
         _wait_for(lambda: len(assign_calls) >= 2)
         assert assign_calls[-1][0] == reg_b["agent_id"]
-        assert assign_calls[-1][1]["categories"] == ["vram"]
+        assert assign_calls[-1][1]["categories"] == ["cpu"]
         assert _owner(clean_redis, "mm-take") == reg_b["agent_id"]
 
 
@@ -265,3 +267,322 @@ async def test_assign_rolls_back_lease_when_command_fails(
     assert await metrics_service.assign_ownership(aredis, agent_id) is True
     assert await aredis.get(redis_keys.metrics_owner_key("mm-rb")) == agent_id
     await aredis.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Phase 17 slice 3: per-GPU merge (non-owner GPU frames stored, machine-wide
+# still owner-gated) + read_machine_metrics merge-on-read.
+# ---------------------------------------------------------------------------
+
+
+def _vram_payload(uuid: str, gid: int, total: int, used: int, util: float) -> dict:
+    """A single-GPU metrics.machine payload shaped like the provider emitter."""
+    gpu = {
+        "id": gid,
+        "uuid": uuid,
+        "name": f"card{gid}",
+        "vendor": "nvidia",
+        "vram_total": total,
+        "vram_used": used,
+        "vram_free": total - used,
+        "utilization": util,
+        "temperature": 42.0,
+    }
+    return {
+        "vram": {
+            "total_bytes": total,
+            "used_bytes": used,
+            "free_bytes": total - used,
+            "gpu_count": 1,
+            "gpus": [gpu],
+        },
+        "gpu_usage": {
+            "utilization_percent": util,
+            "gpus": [{"id": gid, "utilization": util}],
+        },
+        "assigned_gpus": [uuid],
+    }
+
+
+def _make_agents(
+    session: Session, machine_uid: str, names: list[str]
+) -> dict[str, str]:
+    """Create a machine + provider agents; return {name: agent PK uuid str}."""
+    if session.query(Machine).filter(Machine.uid == machine_uid).first() is None:
+        session.add(
+            Machine(
+                uid=machine_uid,
+                name=f"name-{machine_uid}",
+                registration_secret="mach-secret",
+            )
+        )
+        session.commit()
+    machine = session.query(Machine).filter(Machine.uid == machine_uid).one()
+    out: dict[str, str] = {}
+    for name in names:
+        agent = ProviderAgent(
+            machine_id=machine.id, provider_type="mock", agent_id=name
+        )
+        session.add(agent)
+        session.commit()
+        out[name] = str(agent.id)
+    return out
+
+
+async def _aredis():
+    import os
+
+    import redis.asyncio as aioredis
+
+    return aioredis.from_url(os.environ["TEST_REDIS_URL"], decode_responses=True)
+
+
+async def test_nonowner_gpu_frame_is_stored(session: Session) -> None:
+    """A non-owner's GPU-category frame writes a per-agent partial (not dropped)."""
+    ids = _make_agents(session, "mm-gpu-nonowner", ["a", "b"])
+    r = await _aredis()
+    try:
+        # Lease names agent a; b is a non-owner but still reports its GPU.
+        await r.set(redis_keys.metrics_owner_key("mm-gpu-nonowner"), ids["a"], ex=60)
+        stored = await metrics_service.handle_machine_metrics(
+            r, ids["b"], _vram_payload("GPU-B", 0, 200, 20, 40.0)
+        )
+        assert stored is True
+        partial_key = redis_keys.metrics_agent_partial_key("mm-gpu-nonowner", ids["b"])
+        raw = await r.get(partial_key)
+        assert raw is not None
+        part = json.loads(raw)
+        assert part["vram"]["gpus"][0]["uuid"] == "GPU-B"
+        # N2: the partial stays minimal — assigned_gpus is not stored (read
+        # derives attribution from the unioned vram.gpus uuids).
+        assert "assigned_gpus" not in part
+        # The non-owner did NOT touch the machine-wide snapshot or the lease.
+        assert await r.get(redis_keys.metrics_machine_key("mm-gpu-nonowner")) is None
+        assert await r.get(redis_keys.metrics_owner_key("mm-gpu-nonowner")) == ids["a"]
+    finally:
+        await r.aclose()
+
+
+async def test_nonowner_machine_only_frame_dropped(session: Session) -> None:
+    """A non-owner's machine-only (cpu) frame is still dropped entirely."""
+    ids = _make_agents(session, "mm-mw-nonowner", ["a", "b"])
+    r = await _aredis()
+    try:
+        await r.set(redis_keys.metrics_owner_key("mm-mw-nonowner"), ids["a"], ex=60)
+        stored = await metrics_service.handle_machine_metrics(
+            r, ids["b"], {"cpu": {"cores": 16}}
+        )
+        assert stored is False
+        assert (
+            await r.get(
+                redis_keys.metrics_agent_partial_key("mm-mw-nonowner", ids["b"])
+            )
+            is None
+        )
+        assert await r.get(redis_keys.metrics_machine_key("mm-mw-nonowner")) is None
+    finally:
+        await r.aclose()
+
+
+async def test_owner_machinewide_refreshes_lease_and_writes_snapshot(
+    session: Session,
+) -> None:
+    """The owner's machine-wide frame refreshes the lease + writes the snapshot."""
+    ids = _make_agents(session, "mm-owner-mw", ["a"])
+    r = await _aredis()
+    try:
+        owner_key = redis_keys.metrics_owner_key("mm-owner-mw")
+        await r.set(owner_key, ids["a"], ex=60)
+        stored = await metrics_service.handle_machine_metrics(
+            r, ids["a"], {"os_ram": {"total_bytes": 1000}, "cpu": {"cores": 8}}
+        )
+        assert stored is True
+        snap = json.loads(await r.get(redis_keys.metrics_machine_key("mm-owner-mw")))
+        assert snap["cpu"]["cores"] == 8
+        assert snap["os_ram"]["total_bytes"] == 1000
+        assert snap["owner_agent_id"] == ids["a"]
+        # Lease still held by the owner.
+        assert await r.get(owner_key) == ids["a"]
+    finally:
+        await r.aclose()
+
+
+async def test_read_machine_metrics_merges_two_agents(session: Session) -> None:
+    """Two agents each reporting a different GPU merge into one union."""
+    ids = _make_agents(session, "mm-merge", ["a", "b"])
+    r = await _aredis()
+    try:
+        await metrics_service.handle_machine_metrics(
+            r, ids["a"], _vram_payload("GPU-A", 0, 100, 10, 20.0)
+        )
+        await metrics_service.handle_machine_metrics(
+            r, ids["b"], _vram_payload("GPU-B", 0, 200, 20, 40.0)
+        )
+        merged = await metrics_service.read_machine_metrics(r, "mm-merge")
+        assert merged["vram"]["gpu_count"] == 2
+        assert merged["vram"]["total_bytes"] == 300
+        assert merged["vram"]["used_bytes"] == 30
+        assert merged["vram"]["free_bytes"] == 270
+        by_uuid = {g["uuid"]: g for g in merged["vram"]["gpus"]}
+        assert by_uuid["GPU-A"]["agent_id"] == ids["a"]
+        assert by_uuid["GPU-B"]["agent_id"] == ids["b"]
+        # gpu_usage derived from the union: mean of per-gpu utilization.
+        assert merged["gpu_usage"]["utilization_percent"] == 30.0
+        usage_by_uuid = {g["uuid"]: g for g in merged["gpu_usage"]["gpus"]}
+        assert usage_by_uuid["GPU-A"]["agent_id"] == ids["a"]
+        assert set(merged["reporting_agents"]) == {ids["a"], ids["b"]}
+    finally:
+        await r.aclose()
+
+
+async def test_read_machine_metrics_overlays_machinewide(session: Session) -> None:
+    """Owner machine-wide sections overlay the merged GPU union on read."""
+    ids = _make_agents(session, "mm-merge-mw", ["a", "b"])
+    r = await _aredis()
+    try:
+        await r.set(redis_keys.metrics_owner_key("mm-merge-mw"), ids["a"], ex=60)
+        await metrics_service.handle_machine_metrics(
+            r, ids["a"], _vram_payload("GPU-A", 0, 100, 10, 20.0)
+        )
+        await metrics_service.handle_machine_metrics(
+            r, ids["b"], _vram_payload("GPU-B", 0, 200, 20, 40.0)
+        )
+        await metrics_service.handle_machine_metrics(
+            r, ids["a"], {"cpu": {"cores": 8}, "os_ram": {"total_bytes": 4096}}
+        )
+        merged = await metrics_service.read_machine_metrics(r, "mm-merge-mw")
+        assert merged["vram"]["gpu_count"] == 2
+        assert merged["cpu"]["cores"] == 8
+        assert merged["os_ram"]["total_bytes"] == 4096
+        assert merged["owner_agent_id"] == ids["a"]
+    finally:
+        await r.aclose()
+
+
+async def test_read_machine_metrics_empty(session: Session) -> None:
+    """No partials + no snapshot => minimal dict with no GPU sections."""
+    _make_agents(session, "mm-empty", ["a"])
+    r = await _aredis()
+    try:
+        merged = await metrics_service.read_machine_metrics(r, "mm-empty")
+        assert merged == {"machine_uid": "mm-empty"}
+        assert "vram" not in merged
+        assert "gpu_usage" not in merged
+    finally:
+        await r.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Phase 17 slice 3 review fixes: M1 assign gate, M2 reporting, L1 uuid keying,
+# L2 numeric coercion.
+# ---------------------------------------------------------------------------
+
+
+async def test_assign_gate_gpu_only_agent_does_not_claim_lease(
+    session: Session, monkeypatch
+) -> None:
+    """M1: only agents reporting a machine-wide category claim the owner lease."""
+    ids = _make_agents(session, "mm-assign-gate", ["gpuonly", "cpucap"])
+    r = await _aredis()
+
+    async def ok(*_args, **_kwargs):  # noqa: ARG001
+        return Frame(type="ack", payload={"ok": True})
+
+    monkeypatch.setattr(metrics_service.manager, "send_command", ok)
+    try:
+        # GPU-only agent declares vram/gpu_usage but no machine-wide category.
+        await r.set(
+            redis_keys.metrics_cats_key(ids["gpuonly"]), '["vram", "gpu_usage"]'
+        )
+        assert await metrics_service.assign_ownership(r, ids["gpuonly"]) is False
+        assert await r.get(redis_keys.metrics_owner_key("mm-assign-gate")) is None
+
+        # A machine-wide-capable agent can then claim the still-free lease.
+        await r.set(redis_keys.metrics_cats_key(ids["cpucap"]), '["cpu", "vram"]')
+        assert await metrics_service.assign_ownership(r, ids["cpucap"]) is True
+        assert (
+            await r.get(redis_keys.metrics_owner_key("mm-assign-gate")) == ids["cpucap"]
+        )
+    finally:
+        await r.aclose()
+
+
+async def test_read_gpu_usage_only_partial_not_counted(session: Session) -> None:
+    """M2: a partial contributing no vram GPU is absent from reporting_agents."""
+    ids = _make_agents(session, "mm-m2", ["a", "b"])
+    r = await _aredis()
+    try:
+        await metrics_service.handle_machine_metrics(
+            r,
+            ids["a"],
+            {
+                "gpu_usage": {
+                    "utilization_percent": 50.0,
+                    "gpus": [{"id": 0, "utilization": 50.0}],
+                }
+            },
+        )
+        await metrics_service.handle_machine_metrics(
+            r, ids["b"], _vram_payload("GPU-B", 0, 200, 20, 40.0)
+        )
+        merged = await metrics_service.read_machine_metrics(r, "mm-m2")
+        assert merged["vram"]["gpu_count"] == 1
+        assert merged["reporting_agents"] == [ids["b"]]
+        assert ids["a"] not in merged["reporting_agents"]
+    finally:
+        await r.aclose()
+
+
+async def test_read_skips_gpu_without_uuid(session: Session) -> None:
+    """L1: a vram GPU entry with no uuid is skipped (agrees with hardware.py)."""
+    ids = _make_agents(session, "mm-l1", ["a"])
+    r = await _aredis()
+    try:
+        partial = {
+            "vram": {
+                "gpus": [{"id": 0, "vram_total": 100, "utilization": 10.0}]  # no uuid
+            }
+        }
+        await r.set(
+            redis_keys.metrics_agent_partial_key("mm-l1", ids["a"]),
+            json.dumps(partial),
+            ex=60,
+        )
+        merged = await metrics_service.read_machine_metrics(r, "mm-l1")
+        assert "vram" not in merged
+        assert "reporting_agents" not in merged
+    finally:
+        await r.aclose()
+
+
+async def test_read_coerces_nonnumeric_fields(session: Session) -> None:
+    """L2: non-numeric vram/utilization fields coerce to 0 instead of raising."""
+    ids = _make_agents(session, "mm-l2", ["a"])
+    r = await _aredis()
+    try:
+        partial = {
+            "vram": {
+                "gpus": [
+                    {
+                        "uuid": "GPU-A",
+                        "id": 0,
+                        "vram_total": "oops",
+                        "vram_used": None,
+                        "vram_free": 50,
+                        "utilization": None,
+                    }
+                ]
+            }
+        }
+        await r.set(
+            redis_keys.metrics_agent_partial_key("mm-l2", ids["a"]),
+            json.dumps(partial),
+            ex=60,
+        )
+        merged = await metrics_service.read_machine_metrics(r, "mm-l2")
+        assert merged["vram"]["total_bytes"] == 0
+        assert merged["vram"]["used_bytes"] == 0
+        assert merged["vram"]["free_bytes"] == 50
+        assert merged["gpu_usage"]["utilization_percent"] == 0.0
+    finally:
+        await r.aclose()

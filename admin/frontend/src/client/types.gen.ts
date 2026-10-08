@@ -478,6 +478,40 @@ export type adminPatchMachineResponses = {
 
 export type adminPatchMachineResponse = adminPatchMachineResponses[keyof adminPatchMachineResponses];
 
+export type adminGetMachineMetricsData = {
+    body?: never;
+    path: {
+        /**
+         * Machine Id
+         */
+        machine_id: string;
+    };
+    query?: never;
+    url: '/admin/api/machines/{machine_id}/metrics';
+};
+
+export type adminGetMachineMetricsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminGetMachineMetricsError = adminGetMachineMetricsErrors[keyof adminGetMachineMetricsErrors];
+
+export type adminGetMachineMetricsResponses = {
+    /**
+     * Response Admin-Get Machine Metrics
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminGetMachineMetricsResponse = adminGetMachineMetricsResponses[keyof adminGetMachineMetricsResponses];
+
 export type adminRotateMachineSecretData = {
     body?: never;
     path: {

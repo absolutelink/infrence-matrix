@@ -507,3 +507,129 @@ def test_live_websocket_reflected_in_reads(
         assert time.monotonic() < deadline, "disconnect not reflected"
         time.sleep(0.02)
     assert client.get("/admin/api/stats/overview").json()["instances_connected"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 17 slice 3: GET /admin/api/machines/{id}/metrics (merged on read)
+# ---------------------------------------------------------------------------
+
+
+def _gpu_partial(uuid: str, gid: int, total: int, used: int, util: float) -> str:
+    import json as _json
+
+    return _json.dumps(
+        {
+            "vram": {
+                "total_bytes": total,
+                "used_bytes": used,
+                "free_bytes": total - used,
+                "gpu_count": 1,
+                "gpus": [
+                    {
+                        "id": gid,
+                        "uuid": uuid,
+                        "name": f"card{gid}",
+                        "vendor": "nvidia",
+                        "vram_total": total,
+                        "vram_used": used,
+                        "vram_free": total - used,
+                        "utilization": util,
+                        "temperature": 42.0,
+                    }
+                ],
+            },
+            "gpu_usage": {
+                "utilization_percent": util,
+                "gpus": [{"id": gid, "utilization": util}],
+            },
+            "assigned_gpus": [uuid],
+        }
+    )
+
+
+def test_machine_metrics_endpoint_merges_partials(
+    client: TestClient, session: Session, clean_redis
+) -> None:
+    import json as _json
+
+    machine, _ = _stack(session, alias="mm-ep")
+    uid = machine.uid
+    clean_redis.set(
+        redis_keys.metrics_agent_partial_key(uid, "agent-a"),
+        _gpu_partial("GPU-A", 0, 100, 10, 20.0),
+        ex=60,
+    )
+    clean_redis.set(
+        redis_keys.metrics_agent_partial_key(uid, "agent-b"),
+        _gpu_partial("GPU-B", 0, 200, 20, 40.0),
+        ex=60,
+    )
+    clean_redis.set(
+        redis_keys.metrics_machine_key(uid),
+        _json.dumps({"cpu": {"cores": 8}, "owner_agent_id": "agent-a"}),
+        ex=60,
+    )
+
+    resp = client.get(f"/admin/api/machines/{machine.id}/metrics")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["machine_uid"] == uid
+    assert body["vram"]["gpu_count"] == 2
+    assert body["vram"]["total_bytes"] == 300
+    assert body["gpu_usage"]["utilization_percent"] == 30.0
+    assert body["cpu"]["cores"] == 8
+    assert body["owner_agent_id"] == "agent-a"
+    assert set(body["reporting_agents"]) == {"agent-a", "agent-b"}
+
+
+def test_machine_metrics_endpoint_empty(
+    client: TestClient,
+    session: Session,
+    clean_redis,  # noqa: ARG001
+) -> None:
+    machine, _ = _stack(session, alias="mm-ep-empty")
+    resp = client.get(f"/admin/api/machines/{machine.id}/metrics")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"machine_uid": machine.uid}
+
+
+def test_machine_metrics_endpoint_unknown_machine_404(
+    client: TestClient,
+) -> None:
+    resp = client.get(f"/admin/api/machines/{uuid.uuid4()}/metrics")
+    assert resp.status_code == 404
+
+
+def test_machine_metrics_endpoint_coerces_bad_numeric(
+    client: TestClient, session: Session, clean_redis
+) -> None:
+    """L2: a partial with non-numeric fields returns 200 (coerced), not a 500."""
+    import json as _json
+
+    machine, _ = _stack(session, alias="mm-ep-bad")
+    clean_redis.set(
+        redis_keys.metrics_agent_partial_key(machine.uid, "agent-a"),
+        _json.dumps(
+            {
+                "vram": {
+                    "gpus": [
+                        {
+                            "uuid": "GPU-A",
+                            "id": 0,
+                            "vram_total": "oops",
+                            "vram_used": None,
+                            "vram_free": 50,
+                            "utilization": "n/a",
+                        }
+                    ]
+                }
+            }
+        ),
+        ex=60,
+    )
+    resp = client.get(f"/admin/api/machines/{machine.id}/metrics")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["vram"]["total_bytes"] == 0
+    assert body["vram"]["free_bytes"] == 50
+    assert body["gpu_usage"]["utilization_percent"] == 0.0
