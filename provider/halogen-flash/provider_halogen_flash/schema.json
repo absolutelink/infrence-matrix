@@ -605,22 +605,6 @@
       "x-order": 10,
       "additionalProperties": false,
       "properties": {
-        "api_port": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 65535,
-          "title": "API port",
-          "description": "Flash API listen port (all HTTP traffic). Part of the disk-cache fingerprint pair: when absent, both ports are derived deterministically from MACHINE_UID in the 8200-8289 static range (no schema default).",
-          "x-flag": "HALOGEN_API_PORT"
-        },
-        "engine_port": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 65535,
-          "title": "Engine port",
-          "description": "Private engine port (referenced via HALOGEN_ENGINE). Must be pinned together with api_port for fingerprint stability (no schema default).",
-          "x-flag": "HALOGEN_PORT"
-        },
         "bind": {
           "type": "string",
           "default": "127.0.0.1",

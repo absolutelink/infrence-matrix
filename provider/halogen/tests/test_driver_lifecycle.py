@@ -60,13 +60,32 @@ async def test_start_healthy_running_via_lifecycle(
         ]
         assert (state_dir / "server_started").exists()
         assert await driver.health() is True
-        # Two ports: api = PROVIDER_PORT+1, engine = PROVIDER_PORT+2.
-        assert driver.api_port == 8182
-        assert driver.engine_port == 8183
+        # Port model overhaul: two OS-assigned free ports (api != engine), not
+        # derived from PROVIDER_PORT.
+        assert isinstance(driver.api_port, int) and driver.api_port > 0
+        assert isinstance(driver.engine_port, int) and driver.engine_port > 0
+        assert driver.api_port != driver.engine_port
     finally:
         await lifecycle.stop()
         await driver.aclose()
     assert lifecycle.backend_status == BackendStatusValue.STOPPED
+
+
+async def test_ports_none_until_start_and_after_stop(
+    tmp_path, fake_halogen_binary, local_artifacts
+) -> None:
+    """Port model overhaul: the (api, engine) pair is allocated at start and
+    cleared on stop, so the "None until start" invariant holds across a cycle."""
+    driver = _backend(tmp_path, fake_halogen_binary, local_artifacts)
+    assert driver.api_port is None and driver.engine_port is None
+    try:
+        await driver.start()
+        assert isinstance(driver.api_port, int) and driver.api_port > 0
+        assert isinstance(driver.engine_port, int) and driver.engine_port > 0
+    finally:
+        await driver.stop()
+    assert driver.api_port is None and driver.engine_port is None
+    await driver.aclose()
 
 
 async def test_env_mapping_through_real_spawn(
@@ -86,27 +105,12 @@ async def test_env_mapping_through_real_spawn(
         assert recorded["HALOGEN_KV_SLOTS"] == "4"
         assert recorded["HALOGEN_DRAFTER"] == "mtp"
         assert recorded["HALOGEN_CACHE_MB"] == "2048"
-        assert recorded["HALOGEN_API_PORT"] == "8182"
-        assert recorded["HALOGEN_ENGINE"] == "127.0.0.1:8183"
+        # Ports are OS-assigned at start; the fake records the env it was
+        # launched with, so they must match the driver's allocated pair.
+        assert recorded["HALOGEN_API_PORT"] == str(driver.api_port)
+        assert recorded["HALOGEN_ENGINE"] == f"127.0.0.1:{driver.engine_port}"
         assert recorded["HALOGEN_CHECKPOINT"] == local_artifacts["checkpoint"]
         assert recorded["HALOGEN_TOKENIZER"] == local_artifacts["tokenizer"]
-    finally:
-        await driver.aclose()
-
-
-async def test_explicit_ports_from_config(
-    tmp_path, fake_halogen_binary, local_artifacts
-) -> None:
-    driver = _backend(
-        tmp_path,
-        fake_halogen_binary,
-        local_artifacts,
-        networking={"api_port": 9401, "engine_port": 9402},
-    )
-    try:
-        await driver.start()
-        assert driver.api_port == 9401
-        assert driver.engine_port == 9402
     finally:
         await driver.aclose()
 

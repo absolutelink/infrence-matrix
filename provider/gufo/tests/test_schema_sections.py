@@ -73,7 +73,6 @@ CANONICAL_CONFIG: dict[str, Any] = {
         "sessions": 4,
         "max_connections": 128,
         "max_request_bytes": 16777216,
-        "backend_port": 8123,
         "api_key": "s3cret",
         "verbose": True,
         "log_progress": False,
@@ -114,7 +113,9 @@ def test_schema_has_the_planned_sections() -> None:
 # fleet consensus contract (docs/ws-protocol.md §2). If you change
 # schema.json, every known gufo instance must re-register with the new
 # file (or the operator force-commits); update this pin deliberately.
-SHIPPED_SCHEMA_FP = "3e5882d7d1c58cd8d1723e37ff1a618d8c240950a45bbafb9ba3057c51aa7acb"
+# Port model overhaul: the operator-facing `server.backend_port` field was
+# removed (the engine now binds an OS-assigned private port), bumping the fp.
+SHIPPED_SCHEMA_FP = "cbe7abf16b55f505eaf8118489f61ce31b005802382b1e2694e7ac580ea28429"
 
 
 def test_schema_fingerprint_is_stable() -> None:
@@ -170,12 +171,22 @@ def test_schema_rejects_out_of_range_and_bad_types() -> None:
     cfg = json.loads(json.dumps(CANONICAL_CONFIG))
     cfg["context"]["context"] = 0
     cfg["server"]["sessions"] = 0
-    cfg["server"]["backend_port"] = 70000
     cfg["disk_cache"]["cache_disk"] = "yes"  # must be boolean
     errors = validate_backend_config(SCHEMA, cfg)
     joined = " ".join(errors)
-    for token in ("context", "sessions", "backend_port", "cache_disk"):
+    for token in ("context", "sessions", "cache_disk"):
         assert token in joined, token
+
+
+def test_schema_rejects_server_backend_port() -> None:
+    """Port model overhaul: `server.backend_port` is no longer an accepted
+    schema property (the engine binds an OS-assigned private port). The `server`
+    section's additionalProperties:false rejects it."""
+    cfg = json.loads(json.dumps(CANONICAL_CONFIG))
+    cfg["server"]["backend_port"] = 8123
+    errors = validate_backend_config(SCHEMA, cfg)
+    assert any("backend_port" in e for e in errors)
+    assert "backend_port" not in SCHEMA["properties"]["server"]["properties"]
 
 
 def test_bool_only_flags_are_boolean_with_false_default() -> None:
@@ -210,11 +221,8 @@ def test_every_field_has_description_and_flag() -> None:
             assert field.get("description"), label
             assert field.get("title"), label
             # Artifact fields are $ref-based (descriptor objects carry no
-            # scalar default); backend_port has none either (env-derived
-            # PROVIDER_PORT + 1 when unpinned).
-            no_scalar_default = "$ref" in field or (
-                section_name == "server" and key == "backend_port"
-            )
+            # scalar default).
+            no_scalar_default = "$ref" in field
             assert "default" in field or no_scalar_default, label
             assert field.get("x-flag"), label
             assert str(field["x-flag"]).startswith("--"), label
@@ -407,13 +415,11 @@ def test_driver_reads_nested_sections(tmp_path) -> None:
     driver = GufoBackend(settings, {})
     driver.apply_config(CANONICAL_CONFIG)
     assert driver._config == CANONICAL_CONFIG
-    # backend_port relocated under `server`.
-    assert driver.backend_port == 8123
+    # Port model overhaul: the engine port is NOT config-derived anymore — it is
+    # allocated (OS-assigned free port) at start, so it stays None until then.
+    assert driver.backend_port is None
     driver.apply_config({"context": {"context": 512}})
-    assert driver.backend_port == settings.PROVIDER_PORT + 1
-    # Legacy top-level backend_port still honored.
-    driver.apply_config({"backend_port": 7777})
-    assert driver.backend_port == 7777
+    assert driver.backend_port is None
     # effective_capacity from the flattened `server` section.
     driver.apply_config({"server": {"sessions": 6}})
     assert driver.effective_capacity == 6
@@ -522,9 +528,7 @@ async def test_sectioned_aux_resolution_start_shape(tmp_path, monkeypatch) -> No
     driver = driver_mod.GufoBackend(make_settings(tmp_path, "gufo"), {})
     driver.apply_config(CANONICAL_CONFIG)
     options = await driver._resolve_aux()
-    cmd = build_command(
-        options, model_path="/models/main.gguf", port=driver.backend_port
-    )
+    cmd = build_command(options, model_path="/models/main.gguf", port=8123)
     joined = " ".join(cmd)
     assert "--mmproj /models/vision.gguf" in joined
     assert "--dflash-model /models/dflash.gguf" in joined

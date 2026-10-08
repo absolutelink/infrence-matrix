@@ -10,14 +10,18 @@ still merged (section values win on key conflicts) for hand-rolled
 configs. None-skip semantics hold: absent or None values are never
 emitted; the engine keeps its own default.
 
-Port rule: halogen exposes an API port and a private engine port. When
-not pinned they default to `PROVIDER_PORT + 1` / `PROVIDER_PORT + 2`
-from the container env. Resolution is ATOMIC (Phase 12 D3 lesson): the
-pair is honored only when BOTH ports come from the same source, so a
-half-migrated config can never mix a `networking` api_port with a
-legacy top-level engine_port.
+Port rule: halogen exposes an API port and a private engine port. Since the
+port model overhaul these are the agent's PRIVATE concern: the operator can no
+longer pin them (the schema's `networking` port fields were removed), so the
+driver allocates TWO distinct OS-assigned free loopback ports per backend at
+start (bind `127.0.0.1:0`, read back, release) via :func:`allocate_ports`. Two
+halogen backends on one agent therefore never collide, and the admin never
+learns either port (it dials the agent's single env `PROVIDER_PORT` and routes by
+model).
 """
 
+import contextlib
+import socket
 from typing import Any
 
 # Fixed env always set for a halogen process.
@@ -47,9 +51,9 @@ ENV_MAP: dict[str, str] = {
 # backend_config sections whose leaf keys flatten into the semantic
 # `options` dict consumed by ENV_MAP / build_env (Phase 12). `artifacts`
 # is excluded: the driver resolves those descriptors to local paths and
-# passes them to build_env explicitly. `networking` ports ride along
-# harmlessly — ENV_MAP has no key for them; the driver reads ports via
-# resolve_ports().
+# passes them to build_env explicitly. The `networking` section no longer
+# carries ports (the port model overhaul removed those schema fields); the
+# driver allocates the (api, engine) pair via allocate_ports().
 CONFIG_SECTIONS: tuple[str, ...] = (
     "cache",
     "concurrency",
@@ -78,33 +82,31 @@ def flatten_options(cfg: dict[str, Any]) -> dict[str, Any]:
     return flat
 
 
-def resolve_ports(cfg: dict[str, Any], provider_port: int) -> tuple[int, int]:
-    """Resolve the (api_port, engine_port) pair for this instance.
+def _free_port() -> int:
+    """Ask the OS for a free loopback port (bind ``127.0.0.1:0``, read back,
+    release)."""
+    with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
-    Each source is ATOMIC — a pair is honored only when both ports come
-    from the same source, so a half-migrated config can never mix a
-    `networking` api_port with a legacy top-level engine_port.
-    Resolution order:
 
-    1. `networking` section with BOTH `api_port` and `engine_port`.
-    2. Legacy top-level `api_port` (or its `backend_port` alias) AND
-       `engine_port` (both present).
-    3. The default pair derived from the container's PROVIDER_PORT
-       (api = PROVIDER_PORT + 1, engine = PROVIDER_PORT + 2).
+def allocate_ports() -> tuple[int, int]:
+    """Allocate a DISTINCT ``(api_port, engine_port)`` pair of OS-assigned free
+    loopback ports for one halogen backend.
+
+    Port model overhaul: the operator no longer pins ports (the schema's
+    `networking` port fields were removed), so every backend gets a fresh,
+    private pair the admin never sees. The two ports are guaranteed distinct so
+    the API and engine never collide within a single backend; distinctness across
+    backends follows from the OS handing out free ports. A tiny TOCTOU window
+    exists between probing and binding; a stolen port makes the engine fail to
+    bind and exit early, surfacing as a boot error the admin scheduler re-drives.
     """
-    networking = cfg.get("networking")
-    if isinstance(networking, dict):
-        api = networking.get("api_port")
-        engine = networking.get("engine_port")
-        if api is not None and engine is not None:
-            return int(api), int(engine)
-    api = cfg.get("api_port")
-    if api is None:
-        api = cfg.get("backend_port")
-    engine = cfg.get("engine_port")
-    if api is not None and engine is not None:
-        return int(api), int(engine)
-    return provider_port + 1, provider_port + 2
+    api = _free_port()
+    engine = _free_port()
+    while engine == api:
+        engine = _free_port()
+    return api, engine
 
 
 def build_env(

@@ -3,8 +3,9 @@
 Wires `HalogenFlashBackend` into the generic provider machinery
 (llama-cpp/mock pattern): register once, drive the shared
 BackendLifecycle from `backend.start` / `backend.stop`, keep the admin
-WS alive with `run_forever`, serve the /v1 surface on PROVIDER_PORT.
-Boot is admin-driven.
+WS alive with `run_forever`, serve the agent's single /v1 surface on
+PROVIDER_PORT (routing each request to a backend by its ``model`` =
+definition alias). Boot is admin-driven.
 
 This package also demonstrates the **usage-normalization override**: the
 driver normalizes the backend's non-spec usage into a spec dict before
@@ -31,7 +32,7 @@ from provider_lib.metrics import (
 )
 from provider_lib.ops import emit_backend_status_snapshot, install_backend_ops
 from provider_lib.registry import BackendHandle, BackendRegistry
-from provider_lib.serve import MultiPortServer
+from provider_lib.serve import AgentServer
 from provider_lib.wire import Frame, InstanceStatusValue
 
 from provider_halogen_flash.driver import SCHEMA, HalogenFlashBackend
@@ -189,34 +190,38 @@ def build_registry(client: AdminClient, result: RegistrationResult) -> BackendRe
 
     halogen-flash declares ``x-max-running-backends: 1``, so in practice the
     admin places at most one backend here; the registry keeps the code path
-    uniform with the other providers.
+    uniform with the other providers. The agent's single ``/v1`` surface routes
+    by the request ``model`` (= definition alias); the engine ports come from the
+    static MACHINE_UID-derived pair, not the assignment.
     """
     registry = BackendRegistry()
     for backend in result.backends:
         iid = backend.get("instance_id")
         if iid is None:  # pragma: no cover - admin always assigns an id
             continue
-        port = backend.get("port")
-        serve_port = port if isinstance(port, int) else None
         definition = backend.get("definition") or {}
+        raw_alias = definition.get("alias")
+        alias = raw_alias if isinstance(raw_alias, str) else None
         backend_config = definition.get("backend_config") or {}
         lifecycle = make_lifecycle(client, backend_config, instance_id=str(iid))
         config_state = ConfigState()
         _apply_backend(lifecycle, backend, config_state)
-        registry.add(BackendHandle(str(iid), lifecycle, config_state, port=serve_port))
+        # Port model overhaul: alias for model routing; no per-backend port.
+        registry.add(BackendHandle(str(iid), lifecycle, config_state, alias=alias))
     return registry
 
 
 def make_handle(client: AdminClient, entry: dict[str, Any]) -> BackendHandle:
     """Build a drivable halogen-flash lifecycle for a newly-assigned backend."""
     iid = str(entry["instance_id"])
-    port = entry.get("port")
-    serve_port = port if isinstance(port, int) else None
+    raw_alias = entry.get("alias")
+    alias = raw_alias if isinstance(raw_alias, str) else None
     backend_config = entry.get("backend_config") or {}
     lifecycle = make_lifecycle(client, backend_config, instance_id=iid)
     config_state = ConfigState()
     _apply_assignment(lifecycle, entry, config_state)
-    return BackendHandle(iid, lifecycle, config_state, port=serve_port)
+    # Port model overhaul: alias for model routing; no per-backend port.
+    return BackendHandle(iid, lifecycle, config_state, alias=alias)
 
 
 def install_command_handlers(
@@ -486,11 +491,11 @@ async def run_async() -> None:
             on_disconnected=on_disconnected,
         )
     )
-    # Slice 6: serve each hosted backend's /v1 on its own port (base_port +
-    # offset); a single-backend agent yields exactly one listener on
-    # PROVIDER_PORT — identical to the pre-slice-6 behavior. The usage
-    # normalization override is preserved on every served backend.
-    server = MultiPortServer(
+    # Port model overhaul: serve the agent's single /v1 surface on
+    # settings.PROVIDER_PORT and route each request to a backend by model (the
+    # request's `model` == the definition alias). One listener, no per-backend
+    # port churn. The usage normalization override is preserved on the surface.
+    server = AgentServer(
         settings,
         PROVIDER_TYPE,
         VERSION,

@@ -6,9 +6,11 @@ Phase 4 `BackendDriver` contract.
 Halogen specifics:
 
 - **Two ports.** The process exposes an OpenAI-compatible API port and a
-  private engine port. `api_port` defaults to PROVIDER_PORT + 1,
-  `engine_port` to PROVIDER_PORT + 2. Health and all /v1 traffic go to
-  the API port; the engine port only appears in HALOGEN_ENGINE.
+  private engine port. Since the port model overhaul the driver allocates two
+  distinct OS-assigned free loopback ports per backend at start (the admin never
+  learns them; it dials the agent's single env `PROVIDER_PORT` and routes by
+  model). Health and all /v1 traffic go to the API port; the engine port only
+  appears in HALOGEN_ENGINE.
 - **Env-configured.** Almost all configuration flows through HALOGEN_*
   env vars (see `provider_halogen.env`); argv is just the entrypoint
   word `all`. Phase 12 sections flatten into the semantic options dict
@@ -45,11 +47,11 @@ from provider_lib.schema import load_schema, validate_backend_config
 from provider_lib.wire import BackendStatusValue
 
 from provider_halogen.env import (
+    allocate_ports,
     build_argv,
     build_env,
     effective_capacity,
     flatten_options,
-    resolve_ports,
 )
 
 logger = logging.getLogger("provider.halogen")
@@ -83,19 +85,16 @@ class HalogenBackend(BackendDriver):
         *,
         progress_cb: ProgressCallback | None = None,
         status_cb: StatusCallback | None = None,
-        serve_port: int | None = None,
     ) -> None:
         self._settings = settings
         self._config = backend_config or {}
         self._progress_cb = progress_cb
         self._status_cb = status_cb
         self._binary = settings.HALOGEN_SERVER_PATH
-        # Slice 6: the (api, engine) pair derives from the backend's
-        # admin-facing assignment port (base_port + offset) so two halogen
-        # backends on one agent never collide; ``None`` keeps the
-        # single-backend default (PROVIDER_PORT + 1 / + 2).
-        self._serve_port = serve_port
-        self._ports = self._resolve_ports()
+        # Port model overhaul: the (api, engine) pair is a private concern
+        # allocated at start as two OS-assigned free loopback ports (the admin
+        # never learns them). ``None`` until :meth:`start` binds it.
+        self._ports: tuple[int, int] | None = None
         self._proc: subprocess.Popen[str] | None = None
         # Legacy merges stderr into stdout (single pipe); the ring labels
         # merged lines "stdout".
@@ -105,15 +104,6 @@ class HalogenBackend(BackendDriver):
         # Phase 9: local paths resolved during the last start, used by
         # storage.prune_unused as the "referenced artifact set".
         self.resolved_artifacts: list[str] = []
-
-    def _resolve_ports(self) -> tuple[int, int]:
-        # Phase 12: `networking.{api_port,engine_port}`, atomic with the
-        # legacy top-level keys (see env.resolve_ports). The default base is
-        # this backend's serve port (slice 6) or the agent's PROVIDER_PORT.
-        base = self._serve_port
-        if base is None:
-            base = self._settings.PROVIDER_PORT
-        return resolve_ports(self._config, base)
 
     def attach_status_callback(self, emit: StatusCallback) -> None:
         """Bind the lifecycle's out-of-band status reporter.
@@ -135,7 +125,8 @@ class HalogenBackend(BackendDriver):
         self._config = backend_config or {}
         for err in validate_backend_config(SCHEMA, self._config):
             logger.warning("backend_config schema violation: %s", err)
-        self._ports = self._resolve_ports()
+        # The (api, engine) pair is allocated at start (OS-assigned free ports),
+        # never read from config — nothing to recompute here.
         # Config changed: previously resolved artifacts are stale.
         self.resolved_artifacts = []
 
@@ -145,17 +136,17 @@ class HalogenBackend(BackendDriver):
         return flatten_options(self._config)
 
     @property
-    def api_port(self) -> int:
-        return self._ports[0]
+    def api_port(self) -> int | None:
+        return self._ports[0] if self._ports is not None else None
 
     @property
-    def engine_port(self) -> int:
-        return self._ports[1]
+    def engine_port(self) -> int | None:
+        return self._ports[1] if self._ports is not None else None
 
     @property
-    def backend_port(self) -> int:
+    def backend_port(self) -> int | None:
         """The port the admin-facing streams come from (the API port)."""
-        return self._ports[0]
+        return self._ports[0] if self._ports is not None else None
 
     @property
     def base_url(self) -> str:
@@ -235,6 +226,10 @@ class HalogenBackend(BackendDriver):
             raise RuntimeError(f"halogen entrypoint not found: {self._binary}")
         checkpoint_path, tokenizer_path = await self._resolve_artifacts()
         self.resolved_artifacts = [checkpoint_path, tokenizer_path]
+        # Port model overhaul: allocate a private OS-assigned (api, engine) pair
+        # now (the admin never sees it). A stolen port makes the engine fail to
+        # bind and exit early, surfacing as a boot error the scheduler re-drives.
+        self._ports = allocate_ports()
         api_port, engine_port = self._ports
         env = build_env(
             self._options(),
@@ -480,6 +475,9 @@ class HalogenBackend(BackendDriver):
     async def stop(self) -> None:
         proc = self._proc
         self._proc = None
+        # Port model overhaul: the (api, engine) pair is allocated per start, so
+        # clear it here to keep the "None until start" invariant between boots.
+        self._ports = None
         if proc is not None and proc.poll() is None:
             # The entrypoint spawns the engine + API as children; kill the
             # process group so no child survives a failed stop.

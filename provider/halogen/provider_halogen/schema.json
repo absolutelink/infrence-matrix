@@ -227,29 +227,10 @@
     "networking": {
       "type": "object",
       "title": "Networking / Ports",
-      "description": "The (api, engine) port pair. Resolution is ATOMIC (Phase 12 D3 lesson): the pair is honored only when BOTH ports come from the same source (this section, or the legacy top-level keys); a lone half is ignored and the full default pair derived from the container's PROVIDER_PORT is used instead (api = PROVIDER_PORT+1, engine = PROVIDER_PORT+2).",
+      "description": "Deprecated: halogen ports are no longer operator-configurable. Since the port model overhaul each backend's (api, engine) pair is an OS-assigned private loopback port allocated at start; the admin never learns them. This section accepts no properties.",
       "x-order": 7,
       "additionalProperties": false,
-      "properties": {
-        "api_port": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 65535,
-          "title": "API port",
-          "description": "Halogen API listen port (all /v1 traffic + health, exported as HALOGEN_API_PORT). Must be pinned together with engine_port; alone it is ignored in favor of the default pair (no schema default).",
-          "x-flag": "HALOGEN_API_PORT",
-          "x-order": 1
-        },
-        "engine_port": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 65535,
-          "title": "Engine port",
-          "description": "Private engine port (exported as HALOGEN_PORT and referenced via HALOGEN_ENGINE). Must be pinned together with api_port; alone it is ignored in favor of the default pair (no schema default).",
-          "x-flag": "HALOGEN_PORT",
-          "x-order": 2
-        }
-      }
+      "properties": {}
     }
   },
   "$defs": {

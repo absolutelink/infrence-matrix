@@ -9,8 +9,10 @@ llama-cpp/mock pattern:
   3. Command handlers: backend.start / backend.stop drive the shared
      lifecycle; metrics.assign / metrics.unassign start/stop the
      machine-level metrics emitter.
-  4. Serve the provider /v1 surface (built by provider_lib) on
-     PROVIDER_PORT; the backend_port defaults to PROVIDER_PORT + 1.
+  4. Serve the agent's single /v1 surface (built by provider_lib) on
+     PROVIDER_PORT; each request is routed to a backend by its ``model``
+     (= definition alias). Each backend's gufo engine binds a private
+     OS-assigned local port the admin never sees.
 
 Boot is admin-driven: after connect the backend stays STOPPED until the
 admin sends `backend.start`. The backend_config comes from the
@@ -40,7 +42,7 @@ from provider_lib.metrics import (
 )
 from provider_lib.ops import emit_backend_status_snapshot, install_backend_ops
 from provider_lib.registry import BackendHandle, BackendRegistry
-from provider_lib.serve import MultiPortServer
+from provider_lib.serve import AgentServer
 from provider_lib.wire import Frame, InstanceStatusValue
 
 from provider_gufo.driver import SCHEMA, GufoBackend
@@ -86,21 +88,18 @@ def make_driver(
     settings: ProviderSettings,
     backend_config: dict[str, Any],
     client: AdminClient | None = None,
-    serve_port: int | None = None,
 ) -> GufoBackend:
     """Build the driver with progress/log events routed to the admin.
 
-    ``serve_port`` (slice 6) is this backend's admin-facing port; the engine
-    binds to ``serve_port + 1`` so backends on one agent never collide.
+    Port model overhaul: the engine's private local port is allocated by the
+    driver at start (OS-assigned free port); nothing is threaded in here.
     """
 
     async def on_progress(payload: dict[str, Any]) -> None:
         if client is not None:
             await client.send_event("download.progress", payload)
 
-    return GufoBackend(
-        settings, backend_config, progress_cb=on_progress, serve_port=serve_port
-    )
+    return GufoBackend(settings, backend_config, progress_cb=on_progress)
 
 
 def make_lifecycle(
@@ -108,10 +107,9 @@ def make_lifecycle(
     backend_config: dict[str, Any] | None = None,
     *,
     instance_id: str | None = None,
-    serve_port: int | None = None,
 ):
-    """Build the gufo lifecycle with status events to the admin (slice 6:
-    keyed to THIS backend's ``instance_id``)."""
+    """Build the gufo lifecycle with status events to the admin (keyed to THIS
+    backend's ``instance_id``)."""
     settings = client.settings
 
     def _iid() -> str | None:
@@ -132,9 +130,7 @@ def make_lifecycle(
             payload["instance_id"] = iid
         await client.send_event("backend.status", payload)
 
-    driver = make_driver(
-        settings, backend_config or {}, client=client, serve_port=serve_port
-    )
+    driver = make_driver(settings, backend_config or {}, client=client)
     return BackendLifecycle(
         driver, capacity=DEFAULT_CAPACITY, status_callback=emit, instance_id=_iid()
     )
@@ -190,37 +186,40 @@ def _apply_assignment(
 
 
 def build_registry(client: AdminClient, result: RegistrationResult) -> BackendRegistry:
-    """Host one drivable lifecycle per backend the admin placed on this agent."""
+    """Host one drivable lifecycle per backend the admin placed on this agent.
+
+    The agent's single ``/v1`` surface routes inference by the request ``model``
+    (= definition alias); each backend's engine binds its own private port.
+    """
     registry = BackendRegistry()
     for backend in result.backends:
         iid = backend.get("instance_id")
         if iid is None:  # pragma: no cover - admin always assigns an id
             continue
-        port = backend.get("port")
-        serve_port = port if isinstance(port, int) else None
         definition = backend.get("definition") or {}
+        raw_alias = definition.get("alias")
+        alias = raw_alias if isinstance(raw_alias, str) else None
         backend_config = definition.get("backend_config") or {}
-        lifecycle = make_lifecycle(
-            client, backend_config, instance_id=str(iid), serve_port=serve_port
-        )
+        lifecycle = make_lifecycle(client, backend_config, instance_id=str(iid))
         config_state = ConfigState()
         _apply_backend(lifecycle, backend, config_state)
-        registry.add(BackendHandle(str(iid), lifecycle, config_state, port=serve_port))
+        # Port model overhaul: the handle carries its alias so the agent's single
+        # /v1 surface routes by model; no per-backend port.
+        registry.add(BackendHandle(str(iid), lifecycle, config_state, alias=alias))
     return registry
 
 
 def make_handle(client: AdminClient, entry: dict[str, Any]) -> BackendHandle:
-    """Build a drivable gufo lifecycle for a newly-assigned backend (slice 6)."""
+    """Build a drivable gufo lifecycle for a newly-assigned backend."""
     iid = str(entry["instance_id"])
-    port = entry.get("port")
-    serve_port = port if isinstance(port, int) else None
+    raw_alias = entry.get("alias")
+    alias = raw_alias if isinstance(raw_alias, str) else None
     backend_config = entry.get("backend_config") or {}
-    lifecycle = make_lifecycle(
-        client, backend_config, instance_id=iid, serve_port=serve_port
-    )
+    lifecycle = make_lifecycle(client, backend_config, instance_id=iid)
     config_state = ConfigState()
     _apply_assignment(lifecycle, entry, config_state)
-    return BackendHandle(iid, lifecycle, config_state, port=serve_port)
+    # Port model overhaul: alias for model routing; no per-backend port.
+    return BackendHandle(iid, lifecycle, config_state, alias=alias)
 
 
 def install_command_handlers(
@@ -496,10 +495,11 @@ async def run_async() -> None:
             on_disconnected=on_disconnected,
         )
     )
-    # Slice 6: serve each hosted backend's /v1 on its own port (base_port +
-    # offset); a single-backend agent yields exactly one listener on
-    # PROVIDER_PORT — identical to the pre-slice-6 behavior.
-    server = MultiPortServer(settings, PROVIDER_TYPE, VERSION, registry)
+    # Port model overhaul: serve the agent's single /v1 surface on
+    # settings.PROVIDER_PORT and route each request to a backend by model (the
+    # request's `model` == the definition alias). One listener, no per-backend
+    # port churn — a backend added by an assignments push is routable immediately.
+    server = AgentServer(settings, PROVIDER_TYPE, VERSION, registry)
     serve_task = asyncio.create_task(server.serve_forever())
     try:
         await serve_task

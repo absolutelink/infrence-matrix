@@ -1,12 +1,14 @@
-"""Slice 6 serve guard: uvicorn binds each backend on a single ``port``.
+"""Serve guards for the halogen package.
 
 `uvicorn.Config` has no `base_port` kwarg and takes no `**kwargs`, so a
-`base_port=` there crashes the container at startup. Slice 6 moved per-backend
-HTTP serving into :class:`provider_lib.serve.MultiPortServer` (one uvicorn
-listener per hosted backend, each on its assignment port). This test (a) proves
-`base_port` is invalid and `port` is valid, (b) asserts the shared server binds
-with `port=` and never `base_port=`, and (c) asserts the package's `run_async`
-delegates serving to `MultiPortServer` (no stray `base_port=`).
+`base_port=` there crashes the container at startup. The port model overhaul
+serves the agent's single ``/v1`` surface on ``PROVIDER_PORT`` via
+:class:`provider_lib.serve.AgentServer` (one uvicorn listener, routing by model);
+the legacy :class:`provider_lib.serve.MultiPortServer` (one listener per backend)
+remains for not-yet-migrated providers. This test (a) proves `base_port` is
+invalid and `port` is valid, (b) asserts the shared serve module binds with
+`port=` and never `base_port=`, and (c) asserts the package's `run_async`
+delegates serving to `AgentServer` with no per-backend `serve_port` threading.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ def test_uvicorn_config_rejects_base_port() -> None:
     assert cfg.port == 8081
 
 
-def test_multi_port_server_binds_on_port_not_base_port() -> None:
+def test_serve_binds_on_port_not_base_port() -> None:
     from provider_lib import serve
 
     src = inspect.getsource(serve)
@@ -33,9 +35,19 @@ def test_multi_port_server_binds_on_port_not_base_port() -> None:
     assert "port=port" in src
 
 
-def test_run_async_serves_via_multi_port_server() -> None:
+def test_run_async_serves_via_agent_server() -> None:
     import provider_halogen.main as m
 
     src = inspect.getsource(m.run_async)
     assert "base_port=settings.PROVIDER_PORT" not in src
-    assert "MultiPortServer" in src
+    assert "AgentServer" in src
+    assert "MultiPortServer" not in src
+
+
+def test_main_has_no_serve_port_threading() -> None:
+    """Port model overhaul: the driver self-allocates its engine ports, so no
+    ``serve_port`` threading remains anywhere in the package's main module."""
+    import provider_halogen.main as m
+
+    src = inspect.getsource(m)
+    assert "serve_port" not in src

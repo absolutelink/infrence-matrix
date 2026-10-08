@@ -1,9 +1,10 @@
 """Phase 12 halogen schema tests: the shipped schema.json is valid
 2020-12, a canonical sectioned backend_config validates against it, the
 frozen fingerprint pins the consensus contract, the sections→options
-adapter + env build honor every wired field, port resolution is atomic,
-and the old flat shape (top-level model/tokenizer/ports + options blob)
-is rejected at the top level."""
+adapter + env build honor every wired field, ports are OS-assigned free
+pairs (no operator pinning since the port model overhaul), and the old
+flat shape (top-level model/tokenizer/ports + options blob) is rejected
+at the top level."""
 
 import json
 from typing import Any
@@ -15,9 +16,9 @@ from provider_halogen.driver import SCHEMA
 from provider_halogen.env import (
     CONFIG_SECTIONS,
     ENV_MAP,
+    allocate_ports,
     build_env,
     flatten_options,
-    resolve_ports,
 )
 from provider_halogen.main import PROVIDER_TYPE
 
@@ -37,7 +38,7 @@ CANONICAL_CONFIG: dict[str, Any] = {
     "quantization": {"w4a4": 1, "w4a4_excl": "attn"},
     "speculative": {"drafter": "mtp"},
     "server": {"max_tokens_cap": 8192, "keepalive_timeout": 60, "sse_keepalive_s": 15},
-    "networking": {"api_port": 8082, "engine_port": 8083},
+    "networking": {},
 }
 
 
@@ -73,7 +74,10 @@ def test_schema_has_the_planned_sections() -> None:
 # fleet consensus contract (docs/ws-protocol.md §2). If you change
 # schema.json, every known halogen instance must re-register with the
 # new file (or the operator force-commits); update this pin deliberately.
-SHIPPED_SCHEMA_FP = "07e4a3b40e6bbb5470f87b2e80f68a6263ceeb3333cfed42a180336cc9d24717"
+# Port model overhaul: the operator-facing `networking.{api_port,engine_port}`
+# fields were removed (the engine now binds an OS-assigned private pair),
+# bumping the fp.
+SHIPPED_SCHEMA_FP = "ae943493f0134e696021970eb259cb7b487e9f57eddc61f95543facc4af592a0"
 
 
 def test_schema_fingerprint_is_stable() -> None:
@@ -131,12 +135,24 @@ def test_schema_rejects_out_of_range_and_bad_enum() -> None:
     cfg = json.loads(json.dumps(CANONICAL_CONFIG))
     cfg["concurrency"]["kv_slots"] = 0
     cfg["quantization"]["w4a4"] = 2
-    cfg["networking"]["api_port"] = 70000
     cfg["cache"]["cache_mb"] = -1
     errors = validate_backend_config(SCHEMA, cfg)
     joined = " ".join(errors)
-    for token in ("kv_slots", "w4a4", "api_port", "cache_mb"):
+    for token in ("kv_slots", "w4a4", "cache_mb"):
         assert token in joined, token
+
+
+def test_schema_rejects_networking_ports() -> None:
+    """Port model overhaul: `networking.{api_port,engine_port}` are no longer
+    accepted schema properties (the engine binds an OS-assigned private pair).
+    The `networking` section's additionalProperties:false rejects them."""
+    for key in ("api_port", "engine_port"):
+        cfg = json.loads(json.dumps(CANONICAL_CONFIG))
+        cfg["networking"][key] = 8082
+        errors = validate_backend_config(SCHEMA, cfg)
+        assert any(key in e for e in errors), key
+    props = SCHEMA["properties"]["networking"]["properties"]
+    assert "api_port" not in props and "engine_port" not in props
 
 
 def test_null_semantics_for_optional_fields() -> None:
@@ -195,11 +211,8 @@ def test_every_field_has_description_and_flag() -> None:
             assert field.get("description"), label
             assert field.get("title"), label
             # Artifact fields are $ref-based (descriptor objects have no
-            # scalar default); networking ports have no schema default
-            # either (the pair derives from PROVIDER_PORT when unpinned).
-            no_scalar_default = "$ref" in field or (
-                section_name == "networking" and key in ("api_port", "engine_port")
-            )
+            # scalar default).
+            no_scalar_default = "$ref" in field
             assert "default" in field or no_scalar_default, label
             # Every field names its exact HALOGEN_* env var.
             assert field.get("x-flag"), label
@@ -219,11 +232,13 @@ def test_all_env_map_keys_are_wired_schema_fields() -> None:
     # Every one of the 12 ENV_MAP keys is present in a section and wired.
     assert set(ENV_MAP.values()) <= wired
     assert unwired == set()
-    # All 12 semantic options + 2 ports + 2 artifacts = 16 fields.
+    # All 12 semantic options + 2 artifacts = 14 fields (the port fields were
+    # removed in the port model overhaul; BIND/ENGINE/API_PORT/PORT env vars are
+    # fixed wiring, not schema fields).
     total_fields = sum(len(sec["properties"]) for sec in SCHEMA["properties"].values())
     assert (
-        total_fields == len(ENV_MAP) + len(FIXED_WIRING) - 2
-    )  # BIND/ENGINE not fields
+        total_fields == len(ENV_MAP) + len(FIXED_WIRING) - 4
+    )  # BIND/ENGINE/API_PORT/PORT not fields
     assert len(wired) == total_fields
 
 
@@ -286,40 +301,26 @@ def test_env_spotcheck_server_section() -> None:
 
 
 def test_env_spotcheck_networking_ports_are_fixed_wiring_not_options() -> None:
-    # Ports flow through resolve_ports + build_env kwargs, never ENV_MAP.
-    cfg = {"networking": {"api_port": 9401, "engine_port": 9402}}
-    api, engine = resolve_ports(cfg, 8081)
-    assert (api, engine) == (9401, 9402)
-    env = _build(cfg, api_port=api, engine_port=engine)
-    assert env["HALOGEN_API_PORT"] == "9401"
-    assert env["HALOGEN_PORT"] == "9402"
+    # Ports flow through build_env kwargs, never ENV_MAP (the driver allocates
+    # them via allocate_ports at start).
+    api, engine = allocate_ports()
+    env = _build({}, api_port=api, engine_port=engine)
+    assert env["HALOGEN_API_PORT"] == str(api)
+    assert env["HALOGEN_PORT"] == str(engine)
+    assert env["HALOGEN_ENGINE"] == f"127.0.0.1:{engine}"
     assert "api_port" not in ENV_MAP and "engine_port" not in ENV_MAP
 
 
-def test_resolve_ports_is_atomic() -> None:
-    # D3 M1 lesson: a half-pinned pair never mixes sources.
-    # Full networking pair wins over everything.
-    assert resolve_ports(
-        {"networking": {"api_port": 1111, "engine_port": 2222}, "engine_port": 9999},
-        8081,
-    ) == (1111, 2222)
-    # networking with only ONE port → ignored, default pair used.
-    assert resolve_ports({"networking": {"api_port": 1111}}, 8081) == (8082, 8083)
-    assert resolve_ports({"networking": {"engine_port": 2222}}, 8081) == (8082, 8083)
-    # Legacy top-level pair (api_port or backend_port alias) honored only
-    # when BOTH present.
-    assert resolve_ports({"api_port": 3333, "engine_port": 4444}, 8081) == (
-        3333,
-        4444,
-    )
-    assert resolve_ports({"backend_port": 3333, "engine_port": 4444}, 8081) == (
-        3333,
-        4444,
-    )
-    assert resolve_ports({"api_port": 3333}, 8081) == (8082, 8083)
-    assert resolve_ports({"engine_port": 4444}, 8081) == (8082, 8083)
-    # Nothing pinned → PROVIDER_PORT + 1 / + 2.
-    assert resolve_ports({}, 8081) == (8082, 8083)
+def test_allocate_ports_returns_distinct_free_ports() -> None:
+    """Port model overhaul: each backend gets a fresh, distinct (api, engine)
+    pair of OS-assigned free loopback ports (no config pinning, no collision)."""
+    pairs = [allocate_ports() for _ in range(5)]
+    for api, engine in pairs:
+        assert isinstance(api, int) and api > 0
+        assert isinstance(engine, int) and engine > 0
+        assert api != engine
+    # Across calls the pairs differ (OS hands out distinct free ports).
+    assert len(set(pairs)) == len(pairs)
 
 
 def test_canonical_config_flattens_into_env_completely() -> None:
@@ -388,22 +389,15 @@ def test_driver_reads_nested_sections(tmp_path) -> None:
     driver = HalogenBackend(settings, {})
     driver.apply_config(CANONICAL_CONFIG)
     assert driver._config == CANONICAL_CONFIG
-    assert driver.api_port == 8082
-    assert driver.engine_port == 8083
+    # Port model overhaul: the (api, engine) pair is NOT config-derived anymore —
+    # it is allocated (OS-assigned free ports) at start, so it stays None until
+    # then.
+    assert driver.api_port is None
+    assert driver.engine_port is None
     assert driver.effective_capacity == 4
-    # Unpinned → default pair from PROVIDER_PORT.
     driver.apply_config({"concurrency": {"kv_slots": 2}})
-    assert driver.api_port == settings.PROVIDER_PORT + 1
-    assert driver.engine_port == settings.PROVIDER_PORT + 2
-    # Legacy top-level pair still honored.
-    driver.apply_config({"api_port": 7777, "engine_port": 7778})
-    assert (driver.api_port, driver.engine_port) == (7777, 7778)
-    # Legacy half-pair is ignored (atomic), not mixed with the section.
-    driver.apply_config({"networking": {"api_port": 6001}, "engine_port": 6002})
-    assert (driver.api_port, driver.engine_port) == (
-        settings.PROVIDER_PORT + 1,
-        settings.PROVIDER_PORT + 2,
-    )
+    assert driver.api_port is None
+    assert driver.engine_port is None
 
 
 def test_apply_config_resets_resolved_artifacts(tmp_path) -> None:

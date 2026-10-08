@@ -92,7 +92,7 @@ CANONICAL_CONFIG: dict[str, Any] = {
     "npu": {
         "npu_models": ["qwen3-embedding-0.6b", "qwen3.5-2b"],
     },
-    "networking": {"api_port": 8200, "engine_port": 8201},
+    "networking": {},
     "troubleshooting": {},
 }
 
@@ -134,7 +134,10 @@ def test_schema_has_the_planned_sections() -> None:
 # schema.json, every known halogen-flash instance must re-register with
 # the new file (or the operator force-commits); update this pin
 # deliberately.
-SHIPPED_SCHEMA_FP = "d3b144d49aa3cb8f0b6c75f9cd469d4d652e55c9529c12814cf817532843e130"
+# Port model overhaul: the operator-facing `networking.{api_port,engine_port}`
+# fields were removed (the engine always uses the static MACHINE_UID-derived
+# pair), bumping the fp.
+SHIPPED_SCHEMA_FP = "3d17412ba54ddc3713e9fc9be984541ca181b9863b9b3e559b75d22d2b9b7bf1"
 
 
 def test_schema_fingerprint_is_stable() -> None:
@@ -198,6 +201,20 @@ def test_schema_rejects_old_flat_shape() -> None:
     joined = " ".join(errors)
     for key in ("model", "tokenizer", "api_port", "engine_port", "options"):
         assert key in joined, key
+
+
+def test_schema_rejects_networking_ports() -> None:
+    """Port model overhaul: `networking.{api_port,engine_port}` are no longer
+    accepted schema properties — the engine always uses the static
+    MACHINE_UID-derived pair (env.derive_static_ports). The `networking`
+    section's additionalProperties:false rejects them."""
+    for key in ("api_port", "engine_port"):
+        cfg = json.loads(json.dumps(CANONICAL_CONFIG))
+        cfg["networking"][key] = 8200
+        errors = validate_backend_config(SCHEMA, cfg)
+        assert any(key in e for e in errors), key
+    props = SCHEMA["properties"]["networking"]["properties"]
+    assert "api_port" not in props and "engine_port" not in props
 
 
 def test_schema_rejects_unknown_keys_in_sections() -> None:
@@ -322,11 +339,10 @@ def test_every_field_has_description_and_flag_or_supported() -> None:
             assert field.get("description"), label
             assert field.get("title"), label
             # Artifact fields are $ref-based (descriptor objects have no
-            # scalar default); ports have no schema default either (the
-            # pair derives from MACHINE_UID for fingerprint stability).
+            # scalar default); the port fields were removed in the port model
+            # overhaul (the engine always uses the static MACHINE_UID pair).
             no_scalar_default = (
                 "$ref" in field
-                or (section_name == "networking" and key in ("api_port", "engine_port"))
                 or "oneOf" in field  # vision_tower: descriptor | bool | path
             )
             assert "default" in field or no_scalar_default, label

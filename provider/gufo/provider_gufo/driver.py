@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import signal
+import socket
 import subprocess
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -65,20 +66,22 @@ SCHEMA: dict[str, Any] = load_schema("provider_gufo")
 AUX_KEYS = ("mmproj", "dflash_model", "dspark_model", "mtp_model")
 
 
-def _read_backend_port(
-    cfg: dict[str, Any], settings: ProviderSettings, serve_port: int | None = None
-) -> int:
-    """Resolve the gufo listen port: `server.backend_port` (Phase 12),
-    the legacy top-level `backend_port`, or ``serve_port + 1`` (the agent's
-    assignment port for this backend, slice 6) falling back to
-    ``PROVIDER_PORT + 1`` when no serve port is threaded."""
-    port = (cfg.get("server") or {}).get("backend_port")
-    if port is None:
-        port = cfg.get("backend_port")
-    if port is not None:
-        return int(port)
-    base = serve_port if serve_port is not None else settings.PROVIDER_PORT
-    return base + 1
+def _pick_free_port() -> int:
+    """Ask the OS for a free loopback port (bind ``127.0.0.1:0``, read back,
+    release).
+
+    Port model overhaul: each backend's gufo engine binds a private local port
+    inside the container that the admin never learns or dials. The agent's single
+    ``/v1`` surface (``PROVIDER_PORT``) routes requests to this backend by model,
+    so the engine port is an internal detail. A tiny TOCTOU window exists between
+    releasing the probed port and the engine binding it; if the port is stolen the
+    engine fails to bind and exits early, surfacing as a boot error that the admin
+    scheduler re-drives on the next ``backend.start`` (which re-picks a fresh
+    port).
+    """
+    with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 class GufoBackend(BackendDriver):
@@ -90,16 +93,15 @@ class GufoBackend(BackendDriver):
         backend_config: dict[str, Any],
         *,
         progress_cb: ProgressCallback | None = None,
-        serve_port: int | None = None,
     ) -> None:
         self._settings = settings
         self._config = backend_config or {}
         self._progress_cb = progress_cb
         self._binary = settings.GUFO_SERVER_PATH
-        # Slice 6: engine binds to ``serve_port + 1`` so backends on one agent
-        # never collide; ``None`` keeps the single-backend default.
-        self._serve_port = serve_port
-        self.backend_port = _read_backend_port(self._config, settings, serve_port)
+        # Port model overhaul: the engine's private local port is allocated at
+        # start (OS-assigned free port), NOT derived from config or the agent's
+        # env port. ``None`` until :meth:`start` binds it.
+        self.backend_port: int | None = None
         self._proc: subprocess.Popen[str] | None = None
         self._log_ring = CursorLogRing(_LOG_BUFFER_LINES)
         self._log_readers: list[asyncio.Task[None]] = []
@@ -128,9 +130,8 @@ class GufoBackend(BackendDriver):
         self._config = backend_config or {}
         for err in validate_backend_config(SCHEMA, self._config):
             logger.warning("backend_config schema violation: %s", err)
-        self.backend_port = _read_backend_port(
-            self._config, self._settings, self._serve_port
-        )
+        # The engine port is allocated at start (OS-assigned free port), never
+        # read from config — nothing to recompute here.
         # Config changed: previously resolved artifacts are stale.
         self.resolved_artifacts = []
 
@@ -227,6 +228,10 @@ class GufoBackend(BackendDriver):
             for key in AUX_KEYS
             if isinstance(options.get(key), str) and options[key]
         ]
+        # Port model overhaul: allocate a private OS-assigned engine port now
+        # (the admin never sees it). A stolen port makes gufo fail to bind and
+        # exit early, surfacing as a boot error the scheduler re-drives.
+        self.backend_port = _pick_free_port()
         cmd = build_command(
             options,
             model_path=model_path,
@@ -468,6 +473,9 @@ class GufoBackend(BackendDriver):
     async def stop(self) -> None:
         proc = self._proc
         self._proc = None
+        # Port model overhaul: the engine port is allocated per start, so clear
+        # it here to keep the "None until start" invariant between boots.
+        self.backend_port = None
         if proc is not None and proc.poll() is None:
             # Kill the whole process group (gufo workers included).
             with contextlib.suppress(ProcessLookupError):

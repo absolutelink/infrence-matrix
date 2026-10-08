@@ -508,15 +508,6 @@
           "x-flag": "--max-request-bytes",
           "x-order": 3
         },
-        "backend_port": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 65535,
-          "title": "Backend port",
-          "description": "gufo listen port. Relocated here from the old top-level 'backend_port'; when absent the driver uses PROVIDER_PORT + 1 from the container env (no schema default).",
-          "x-flag": "--port",
-          "x-order": 4
-        },
         "api_key": {
           "type": [
             "string",

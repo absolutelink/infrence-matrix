@@ -157,8 +157,13 @@ async def test_admin_driven_boot_and_v1_streaming(
         assert detail["capacity"] == CAPACITY
         # kv_slots surfaced as the engine's effective capacity; both ports.
         assert detail["effective_capacity"] == 2
-        assert detail["api_port"] == settings.PROVIDER_PORT + 1
-        assert detail["engine_port"] == settings.PROVIDER_PORT + 2
+        # Port model overhaul: the engine binds an OS-assigned private (api,
+        # engine) pair, so the ack reports positive local ports (not
+        # PROVIDER_PORT + 1 / + 2).
+        assert detail["api_port"] == lifecycle.driver.api_port
+        assert detail["engine_port"] == lifecycle.driver.engine_port
+        assert isinstance(detail["api_port"], int) and detail["api_port"] > 0
+        assert detail["api_port"] != detail["engine_port"]
         await _await_frames(
             lambda f: (
                 f.type == "backend.status"

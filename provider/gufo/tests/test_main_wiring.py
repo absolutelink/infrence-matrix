@@ -156,7 +156,11 @@ async def test_admin_driven_boot_and_v1_streaming(
         assert acks[0].payload["ok"] is True
         assert acks[0].payload["detail"]["backend"] == PROVIDER_TYPE
         assert acks[0].payload["detail"]["capacity"] == CAPACITY
-        assert acks[0].payload["detail"]["backend_port"] == settings.PROVIDER_PORT + 1
+        # Port model overhaul: the engine binds an OS-assigned private port, so
+        # the ack reports a positive local port (no longer PROVIDER_PORT + 1).
+        acked_port = acks[0].payload["detail"]["backend_port"]
+        assert isinstance(acked_port, int) and acked_port > 0
+        assert acked_port == lifecycle.driver.backend_port
         await _await_frames(
             lambda f: (
                 f.type == "backend.status"
