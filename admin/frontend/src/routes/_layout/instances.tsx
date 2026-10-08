@@ -19,14 +19,6 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
-import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -34,6 +26,14 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Label } from "@/components/ui/label"
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet"
 import { Switch } from "@/components/ui/switch"
 import {
   Table,
@@ -288,17 +288,17 @@ function InstancesPage() {
         </div>
       )}
 
-      <StorageActionDialog
+      <StorageActionSheet
         kind="cache"
         instance={cacheTarget}
         onClose={() => setCacheTarget(null)}
       />
-      <StorageActionDialog
+      <StorageActionSheet
         kind="prune"
         instance={pruneTarget}
         onClose={() => setPruneTarget(null)}
       />
-      <BackendActionDialog
+      <BackendActionSheet
         target={backendTarget}
         onClose={() => setBackendTarget(null)}
       />
@@ -322,7 +322,7 @@ function relTime(iso: string | null): string {
   return new Date(iso).toLocaleString()
 }
 
-function StorageActionDialog({
+function StorageActionSheet({
   kind,
   instance,
   onClose,
@@ -370,7 +370,7 @@ function StorageActionDialog({
       : "Deletes MODELS_DIR files not referenced by the driver's resolved artifact set. Refuses to run blind."
 
   return (
-    <Dialog
+    <Sheet
       open={instance !== null}
       onOpenChange={(o) => {
         if (!o) {
@@ -381,18 +381,18 @@ function StorageActionDialog({
         }
       }}
     >
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-          <DialogDescription>
+      <SheetContent className="flex w-full flex-col gap-0 p-0 sm:max-w-xl">
+        <SheetHeader className="border-b">
+          <SheetTitle>{title}</SheetTitle>
+          <SheetDescription>
             {desc} Target:{" "}
             <span className="font-mono">
               {instance?.machine_uid} / {instance?.alias}
             </span>
-          </DialogDescription>
-        </DialogHeader>
+          </SheetDescription>
+        </SheetHeader>
 
-        <div className="space-y-3">
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
           <div className="flex items-center justify-between rounded-lg border p-3">
             <div>
               <Label className="text-sm font-medium">Dry run</Label>
@@ -447,7 +447,7 @@ function StorageActionDialog({
           )}
         </div>
 
-        <DialogFooter>
+        <SheetFooter className="flex-row justify-end border-t">
           <Button
             type="button"
             variant="outline"
@@ -470,9 +470,9 @@ function StorageActionDialog({
                 ? "Preview (dry run)"
                 : "Execute"}
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   )
 }
 
@@ -521,7 +521,7 @@ function BackendActionMenu({
   )
 }
 
-function BackendActionDialog({
+function BackendActionSheet({
   target,
   onClose,
 }: {
@@ -587,24 +587,24 @@ function BackendActionDialog({
   }
 
   return (
-    <Dialog
+    <Sheet
       open={target !== null}
       onOpenChange={(o) => {
         if (!o) reset()
       }}
     >
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>{spec?.label}</DialogTitle>
-          <DialogDescription>
+      <SheetContent className="flex w-full flex-col gap-0 p-0 sm:max-w-xl">
+        <SheetHeader className="border-b">
+          <SheetTitle>{spec?.label}</SheetTitle>
+          <SheetDescription>
             {kind ? desc[kind] : ""} Target:{" "}
             <span className="font-mono">
               {target?.instance.machine_uid} / {target?.instance.alias}
             </span>
-          </DialogDescription>
-        </DialogHeader>
+          </SheetDescription>
+        </SheetHeader>
 
-        <div className="space-y-3">
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
           {spec?.waits && (
             <div className="flex items-center justify-between rounded-lg border p-3">
               <div>
@@ -665,7 +665,7 @@ function BackendActionDialog({
           )}
         </div>
 
-        <DialogFooter>
+        <SheetFooter className="flex-row justify-end border-t">
           <Button type="button" variant="outline" onClick={reset}>
             Close
           </Button>
@@ -677,8 +677,8 @@ function BackendActionDialog({
           >
             {mutation.isPending ? "Sending…" : spec?.label}
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   )
 }

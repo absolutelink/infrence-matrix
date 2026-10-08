@@ -118,7 +118,7 @@ starting a feature, read the linked protocol/doc first.
 | 16 | Machine-scoped provider **agents**: one container → many same-type backends, placement, `max_running_backends` | 🟡 slices 1–6 landed (agents, placement, `max_running` hot-swap + proactive warm-up, `agent.assignments.update` push, real-engine multi-backend-per-process + per-port serving); 7–8 pending |
 | 17 | Per-GPU machine metrics + hardware union: device-isolated agents (one GPU each) merge into a full machine inventory and live snapshot | ✅ Complete |
 | 18 | Embeddings + modality-scoped endpoints: `ProviderDefinition.modality` (`llm`/`embedding`, `audio` reserved), `ProviderType.serves_modalities`, spec `POST /v1/embeddings` via litellm, llama-cpp `--embedding`/`--pooling` + mock fake embeddings | ✅ shipped (all 7 slices green + e2e verified vs local admin + mock) |
-| 19 | Live stats bar (tokens/sec, queue/active, VRAM/GPU + popovers incl. queue clear) + UI ergonomics: create/edit forms → right-side drawers, logs → bottom-docked tabbed panel | 🟡 S0–S3 landed |
+| 19 | Live stats bar (tokens/sec, queue/active, VRAM/GPU + popovers incl. queue clear) + UI ergonomics: create/edit forms → right-side drawers, logs → bottom-docked tabbed panel | 🟡 S0–S4 landed |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
 
@@ -2545,7 +2545,16 @@ as right-side drawers, and a bottom-docked tabbed logs panel.
       `ClearQueueResult` types + `UsageSample.alias`. Mobile hides VRAM +
       prompt detail. tsc/lint/build green. Reviewer: CLEAN (Lows applied:
       `ClearQueueResult` reuse, popover `aria-label`s).
-- [ ] **S4 — forms → right-side `Sheet` drawers.**
+- [x] **S4 — forms → right-side `Sheet` drawers:** DONE:
+      `DefinitionFormSheet`, `MachineFormSheet`, `StorageActionSheet`,
+      `BackendActionSheet`, and the provider-types commit/dismiss sheet —
+      all converted from centered `Dialog` to `Sheet side="right"` with
+      fixed header / `min-h-0 flex-1` scrollable body / pinned footer
+      (LogsSheet pattern); pure container swap (form logic, validation,
+      reset-on-open, close-on-success unchanged). Delete confirmations
+      stay `Dialog`s. tsc/lint/build green. Reviewer: CLEAN (only
+      pre-existing polish noted: storage-footer reset asymmetry,
+      `shrink-0` header hardening — deferred).
 - [ ] **S5 — bottom-docked tabbed logs panel.**
 
 ---

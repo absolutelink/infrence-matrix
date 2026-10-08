@@ -61,6 +61,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet"
 import { Switch } from "@/components/ui/switch"
 import {
   Table,
@@ -204,7 +212,7 @@ function DefinitionsPage() {
         </div>
       )}
 
-      <DefinitionFormDialog
+      <DefinitionFormSheet
         // Remount per target: defaultValues are read only at first mount.
         key={editing?.id ?? (creating ? "create" : "closed")}
         open={creating || editing !== null}
@@ -440,7 +448,7 @@ function DefinitionDetail({
  * AdminService.getProviderType for the selected provider type, with a
  * raw-JSON escape hatch. All other fields keep their previous shape.
  */
-function DefinitionFormDialog({
+function DefinitionFormSheet({
   open,
   definition,
   onClose,
@@ -746,23 +754,23 @@ function DefinitionFormDialog({
   })
 
   return (
-    <Dialog
+    <Sheet
       open={open}
       onOpenChange={(o) => {
         if (!o) onClose()
       }}
     >
-      <DialogContent className="sm:max-w-3xl max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>
+      <SheetContent className="flex w-full flex-col gap-0 p-0 sm:max-w-3xl">
+        <SheetHeader className="border-b">
+          <SheetTitle>
             {isEdit ? `Edit ${definition?.alias}` : "Add definition"}
-          </DialogTitle>
-          <DialogDescription>
+          </SheetTitle>
+          <SheetDescription>
             {isEdit
               ? "Changing backend_config or capacity pushes provider.config.update to every connected instance (results shown after save)."
               : "Agents of the chosen provider type host this definition according to its placement."}
-          </DialogDescription>
-        </DialogHeader>
+          </SheetDescription>
+        </SheetHeader>
         <Form {...form}>
           <form
             onSubmit={form.handleSubmit((v) => {
@@ -777,349 +785,364 @@ function DefinitionFormDialog({
               form.clearErrors("agents")
               mutation.mutate(v)
             })}
-            className="space-y-4"
+            className="flex min-h-0 flex-1 flex-col"
           >
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <FormField
-                control={form.control}
-                name="alias"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Alias</FormLabel>
-                    <FormControl>
-                      <Input {...field} placeholder="mock-model" />
-                    </FormControl>
-                    <FormDescription>
-                      Public model name used by clients in /v1.
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="provider_type"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Provider type</FormLabel>
-                    <Select
-                      onValueChange={(v) => {
-                        field.onChange(v)
-                        // Agents are type-specific: a retype invalidates any
-                        // cherry-picked selection.
-                        form.setValue("agents", [])
-                      }}
-                      value={field.value}
-                      disabled={
-                        isEdit && (definition?.instances?.length ?? 0) > 0
-                      }
-                    >
-                      <FormControl>
-                        <SelectTrigger>
-                          <SelectValue placeholder="Select type" />
-                        </SelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        {providerTypes.map((t) => (
-                          <SelectItem key={t.name} value={t.name}>
-                            {t.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <FormDescription>
-                      {isEdit && (definition?.instances?.length ?? 0) > 0
-                        ? "Locked: instances are attached (changing the type would break their binding)."
-                        : "The registered type whose schema renders backend_config and whose agents can host this model."}
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="modality"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Modality</FormLabel>
-                    <Select
-                      onValueChange={(v) => field.onChange(v)}
-                      value={field.value}
-                      disabled={
-                        isEdit && (definition?.instances?.length ?? 0) > 0
-                      }
-                    >
-                      <FormControl>
-                        <SelectTrigger>
-                          <SelectValue placeholder="Select modality" />
-                        </SelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        {servedModalities.map((m) => (
-                          <SelectItem key={m} value={m} className="capitalize">
-                            {m}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <FormDescription>
-                      {isEdit && (definition?.instances?.length ?? 0) > 0
-                        ? "Locked: instances are attached (changing the modality would break their binding)."
-                        : providerType
-                          ? `Endpoint kind this alias serves. "${providerType}" hosts: ${servedModalities.join(", ")}.`
-                          : "Pick a provider type first — available modalities depend on it."}
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </div>
-
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-              <FormField
-                control={form.control}
-                name="capacity"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Capacity</FormLabel>
-                    <FormControl>
-                      <Input type="number" min={1} step={1} {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="vram_required_bytes"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>VRAM required (bytes)</FormLabel>
-                    <FormControl>
-                      <Input
-                        type="number"
-                        min={0}
-                        step={1024 ** 3}
-                        {...field}
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="idle_timeout_seconds"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Idle timeout (s)</FormLabel>
-                    <FormControl>
-                      <Input type="number" min={0} step={30} {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </div>
-
-            <div className="space-y-3 rounded-lg border p-3">
-              <FormLabel className="text-sm font-semibold">Placement</FormLabel>
-              <FormField
-                control={form.control}
-                name="agent_placement"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Agent placement</FormLabel>
-                    <Select onValueChange={field.onChange} value={field.value}>
-                      <FormControl>
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        <SelectItem value="any_of_type">
-                          Any agent of this type
-                        </SelectItem>
-                        <SelectItem value="specific">
-                          Specific agents…
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <FormDescription>
-                      {providerType
-                        ? `any_of_type hosts on every "${providerType}" agent; specific cherry-picks individual agents.`
-                        : "Pick a provider type first — placement lists that type's agents."}
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              {placement === "specific" && (
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <FormField
                   control={form.control}
-                  name="agents"
+                  name="alias"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>
-                        Host on{" "}
-                        <span className="font-mono">{providerType || "—"}</span>{" "}
-                        agents
-                      </FormLabel>
-                      {eligibleAgents.length === 0 ? (
-                        <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
-                          No {providerType || "—"} agents registered yet. Start
-                          a provider container of this type, then pick it here.
-                        </p>
-                      ) : (
-                        <div className="max-h-48 space-y-1 overflow-auto rounded-md border p-2">
-                          {eligibleAgents.map((a) => {
-                            const checked = field.value.includes(a.id)
-                            const cbId = `def-agent-${a.id}`
-                            return (
-                              <div
-                                key={a.id}
-                                className="flex items-center gap-2 rounded px-1 py-1 text-sm hover:bg-accent"
-                              >
-                                <Checkbox
-                                  id={cbId}
-                                  checked={checked}
-                                  onCheckedChange={(c) =>
-                                    field.onChange(
-                                      c
-                                        ? [...field.value, a.id]
-                                        : field.value.filter((x) => x !== a.id),
-                                    )
-                                  }
-                                />
-                                <label
-                                  htmlFor={cbId}
-                                  className="flex flex-1 cursor-pointer items-center gap-2"
-                                >
-                                  <span className="font-mono text-xs">
-                                    {a.agent_id}
-                                  </span>
-                                  <span className="text-xs text-muted-foreground">
-                                    @ {a.machine_uid ?? "—"} · :{a.base_port}
-                                  </span>
-                                </label>
-                                <StatusBadge status={a.agent_status} />
-                                {!a.websocket_connected && (
-                                  <span className="text-xs text-muted-foreground">
-                                    (ws down)
-                                  </span>
-                                )}
-                              </div>
-                            )
-                          })}
-                        </div>
-                      )}
+                      <FormLabel>Alias</FormLabel>
+                      <FormControl>
+                        <Input {...field} placeholder="mock-model" />
+                      </FormControl>
+                      <FormDescription>
+                        Public model name used by clients in /v1.
+                      </FormDescription>
                       <FormMessage />
                     </FormItem>
                   )}
                 />
-              )}
-            </div>
+                <FormField
+                  control={form.control}
+                  name="provider_type"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Provider type</FormLabel>
+                      <Select
+                        onValueChange={(v) => {
+                          field.onChange(v)
+                          // Agents are type-specific: a retype invalidates any
+                          // cherry-picked selection.
+                          form.setValue("agents", [])
+                        }}
+                        value={field.value}
+                        disabled={
+                          isEdit && (definition?.instances?.length ?? 0) > 0
+                        }
+                      >
+                        <FormControl>
+                          <SelectTrigger>
+                            <SelectValue placeholder="Select type" />
+                          </SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
+                          {providerTypes.map((t) => (
+                            <SelectItem key={t.name} value={t.name}>
+                              {t.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <FormDescription>
+                        {isEdit && (definition?.instances?.length ?? 0) > 0
+                          ? "Locked: instances are attached (changing the type would break their binding)."
+                          : "The registered type whose schema renders backend_config and whose agents can host this model."}
+                      </FormDescription>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="modality"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Modality</FormLabel>
+                      <Select
+                        onValueChange={(v) => field.onChange(v)}
+                        value={field.value}
+                        disabled={
+                          isEdit && (definition?.instances?.length ?? 0) > 0
+                        }
+                      >
+                        <FormControl>
+                          <SelectTrigger>
+                            <SelectValue placeholder="Select modality" />
+                          </SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
+                          {servedModalities.map((m) => (
+                            <SelectItem
+                              key={m}
+                              value={m}
+                              className="capitalize"
+                            >
+                              {m}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <FormDescription>
+                        {isEdit && (definition?.instances?.length ?? 0) > 0
+                          ? "Locked: instances are attached (changing the modality would break their binding)."
+                          : providerType
+                            ? `Endpoint kind this alias serves. "${providerType}" hosts: ${servedModalities.join(", ")}.`
+                            : "Pick a provider type first — available modalities depend on it."}
+                      </FormDescription>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              </div>
 
-            <div className="space-y-2">
-              <div className="flex items-center justify-between gap-2">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                <FormField
+                  control={form.control}
+                  name="capacity"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Capacity</FormLabel>
+                      <FormControl>
+                        <Input type="number" min={1} step={1} {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="vram_required_bytes"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>VRAM required (bytes)</FormLabel>
+                      <FormControl>
+                        <Input
+                          type="number"
+                          min={0}
+                          step={1024 ** 3}
+                          {...field}
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="idle_timeout_seconds"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Idle timeout (s)</FormLabel>
+                      <FormControl>
+                        <Input type="number" min={0} step={30} {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              </div>
+
+              <div className="space-y-3 rounded-lg border p-3">
                 <FormLabel className="text-sm font-semibold">
-                  backend_config
+                  Placement
                 </FormLabel>
-                {schemaHasFields && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={toggleRawMode}
-                  >
-                    {effectiveRawMode ? (
-                      <>
-                        <FormInput /> Schema form
-                      </>
-                    ) : (
-                      <>
-                        <Code2 /> Raw JSON
-                      </>
+                <FormField
+                  control={form.control}
+                  name="agent_placement"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Agent placement</FormLabel>
+                      <Select
+                        onValueChange={field.onChange}
+                        value={field.value}
+                      >
+                        <FormControl>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
+                          <SelectItem value="any_of_type">
+                            Any agent of this type
+                          </SelectItem>
+                          <SelectItem value="specific">
+                            Specific agents…
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <FormDescription>
+                        {providerType
+                          ? `any_of_type hosts on every "${providerType}" agent; specific cherry-picks individual agents.`
+                          : "Pick a provider type first — placement lists that type's agents."}
+                      </FormDescription>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                {placement === "specific" && (
+                  <FormField
+                    control={form.control}
+                    name="agents"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>
+                          Host on{" "}
+                          <span className="font-mono">
+                            {providerType || "—"}
+                          </span>{" "}
+                          agents
+                        </FormLabel>
+                        {eligibleAgents.length === 0 ? (
+                          <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+                            No {providerType || "—"} agents registered yet.
+                            Start a provider container of this type, then pick
+                            it here.
+                          </p>
+                        ) : (
+                          <div className="max-h-48 space-y-1 overflow-auto rounded-md border p-2">
+                            {eligibleAgents.map((a) => {
+                              const checked = field.value.includes(a.id)
+                              const cbId = `def-agent-${a.id}`
+                              return (
+                                <div
+                                  key={a.id}
+                                  className="flex items-center gap-2 rounded px-1 py-1 text-sm hover:bg-accent"
+                                >
+                                  <Checkbox
+                                    id={cbId}
+                                    checked={checked}
+                                    onCheckedChange={(c) =>
+                                      field.onChange(
+                                        c
+                                          ? [...field.value, a.id]
+                                          : field.value.filter(
+                                              (x) => x !== a.id,
+                                            ),
+                                      )
+                                    }
+                                  />
+                                  <label
+                                    htmlFor={cbId}
+                                    className="flex flex-1 cursor-pointer items-center gap-2"
+                                  >
+                                    <span className="font-mono text-xs">
+                                      {a.agent_id}
+                                    </span>
+                                    <span className="text-xs text-muted-foreground">
+                                      @ {a.machine_uid ?? "—"} · :{a.base_port}
+                                    </span>
+                                  </label>
+                                  <StatusBadge status={a.agent_status} />
+                                  {!a.websocket_connected && (
+                                    <span className="text-xs text-muted-foreground">
+                                      (ws down)
+                                    </span>
+                                  )}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        )}
+                        <FormMessage />
+                      </FormItem>
                     )}
-                  </Button>
+                  />
                 )}
               </div>
-              {!providerType ? (
-                <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
-                  Select a provider type to load its schema and render
-                  backend_config.
-                </p>
-              ) : schemaLoading ? (
-                <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
-                  Loading {providerType} schema…
-                </p>
-              ) : !schema ? (
-                <p className="rounded-md border border-destructive/40 p-3 text-xs text-destructive">
-                  Provider type "{providerType}" has no committed schema.
-                </p>
-              ) : effectiveRawMode ? (
-                <>
-                  {!schemaHasFields && (
-                    <p className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-500">
-                      <AlertTriangle className="size-3.5" />
-                      This type's committed schema has no fields (permissive
-                      bootstrap) — raw JSON only.
-                    </p>
-                  )}
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <FormLabel className="text-sm font-semibold">
+                    backend_config
+                  </FormLabel>
                   {schemaHasFields && (
-                    <p className="text-xs text-muted-foreground">
-                      Secret fields are omitted from this view — edit them via
-                      the schema form (leave blank to keep the current value).
-                      Saving here keeps stored secrets intact.
-                    </p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={toggleRawMode}
+                    >
+                      {effectiveRawMode ? (
+                        <>
+                          <FormInput /> Schema form
+                        </>
+                      ) : (
+                        <>
+                          <Code2 /> Raw JSON
+                        </>
+                      )}
+                    </Button>
                   )}
-                  <Textarea
-                    value={rawText}
-                    rows={12}
-                    spellCheck={false}
-                    className="font-mono text-xs"
-                    onChange={(e) => {
-                      setRawText(e.target.value)
-                      setRawError(null)
-                    }}
-                  />
-                  {rawError && (
-                    <p className="text-xs text-destructive">{rawError}</p>
-                  )}
-                </>
-              ) : (
-                <SchemaForm
-                  schema={schema}
-                  value={configValue}
-                  onChange={setConfigValue}
-                  extraErrors={extraErrors}
-                />
-              )}
-            </div>
-
-            <FormField
-              control={form.control}
-              name="enabled"
-              render={({ field }) => (
-                <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3">
-                  <div className="space-y-0.5">
-                    <FormLabel>Enabled</FormLabel>
-                    <FormDescription>
-                      Disabled definitions are excluded from scheduling and
-                      hidden from /v1/models.
-                    </FormDescription>
-                  </div>
-                  <FormControl>
-                    <Switch
-                      checked={field.value}
-                      onCheckedChange={field.onChange}
+                </div>
+                {!providerType ? (
+                  <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+                    Select a provider type to load its schema and render
+                    backend_config.
+                  </p>
+                ) : schemaLoading ? (
+                  <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+                    Loading {providerType} schema…
+                  </p>
+                ) : !schema ? (
+                  <p className="rounded-md border border-destructive/40 p-3 text-xs text-destructive">
+                    Provider type "{providerType}" has no committed schema.
+                  </p>
+                ) : effectiveRawMode ? (
+                  <>
+                    {!schemaHasFields && (
+                      <p className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-500">
+                        <AlertTriangle className="size-3.5" />
+                        This type's committed schema has no fields (permissive
+                        bootstrap) — raw JSON only.
+                      </p>
+                    )}
+                    {schemaHasFields && (
+                      <p className="text-xs text-muted-foreground">
+                        Secret fields are omitted from this view — edit them via
+                        the schema form (leave blank to keep the current value).
+                        Saving here keeps stored secrets intact.
+                      </p>
+                    )}
+                    <Textarea
+                      value={rawText}
+                      rows={12}
+                      spellCheck={false}
+                      className="font-mono text-xs"
+                      onChange={(e) => {
+                        setRawText(e.target.value)
+                        setRawError(null)
+                      }}
                     />
-                  </FormControl>
-                </FormItem>
-              )}
-            />
+                    {rawError && (
+                      <p className="text-xs text-destructive">{rawError}</p>
+                    )}
+                  </>
+                ) : (
+                  <SchemaForm
+                    schema={schema}
+                    value={configValue}
+                    onChange={setConfigValue}
+                    extraErrors={extraErrors}
+                  />
+                )}
+              </div>
 
-            <DialogFooter>
+              <FormField
+                control={form.control}
+                name="enabled"
+                render={({ field }) => (
+                  <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3">
+                    <div className="space-y-0.5">
+                      <FormLabel>Enabled</FormLabel>
+                      <FormDescription>
+                        Disabled definitions are excluded from scheduling and
+                        hidden from /v1/models.
+                      </FormDescription>
+                    </div>
+                    <FormControl>
+                      <Switch
+                        checked={field.value}
+                        onCheckedChange={field.onChange}
+                      />
+                    </FormControl>
+                  </FormItem>
+                )}
+              />
+            </div>
+            <SheetFooter className="flex-row justify-end border-t">
               <Button type="button" variant="outline" onClick={onClose}>
                 Cancel
               </Button>
@@ -1130,11 +1153,11 @@ function DefinitionFormDialog({
                     ? "Save & push"
                     : "Create"}
               </Button>
-            </DialogFooter>
+            </SheetFooter>
           </form>
         </Form>
-      </DialogContent>
-    </Dialog>
+      </SheetContent>
+    </Sheet>
   )
 }
 

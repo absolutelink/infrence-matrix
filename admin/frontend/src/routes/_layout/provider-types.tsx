@@ -18,13 +18,13 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet"
 import {
   Table,
   TableBody,
@@ -348,26 +348,26 @@ function ConsensusBanner({ detail }: { detail: ProviderTypeDetail }) {
         </div>
       </AlertDescription>
 
-      <Dialog
+      <Sheet
         open={confirming !== null}
         onOpenChange={(o) => {
           if (!o) setConfirming(null)
         }}
       >
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>
+        <SheetContent className="flex w-full flex-col gap-0 p-0 sm:max-w-lg">
+          <SheetHeader className="border-b">
+            <SheetTitle>
               {confirming === "commit"
                 ? "Force-commit pending schema"
                 : "Dismiss pending schema"}
-            </DialogTitle>
-            <DialogDescription>
+            </SheetTitle>
+            <SheetDescription>
               {confirming === "commit"
                 ? `Promote ${fpShort(c.pending_fingerprint)} to committed for ${detail.name}? Connected instances on the old schema keep running until they upgrade and re-register.`
                 : `Drop the pending schema ${fpShort(c.pending_fingerprint)} for ${detail.name}? Instances will keep being refused until they present the committed fingerprint again.`}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
+            </SheetDescription>
+          </SheetHeader>
+          <SheetFooter className="flex-row justify-end border-t">
             <Button
               type="button"
               variant="outline"
@@ -387,9 +387,9 @@ function ConsensusBanner({ detail }: { detail: ProviderTypeDetail }) {
                   ? "Commit"
                   : "Dismiss"}
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          </SheetFooter>
+        </SheetContent>
+      </Sheet>
     </Alert>
   )
 }

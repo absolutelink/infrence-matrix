@@ -37,6 +37,14 @@ import {
 } from "@/components/ui/form"
 import { Input } from "@/components/ui/input"
 import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet"
+import {
   Table,
   TableBody,
   TableCell,
@@ -130,7 +138,7 @@ function MachinesPage() {
         </div>
       )}
 
-      <MachineFormDialog
+      <MachineFormSheet
         // Remount per target: useForm defaultValues are read only at first
         // mount, so editing B after A would otherwise show A's values.
         key={editing?.id ?? (creating ? "create" : "closed")}
@@ -472,7 +480,7 @@ function MachineSecretPanel({ machine }: { machine: Machine }) {
   )
 }
 
-function MachineFormDialog({
+function MachineFormSheet({
   open,
   machine,
   onClose,
@@ -527,142 +535,144 @@ function MachineFormDialog({
   })
 
   return (
-    <Dialog
+    <Sheet
       open={open}
       onOpenChange={(o) => {
         if (!o) onClose()
       }}
     >
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>{isEdit ? "Edit machine" : "Add machine"}</DialogTitle>
-          <DialogDescription>
+      <SheetContent className="flex w-full flex-col gap-0 p-0 sm:max-w-xl">
+        <SheetHeader className="border-b">
+          <SheetTitle>{isEdit ? "Edit machine" : "Add machine"}</SheetTitle>
+          <SheetDescription>
             {isEdit
               ? "Update machine details. The uid cannot be changed — it is referenced by provider containers and Redis leases."
               : "Register a host that provider instances will register against."}
-          </DialogDescription>
-        </DialogHeader>
+          </SheetDescription>
+        </SheetHeader>
         <Form {...form}>
           <form
             onSubmit={form.handleSubmit((v) => mutation.mutate(v))}
-            className="space-y-4"
+            className="flex min-h-0 flex-1 flex-col"
           >
-            <FormField
-              control={form.control}
-              name="uid"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>UID</FormLabel>
-                  <FormControl>
-                    <Input
-                      {...field}
-                      disabled={isEdit}
-                      placeholder="core-2-111"
-                      className={isEdit ? "opacity-60" : ""}
-                    />
-                  </FormControl>
-                  <FormDescription>
-                    Matches the provider container&apos;s MACHINE_UID env.
-                    {isEdit && " Immutable."}
-                  </FormDescription>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={form.control}
-              name="name"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Name</FormLabel>
-                  <FormControl>
-                    <Input {...field} placeholder="Provider Host 111" />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
               <FormField
                 control={form.control}
-                name="host"
+                name="uid"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Host</FormLabel>
+                    <FormLabel>UID</FormLabel>
                     <FormControl>
-                      <Input {...field} placeholder="hostname" />
+                      <Input
+                        {...field}
+                        disabled={isEdit}
+                        placeholder="core-2-111"
+                        className={isEdit ? "opacity-60" : ""}
+                      />
                     </FormControl>
+                    <FormDescription>
+                      Matches the provider container&apos;s MACHINE_UID env.
+                      {isEdit && " Immutable."}
+                    </FormDescription>
                     <FormMessage />
                   </FormItem>
                 )}
               />
               <FormField
                 control={form.control}
-                name="dns"
+                name="name"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>DNS</FormLabel>
+                    <FormLabel>Name</FormLabel>
                     <FormControl>
-                      <Input {...field} placeholder="box.local" />
+                      <Input {...field} placeholder="Provider Host 111" />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
                 )}
               />
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                <FormField
+                  control={form.control}
+                  name="host"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Host</FormLabel>
+                      <FormControl>
+                        <Input {...field} placeholder="hostname" />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="dns"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>DNS</FormLabel>
+                      <FormControl>
+                        <Input {...field} placeholder="box.local" />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="ip"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>IP</FormLabel>
+                      <FormControl>
+                        <Input {...field} placeholder="10.0.0.5" />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              </div>
               <FormField
                 control={form.control}
-                name="ip"
+                name="total_vram_bytes"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>IP</FormLabel>
+                    <FormLabel>Total VRAM (bytes)</FormLabel>
                     <FormControl>
-                      <Input {...field} placeholder="10.0.0.5" />
+                      <Input
+                        type="number"
+                        min={0}
+                        step={1024 ** 3}
+                        {...field}
+                        disabled={isEdit}
+                        className={isEdit ? "opacity-60" : ""}
+                      />
                     </FormControl>
+                    <FormDescription>
+                      {isEdit
+                        ? "Auto-summed from provider GPU reports (union across agents on this machine)."
+                        : "Scheduler admission budget. Refreshed from provider hardware reports."}
+                    </FormDescription>
                     <FormMessage />
                   </FormItem>
                 )}
               />
+              <p className="text-xs text-muted-foreground">
+                Address preference: dns → host → ip (reachable_address()).
+              </p>
             </div>
-            <FormField
-              control={form.control}
-              name="total_vram_bytes"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Total VRAM (bytes)</FormLabel>
-                  <FormControl>
-                    <Input
-                      type="number"
-                      min={0}
-                      step={1024 ** 3}
-                      {...field}
-                      disabled={isEdit}
-                      className={isEdit ? "opacity-60" : ""}
-                    />
-                  </FormControl>
-                  <FormDescription>
-                    {isEdit
-                      ? "Auto-summed from provider GPU reports (union across agents on this machine)."
-                      : "Scheduler admission budget. Refreshed from provider hardware reports."}
-                  </FormDescription>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <p className="text-xs text-muted-foreground">
-              Address preference: dns → host → ip (reachable_address()).
-            </p>
-            <DialogFooter>
+            <SheetFooter className="flex-row justify-end border-t">
               <Button type="button" variant="outline" onClick={onClose}>
                 Cancel
               </Button>
               <Button type="submit" disabled={mutation.isPending}>
                 {mutation.isPending ? "Saving…" : isEdit ? "Save" : "Create"}
               </Button>
-            </DialogFooter>
+            </SheetFooter>
           </form>
         </Form>
-      </DialogContent>
-    </Dialog>
+      </SheetContent>
+    </Sheet>
   )
 }
 
