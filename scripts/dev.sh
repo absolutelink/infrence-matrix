@@ -173,6 +173,11 @@ up_docker() {
     sleep 1
   done
   curl -sf "$ADMIN_URL/admin/api/health" >/dev/null 2>&1 || { err "admin not healthy"; return 1; }
+  # Phase 17 two-agent GPU-split demo (optional): after this comes up, run
+  #   MOCK_MACHINE_SECRET="$MACHINE_SECRET" MOCK_ASSIGNED_GPU_UUIDS=mock-gpu-1 \
+  #     docker compose -f "$ROOT/compose.yml" --profile two-gpu up -d --build provider-mock provider-mock-2
+  # to add a second mock agent pinned to mock-gpu-2 on the same machine; the
+  # admin unions the two per-GPU reports back to 2 GPUs / 48 GiB.
   seed "provider-mock"
   log "starting mock provider..."
   MOCK_MACHINE_SECRET="$MACHINE_SECRET" MOCK_AGENT_ID="$AGENT_ID" \

@@ -63,6 +63,23 @@ services:
       timeout: 10s
       retries: 3
 
+  # ── Phase 17 two-agent GPU-split demo ────────────────────────────────
+  # The default single mock agent (provider-mock) reports BOTH fake GPUs
+  # (mock-gpu-1 + mock-gpu-2 = 48 GiB), which already exercises the admin's
+  # union-by-uuid + auto-sum of machine.total_vram_bytes.
+  #
+  # To demonstrate a DEVICE-ISOLATED split — two agents on one machine, each
+  # pinned to a single GPU — activate the `two-gpu` profile and pin the primary
+  # agent to mock-gpu-1:
+  #
+  #   MOCK_ASSIGNED_GPU_UUIDS=mock-gpu-1 docker compose --profile two-gpu up
+  #
+  # provider-mock then reports only mock-gpu-1 (24 GiB) and provider-mock-2
+  # (profile two-gpu) reports only mock-gpu-2 (24 GiB); the admin merges the two
+  # per-agent metrics partials + registration hardware back to 2 GPUs / 48 GiB.
+  # With the profile OFF, provider-mock-2 never starts and provider-mock's empty
+  # ASSIGNED_GPU_UUIDS keeps the default behavior byte-identical.
+  #
   # Mock provider: full-path local development with no hardware.
   # The provider dials the admin WS; admin points litellm back at :8081.
   # Phase 16: an agent authenticates with the machine's shared secret and a
@@ -84,9 +101,42 @@ services:
       - CACHE_DIR=/cache
       - MODELS_DIR=/models
       - METRICS_CATEGORIES=gpu_usage vram os_ram cpu storage
+      # Phase 17: empty (default) => report every fake GPU (both / 48 GiB).
+      # Set MOCK_ASSIGNED_GPU_UUIDS=mock-gpu-1 with the two-gpu profile to pin
+      # this agent to a single GPU (device-isolated split demo).
+      - ASSIGNED_GPU_UUIDS=${MOCK_ASSIGNED_GPU_UUIDS:-}
     volumes:
       - mock_cache:/cache
       - mock_models:/models
+    depends_on:
+      admin:
+        condition: service_healthy
+
+  # Second mock agent (Phase 17 two-gpu profile): same machine, distinct
+  # AGENT_ID + base port (8082 avoids the admin port-conflict guard), pinned to
+  # the other fake GPU. Own cache/models volumes so its provider_config.json
+  # never collides with provider-mock's.
+  provider-mock-2:
+    profiles: ["two-gpu"]
+    build:
+      context: .
+      dockerfile: provider/mock/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8082:8082"
+    environment:
+      - MACHINE_UID=${MOCK_MACHINE_UID:-mock-machine-1}
+      - MACHINE_SECRET=${MOCK_MACHINE_SECRET:?set MOCK_MACHINE_SECRET to the machine's registration_secret}
+      - AGENT_ID=${MOCK_AGENT_ID_2:-mock-agent-2}
+      - ADMIN_BASE_URL=http://admin:8000
+      - PROVIDER_PORT=8082
+      - CACHE_DIR=/cache
+      - MODELS_DIR=/models
+      - METRICS_CATEGORIES=gpu_usage vram os_ram cpu storage
+      - ASSIGNED_GPU_UUIDS=${MOCK_ASSIGNED_GPU_UUIDS_2:-mock-gpu-2}
+    volumes:
+      - mock2_cache:/cache
+      - mock2_models:/models
     depends_on:
       admin:
         condition: service_healthy
@@ -227,6 +277,8 @@ volumes:
   redis_data:
   mock_cache:
   mock_models:
+  mock2_cache:
+  mock2_models:
   # Declare these when uncommenting a hardware provider example above.
   # gufo_cache:
   # gufo_models:

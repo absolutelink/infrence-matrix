@@ -36,7 +36,7 @@ from provider_lib.metrics import filter_gpus, parse_gpu_assignment
 from provider_lib.ops import install_backend_ops
 from provider_lib.registry import BackendHandle, BackendRegistry
 from provider_lib.serve import MultiPortServer
-from provider_lib.wire import InstanceStatusValue
+from provider_lib.wire import Frame, InstanceStatusValue
 
 from provider_mock.backend import SCHEMA, MockBackend
 
@@ -50,13 +50,21 @@ DEFAULT_MODEL = "mock-model"
 FAKE_HARDWARE: dict[str, Any] = {
     "gpus": [
         {
+            "id": 0,
             "uuid": "mock-gpu-1",
             "vendor": "mock",
-            "name": "Mock GPU",
+            "name": "Mock GPU 1",
             "total_vram_bytes": 24 * 1024**3,
-        }
+        },
+        {
+            "id": 1,
+            "uuid": "mock-gpu-2",
+            "vendor": "mock",
+            "name": "Mock GPU 2",
+            "total_vram_bytes": 24 * 1024**3,
+        },
     ],
-    "total_vram_bytes": 24 * 1024**3,
+    "total_vram_bytes": 48 * 1024**3,
     "cpu": {"cores": 8, "model": "mock-cpu"},
     "ram": {"total_bytes": 32 * 1024**3},
 }
@@ -65,11 +73,13 @@ FAKE_HARDWARE: dict[str, Any] = {
 def build_hardware_report(settings: ProviderSettings) -> dict[str, Any]:
     """Fake hardware inventory, filtered to ``ASSIGNED_GPU_UUIDS`` (Phase 17).
 
-    The mock keeps a single fake GPU for now (the two-GPU split is a later
-    slice). With no assignment the report is identical to ``FAKE_HARDWARE``;
+    The mock advertises two 24 GiB fake GPUs (48 GiB total) so a device-isolated
+    two-agent split can be demonstrated with no real hardware. With no
+    assignment the report is identical to ``FAKE_HARDWARE`` (both GPUs / 48 GiB);
     when ``ASSIGNED_GPU_UUIDS`` is set the ``gpus`` list and ``total_vram_bytes``
     reflect only the assigned subset (a token is a GPU ``uuid`` or decimal
-    index).
+    index), so two agents each pinned to one fake GPU union to 2 GPUs / 48 GiB
+    on the admin.
     """
     assignment = parse_gpu_assignment(settings.assigned_gpu_tokens)
     gpus = filter_gpus(FAKE_HARDWARE["gpus"], assignment)
@@ -204,6 +214,30 @@ def install_command_handlers(
         make_handle=make_handle,
     )
     install_config_handlers(client, target, resolved_state, client.settings)
+
+
+def install_metrics_handlers(client: AdminClient, emitter: Any) -> None:
+    """Wire ``metrics.assign`` / ``metrics.unassign`` for the run_async path.
+
+    Phase 17 slice 5: installed ONLY from :func:`run_async` (the production
+    entrypoint) so the test-facing ``register_and_connect`` /
+    ``register_provider`` / ``bootstrap_agent`` paths never receive these
+    commands nor start the synthetic emitter. The loop itself is started on
+    connect (``on_connected``); these handlers only toggle whether the
+    machine-wide categories are included in each frame (GPU categories keep
+    flowing regardless).
+    """
+
+    async def on_metrics_assign(frame: Frame) -> dict[str, Any]:  # noqa: ARG001
+        emitter.set_owned(True)
+        return {"ok": True, "detail": {"emitting": True}}
+
+    async def on_metrics_unassign(frame: Frame) -> dict[str, Any]:  # noqa: ARG001
+        emitter.set_owned(False)
+        return {"ok": True, "detail": {"emitting": False}}
+
+    client.on_command("metrics.assign", on_metrics_assign)
+    client.on_command("metrics.unassign", on_metrics_unassign)
 
 
 def _apply_backend(
@@ -378,6 +412,17 @@ async def run_async() -> None:
     # mock driver has no subprocess ring, so only provider.logs flows).
     log_bundle = install_log_streaming(client, lifecycle)
 
+    # Phase 17 slice 5: synthetic machine-metrics emitter (production path
+    # only). GPU categories emit from every connected agent (filtered to
+    # ASSIGNED_GPU_UUIDS); machine-wide categories are owner-gated via the
+    # metrics.assign / metrics.unassign commands installed just below.
+    # Imported lazily to avoid an import cycle (metrics imports FAKE_HARDWARE
+    # from this module).
+    from provider_mock.metrics import MockMachineMetricsEmitter
+
+    emitter = MockMachineMetricsEmitter(lifecycle, client, settings)
+    install_metrics_handlers(client, emitter)
+
     # Keep the admin WS alive for the process lifetime alongside the per-backend
     # HTTP servers: run_forever dials in, re-emits provider.status on every
     # (re)connect, and reconnects with exponential backoff if the admin restarts
@@ -386,6 +431,9 @@ async def run_async() -> None:
 
     async def on_connected() -> None:
         log_bundle.start()
+        # GPU categories emit from every connected agent; the loop runs for the
+        # socket lifetime (machine-wide categories stay gated on metrics.assign).
+        emitter.start()
         await emit_provider_status(client, lifecycle)
         if not first_connect.is_set():
             first_connect.set()
@@ -395,10 +443,15 @@ async def run_async() -> None:
                 client.epoch,
             )
 
+    async def on_disconnected() -> None:
+        await log_bundle.stop()
+        emitter.set_owned(False)
+        await emitter.stop()
+
     ws_task = asyncio.create_task(
         client.run_forever(
             on_connected=on_connected,
-            on_disconnected=log_bundle.stop,
+            on_disconnected=on_disconnected,
         )
     )
     # Slice 6: serve each hosted backend's /v1 on its own port (base_port +
@@ -418,6 +471,7 @@ async def run_async() -> None:
         await asyncio.gather(ws_task, return_exceptions=True)
         await server.aclose()
         await log_bundle.stop()
+        await emitter.stop()
         await client.disconnect()
 
 
