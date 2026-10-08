@@ -11,6 +11,8 @@ import websockets
 from conftest import make_settings
 from provider_lib.admin_client import AdminClient
 from provider_lib.backend import BackendNotReady
+from provider_lib.ops import emit_backend_status_snapshot
+from provider_lib.registry import BackendHandle, BackendRegistry
 from provider_lib.wire import BackendStatusValue, Frame
 
 from provider_halogen_flash.main import (
@@ -321,3 +323,41 @@ def test_build_app_reports_provider_type() -> None:
     routes = {r.path for r in app.routes}
     assert "/v1/responses" in routes
     assert "/health" in routes
+
+
+async def test_connect_snapshot_emits_backend_status_per_backend(
+    tmp_path, fake_flash_binary
+) -> None:
+    """Fix A wiring: the on_connected callback emits one backend.status frame
+    per hosted backend carrying the lifecycle's current status, so a restarted
+    agent heals the admin's stale `running` mirror. Exercises the exact helper
+    on_connected invokes against a real halogen-flash lifecycle."""
+
+    class _RecordingClient:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, dict]] = []
+
+        async def send_event(self, type_: str, payload: dict) -> None:
+            self.events.append((type_, payload))
+
+    settings = make_settings(tmp_path, fake_flash_binary)
+    client = AdminClient(settings)
+    lifecycle = make_lifecycle(client, {}, instance_id=INSTANCE_ID)
+    registry = BackendRegistry()
+    registry.add(BackendHandle(INSTANCE_ID, lifecycle))
+    rec = _RecordingClient()
+    try:
+        await emit_backend_status_snapshot(rec, registry)
+    finally:
+        await lifecycle.driver.aclose()
+
+    assert rec.events == [
+        (
+            "backend.status",
+            {
+                "instance_id": INSTANCE_ID,
+                "backend_status": BackendStatusValue.STOPPED,
+                "reason": "connect snapshot",
+            },
+        )
+    ]

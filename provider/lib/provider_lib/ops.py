@@ -322,6 +322,43 @@ class BackendOps:
         await self._client.send_event("provider.status", payload)
 
 
+async def emit_backend_status_snapshot(
+    client: AdminClient,
+    lifecycle_or_registry: BackendLifecycle | BackendRegistry,
+) -> None:
+    """Emit one ``backend.status`` frame per hosted backend carrying the
+    lifecycle's CURRENT status (connect-time reconcile).
+
+    A restarted provider container starts every lifecycle in ``stopped``,
+    while the admin's DB mirror still shows the pre-restart status (the admin
+    deliberately leaves ``backend_status`` untouched on socket teardown). The
+    lifecycle only emits ``backend.status`` on transitions, so nothing else
+    heals the mirror: the scheduler keeps treating the backend as booted and
+    routes traffic to a proxy that answers 503. Emitting a snapshot on every
+    accepted connection lets the admin's existing ``backend.status`` ingest
+    persist the true state and prune stale scheduler VRAM holds. Epoch
+    fencing (``connect()`` sets the epoch before ``on_connected`` runs) drops
+    any snapshot from a superseded socket.
+    """
+    registry = (
+        lifecycle_or_registry
+        if isinstance(lifecycle_or_registry, BackendRegistry)
+        else registry_from_lifecycle(lifecycle_or_registry)
+    )
+    for handle in registry.handles():
+        iid = handle.lifecycle.instance_id or handle.instance_id
+        if not iid:
+            continue
+        await client.send_event(
+            "backend.status",
+            {
+                "instance_id": str(iid),
+                "backend_status": handle.lifecycle.backend_status,
+                "reason": "connect snapshot",
+            },
+        )
+
+
 def _unknown_instance_nak(frame: Frame, step: str) -> dict[str, Any]:
     iid = (frame.payload or {}).get("instance_id")
     return {
@@ -422,4 +459,4 @@ def install_backend_ops(
     return None
 
 
-__all__ = ["BackendOps", "install_backend_ops"]
+__all__ = ["BackendOps", "emit_backend_status_snapshot", "install_backend_ops"]

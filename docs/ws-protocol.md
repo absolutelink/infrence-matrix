@@ -316,6 +316,20 @@ and marks the `ProviderAgent` `disconnected`, clearing each backend's
 `backend_loaded_at` so the next loaded status re-arms the idle clock. The
 epoch key is **not** deleted.
 
+**Connect-time snapshot reconcile.** The admin deliberately leaves each
+`ProviderInstance.backend_status` untouched on socket teardown, and a restarted
+agent container starts every lifecycle in `stopped` while the lifecycle only
+emits `backend.status` on transitions — so without a reconcile the mirror stays
+stale (`running`) and the scheduler keeps routing to a proxy that answers 503.
+To heal it, on **every** accepted connection the agent emits one `backend.status`
+frame per hosted backend carrying the lifecycle's current status
+(`{"instance_id", "backend_status", "reason": "connect snapshot"}`, via
+`provider_lib.ops.emit_backend_status_snapshot`, called from each provider's
+`on_connected` right after `provider.status`). The admin persists it exactly like
+any other transition frame (updating `backend_status` and pruning scheduler VRAM
+holds for a reported `stopped`). Epoch fencing drops any snapshot from a
+superseded socket.
+
 ### Close codes
 
 | Code | Meaning |

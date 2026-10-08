@@ -29,7 +29,7 @@ from provider_lib.metrics import (
     gpu_uuid,
     parse_gpu_assignment,
 )
-from provider_lib.ops import install_backend_ops
+from provider_lib.ops import emit_backend_status_snapshot, install_backend_ops
 from provider_lib.registry import BackendHandle, BackendRegistry
 from provider_lib.serve import MultiPortServer
 from provider_lib.wire import Frame, InstanceStatusValue
@@ -466,6 +466,7 @@ async def run_async() -> None:
         # metrics.assign ownership).
         emitter.start()
         await emit_provider_status(client, lifecycle)
+        await emit_backend_status_snapshot(client, registry)
         if not first_connect.is_set():
             first_connect.set()
             logger.info(

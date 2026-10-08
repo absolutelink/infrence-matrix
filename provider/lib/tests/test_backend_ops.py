@@ -20,7 +20,7 @@ from config_fakes import RecordingClient
 
 from provider_lib.backend import BackendDriver, BackendLifecycle
 from provider_lib.config import ProviderSettings
-from provider_lib.ops import install_backend_ops
+from provider_lib.ops import emit_backend_status_snapshot, install_backend_ops
 from provider_lib.wire import BackendStatusValue, InstanceStatusValue
 
 
@@ -381,3 +381,71 @@ async def test_start_detail_carries_driver_ports() -> None:
     assert ack["detail"]["api_port"] == 8288
     assert ack["detail"]["engine_port"] == 8289
     assert "backend_port" not in ack["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Connect-time backend.status snapshot (Fix A: reconcile the admin mirror)
+# ---------------------------------------------------------------------------
+async def test_emit_backend_status_snapshot_one_frame_per_handle() -> None:
+    """A restarted agent must re-announce every hosted backend's CURRENT
+    status so the admin heals its DB mirror (the lifecycle only emits
+    backend.status on transitions, so nothing else would)."""
+    from provider_lib.registry import BackendHandle, BackendRegistry
+
+    client = RecordingClient(ProviderSettings())
+    stopped = BackendLifecycle(GatedDriver(), capacity=1, instance_id="inst-stopped")
+    running_driver = GatedDriver()
+    running = BackendLifecycle(running_driver, capacity=1, instance_id="inst-running")
+    await running.start()  # STOPPED -> RUNNING
+    assert running.backend_status == BackendStatusValue.RUNNING
+
+    registry = BackendRegistry()
+    registry.add(BackendHandle("inst-stopped", stopped))
+    registry.add(BackendHandle("inst-running", running))
+
+    await emit_backend_status_snapshot(client, registry)
+
+    frames = [p for t, p in client.events if t == "backend.status"]
+    assert len(frames) == 2
+    by_id = {f["instance_id"]: f for f in frames}
+    assert by_id["inst-stopped"]["backend_status"] == BackendStatusValue.STOPPED
+    assert by_id["inst-running"]["backend_status"] == BackendStatusValue.RUNNING
+    assert all(f["reason"] == "connect snapshot" for f in frames)
+
+
+async def test_emit_backend_status_snapshot_skips_placeholder_instance_id() -> None:
+    """A handle whose key predates registration (empty) and whose lifecycle has
+    no instance_id yet is skipped — the admin drops frames without one."""
+    from provider_lib.registry import BackendHandle, BackendRegistry
+
+    client = RecordingClient(ProviderSettings())
+    placeholder = BackendLifecycle(GatedDriver(), capacity=1, instance_id=None)
+    real = BackendLifecycle(GatedDriver(), capacity=1, instance_id="inst-real")
+    registry = BackendRegistry()
+    registry.add(BackendHandle("", placeholder))
+    registry.add(BackendHandle("inst-real", real))
+
+    await emit_backend_status_snapshot(client, registry)
+
+    frames = [p for t, p in client.events if t == "backend.status"]
+    assert [f["instance_id"] for f in frames] == ["inst-real"]
+
+
+async def test_emit_backend_status_snapshot_accepts_bare_lifecycle() -> None:
+    """Single-backend convenience: a bare BackendLifecycle is wrapped via
+    registry_from_lifecycle (mirrors install_backend_ops)."""
+    client = RecordingClient(ProviderSettings())
+    lifecycle = BackendLifecycle(GatedDriver(), capacity=1, instance_id="solo")
+
+    await emit_backend_status_snapshot(client, lifecycle)
+
+    assert client.events == [
+        (
+            "backend.status",
+            {
+                "instance_id": "solo",
+                "backend_status": BackendStatusValue.STOPPED,
+                "reason": "connect snapshot",
+            },
+        )
+    ]
