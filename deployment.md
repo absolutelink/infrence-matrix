@@ -8,7 +8,7 @@ Deployment of the overhauled stack. Architecture:
 | Host | Runs | Access |
 | --- | --- | --- |
 | Application host (`core@10.100.2.100`) | `matrix-app` container (admin: FastAPI + built SPA), postgres, redis, Traefik | `docker` |
-| Provider host(s) (`core@10.100.2.111`) | provider instance containers (one per backend), each on its own `PROVIDER_PORT` | root-scoped `podman` |
+| Provider host(s) (`core@10.100.2.111`) | provider **agent** containers (one per machine + provider type + `AGENT_ID`; each hosts 1..N backends), each publishing a single admin-facing `PROVIDER_PORT` | root-scoped `podman` |
 | Public | `https://matrix.thelink.family` → `/` Swagger, `/admin` WebUI, `/v1` inference, `/provider/ws` provider dial-in | Traefik TLS |
 
 ## Images
@@ -85,14 +85,20 @@ docker logs matrix-app --tail 50
 
 ## Provider host(s)
 
-Provider instances run in **root's Podman space** on `core@10.100.2.111`
-(quadlet/systemd or `podman run`). Each instance needs:
+Provider **agent** containers run in **root's Podman space** on
+`core@10.100.2.111` (quadlet/systemd or `podman run`). Each agent is bound to
+one machine + one provider type + a stable `AGENT_ID`, hosts 1..N backends, and
+publishes a **single** admin-facing `/v1` port. Each agent needs:
 
 ```
 MACHINE_UID=<machine uid pre-created in the admin UI>
-PROVIDER_REGISTRATION_TOKEN=<token of the provider definition>
+MACHINE_SECRET=<the machine's registration_secret, shown in the admin UI>
+AGENT_ID=<stable id; discriminates multiple agents sharing a machine+type>
 ADMIN_BASE_URL=https://matrix.thelink.family
-PROVIDER_PORT=8081            # unique per machine per instance
+PROVIDER_PORT=8081            # the agent's single admin-facing /v1 port; two
+                              # agents on one machine must publish distinct
+                              # values (deployment responsibility — the admin no
+                              # longer polices or allocates per-backend ports)
 CACHE_DIR=/cache              # prompt cache + provider_config.json
 MODELS_DIR=/models            # model artifacts
 METRICS_CATEGORIES="gpu_usage vram os_ram cpu storage"   # no 'inference'
@@ -106,7 +112,8 @@ sudo podman pull ghcr.io/<owner>/provider-llama-cpp:<version>
 sudo podman run -d --name provider-llama-cpp \
   --device /dev/dri --device /dev/kfd \
   -e MACHINE_UID=matrix-1 \
-  -e PROVIDER_REGISTRATION_TOKEN=<token> \
+  -e MACHINE_SECRET=<machine registration_secret> \
+  -e AGENT_ID=matrix-1-llama \
   -e ADMIN_BASE_URL=https://matrix.thelink.family \
   -e PROVIDER_PORT=8081 \
   -e CACHE_DIR=/cache -e MODELS_DIR=/models \
@@ -123,7 +130,8 @@ sudo podman run -d --name provider-llama-cpp-cuda12 \
   --device /dev/nvidia0 --device /dev/nvidiactl \
   --device /dev/nvidia-uvm --device /dev/nvidia-uvm-tools \
   -e MACHINE_UID=matrix-1 \
-  -e PROVIDER_REGISTRATION_TOKEN=<token> \
+  -e MACHINE_SECRET=<machine registration_secret> \
+  -e AGENT_ID=matrix-1-llama \
   -e ADMIN_BASE_URL=https://matrix.thelink.family \
   -e PROVIDER_PORT=8081 \
   -e CACHE_DIR=/cache -e MODELS_DIR=/models \
@@ -133,8 +141,11 @@ sudo podman run -d --name provider-llama-cpp-cuda12 \
 
 - The provider registers at startup, then **dials out** to
   `wss://matrix.thelink.family/provider/ws` — no inbound port to the
-  provider host is required for control (only the `PROVIDER_PORT` must be
-  reachable from the admin for litellm's HTTP calls).
+  provider host is required for control (only the agent's single
+  `PROVIDER_PORT` must be reachable from the admin; litellm dials it for
+  every backend of that agent and the agent routes each request to the right
+  backend by `model`). Engine (backend) ports are internal to the container and
+  OS-assigned by default — the admin never dials them.
 - Providers read env at startup only; to change config, recreate the
   container (`podman rm -f` + `run`, or `docker compose up -d
   --force-recreate provider-<type>` where Compose is used).
@@ -161,9 +172,10 @@ sudo podman run -d --name provider-llama-cpp-cuda12 \
 
 `/admin/api/*` and `/v1/*` are **unauthenticated**. Do not expose them
 beyond a trusted network / reverse proxy without adding auth first. The
-only secrets are the per-definition `registration_token` (plaintext in
-provider env) and the per-instance WS secret (Redis). Token rotation is
-manual (edit the definition, redeploy the provider). See ARCHITECTURE.md
+only secrets are the shared per-machine `registration_secret` (plaintext in
+provider env as `MACHINE_SECRET`) and the per-agent WS secret (Redis). Rotating
+the machine secret is manual (rotate it in the admin UI, redeploy the machine's
+providers). See ARCHITECTURE.md
 §12.
 
 ## Operational notes

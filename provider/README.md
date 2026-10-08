@@ -13,18 +13,21 @@ that same type. It exposes:
 - **One dial-out WebSocket** to the admin (`/provider/ws`) that multiplexes
   lifecycle commands/events for **all** of its backends; per-backend frames
   carry the target `instance_id`.
-- **An OpenAI-compatible HTTP API per backend**, each on its own port
-  `PROVIDER_PORT + offset` (the agent's `PROVIDER_PORT` env is the base; the
-  first backend uses it, subsequent backends increment). The admin's litellm
-  client targets `http://<machine.reachable_address()>:<backend port>/v1/...`.
+- **One OpenAI-compatible HTTP `/v1` surface** on the agent's single
+  `PROVIDER_PORT` env port. The admin's litellm client targets
+  `http://<machine.reachable_address()>:<PROVIDER_PORT>/v1/...` for **every**
+  backend of this agent; the agent routes each request to the right backend by
+  the request `model` field (= the definition `alias`), answering 404 for an
+  unknown model. Each backend's engine binds a **private** local port inside the
+  container that the admin never learns or dials.
 
 `provider/lib/provider_lib` holds the generic machinery; each provider
 package (`provider/mock`, `provider/llama-cpp`, `provider/halogen`,
 `provider/halogen-flash`, `provider/gufo`) implements the per-type
 driver and overrides only what its backend does differently. Since Phase 16
 slice 6 every package hosts N backends per process (a `BackendRegistry` of
-lifecycles served by a `MultiPortServer`); a single-backend agent is just the
-N=1 case and behaves byte-identically to the pre-agent design.
+lifecycles served by a single `AgentServer` on the env `PROVIDER_PORT`); a
+single-backend agent is just the N=1 case.
 
 ## What you get from the library vs. what you implement
 
@@ -33,7 +36,7 @@ N=1 case and behaves byte-identically to the pre-agent design.
 | Agent registration + one multiplexed WS client (`admin_client.py`) | `BackendDriver` (start/stop/health/list_models/stream_*) |
 | Backend state machine + slot admission (`backend.py`) | Command/env construction for the real backend |
 | Per-backend dispatch registry (`registry.py`) | A `make_handle` factory that builds a `BackendHandle` from an assignment entry |
-| Multi-port HTTP serving (`serve.py`, `MultiPortServer`) | Wiring only — serve each hosted backend's `/v1` on its own port |
+| Single env-port HTTP serving (`serve.py`, `AgentServer`) | Wiring only — serve the agent's one `/v1` on `PROVIDER_PORT`; the app routes to a backend by `model` |
 | `agent.assignments.update` reconcile (`assignments.py`) | Wiring only — `install_backend_ops(..., make_handle=...)` installs it |
 | Provider-port FastAPI app + `/v1` surface (`app_factory.py`) | Translation of the backend's native output → spec |
 | Model downloader + progress events (`downloader.py`) | Artifact layout for your model files |
@@ -44,8 +47,8 @@ N=1 case and behaves byte-identically to the pre-agent design.
 
 The goal: a new provider type is usually just a `BackendDriver` subclass
 plus a `main.py` that wires it into a `BackendRegistry` (one lifecycle per
-placed backend) and serves it with `MultiPortServer`. If only one behavior
-differs (e.g. usage normalization), override just that.
+placed backend) and serves the agent's single `/v1` surface with `AgentServer`.
+If only one behavior differs (e.g. usage normalization), override just that.
 
 ## Writing a new provider type
 
@@ -56,9 +59,9 @@ differs (e.g. usage normalization), override just that.
 3. Add `main.py` mirroring `provider/mock/provider_mock/main.py`: build a
    driver + `BackendLifecycle` **per placed backend** into a
    `BackendRegistry`, install WS command handlers
-   (`install_backend_ops` + `install_config_handlers`), register over HTTP,
-   then dial the WS with `AdminClient.run_forever()` and serve every
-   backend's port with `MultiPortServer`.
+    (`install_backend_ops` + `install_config_handlers`), register over HTTP,
+    then dial the WS with `AdminClient.run_forever()` and serve the agent's
+    single `/v1` surface with `AgentServer`.
 4. Set `PROVIDER_TYPE` for the package (a constant, never from the
    environment). The agent registers as a `(machine, provider_type,
    agent_id)` triple; the admin resolves the definitions *placed* on this
@@ -92,7 +95,7 @@ environment plus the registration response — the agent has **no database**.
 | `AGENT_ID` | yes | Stable operator-set id discriminating multiple agents that share a `(machine, provider_type)`. |
 | `ADMIN_BASE_URL` | yes | e.g. `http://admin:8000`. The WS URL is derived by scheme swap (`http→ws`, `https→wss`) + `/provider/ws?agent_id=<PK uuid>`. |
 | `PROVIDER_TYPE` | (package constant) | The single backend type this agent runs. Set in the package (`provider_lib.config.PROVIDER_TYPE`), **never** from the environment. |
-| `PROVIDER_PORT` | no (8081) | **Base** port; the agent's backends listen on `PROVIDER_PORT + offset`. |
+| `PROVIDER_PORT` | no (8081) | The agent's **single** admin-facing `/v1` port (published to the bridge network). The agent routes each request to a backend by `model` on this one port. Engine (backend) ports are internal to the container and OS-assigned by default (bind `127.0.0.1:0`); the admin never learns or dials them. |
 | `CACHE_DIR` | yes (`/cache`) | Prompt caches + the persisted `provider_config.json`. |
 | `MODELS_DIR` | yes (`/models`) | Model artifact storage. |
 | `METRICS_CATEGORIES` | no | Space-delimited: `gpu_usage vram os_ram cpu storage`. Inference metrics are **always** enabled and must not appear here. |
@@ -117,15 +120,18 @@ resolves the agent's placed definitions, and returns:
   "agent_secret": "<WS bearer>",
   "machine": { ... },
   "backends": [
-    {"instance_id": "<uuid>", "port": 8081, "definition": { "alias": "...",
+    {"instance_id": "<uuid>", "definition": { "alias": "...",
      "backend_config": { }, "config_fingerprint": "...", "capacity": 1, ... }}
   ]
 }
 ```
 
 The agent persists this to `CACHE_DIR/provider_config.json` and builds **one
-hosted backend per `backends` entry** (each keyed by its `instance_id`, served
-on its `port`). A single-backend registration yields exactly one entry.
+hosted backend per `backends` entry** (each keyed by its `instance_id`; the
+`definition.alias` is the `model` name the agent's single `/v1` surface routes
+on). No per-backend `port` is returned — every backend is reached through the
+agent's single `PROVIDER_PORT`. A single-backend registration yields exactly one
+entry.
 
 ### Decommissioning / renaming an agent
 
@@ -141,7 +147,7 @@ agent.
 ### BackendRegistry + per-backend dispatch
 
 `provider_lib.registry.BackendRegistry` maps `instance_id -> BackendHandle`
-(a `BackendLifecycle` + its `ConfigState` + serve `port`). The shared command
+(a `BackendLifecycle` + its `ConfigState` + `alias`). The shared command
 handlers installed by `install_backend_ops` and `install_config_handlers`
 route each per-backend frame to the correct lifecycle by the payload's
 `instance_id`; a frame naming an id this agent does not host is NAK'd
@@ -155,16 +161,19 @@ placement push can spawn a backend without a process restart. Every package
 supplies one since slice 6; an agent built without one defensively **refuses**
 an add it cannot serve rather than crashing.
 
-### MultiPortServer
+### AgentServer
 
-`provider_lib.serve.MultiPortServer` runs one uvicorn server per hosted
-backend in a single process, each serving that backend's normalized `/v1`
-surface on its assignment port. When an `agent.assignments.update` reconcile
-adds or drops a backend it fires the registry's change listeners and the
-server binds/unbinds the affected ports dynamically. A single-backend agent
-produces exactly one listener on `PROVIDER_PORT` — byte-identical to the
-pre-agent behavior. The control plane stays one agent WebSocket; only the data
-plane fans out across ports.
+`provider_lib.serve.AgentServer` runs **one** uvicorn server on the agent's env
+`PROVIDER_PORT`, serving a single normalized `/v1` surface whose app resolves the
+target backend per request from the live `BackendRegistry` (matching the request's
+`model` against each handle's `alias`; unknown model → 404). Because routing
+happens at request time, an `agent.assignments.update` reconcile that adds or
+drops a backend needs **no** listener churn — the new backend is immediately
+routable on the same port. Each backend's engine binds a private local port
+inside the container (OS-assigned free loopback by default; halogen a distinct
+`(api, engine)` pair; halogen-flash a static `MACHINE_UID`-derived pair) that the
+admin never learns or dials. The control plane stays one agent WebSocket; the data
+plane is one multiplexed `/v1` surface.
 
 
 ## Authoring schema.json (Phase 12)
@@ -445,7 +454,7 @@ conformance suite validates against them. `provider_mock.main` builds a
 `BackendRegistry` with **one `BackendLifecycle` per placed backend** (from the
 registration response's `backends`), shared between the admin WS command
 handlers (`backend.start`/`backend.stop` route to the right lifecycle by
-`instance_id`) and the per-port `/v1` apps served by `MultiPortServer`. Boot
+`instance_id`) and the single env-port `/v1` surface served by `AgentServer`. Boot
 is admin-driven: after connect the backends stay STOPPED until the scheduler
 (or a placement warm-up) boots them.
 
@@ -513,7 +522,7 @@ Phase 12):
                "seed": -1, "repeat_penalty": 1.0},
   "reasoning": {"reasoning": "on", "reasoning_budget": -1, "jinja": true},
   "vision":   {"image_max_tokens": 1024},
-  "server":   {"backend_port": 9999, "threads": -1, "batch_size": 2048,
+  "server":   {"threads": -1, "batch_size": 2048,
                "ubatch_size": 512, "parallel": 1, "cont_batching": true,
                "warmup": true, "flash_attn": "auto"},
   "endpoints": {"host": "127.0.0.1", "sse_ping_interval": 30},
@@ -531,9 +540,10 @@ Phase 12):
 - `gpu_layers` default is now `"auto"` (upstream), **not** the legacy
   fixed `35`. `flash_attn` is tri-state `on|off|auto` (upstream default
   `auto`).
-- `backend_port` relocated from top-level into `server` (a server knob).
-  No schema default: when absent the driver uses `PROVIDER_PORT + 1`
-  from the container env.
+- The `server` section has **no** port field (port model overhaul): the
+  `llama-server` engine binds a private OS-assigned loopback port allocated at
+  start (`bind 127.0.0.1:0`), which the admin never learns or dials. The old
+  `backend_port` config field was removed.
 - Canonical renames (legacy keys still accepted by the driver, canonical
   wins when both present): `context_size`→`ctx`,
   `checkpoint_every`→`checkpoint_min_step`,
@@ -558,7 +568,7 @@ are unchanged in spirit, only the read path moved.
 | Config (section.field) | CLI |
 | --- | --- |
 | `artifacts.model` (resolved) | `--model <path>` |
-| `server.backend_port` (or env default) | `--port <p>` |
+| (engine port, OS-assigned at start) | `--port <p>` (private; not a config field) |
 | `gpu.gpu_layers` (default "auto"; int\|auto\|all) | `--n-gpu-layers` |
 | `context.ctx` / legacy `context_size` (default 4096) | `--ctx-size` |
 | `server.batch_size` (default 2048, matching the schema) | `--batch-size` |
@@ -683,7 +693,7 @@ driver passes events through unmodified except for rate enrichment.
   "sampling": {"temperature": 0.7, "top_k": 40, "top_p": 0.9},
   "reasoning": {"think": "on", "reasoning_effort": "high"},
   "limits": {"prefill_chunk": 2048, "max_pending": 64},
-  "server": {"sessions": 4, "backend_port": 8082, "api_key": "...",
+  "server": {"sessions": 4, "api_key": "...",
               "verbose": true, "log_progress": false}
 }
 ```
@@ -698,10 +708,10 @@ driver passes events through unmodified except for rate enrichment.
   through the downloader and rewrites the flattened option to the
   concrete local path before spawn (legacy "aux by path" semantics).
   Plain strings pass through untouched.
-- `server.backend_port` optional; default `PROVIDER_PORT + 1` (the
-  legacy top-level `backend_port` is still honored). Health:
-  `GET /health` on that port. Binary from env `GUFO_SERVER_PATH`
-  (default `gufo`).
+- The `server` section has **no** port field (port model overhaul): the gufo
+  engine binds a private OS-assigned loopback port allocated at start, which the
+  admin never learns or dials. Health: `GET /health` on that private port.
+  Binary from env `GUFO_SERVER_PATH` (default `gufo`).
 - The subprocess runs in its own session (`start_new_session=True`);
   `stop()` kills the whole process group.
 
@@ -711,7 +721,7 @@ driver passes events through unmodified except for rate enrichment.
 `artifacts`) over the legacy flat `cfg["options"]` into one options
 dict; the flag maps below are unchanged.
 
-Base argv: `gufo serve llm --host 127.0.0.1 --port <backend_port>
+Base argv: `gufo serve llm --host 127.0.0.1 --port <private engine port>
 --model <resolved model path>`, then per-key from the flattened
 options:
 
@@ -755,9 +765,14 @@ scheduling contract).
 `HalogenBackend` (provider_halogen/driver.py) manages one halogen
 process. Halogen is **env-configured** (not argv): `backend_config`
 holds the semantic config and `env.py` maps it to `HALOGEN_*`
-environment variables. The process exposes **two ports**: an
-OpenAI-compatible **API port** (all HTTP traffic) and a private
-**engine port** (referenced only via `HALOGEN_ENGINE`).
+environment variables. The process binds **two private engine ports**
+inside the container — an OpenAI-compatible **API port** (all engine HTTP
+traffic + health) and an **engine port** (referenced only via
+`HALOGEN_ENGINE`). Since the port model overhaul these are allocated per
+backend as distinct OS-assigned free loopback ports (`env.allocate_ports()`),
+so multiple halogen backends on one agent never collide; the admin never
+learns or dials them — it reaches the backend through the agent's single
+`PROVIDER_PORT` `/v1` surface, routed by `model`.
 
 ### backend_config schema
 > **Canonical (Phase 12):** the authoritative schema is the shipped
@@ -777,7 +792,7 @@ OpenAI-compatible **API port** (all HTTP traffic) and a private
   "quantization": {"w4a4": 1, "w4a4_excl": "attn"},
   "speculative": {"drafter": "mtp"},
   "server": {"max_tokens_cap": 8192, "keepalive_timeout": 60, "sse_keepalive_s": 15},
-  "networking": {"api_port": 8082, "engine_port": 8083}
+  "networking": {}
 }
 ```
 
@@ -787,12 +802,12 @@ OpenAI-compatible **API port** (all HTTP traffic) and a private
   downloader (file-only — unpack a HF tokenizer directory locally and
   reference it by path). The legacy top-level `model` / `tokenizer`
   keys are still honored as fallback.
-- Ports (`networking.api_port` / `networking.engine_port`): resolution
-  is **ATOMIC** — the pinned pair is honored only when BOTH come from
-  the same source (the `networking` section, or the legacy top-level
-  keys); a half-pinned config falls back entirely to the default pair
-  `PROVIDER_PORT + 1` / `PROVIDER_PORT + 2`. Health = `GET /health` on
-  the **API port**.
+- The `networking` section has **no** port fields (port model overhaul): the
+  `(api, engine)` pair is allocated per backend at start as two distinct
+  OS-assigned free loopback ports (`env.allocate_ports()`), private to the
+  container. The old `networking.api_port` / `networking.engine_port` config
+  fields (and their atomic both-or-neither pinning) were removed. Health =
+  `GET /health` on the private **API port**.
 - Binary/entrypoint from env `HALOGEN_SERVER_PATH` (default
   `halogen-server`); spawned as
   `stdbuf -oL -eL <entrypoint> all` with stderr merged into stdout
@@ -801,16 +816,15 @@ OpenAI-compatible **API port** (all HTTP traffic) and a private
 ### Env mapping (env.py)
 
 `flatten_options()` merges the section leaves (all sections except
-`artifacts` and the fixed-wiring `networking` ports) over the legacy
-flat `cfg["options"]` into one semantic dict; the mapping below is
-unchanged.
+`artifacts`) over the legacy flat `cfg["options"]` into one semantic
+dict; the mapping below is unchanged.
 
 Fixed (always set):
 
 | Env | Value |
 | --- | --- |
-| `HALOGEN_API_PORT` | `networking.api_port` (resolved pair) |
-| `HALOGEN_PORT` | `networking.engine_port` (resolved pair) |
+| `HALOGEN_API_PORT` | OS-assigned private API port (allocated at start) |
+| `HALOGEN_PORT` | OS-assigned private engine port (allocated at start) |
 | `HALOGEN_BIND` | `127.0.0.1` |
 | `HALOGEN_ENGINE` | `127.0.0.1:<engine_port>` |
 | `HALOGEN_CHECKPOINT` | resolved `artifacts.model` path |
@@ -836,8 +850,8 @@ None**, stringified):
 
 **Capacity:** the engine's request slots = the flattened `kv_slots`
 (from `concurrency.kv_slots`, default 1), reported as
-`detail.effective_capacity` in the `backend.start` ack (plus
-`api_port`/`engine_port`). The lifecycle capacity comes from
+`detail.effective_capacity` in the `backend.start` ack (plus the private
+`api_port`/`engine_port`, informational only). The lifecycle capacity comes from
 `provider_definition.capacity`.
 
 **Streaming:** the driver proxies SSE from the API port's
@@ -855,7 +869,8 @@ halogen-flash process. Key differences from plain halogen:
 - The backend is **NOT spec-compliant on usage** — this package carries
   the canonical `calculate_usage` override (see "Overriding usage
   normalization" above).
-- **Static ports** keep the engine's disk-cache fingerprint stable.
+- **Static `MACHINE_UID`-derived ports** keep the engine's disk-cache
+  fingerprint stable across restarts (see "Static ports" below).
 - **NPU small-model pinning** (Ryzen AI), gated by a host probe.
 
 ### backend_config schema
@@ -891,7 +906,7 @@ halogen-flash process. Key differences from plain halogen:
   "composable": {"composable_context": 1},
   "vision": {"vision_max_pixels": 1048576},
   "npu": {"npu_models": ["qwen3-embedding-0.6b", "qwen3.5-2b"]},
-  "networking": {"api_port": 8200, "engine_port": 8201},
+  "networking": {},
   "troubleshooting": {}
 }
 ```
@@ -1033,20 +1048,25 @@ as halogen. Health = `GET /health` on the API port.
 
 The Flash engine hashes its server variables — **ports included** —
 into its on-disk prompt-cache fingerprint. Random per-start ports would
-invalidate the disk cache on every boot, so the `(api, engine)` pair is
-**pinned**:
+invalidate the disk cache on every boot, so halogen-flash is the one
+provider that does **not** use OS-assigned free ports: the `(api, engine)`
+pair is **static and deterministic**:
 
-1. Explicit `networking.api_port` + `networking.engine_port` in
-   `backend_config` win (legacy top-level `api_port`/`engine_port` are
-   still honored as a fallback; the admin persists the pair in the
-   definition — Phase 9's fingerprint flow may re-derive it).
-2. Otherwise `derive_static_ports(MACHINE_UID)` hashes the machine uid
-   (SHA-256) into the dedicated static range **8200–8289**
+1. `derive_static_ports(MACHINE_UID)` hashes the machine uid (SHA-256)
+   into the dedicated static range **8200–8289**
    (`FLASH_PORT_START`/`FLASH_PORT_END`, 45 adjacent pairs), giving the
    same stability property the legacy backend got from allocate-once-
    and-persist: the same machine always boots Flash on the same pair.
-3. `PROVIDER_PORT` never participates in the pair (it's the instance's
-   own admin-facing surface).
+   halogen-flash declares `x-max-running-backends: 1` (one backend per
+   machine), so the machine-scoped pair can never collide with a sibling.
+2. `PROVIDER_PORT` never participates in the pair (it's the agent's own
+   admin-facing `/v1` surface).
+
+Since the port model overhaul the operator-facing `networking.api_port` /
+`networking.engine_port` config fields were **removed** from the schema, so
+`env.resolve_ports` always falls through to the static `MACHINE_UID`-derived
+pair (the function still honors a hand-rolled pin defensively, but no valid
+`backend_config` can carry one).
 
 ### NPU small-model pinning
 
@@ -1116,7 +1136,9 @@ admin start with the same view.
 your package's `install_command_handlers`. It replaces any local
 start/stop handler: the ack detail is built generically from
 `lifecycle.capacity` plus whichever of `effective_capacity`, `api_port`,
-`engine_port`, `backend_port` your driver exposes. Pass a `BackendRegistry`
+`engine_port`, `backend_port` your driver exposes (the port values are the
+backend's **private** engine ports — informational; the admin reaches the backend
+via the agent's single `PROVIDER_PORT` `/v1`, not these). Pass a `BackendRegistry`
 (the agent model — one handle per placed backend) and `install_backend_ops`
 routes each per-backend command to the correct lifecycle by `instance_id`
 (NAKing `unknown_instance` for an id this agent does not host); a single

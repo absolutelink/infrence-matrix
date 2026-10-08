@@ -27,10 +27,11 @@ class ProviderSettings(BaseSettings):
     # (machine, provider_type). Presented on registration and the WS query.
     AGENT_ID: str
 
-    # Base port for this agent's backends. The first backend serves its
-    # OpenAI-compatible API here; additional backends increment
-    # (``base_port + offset``). Admin points litellm at
-    # http://<machine host>:<backend port>/v1.
+    # The agent's single published admin-facing /v1 port. The agent serves one
+    # OpenAI-compatible /v1 surface here and routes each request to the target
+    # backend by the request's model (= definition alias). Backend engine ports
+    # are private to the container and OS-assigned by default; the admin never
+    # learns or dials them.
     PROVIDER_PORT: int = 8081
 
     # Storage

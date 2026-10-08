@@ -109,7 +109,7 @@ agent_id)` triple and authenticates with the machine's shared secret.
 | `provider_type` | The single backend type this agent runs (env `PROVIDER_TYPE`). Must match a registered `ProviderType` (or bootstrap it — see the schema gate). |
 | `schema` | The provider package's committed `schema.json` (JSON Schema 2020-12 for this type's `backend_config`). The admin derives `schema_fingerprint = sha256(canonical_json(schema))` itself; the agent never sends the fingerprint. Optional only as a Phase 12 transition path (see below). |
 | `version` | Must exactly equal the admin `settings.VERSION` (lockstep deploy). |
-| `base_port` | The agent's `PROVIDER_PORT` env (default 8081). Backends are assigned `base_port + offset`. |
+| `base_port` | The agent's single admin-facing `/v1` port (its `PROVIDER_PORT` env, default 8081). The admin dials `http://{machine.reachable_address()}:{base_port}/v1/...` for **every** backend of this agent; the agent routes each request to the right backend by the request `model` (= definition alias). There are no per-backend port offsets, and the admin does **not** police port uniqueness across agents. |
 | `hardware` | Inventory merged into `Machine.hardware` as a per-GPU **union by uuid** (latest report wins per uuid); `total_vram_bytes` is the auto-sum of that union. |
 | `metrics_categories` | Space-delimited source list, sent sorted. Machine-level categories only — **never `inference`** (always on). |
 
@@ -131,12 +131,13 @@ agent_id)` triple and authenticates with the machine's shared secret.
 7. **Schema-consensus gate** (Phase 12) — see below. A refusal is **409** with a
    structured `detail`.
 8. Resolve the agent's **placed definitions** (`_placed_definitions`): every
-   enabled `any_of_type` definition of this type, plus every enabled `specific`
-   definition linked to this agent via `definition_agents`; sorted by alias.
-   Assign ports `base_port + i`. Refuse **409 `port_conflict`** if a *connected*
-   backend on another agent of this machine already holds one of those ports.
-   Reconcile one `ProviderInstance` per placed definition (create stopped rows,
-   refresh fingerprints, retire de-placed ghosts busy-safe).
+    enabled `any_of_type` definition of this type, plus every enabled `specific`
+    definition linked to this agent via `definition_agents`; sorted by alias.
+    Reconcile one `ProviderInstance` per placed definition (create stopped rows,
+    refresh fingerprints, retire de-placed ghosts busy-safe). The admin allocates
+    **no** per-backend ports — every backend of this agent is reached through the
+    agent's single `base_port` `/v1` surface, routed by `model`, so there is no
+    port assignment and no cross-agent port-conflict check.
 9. Mint a fresh **per-agent** `agent_secret` (`secrets.token_urlsafe(32)`),
    store it **only in Redis** under `im:ws:secret:{agent_id}` (30-day TTL), and
    return it once. Persist the declared `metrics_categories` under
@@ -201,7 +202,6 @@ Notes:
   "backends": [
     {
       "instance_id": "<ProviderInstance PK uuid str>",
-      "port": 8081,
       "definition": {
         "id": "<uuid str>", "alias": "my-model", "provider_type": "llama-cpp",
         "backend_config": { }, "config_fingerprint": "<sha256 hex>",
@@ -214,8 +214,10 @@ Notes:
 ```
 
 `backends` is the agent's full placed set — one entry per assigned
-`ProviderDefinition`, each with its own `instance_id` and `port`
-(`base_port + offset`). A single-backend agent gets exactly one entry. The
+`ProviderDefinition`, each with its own `instance_id` and `definition` (whose
+`alias` is the `model` name the agent's single `/v1` surface routes on). No
+per-backend `port` is sent — every backend is reached through the agent's single
+`base_port` `/v1`. A single-backend agent gets exactly one entry. The
 agent persists this response to `CACHE_DIR/provider_config.json` and builds one
 hosted backend (`BackendLifecycle`) per entry.
 
@@ -242,8 +244,6 @@ Errors are plain FastAPI `{"detail": "..."}` bodies, **except** the schema-gate
 (`error` is `schema_conflict` in the conflicting-pending case, with the same
 fields; `voted`/`waiting_on` are `ProviderAgent` PK uuid strings.) The agent
 raises `SchemaPendingError` from this and keeps retrying via the normal backoff.
-A `port_conflict` 409 carries `{"error": "port_conflict", "port": N,
-"conflicting_definition": "...", "conflicting_instance_id": "..."}`.
 
 ---
 
@@ -380,7 +380,7 @@ carry the target `instance_id` in the payload**; the provider's
 | type | payload | status | notes |
 | --- | --- | --- | --- |
 | `agent.assignments.update` | `{"assignments": [...], "max_running_backends": int}` | **Live (Phase 16 slice 5)** | The agent-level counterpart to `provider.config.update`. When a definition's placement changes (created / PATCHed `agent_placement`/`agents`/`enabled`/`alias`), the admin recomputes the agent's placed set, reconciles its `ProviderInstance` rows, and pushes the **full** current assignment set. See the payload/ack detail below. |
-| `backend.start` | `{"instance_id": "...", "wait_for_running": bool = true}` | Live | Provider awaits `BackendLifecycle.start()` and — with `wait_for_running: true` (the scheduler's contract, and the default) — acks only once the lifecycle reaches running, with `detail.capacity` + whatever ports the driver exposes (`api_port`/`engine_port`/`backend_port`/`effective_capacity`, omitted when absent). With `false` the boot runs in a background task and the ack is `{"ok": true, "detail": {"accepted": true, "backend_status": "..."}}` immediately: a cold halogen-flash boot downloads its checkpoint AND companions inside the driver's health wait — tens of GB, tens of minutes — so neither the ack window nor the admin's HTTP request may sit open that long. The outcome then arrives as events: `backend.status initializing` heartbeats, then `running`/`error`, then `backend.metadata`. Waiting while a background boot is already in flight JOINS that boot (never a second spawn); an accept-style call while one is in flight NAKs `boot_in_progress`. Admin timeouts: `BACKEND_BOOT_TIMEOUT_SECONDS` (3600) when waiting, the 60s action window otherwise. |
+| `backend.start` | `{"instance_id": "...", "wait_for_running": bool = true}` | Live | Provider awaits `BackendLifecycle.start()` and — with `wait_for_running: true` (the scheduler's contract, and the default) — acks only once the lifecycle reaches running, with `detail.capacity` + whatever ports the driver exposes (`api_port`/`engine_port`/`backend_port`/`effective_capacity`, omitted when absent) — these are the backend's **private** engine ports (OS-assigned by default; halogen-flash's static pair), reported for information only: the admin never dials them, it reaches the backend via the agent's single `base_port` `/v1` routed by `model`. With `false` the boot runs in a background task and the ack is `{"ok": true, "detail": {"accepted": true, "backend_status": "..."}}` immediately: a cold halogen-flash boot downloads its checkpoint AND companions inside the driver's health wait — tens of GB, tens of minutes — so neither the ack window nor the admin's HTTP request may sit open that long. The outcome then arrives as events: `backend.status initializing` heartbeats, then `running`/`error`, then `backend.metadata`. Waiting while a background boot is already in flight JOINS that boot (never a second spawn); an accept-style call while one is in flight NAKs `boot_in_progress`. Admin timeouts: `BACKEND_BOOT_TIMEOUT_SECONDS` (3600) when waiting, the 60s action window otherwise. |
 | `backend.stop` | `{"instance_id": "..."}` | Live | Provider awaits `BackendLifecycle.stop()` (→ STOPPING → STOPPED, emitted) and acks ok. **No forced drain**: in-flight streams are not cancelled — their producer tasks release their slots as the upstream closes (the client may see the stream end early). Use `provider.config.update` or `backend.restart` when drain semantics matter. Refused `boot_in_progress` while an accepted-style transition is running. |
 | `backend.restart` | `{"instance_id": "...", "wait_for_running": bool = true}` | **Live** | Stop + start, same wait flag as `backend.start`. **Drain-checked first**: NAKs `{"ok": false, "error": "backend_in_use", "detail": {"step": "restart", "retry_after": 10, "in_flight": N}}` while live requests hold slots, so a restart never cuts a stream. |
 | `provider.initialize` | `{"instance_id": "...", "wait_for_running": bool = false}` | **Live** | Full re-provision, driven by the provider package's `re_register` callback: (1) POST `/admin/api/providers/register` again — re-checks the version + schema gates, re-adopts `capacity`/`backend_config`/fingerprint, mints a fresh agent secret and rewrites `CACHE_DIR/provider_config.json`; the live socket is **not** recycled (already authenticated at the current epoch; the new secret is for future reconnects). (2) Drain check — NAKs `backend_in_use` while slots are held. (3) ack (default `{"ok": true, "detail": {"accepted": true, "steps": ["stop","start","metadata"]}}`), then in the background: stop → start (engine downloads/loads, heartbeated as `initializing`) → `list_models()` → `backend.metadata`. Terminal state via `provider.status` (`running` / `error` + `error_message`). |
@@ -409,7 +409,7 @@ Payload (admin → provider) — the agent's **full** current assignment set:
   "assignments": [
     {"instance_id": "<uuid>", "provider_definition_id": "<uuid>",
      "alias": "my-model", "backend_config": { }, "config_fingerprint": "<sha256>",
-     "port": 8081, "capacity": 1, "idle_timeout_seconds": 300,
+     "capacity": 1, "idle_timeout_seconds": 300,
      "vram_required_bytes": 0}
   ],
   "max_running_backends": 0
@@ -438,15 +438,18 @@ The provider reconciles its `BackendRegistry` to the pushed set
 - **remove** — for each hosted handle no longer in the set, `stop_if_idle()` and
   drop it. A **busy** backend is refused (`reason: backend_in_use`) and kept
   until it frees — the exact mirror of the admin's busy-safe prune.
-- A reconcile that changed the hosted set fires the registry's change listeners
-  so the `MultiPortServer` binds/unbinds the affected backends' HTTP ports.
+- Because the agent's single env-port `/v1` surface resolves the target backend
+  from the live registry at request time, an added backend is immediately routable
+  and a removed one immediately unroutable — there is **no** per-backend HTTP
+  listener to bind/unbind and no registry change-listener to fire.
 
 Admin side (`app/services/assignments.py`): `push_agent_assignments` runs the
-shared `reconcile_agent_placement` diff (create stopped rows at
-`base_port + next free offset`; retire de-placed rows busy-safe; refuse a new
-row whose port collides with a connected peer on the machine), then pushes the
-full set over the socket. On a successful push that added backends the admin
-re-triggers the scheduler's proactive warm-up (the slice-4 seam). A
+shared `reconcile_agent_placement` diff (create stopped rows; retire de-placed
+rows busy-safe), then pushes the full set over the socket. The admin allocates
+no per-backend ports and does no cross-agent port-clash check — every backend is
+reached through the agent's single `base_port` `/v1`, routed by `model`. On a
+successful push that added backends the admin re-triggers the scheduler's
+proactive warm-up (the slice-4 seam). A
 disconnected agent still gets its rows reconciled (ghosts pruned) but receives
 no frame — its next registration re-resolves authoritatively.
 

@@ -154,12 +154,9 @@ def install_assignment_handler(
             registry.remove(handle.instance_id)
             removed.append(iid)
 
-        # Slice 6: a reconcile that changed the hosted set drives the multi-port
-        # server to bind/unbind the affected backends' HTTP listeners. Fired
-        # only on an actual change so the initial build (before the server
-        # exists) and no-op pushes stay silent.
-        if added or removed:
-            await registry.notify_changed()
+        # Port model overhaul: the agent's single env-port /v1 surface reads the
+        # live registry per request, so an added/removed backend is immediately
+        # routable (or gone) with no listener sync — nothing to notify here.
 
         logger.info(
             "assignments reconciled: added=%s removed=%s refused=%s",

@@ -1,28 +1,30 @@
-"""Multi-port HTTP serving for a provider agent (Phase 16 slice 6).
+"""Single env-port HTTP serving for a provider agent (port model overhaul).
 
-An agent hosts 1..N backends, each of which the admin dials on its own port
-(``base_port + offset`` — the backend's assignment ``port``). This module runs
-one ``uvicorn`` server per hosted backend in a single process, each serving that
-backend's normalized ``/v1`` surface (built by
-:func:`provider_lib.app_factory.create_provider_app`) bound to the backend's
-port. The control plane stays a single agent WebSocket; only the data plane fans
-out across ports.
+An agent hosts 1..N backends but publishes exactly **one** admin-facing HTTP
+port — its container env ``PROVIDER_PORT``. :class:`AgentServer` runs a single
+``uvicorn`` server on that port whose app (built by
+:func:`provider_lib.app_factory.create_provider_app`) resolves the target
+backend per request from the live :class:`~provider_lib.registry.BackendRegistry`
+(matching the request's ``model`` field against each backend's definition
+``alias``). The control plane stays a single agent WebSocket; the data plane is
+one multiplexed ``/v1`` surface.
 
 Design notes:
 
-* **Additive, not disruptive.** A single-backend agent produces exactly one
-  server on ``PROVIDER_PORT`` — byte-for-byte the pre-slice-6 behavior.
-* **Dynamic.** When an ``agent.assignments.update`` reconcile adds or drops a
-  backend it fires the registry's change listeners; :meth:`MultiPortServer.sync`
-  diffs the served ports against the hosted backends and starts/stops the
-  affected listeners. Backends added after startup become reachable without a
-  process restart.
-* **No per-server signal capture.** ``uvicorn.Server.serve()`` installs process
-  signal handlers (``capture_signals``); running N of them would fight over
-  SIGINT/SIGTERM. We drive each server through its ``startup`` / ``main_loop`` /
-  ``shutdown`` phases directly (mirroring ``Server._serve`` minus the signal
-  capture) so the process owns shutdown and cancelling the serve task tears every
-  listener down cleanly.
+* **One listener, no per-backend churn.** Because routing happens at request time
+  against the shared registry, a backend added or dropped by an
+  ``agent.assignments.update`` reconcile is immediately routable (or removed)
+  without touching the socket — there is no per-backend listener to start/stop
+  and no registry change-listener to sync.
+* **Engine ports are private.** Each backend's engine (llama-server / gufo /
+  halogen / halogen-flash) binds a private local port inside the container that
+  the admin never learns or dials; the admin only ever reaches the agent's single
+  ``PROVIDER_PORT``.
+* **No signal capture.** ``uvicorn.Server.serve()`` installs process signal
+  handlers (``capture_signals``); we drive the server through its ``startup`` /
+  ``main_loop`` / ``shutdown`` phases directly (mirroring ``Server._serve`` minus
+  the signal capture) so the process owns shutdown and cancelling the serve task
+  tears the socket down cleanly.
 """
 
 from __future__ import annotations
@@ -36,13 +38,13 @@ import uvicorn
 
 from provider_lib.app_factory import BackendOverrides, create_provider_app
 from provider_lib.config import ProviderSettings
-from provider_lib.registry import BackendHandle, BackendRegistry
+from provider_lib.registry import BackendRegistry
 
 logger = logging.getLogger("provider.serve")
 
 
 class _BackendListener:
-    """One uvicorn server bound to one backend's port.
+    """One uvicorn server bound to a port.
 
     Runs uvicorn's serve phases without installing signal handlers (the process
     owns shutdown); ``stop`` flips ``should_exit`` so ``main_loop`` returns and
@@ -83,112 +85,10 @@ class _BackendListener:
         self._task = None
 
 
-class MultiPortServer:
-    """Serve each hosted backend's ``/v1`` on its own port, in one process."""
-
-    def __init__(
-        self,
-        settings: ProviderSettings,
-        provider_type: str,
-        version: str,
-        registry: BackendRegistry,
-        *,
-        calculate_usage: Any | None = None,
-        host: str = "0.0.0.0",
-        log_level: str = "info",
-    ) -> None:
-        self._settings = settings
-        self._provider_type = provider_type
-        self._version = version
-        self._registry = registry
-        self._calculate_usage = calculate_usage
-        self._host = host
-        self._log_level = log_level
-        # port -> listener. Keyed by port because the admin addresses a backend
-        # by port; two hosted backends never share a port (admin port_conflict).
-        self._listeners: dict[int, _BackendListener] = {}
-        self._lock = asyncio.Lock()
-
-    def _build_app(self, handle: BackendHandle) -> Any:
-        overrides = BackendOverrides(
-            provider_type=self._provider_type,
-            version=self._version,
-            calculate_usage=self._calculate_usage,
-            lifecycle=handle.lifecycle,
-        )
-        return create_provider_app(self._settings, overrides)
-
-    def _desired(self) -> dict[int, BackendHandle]:
-        """Map each hosted backend's port -> handle (single-backend handles
-        without an explicit port fall back to the agent base port)."""
-        desired: dict[int, BackendHandle] = {}
-        for handle in self._registry.handles():
-            port = (
-                handle.port if handle.port is not None else self._settings.PROVIDER_PORT
-            )
-            desired[int(port)] = handle
-        return desired
-
-    async def sync(self) -> None:
-        """Reconcile served ports with the hosted backends (idempotent)."""
-        async with self._lock:
-            desired = self._desired()
-            # Stop listeners whose backend is no longer hosted.
-            for port in list(self._listeners):
-                if port not in desired:
-                    await self._listeners.pop(port).stop()
-                    logger.info("stopped backend listener on port %s", port)
-            # Start listeners for newly hosted backends. A single backend whose
-            # app fails to build must NOT strand the others (M1): the exception
-            # would otherwise propagate out of sync() (swallowed by the registry
-            # change-listener), leaving every later backend unbound until the
-            # next reconcile. Log-and-continue so the healthy backends still
-            # bind; the broken one is retried on the next sync.
-            for port, handle in desired.items():
-                if port in self._listeners:
-                    continue
-                try:
-                    listener = _BackendListener(
-                        self._build_app(handle), self._host, port, self._log_level
-                    )
-                    listener.start()
-                except Exception:  # noqa: BLE001 - one bad backend must not abort sync
-                    logger.exception(
-                        "failed to start backend listener on port %s (instance %s); "
-                        "continuing with the remaining backends",
-                        port,
-                        handle.instance_id or "?",
-                    )
-                    continue
-                self._listeners[port] = listener
-                logger.info(
-                    "serving backend %s on port %s", handle.instance_id or "?", port
-                )
-
-    async def aclose(self) -> None:
-        """Stop every listener (process shutdown)."""
-        async with self._lock:
-            for port in list(self._listeners):
-                await self._listeners.pop(port).stop()
-
-    async def serve_forever(self) -> None:
-        """Bind every hosted backend's port, keep them in sync with the
-        registry, and block until the task is cancelled."""
-        self._registry.add_change_listener(self.sync)
-        await self.sync()
-        try:
-            # Block until cancelled by the caller (Ctrl-C / task cancel). The
-            # never-set event is the idiomatic "wait forever".
-            await asyncio.Event().wait()
-        finally:
-            await self.aclose()
-
-
 class AgentServer:
     """Serve the agent's ONE admin-facing ``/v1`` surface on ``PROVIDER_PORT``.
 
-    Port model overhaul: instead of one listener per backend (``MultiPortServer``)
-    the agent publishes a single uvicorn server bound to its env ``PROVIDER_PORT``
+    The agent publishes a single uvicorn server bound to its env ``PROVIDER_PORT``
     whose app resolves the target backend per request from the live registry (by
     the request's ``model`` = definition alias). Because resolution happens at
     request time against the shared registry, there is NO per-backend listener
@@ -263,4 +163,4 @@ class AgentServer:
             self._listener = None
 
 
-__all__ = ["MultiPortServer", "AgentServer"]
+__all__ = ["AgentServer"]

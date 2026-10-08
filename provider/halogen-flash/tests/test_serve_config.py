@@ -3,9 +3,7 @@
 `uvicorn.Config` has no `base_port` kwarg and takes no `**kwargs`, so a
 `base_port=` there crashes the container at startup. The port model overhaul
 serves the agent's single ``/v1`` surface on ``PROVIDER_PORT`` via
-:class:`provider_lib.serve.AgentServer` (one uvicorn listener, routing by model);
-the legacy :class:`provider_lib.serve.MultiPortServer` (one listener per backend)
-remains for not-yet-migrated providers. halogen-flash keeps its static
+:class:`provider_lib.serve.AgentServer` (one uvicorn listener, routing by model). halogen-flash keeps its static
 MACHINE_UID-derived engine ports (one backend per machine), but the admin-facing
 surface is now the single env-port AgentServer. This test (a) proves `base_port`
 is invalid and `port` is valid, (b) asserts the shared serve module binds with

@@ -19,7 +19,6 @@ dispatch layer is a transparent pass-through for them.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from typing import Any
 
 from provider_lib.backend import BackendLifecycle
@@ -33,11 +32,6 @@ class BackendHandle:
     matching the request's ``model`` field against it (port model overhaul).
     ``None`` for handles built before an alias is known (single-backend
     convenience / pre-registration placeholder).
-
-    ``port`` is retained for the not-yet-migrated providers that still serve each
-    backend on its own admin-facing port via ``MultiPortServer``; the new
-    single-env-port model does not use it (the agent publishes one
-    ``PROVIDER_PORT`` and routes by model). ``None`` is the default.
     """
 
     def __init__(
@@ -45,13 +39,11 @@ class BackendHandle:
         instance_id: str,
         lifecycle: BackendLifecycle,
         config_state: Any = None,
-        port: int | None = None,
         alias: str | None = None,
     ) -> None:
         self.instance_id = instance_id
         self.lifecycle = lifecycle
         self.config_state = config_state
-        self.port = port
         self.alias = alias
 
 
@@ -62,36 +54,11 @@ class BackendRegistry:
     ``/v1`` surface can resolve the target backend from a request's ``model``
     field (port model overhaul). The index is kept in sync by :meth:`add` /
     :meth:`remove`.
-
-    Slice 6: the registry also carries an optional set of async *change
-    listeners* the multi-port server registers so it can start/stop per-backend
-    HTTP listeners when an ``agent.assignments.update`` reconcile adds or drops
-    a backend. Listeners are fired explicitly via :meth:`notify_changed` (never
-    on every ``add``/``remove``) so the initial build — before the server exists
-    — stays silent.
     """
 
     def __init__(self) -> None:
         self._handles: dict[str, BackendHandle] = {}
         self._by_alias: dict[str, BackendHandle] = {}
-        self._change_listeners: list[Callable[[], Awaitable[None]]] = []
-
-    def add_change_listener(self, listener: Callable[[], Awaitable[None]]) -> None:
-        """Register an async callback fired after a reconcile changes the set."""
-        self._change_listeners.append(listener)
-
-    async def notify_changed(self) -> None:
-        """Fire every change listener (best-effort; a failing listener never
-        aborts the reconcile ack)."""
-        for listener in self._change_listeners:
-            try:
-                await listener()
-            except Exception:  # noqa: BLE001 - server sync must not break ack
-                import logging
-
-                logging.getLogger("provider.registry").exception(
-                    "registry change listener failed"
-                )
 
     def add(self, handle: BackendHandle) -> None:
         self._handles[handle.instance_id] = handle
@@ -186,7 +153,7 @@ class BackendRegistry:
 
 
 def registry_from_lifecycle(
-    lifecycle: BackendLifecycle, config_state: Any = None, port: int | None = None
+    lifecycle: BackendLifecycle, config_state: Any = None
 ) -> BackendRegistry:
     """Build a one-handle registry from a single lifecycle (backward-compat
     path for providers that host exactly one backend)."""
@@ -196,7 +163,6 @@ def registry_from_lifecycle(
             str(lifecycle.instance_id) if lifecycle.instance_id is not None else "",
             lifecycle,
             config_state,
-            port=port,
         )
     )
     return reg

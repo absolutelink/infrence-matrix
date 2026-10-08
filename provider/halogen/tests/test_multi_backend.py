@@ -108,7 +108,6 @@ def test_build_registry_sets_alias_handles(
     ha, hb = registry.get(INSTANCE_A), registry.get(INSTANCE_B)
     assert ha is not None and hb is not None
     assert ha.alias == f"alias-{INSTANCE_A}" and hb.alias == f"alias-{INSTANCE_B}"
-    assert ha.port is None and hb.port is None
     # Engine ports are allocated at start, so unset on a fresh handle.
     assert ha.lifecycle.driver.api_port is None
     assert hb.lifecycle.driver.api_port is None
@@ -124,7 +123,6 @@ def test_make_handle_builds_drivable_backend_for_new_assignment(
     handle = make_handle(client, _entry(INSTANCE_C, local_artifacts))
     assert handle.instance_id == INSTANCE_C
     assert handle.alias == f"alias-{INSTANCE_C}"
-    assert handle.port is None
     assert handle.lifecycle.driver.api_port is None
     assert handle.config_state.applied_fingerprint == f"fp-{INSTANCE_C}"
 
@@ -159,7 +157,6 @@ async def test_assignments_add_and_remove_on_two_agent(
     hc = registry.get(INSTANCE_C)
     assert hc is not None
     assert hc.alias == f"alias-{INSTANCE_C}"
-    assert hc.port is None
     assert hc.lifecycle.driver.api_port is None
 
 
