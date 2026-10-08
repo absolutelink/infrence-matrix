@@ -1,5 +1,7 @@
 import { createFileRoute, Outlet } from "@tanstack/react-router"
 
+import { LogsDock } from "@/components/Common/LogsDock"
+import { LogsDockProvider } from "@/components/Common/LogsDockContext"
 import StatsBar from "@/components/Common/StatsBar"
 import AppSidebar from "@/components/Sidebar/AppSidebar"
 import {
@@ -14,19 +16,22 @@ export const Route = createFileRoute("/_layout")({
 
 function Layout() {
   return (
-    <SidebarProvider>
-      <AppSidebar />
-      <SidebarInset>
-        <header className="sticky top-0 z-10 flex h-16 shrink-0 items-center gap-2 overflow-x-auto border-b bg-background px-4">
-          <SidebarTrigger className="-ml-1 shrink-0 text-muted-foreground" />
-          <StatsBar />
-        </header>
-        <main className="min-h-0 flex-1 overflow-y-auto p-6 md:p-8">
-          <div className="mx-auto h-full max-w-7xl">
-            <Outlet />
-          </div>
-        </main>
-      </SidebarInset>
-    </SidebarProvider>
+    <LogsDockProvider>
+      <SidebarProvider>
+        <AppSidebar />
+        <SidebarInset>
+          <header className="sticky top-0 z-10 flex h-16 shrink-0 items-center gap-2 overflow-x-auto border-b bg-background px-4">
+            <SidebarTrigger className="-ml-1 shrink-0 text-muted-foreground" />
+            <StatsBar />
+          </header>
+          <main className="min-h-0 flex-1 overflow-y-auto p-6 md:p-8">
+            <div className="mx-auto h-full max-w-7xl">
+              <Outlet />
+            </div>
+          </main>
+          <LogsDock />
+        </SidebarInset>
+      </SidebarProvider>
+    </LogsDockProvider>
   )
 }

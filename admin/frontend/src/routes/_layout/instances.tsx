@@ -13,7 +13,7 @@ import {
 import { useState } from "react"
 
 import { AdminService } from "@/client"
-import { LogsSheet } from "@/components/Common/LogsSheet"
+import { useLogsDock } from "@/components/Common/LogsDockContext"
 import { ConnectionBadge, StatusBadge } from "@/components/Common/StatusBadge"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -120,7 +120,7 @@ function InstancesPage() {
   )
   const [cacheTarget, setCacheTarget] = useState<ProviderInstance | null>(null)
   const [pruneTarget, setPruneTarget] = useState<ProviderInstance | null>(null)
-  const [logsTarget, setLogsTarget] = useState<ProviderInstance | null>(null)
+  const logsDock = useLogsDock()
   const [backendTarget, setBackendTarget] =
     useState<BackendActionTarget | null>(null)
 
@@ -242,7 +242,7 @@ function InstancesPage() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => setLogsTarget(i)}
+                        onClick={() => logsDock.openTab(i)}
                         title="View backend + provider logs"
                       >
                         <ScrollText /> Logs
@@ -301,12 +301,6 @@ function InstancesPage() {
       <BackendActionSheet
         target={backendTarget}
         onClose={() => setBackendTarget(null)}
-      />
-      <LogsSheet
-        instance={logsTarget}
-        onOpenChange={(o) => {
-          if (!o) setLogsTarget(null)
-        }}
       />
     </div>
   )

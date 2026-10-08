@@ -118,7 +118,7 @@ starting a feature, read the linked protocol/doc first.
 | 16 | Machine-scoped provider **agents**: one container → many same-type backends, placement, `max_running_backends` | 🟡 slices 1–6 landed (agents, placement, `max_running` hot-swap + proactive warm-up, `agent.assignments.update` push, real-engine multi-backend-per-process + per-port serving); 7–8 pending |
 | 17 | Per-GPU machine metrics + hardware union: device-isolated agents (one GPU each) merge into a full machine inventory and live snapshot | ✅ Complete |
 | 18 | Embeddings + modality-scoped endpoints: `ProviderDefinition.modality` (`llm`/`embedding`, `audio` reserved), `ProviderType.serves_modalities`, spec `POST /v1/embeddings` via litellm, llama-cpp `--embedding`/`--pooling` + mock fake embeddings | ✅ shipped (all 7 slices green + e2e verified vs local admin + mock) |
-| 19 | Live stats bar (tokens/sec, queue/active, VRAM/GPU + popovers incl. queue clear) + UI ergonomics: create/edit forms → right-side drawers, logs → bottom-docked tabbed panel | 🟡 S0–S4 landed |
+| 19 | Live stats bar (tokens/sec, queue/active, VRAM/GPU + popovers incl. queue clear) + UI ergonomics: create/edit forms → right-side drawers, logs → bottom-docked tabbed panel | ✅ shipped (S0–S5) |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
 
@@ -2464,7 +2464,7 @@ idle-eviction note predates Phase 6. None affect the shipped port model.
 
 ---
 
-## Phase 19 — Live stats bar + UI ergonomics 🟡
+## Phase 19 — Live stats bar + UI ergonomics ✅
 
 **Goal:** a global statistics bar in the admin UI header, create/edit forms
 as right-side drawers, and a bottom-docked tabbed logs panel.
@@ -2555,7 +2555,19 @@ as right-side drawers, and a bottom-docked tabbed logs panel.
       stay `Dialog`s. tsc/lint/build green. Reviewer: CLEAN (only
       pre-existing polish noted: storage-footer reset asymmetry,
       `shrink-0` header hardening — deferred).
-- [ ] **S5 — bottom-docked tabbed logs panel.**
+- [x] **S5 — bottom-docked tabbed logs panel:** DONE: `LogsSheet`
+      deleted → `LogsPanel` (full body parity: kind tabs, live/pause,
+      search, stream toggles, download, auto-scroll + jump-to-latest,
+      gap/dropped/skipped banners, seq-merge forward-only cursor,
+      2000-line cap) + `LogsDock` (non-modal flex sibling after `<main>`
+      in `_layout` — content pushed up, no overlay/portal; tablist a11y
+      roles; drag + keyboard resize 200px–70vh with pointercancel/
+      unmount-safe cleanup) + `LogsDockContext` (session-persistent
+      in-memory tabs, default 40vh, viewport-resize re-clamp, pure
+      closeTab successor). Only the active tab polls (`enabled`/`live`
+      gating); inactive panels stay mounted for scrollback/cursor.
+      `instances.tsx` opens tabs. tsc/lint/build green. Reviewer:
+      CLEAN after M1/L1/L2/N1 fixes.
 
 ---
 
