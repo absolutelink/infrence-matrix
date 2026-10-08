@@ -42,6 +42,16 @@ class ProviderSettings(BaseSettings):
     # Known categories: gpu_usage, vram, os_ram, cpu, storage
     METRICS_CATEGORIES: str = "gpu_usage vram os_ram cpu storage"
 
+    # Phase 17: GPU scoping for device-isolated containers. Space-delimited
+    # list; each token is either a full GPU ``uuid`` (case-insensitive exact
+    # match) or a decimal GPU index matched against the sample's ``id``. When
+    # empty the agent implicitly reports every GPU its container can see
+    # (device isolation makes visible == owned); set it only to narrow a
+    # container that sees all GPUs down to the subset it should own. Applies
+    # to both the registration hardware report and the live GPU-category
+    # metrics (``vram`` / ``gpu_usage``).
+    ASSIGNED_GPU_UUIDS: str = ""
+
     # llama.cpp backend (provider_llama_cpp). The binary path comes from
     # the environment, never from backend_config.
     LLAMA_SERVER_PATH: str = "llama-server"
@@ -75,8 +85,11 @@ class ProviderSettings(BaseSettings):
     NPU_PINS_FILE: str = "/opt/halogen/npu/models.txt"
     NPU_BINARY_PATH: str = "/usr/local/bin/halogen-npu"
 
-    # Machine-level metrics emitter period (seconds), active only while
-    # the admin has assigned metrics ownership to this instance.
+    # Machine-level metrics emitter period (seconds). The emitter loop runs
+    # whenever the agent is connected; GPU categories (vram/gpu_usage) emit
+    # every interval from every agent that declares them, while the
+    # machine-wide categories (os_ram/cpu/storage) are included only while the
+    # admin has assigned metrics ownership (metrics.assign).
     MACHINE_METRICS_INTERVAL: float = 10.0
 
     # Minimum seconds between download.progress events.
@@ -92,6 +105,10 @@ class ProviderSettings(BaseSettings):
     @property
     def metrics_categories(self) -> set[str]:
         return {c for c in self.METRICS_CATEGORIES.split() if c}
+
+    @property
+    def assigned_gpu_tokens(self) -> list[str]:
+        return [t for t in self.ASSIGNED_GPU_UUIDS.split() if t]
 
     @property
     def provider_config_path(self) -> Path:

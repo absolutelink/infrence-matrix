@@ -6,16 +6,25 @@ blocking work (subprocess calls, /proc reads, disk stats) runs through
 collector is failure-tolerant: a missing tool or unreadable file simply
 omits its category rather than raising.
 
-Categories (see ProviderSettings.METRICS_CATEGORIES):
-  gpu_usage  GPU utilization percent (nvidia-smi or AMD sysfs)
-  vram       GPU memory totals/used/free (same sampler as gpu_usage)
-  os_ram     /proc/meminfo totals
-  cpu        load average + core count
-  storage    shutil.disk_usage of MODELS_DIR and CACHE_DIR
+Categories (see ProviderSettings.METRICS_CATEGORIES) split into two
+ownership classes (Phase 17):
 
-Machine metrics ownership (exactly one instance per machine reports) is
-assigned by the admin via the `metrics.assign` WS command; the emitter
-runs only between assign and unassign.
+  GPU_CATEGORIES (per-agent, always-on when declared)
+    gpu_usage  GPU utilization percent (nvidia-smi or AMD sysfs)
+    vram       GPU memory totals/used/free (same sampler as gpu_usage)
+  MACHINE_WIDE_CATEGORIES (owner-gated, single agent per machine)
+    os_ram     /proc/meminfo totals
+    cpu        load average + core count
+    storage    shutil.disk_usage of MODELS_DIR and CACHE_DIR
+
+On a device-isolated box each container sees only its own GPU, so the GPU
+categories are emitted by EVERY agent that declares them, filtered to that
+agent's assigned GPUs (`ASSIGNED_GPU_UUIDS`; empty = implicit = every GPU
+the container sees). The machine-wide categories stay owner-gated: the admin
+assigns ownership of the machine-wide snapshot to exactly one agent via the
+`metrics.assign` / `metrics.unassign` WS commands; the emitter loop runs
+whenever it is started (on connect) and `set_owned()` only toggles whether
+the machine-wide categories are included in each frame.
 """
 
 import asyncio
@@ -31,6 +40,52 @@ logger = logging.getLogger("provider.metrics")
 _NVIDIA_QUERY = (
     "index,uuid,name,memory.total,memory.used,utilization.gpu,temperature.gpu"
 )
+
+# Phase 17 category split. GPU categories are emitted by every agent that
+# declares them (filtered to its assigned GPUs); machine-wide categories stay
+# owner-gated (exactly one agent per machine reports them).
+GPU_CATEGORIES = frozenset({"vram", "gpu_usage"})
+MACHINE_WIDE_CATEGORIES = frozenset({"os_ram", "cpu", "storage"})
+
+
+def parse_gpu_assignment(tokens: list[str]) -> set[str]:
+    """Normalize ``ASSIGNED_GPU_UUIDS`` tokens into a match set.
+
+    Each token is either a full GPU ``uuid`` (matched case-insensitively) or a
+    decimal GPU index (matched against the sample's ``id``). An empty result
+    means *implicit* — report every GPU the container sees.
+    """
+    return {t.strip().lower() for t in tokens if t.strip()}
+
+
+def gpu_uuid(gpu: dict[str, Any]) -> str:
+    """Stable identifier for a GPU sample.
+
+    Returns the real ``uuid`` when present (NVIDIA NVML uuid or the AMD
+    PCI-slot-derived uuid), else a synthesized ``gpu-<id>`` fallback. This is
+    the single canonical uuid space: providers report it and operators pass it
+    back as an ``ASSIGNED_GPU_UUIDS`` token, so the reported value and the
+    accepted token always agree.
+    """
+    return str(gpu.get("uuid") or f"gpu-{gpu.get('id')}")
+
+
+def filter_gpus(
+    sample: list[dict[str, Any]], assignment: set[str]
+) -> list[dict[str, Any]]:
+    """Keep only GPUs the agent is assigned.
+
+    An empty ``assignment`` is implicit (pass-through). Otherwise a GPU is kept
+    when its canonical uuid (``gpu_uuid`` — real uuid or the synthesized
+    ``gpu-<id>`` form, case-insensitive) or its decimal ``id`` is in the set.
+    """
+    if not assignment:
+        return sample
+    kept: list[dict[str, Any]] = []
+    for gpu in sample:
+        if gpu_uuid(gpu).lower() in assignment or str(gpu.get("id", "")) in assignment:
+            kept.append(gpu)
+    return kept
 
 
 # ----------------------------------------------------------------------
@@ -89,6 +144,27 @@ def _read_int(path: Path) -> int | None:
         return None
 
 
+def _amd_uuid(device: Path) -> str:
+    """Stable, host-unique uuid for an AMD card.
+
+    AMD sysfs exposes no NVML-style uuid, so derive one from the PCI slot
+    (``PCI_SLOT_NAME`` in the device ``uevent``, e.g. ``amd-0000:03:00.0``).
+    When unavailable, fall back to the ``cardN`` directory name (the device's
+    parent) — never the container-local enumeration index, which is ``0`` for
+    every device-isolated container and would collide across agents in the
+    Phase-17 union-by-uuid merge.
+    """
+    try:
+        uevent = (device / "uevent").read_text()
+    except OSError:  # fmt: skip
+        uevent = ""
+    for line in uevent.splitlines():
+        key, _, value = line.partition("=")
+        if key.strip() == "PCI_SLOT_NAME" and value.strip():
+            return f"amd-{value.strip()}"
+    return f"amd-{device.parent.name}"
+
+
 def _sample_amd_sysfs() -> list[dict[str, Any]]:
     """Read AMDGPU memory/busy telemetry from the kernel driver sysfs."""
     gpus: list[dict[str, Any]] = []
@@ -113,6 +189,7 @@ def _sample_amd_sysfs() -> list[dict[str, Any]]:
         gpus.append(
             {
                 "id": len(gpus),
+                "uuid": _amd_uuid(device),
                 "name": "AMD GPU",
                 "vendor": "amd",
                 "backend": "amd",
@@ -172,15 +249,21 @@ async def collect_gpu_sample() -> list[dict[str, Any]]:
         return []
 
 
-async def collect_vram() -> dict[str, Any]:
+async def collect_vram(gpu_assignment: set[str] | None = None) -> dict[str, Any]:
     gpus = await collect_gpu_sample()
+    if gpu_assignment is not None:
+        gpus = filter_gpus(gpus, gpu_assignment)
     if not gpus:
         raise LookupError("no GPU telemetry source available")
     return _vram_from(gpus)
 
 
-async def collect_gpu_usage() -> dict[str, Any]:
+async def collect_gpu_usage(
+    gpu_assignment: set[str] | None = None,
+) -> dict[str, Any]:
     gpus = await collect_gpu_sample()
+    if gpu_assignment is not None:
+        gpus = filter_gpus(gpus, gpu_assignment)
     if not gpus:
         raise LookupError("no GPU telemetry source available")
     return _usage_from(gpus)
@@ -263,11 +346,14 @@ async def collect_machine_snapshot(
     *,
     models_dir: Path | None = None,
     cache_dir: Path | None = None,
+    gpu_assignment: set[str] | None = None,
 ) -> dict[str, Any]:
     """Collect only the requested categories; never raises.
 
     A category whose collector fails (missing tool, unreadable path) is
-    simply omitted from the returned dict.
+    simply omitted from the returned dict. When ``gpu_assignment`` is given
+    the shared GPU sample is filtered to the agent's assigned GPUs before
+    deriving ``vram`` / ``gpu_usage`` (empty set = implicit = every GPU).
     """
     snapshot: dict[str, Any] = {}
     # vram and gpu_usage share one sampler: sample once, derive both.
@@ -277,6 +363,8 @@ async def collect_machine_snapshot(
         except Exception:  # noqa: BLE001
             logger.debug("gpu sampler failed; omitting vram/gpu_usage")
             gpus = []
+        if gpu_assignment is not None:
+            gpus = filter_gpus(gpus, gpu_assignment)
         if "vram" in categories and gpus:
             snapshot["vram"] = _vram_from(gpus)
         if "gpu_usage" in categories and gpus:
@@ -306,12 +394,17 @@ async def collect_machine_snapshot(
 
 
 class MachineMetricsEmitter:
-    """Periodically sends `metrics.machine` events while assigned.
+    """Periodically sends `metrics.machine` events while started.
 
-    The admin assigns machine-metrics ownership with the `metrics.assign`
-    WS command (exactly one instance per machine) and revokes it with
-    `metrics.unassign` / disconnect. This emitter only runs between
-    start() and stop(); call those from the command handlers.
+    Phase 17 split: the emitter loop runs whenever `start()`ed (on connect),
+    independent of ownership. GPU categories (`vram` / `gpu_usage`) are emitted
+    by EVERY agent that declares them, filtered to its assigned GPUs
+    (`ASSIGNED_GPU_UUIDS`; empty = implicit). Machine-wide categories
+    (`os_ram` / `cpu` / `storage`) are included only while the admin has
+    assigned machine-metrics ownership via `metrics.assign`
+    (`set_owned(True)`); `metrics.unassign` (`set_owned(False)`) drops them
+    but never stops the loop, so GPU telemetry keeps flowing. A frame whose
+    composed snapshot is empty is skipped (no empty-frame spam).
     """
 
     def __init__(self, lifecycle: Any, client: Any, settings: Any) -> None:
@@ -319,10 +412,19 @@ class MachineMetricsEmitter:
         self._client = client
         self._settings = settings
         self._task: asyncio.Task[None] | None = None
+        self._owned: bool = False
 
     @property
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
+
+    @property
+    def owned(self) -> bool:
+        return self._owned
+
+    def set_owned(self, value: bool) -> None:
+        """Toggle whether machine-wide categories are included in each frame."""
+        self._owned = value
 
     def start(self) -> None:
         if self.running:
@@ -338,19 +440,51 @@ class MachineMetricsEmitter:
                 pass
             self._task = None
 
-    async def emit_once(self) -> dict[str, Any]:
+    async def emit_once(self) -> dict[str, Any] | None:
         categories = self._settings.metrics_categories
-        snapshot = await collect_machine_snapshot(
-            categories,
-            models_dir=self._settings.MODELS_DIR,
-            cache_dir=self._settings.CACHE_DIR,
-        )
+        gpu_cats = categories & GPU_CATEGORIES
+        machine_cats = categories & MACHINE_WIDE_CATEGORIES
+        assignment = parse_gpu_assignment(self._settings.assigned_gpu_tokens)
+
+        snapshot: dict[str, Any] = {}
+        assigned_gpus: list[str] = []
+
+        # GPU categories: emitted by every agent that declares them, filtered
+        # to this agent's assignment, regardless of ownership.
+        if gpu_cats:
+            try:
+                gpus = await collect_gpu_sample()
+            except Exception:  # noqa: BLE001
+                logger.debug("gpu sampler failed; omitting vram/gpu_usage")
+                gpus = []
+            gpus = filter_gpus(gpus, assignment)
+            assigned_gpus = [gpu_uuid(g) for g in gpus]
+            if "vram" in gpu_cats and gpus:
+                snapshot["vram"] = _vram_from(gpus)
+            if "gpu_usage" in gpu_cats and gpus:
+                snapshot["gpu_usage"] = _usage_from(gpus)
+
+        # Machine-wide categories: owner-gated single snapshot.
+        if machine_cats and self._owned:
+            machine_snapshot = await collect_machine_snapshot(
+                machine_cats,
+                models_dir=self._settings.MODELS_DIR,
+                cache_dir=self._settings.CACHE_DIR,
+            )
+            snapshot.update(machine_snapshot)
+
+        if not snapshot:
+            # Nothing to report (e.g. only machine-wide cats declared while
+            # not owned) — skip the frame instead of spamming empties.
+            return None
+
         payload: dict[str, Any] = {
             **snapshot,
             "backend_status": self._lifecycle.backend_status,
             "in_flight": self._lifecycle.in_flight,
             "capacity": self._lifecycle.capacity,
             "machine_uid": self._settings.MACHINE_UID,
+            "assigned_gpus": assigned_gpus,
         }
         await self._client.send_event("metrics.machine", payload)
         return payload

@@ -32,6 +32,7 @@ from provider_lib.backend import BackendLifecycle
 from provider_lib.config import ProviderSettings
 from provider_lib.config_update import ConfigState, install_config_handlers
 from provider_lib.log_stream import install_log_streaming
+from provider_lib.metrics import filter_gpus, parse_gpu_assignment
 from provider_lib.ops import install_backend_ops
 from provider_lib.registry import BackendHandle, BackendRegistry
 from provider_lib.serve import MultiPortServer
@@ -59,6 +60,24 @@ FAKE_HARDWARE: dict[str, Any] = {
     "cpu": {"cores": 8, "model": "mock-cpu"},
     "ram": {"total_bytes": 32 * 1024**3},
 }
+
+
+def build_hardware_report(settings: ProviderSettings) -> dict[str, Any]:
+    """Fake hardware inventory, filtered to ``ASSIGNED_GPU_UUIDS`` (Phase 17).
+
+    The mock keeps a single fake GPU for now (the two-GPU split is a later
+    slice). With no assignment the report is identical to ``FAKE_HARDWARE``;
+    when ``ASSIGNED_GPU_UUIDS`` is set the ``gpus`` list and ``total_vram_bytes``
+    reflect only the assigned subset (a token is a GPU ``uuid`` or decimal
+    index).
+    """
+    assignment = parse_gpu_assignment(settings.assigned_gpu_tokens)
+    gpus = filter_gpus(FAKE_HARDWARE["gpus"], assignment)
+    return {
+        **FAKE_HARDWARE,
+        "gpus": gpus,
+        "total_vram_bytes": sum(int(g.get("total_vram_bytes", 0)) for g in gpus),
+    }
 
 
 def make_lifecycle(
@@ -142,7 +161,7 @@ def install_command_handlers(
             provider_type=PROVIDER_TYPE,
             version=VERSION,
             base_port=client.settings.PROVIDER_PORT,
-            hardware=FAKE_HARDWARE,
+            hardware=build_hardware_report(client.settings),
             schema=SCHEMA,
         )
         if isinstance(target, BackendRegistry):
@@ -276,7 +295,7 @@ async def bootstrap_agent(
         provider_type=PROVIDER_TYPE,
         version=VERSION,
         base_port=client.settings.PROVIDER_PORT,
-        hardware=FAKE_HARDWARE,
+        hardware=build_hardware_report(client.settings),
         # Single shared load (provider_mock.backend.SCHEMA) so the schema
         # registered with the admin and the schema the driver validates
         # against are provably the same object.
@@ -311,7 +330,7 @@ async def register_provider(
             provider_type=PROVIDER_TYPE,
             version=VERSION,
             base_port=client.settings.PROVIDER_PORT,
-            hardware=FAKE_HARDWARE,
+            hardware=build_hardware_report(client.settings),
             schema=SCHEMA,
         )
         apply_registration(lifecycle, result, config_state)

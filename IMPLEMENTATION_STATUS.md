@@ -99,7 +99,7 @@ starting a feature, read the linked protocol/doc first.
 | 14 | Shell definitions: deferred typing + `awaiting_config` pre-state | ✅ Complete (superseded by 16) |
 | 15 | Manual backend control + `provider.initialize` + download-bound boot budget | ✅ Complete |
 | 16 | Machine-scoped provider **agents**: one container → many same-type backends, placement, `max_running_backends` | 🟡 slices 1–6 landed (agents, placement, `max_running` hot-swap + proactive warm-up, `agent.assignments.update` push, real-engine multi-backend-per-process + per-port serving); 7–8 pending |
-| 17 | Per-GPU machine metrics + hardware union: device-isolated agents (one GPU each) merge into a full machine inventory and live snapshot | ⬜ Planned |
+| 17 | Per-GPU machine metrics + hardware union: device-isolated agents (one GPU each) merge into a full machine inventory and live snapshot | 🟡 slice 1 (admin hardware union) + slice 2 (provider GPU scoping + split emitter) landed; 3–6 pending |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
 
@@ -1958,7 +1958,7 @@ agent's GPU entries in the machine union.
 
 ### Sub-tasks (implementation order)
 
-- [ ] **A. Provider lib — GPU scoping + split emitter**
+- [x] **A. Provider lib — GPU scoping + split emitter** ✅ (Slice 2 landed)
   - `ProviderSettings`: new optional `ASSIGNED_GPU_UUIDS` env (space-delimited
     GPU UUIDs or decimal indices).
   - `metrics.py`: `filter_gpus(sample, assignment)` — empty assignment =
@@ -1972,6 +1972,21 @@ agent's GPU entries in the machine union.
   - `build_hardware_report` in every hardware provider (llama-cpp, gufo,
     halogen, halogen-flash) + mock: filter `gpus` through the assignment;
     per-agent `total_vram_bytes` = sum of the filtered list.
+  - **Slice 2 note (provider-side only):** `ASSIGNED_GPU_UUIDS` +
+    `assigned_gpu_tokens` land in `provider_lib/config.py`; `GPU_CATEGORIES` /
+    `MACHINE_WIDE_CATEGORIES`, `parse_gpu_assignment`, `filter_gpus`, and the
+    `gpu_assignment` threading through `collect_vram`/`collect_gpu_usage`/
+    `collect_machine_snapshot` land in `provider_lib/metrics.py`. The emitter
+    now runs whenever `start()`ed (started on connect in all four hardware
+    providers' `run_async.on_connected` + `register_and_connect`), with
+    `set_owned(bool)` toggling only the machine-wide categories; GPU categories
+    emit regardless of ownership and an empty composed snapshot is skipped
+    (no frame sent). `on_metrics_assign` → `set_owned(True)`,
+    `on_metrics_unassign` → `set_owned(False)` (never stops the loop);
+    disconnect resets `_owned` and stops the loop. `build_hardware_report`
+    filters the GPU sample + sums `total_vram_bytes` from the filtered set in
+    llama-cpp/gufo/halogen/halogen-flash; the mock report is assignment-aware
+    over its single fake GPU (default output unchanged). Admin merge is Slice 3.
 - [x] **B. Admin — hardware union at registration** ✅ (Slice 1 landed)
   - `providers.py` step 5: merge `machine.hardware["gpus"]` **by UUID**
     (latest report wins per UUID; never erases other agents' entries);

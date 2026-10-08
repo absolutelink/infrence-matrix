@@ -22,7 +22,12 @@ from provider_lib.backend import BackendLifecycle
 from provider_lib.config import ProviderSettings
 from provider_lib.config_update import ConfigState, install_config_handlers
 from provider_lib.log_stream import LogStreamingBundle, install_log_streaming
-from provider_lib.metrics import MachineMetricsEmitter, collect_machine_snapshot
+from provider_lib.metrics import (
+    MachineMetricsEmitter,
+    collect_machine_snapshot,
+    gpu_uuid,
+    parse_gpu_assignment,
+)
 from provider_lib.ops import install_backend_ops
 from provider_lib.registry import BackendHandle, BackendRegistry
 from provider_lib.serve import MultiPortServer
@@ -38,17 +43,23 @@ DEFAULT_CAPACITY = 1
 
 
 async def build_hardware_report(settings: ProviderSettings) -> dict[str, Any]:
-    """Best-effort hardware inventory for registration."""
+    """Best-effort hardware inventory for registration.
+
+    Phase 17: the GPU sample is filtered to ``ASSIGNED_GPU_UUIDS`` (empty =
+    every GPU the container sees) so a device-isolated agent reports only its
+    own GPU and its own VRAM sum.
+    """
     snapshot = await collect_machine_snapshot(
         {"vram", "gpu_usage", "os_ram", "cpu", "storage"},
         models_dir=settings.MODELS_DIR,
         cache_dir=settings.CACHE_DIR,
+        gpu_assignment=parse_gpu_assignment(settings.assigned_gpu_tokens),
     )
     vram = snapshot.get("vram", {})
     return {
         "gpus": [
             {
-                "uuid": g.get("uuid") or f"gpu-{g.get('id')}",
+                "uuid": gpu_uuid(g),
                 "vendor": g.get("vendor", "unknown"),
                 "name": g.get("name", "Unknown GPU"),
                 "total_vram_bytes": g.get("vram_total", 0),
@@ -243,12 +254,17 @@ def install_command_handlers(
 
     async def on_metrics_assign(frame: Frame) -> dict[str, Any]:
         logger.info("metrics.assign received: %s", frame.payload)
+        # Phase 17: the loop already runs from connect; ownership only toggles
+        # whether machine-wide categories are included.
         emitter.start()
+        emitter.set_owned(True)
         return {"ok": True, "detail": {"emitting": True}}
 
     async def on_metrics_unassign(frame: Frame) -> dict[str, Any]:
         logger.info("metrics.unassign received: %s", frame.payload)
-        await emitter.stop()
+        # Drop machine-wide categories but keep the loop alive so GPU
+        # categories (per-agent) keep flowing.
+        emitter.set_owned(False)
         return {"ok": True, "detail": {"emitting": False}}
 
     # backend.start / stop / restart + provider.initialize come from
@@ -390,6 +406,9 @@ async def register_and_connect(
     result, lifecycle, emitter, log_bundle = await register_provider(client, lifecycle)
     await client.connect()
     log_bundle.start()
+    # Phase 17: start the metrics loop on connect so GPU categories emit even
+    # when this agent is not the machine-wide owner.
+    emitter.start()
     await emit_provider_status(client, lifecycle)
     return result, lifecycle, emitter, log_bundle
 
@@ -416,6 +435,10 @@ async def run_async() -> None:
 
     async def on_connected() -> None:
         log_bundle.start()
+        # Phase 17: GPU categories emit from every connected agent; the loop
+        # runs for the socket lifetime (machine-wide categories stay gated on
+        # metrics.assign ownership).
+        emitter.start()
         await emit_provider_status(client, lifecycle)
         if not first_connect.is_set():
             first_connect.set()
@@ -427,6 +450,7 @@ async def run_async() -> None:
 
     async def on_disconnected() -> None:
         await log_bundle.stop()
+        emitter.set_owned(False)
         await emitter.stop()
 
     ws_task = asyncio.create_task(
