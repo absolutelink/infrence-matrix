@@ -33,6 +33,7 @@ function PlaygroundPage() {
       ((await ModelsService.listModels()).data?.data ?? []) as Array<{
         id: string
         owned_by?: string
+        modality?: string
       }>,
     refetchInterval: 15000,
   })
@@ -167,7 +168,11 @@ function PlaygroundPage() {
                   <SelectItem key={m.id} value={m.id}>
                     {m.id}{" "}
                     <span className="text-muted-foreground">
-                      ({m.owned_by})
+                      ({m.owned_by}
+                      {m.modality && m.modality !== "llm"
+                        ? ` · ${m.modality}`
+                        : ""}
+                      )
                     </span>
                   </SelectItem>
                 ))}

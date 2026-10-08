@@ -176,6 +176,8 @@ export interface ProviderDefinition {
   agent_placement: string
   /** Phase 16: ProviderAgent ids linked for 'specific' placement (empty for any_of_type). */
   agents?: string[]
+  /** Phase 18: endpoint kind this definition serves: 'llm' (default) | 'embedding'. */
+  modality?: string
   created_at: string
   updated_at: string | null
   instances?: InstanceSummary[]
@@ -338,6 +340,8 @@ export interface ProviderTypeSummary {
   schema_fingerprint: string
   /** Phase 16: per-agent running cap (0 = unlimited). */
   max_running_backends?: number
+  /** Phase 18: endpoint kinds this type can host (default ["llm"]). */
+  serves_modalities?: string[]
   consensus: ProviderTypeConsensus
 }
 
@@ -348,6 +352,8 @@ export interface ProviderTypeDetail {
   schema_fingerprint: string
   /** Phase 16: per-agent running cap (0 = unlimited). */
   max_running_backends?: number
+  /** Phase 18: endpoint kinds this type can host (default ["llm"]). */
+  serves_modalities?: string[]
   pending_schema: Record<string, unknown> | null
   consensus: ProviderTypeConsensus
   created_at: string

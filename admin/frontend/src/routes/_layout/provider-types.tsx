@@ -112,6 +112,7 @@ function ProviderTypesPage() {
               <TableRow>
                 <TableHead>Name</TableHead>
                 <TableHead>Status</TableHead>
+                <TableHead>Serves</TableHead>
                 <TableHead>Committed fp</TableHead>
                 <TableHead>Pending fp</TableHead>
                 <TableHead>Consensus</TableHead>
@@ -168,6 +169,15 @@ function TypeRow({
         <TableCell>
           <StatusBadge status={t.status} />
         </TableCell>
+        <TableCell className="space-x-1">
+          {(t.serves_modalities?.length ? t.serves_modalities : ["llm"]).map(
+            (m) => (
+              <Badge key={m} variant="outline" className="capitalize">
+                {m}
+              </Badge>
+            ),
+          )}
+        </TableCell>
         <TableCell>
           <code className="font-mono text-xs text-muted-foreground">
             {fpShort(t.schema_fingerprint)}
@@ -193,7 +203,7 @@ function TypeRow({
       </TableRow>
       {expanded && (
         <TableRow className="bg-muted/40 hover:bg-muted/40">
-          <TableCell colSpan={6} className="py-4">
+          <TableCell colSpan={7} className="py-4">
             <TypeDetailPanel name={t.name} />
           </TableCell>
         </TableRow>

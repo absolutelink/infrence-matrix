@@ -12,7 +12,7 @@ import {
   Plus,
   Trash2,
 } from "lucide-react"
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { useForm } from "react-hook-form"
 import { z } from "zod"
 
@@ -96,6 +96,9 @@ const definitionSchema = z.object({
   alias: z.string().min(1, "alias is required").max(255),
   // Phase 16: provider_type is required (the Phase 14 shell is retired).
   provider_type: z.string().min(1, "provider_type is required").max(64),
+  // Phase 18: endpoint kind this definition serves. Gated by the chosen
+  // provider type's serves_modalities in the dialog.
+  modality: z.enum(["llm", "embedding"]),
   capacity: z
     .string()
     .refine((t) => Number.isInteger(Number(t)) && Number(t) >= 1, {
@@ -178,6 +181,7 @@ function DefinitionsPage() {
               <TableRow>
                 <TableHead>Alias</TableHead>
                 <TableHead>Type</TableHead>
+                <TableHead>Modality</TableHead>
                 <TableHead>Enabled</TableHead>
                 <TableHead>Capacity</TableHead>
                 <TableHead>VRAM req.</TableHead>
@@ -261,6 +265,14 @@ function DefinitionRow({
         </TableCell>
         <TableCell>
           <Badge
+            variant={d.modality === "embedding" ? "secondary" : "outline"}
+            className="capitalize"
+          >
+            {d.modality ?? "llm"}
+          </Badge>
+        </TableCell>
+        <TableCell>
+          <Badge
             variant={d.enabled ? "default" : "secondary"}
             className="capitalize"
           >
@@ -302,7 +314,7 @@ function DefinitionRow({
       </TableRow>
       {expanded && (
         <TableRow className="bg-muted/40 hover:bg-muted/40">
-          <TableCell colSpan={8} className="py-4">
+          <TableCell colSpan={9} className="py-4">
             <DefinitionDetail definition={d} />
           </TableCell>
         </TableRow>
@@ -344,6 +356,15 @@ function DefinitionDetail({
         <code className="rounded bg-muted px-2 py-1 font-mono text-xs">
           {d.config_fingerprint ? `${d.config_fingerprint.slice(0, 16)}…` : "—"}
         </code>
+      </div>
+      <div>
+        <h4 className="mb-2 text-sm font-semibold">Modality</h4>
+        <p className="text-xs text-muted-foreground">
+          <span className="font-mono">{d.modality ?? "llm"}</span> —{" "}
+          {d.modality === "embedding"
+            ? "served by POST /v1/embeddings."
+            : "served by /v1/responses and /v1/chat/completions."}
+        </p>
       </div>
       <div>
         <h4 className="mb-2 text-sm font-semibold">Placement</h4>
@@ -441,6 +462,7 @@ function DefinitionFormDialog({
     defaultValues: {
       alias: definition?.alias ?? "",
       provider_type: definition?.provider_type ?? "",
+      modality: definition?.modality === "embedding" ? "embedding" : "llm",
       capacity: String(definition?.capacity ?? 1),
       vram_required_bytes: String(definition?.vram_required_bytes ?? 0),
       idle_timeout_seconds: String(definition?.idle_timeout_seconds ?? 300),
@@ -453,6 +475,7 @@ function DefinitionFormDialog({
   })
 
   const providerType = form.watch("provider_type")
+  const modality = form.watch("modality")
   const placement = form.watch("agent_placement")
 
   // Phase 16: agents available to cherry-pick for 'specific' placement,
@@ -489,6 +512,25 @@ function DefinitionFormDialog({
     schema !== null &&
     typeof schema === "object" &&
     Object.keys((schema as Record<string, unknown>).properties ?? {}).length > 0
+
+  // Phase 18: which modalities the selected provider type can host. Gated by
+  // its serves_modalities (intersected with the known enum); while the detail
+  // is loading or declares none, fall back to just ["llm"].
+  const servedModalities = useMemo<string[]>(() => {
+    const known = ["llm", "embedding"]
+    const raw = (typeDetail?.serves_modalities as string[] | undefined) ?? []
+    const list = raw.filter((m) => known.includes(m))
+    return list.length > 0 ? list : ["llm"]
+  }, [typeDetail])
+
+  // When the chosen type doesn't serve the current modality (e.g. after a
+  // provider_type switch), reset to a served value — mirrors the
+  // backend_config reset on a type change.
+  useEffect(() => {
+    if (!servedModalities.includes(modality)) {
+      form.setValue("modality", servedModalities[0] as "llm" | "embedding")
+    }
+  }, [servedModalities, modality, form])
 
   // Controlled backend_config editor state: `rawMode` toggles between
   // the schema form and the raw-JSON escape hatch.
@@ -631,6 +673,7 @@ function DefinitionFormDialog({
       const body = {
         alias: values.alias,
         provider_type: values.provider_type,
+        modality: values.modality,
         backend_config: backendConfig,
         capacity: Number(values.capacity),
         vram_required_bytes: Number(values.vram_required_bytes),
@@ -788,6 +831,43 @@ function DefinitionFormDialog({
                       {isEdit && (definition?.instances?.length ?? 0) > 0
                         ? "Locked: instances are attached (changing the type would break their binding)."
                         : "The registered type whose schema renders backend_config and whose agents can host this model."}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="modality"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Modality</FormLabel>
+                    <Select
+                      onValueChange={(v) => field.onChange(v)}
+                      value={field.value}
+                      disabled={
+                        isEdit && (definition?.instances?.length ?? 0) > 0
+                      }
+                    >
+                      <FormControl>
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select modality" />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        {servedModalities.map((m) => (
+                          <SelectItem key={m} value={m} className="capitalize">
+                            {m}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <FormDescription>
+                      {isEdit && (definition?.instances?.length ?? 0) > 0
+                        ? "Locked: instances are attached (changing the modality would break their binding)."
+                        : providerType
+                          ? `Endpoint kind this alias serves. "${providerType}" hosts: ${servedModalities.join(", ")}.`
+                          : "Pick a provider type first — available modalities depend on it."}
                     </FormDescription>
                     <FormMessage />
                   </FormItem>
