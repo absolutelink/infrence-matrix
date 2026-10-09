@@ -46,6 +46,30 @@ commit `8d2d9b8` + this phase's fixes):
 | `compact-response` | Compaction Endpoint | ❌ 404 — `POST /v1/responses/compact` not implemented (Phase 7+ scope decision; not a Phase 6 blocker) |
 | `compact-missing-model` | Compaction Missing Required Model | ❌ 404 — same missing route |
 
+### Run 2026-10-09 — deployment (`matrix.thelink.family`, alias `rocinante-tiny`, llama-cpp provider)
+
+1 passed / 16 failed (7 of the failures are N/A `websocket-*`). The
+whole HTTP+SSE cluster (basic, system-prompt, assistant-phase, streaming,
+tool-calling, image-input, multi-turn) failed identically on **null /
+missing terminal response fields** — llama.cpp's `/v1/responses`
+terminal response omits `completed_at`, `background`, `service_tier`,
+`presence_penalty`, `frequency_penalty`, `top_logprobs`,
+`max_tool_calls`, `safety_identifier`, `prompt_cache_key`, and sends
+`tools`/`tool_choice`/`truncation`/`text`/`top_p`/`temperature`/`store`/
+`parallel_tool_calls` as `null`, plus `usage.output_tokens_details:
+null`. The mock passed because it emits a spec-complete skeleton.
+
+**Fix (admin-side, pending deploy):** `_normalize_response()` in
+`admin/backend/app/api/v1/responses.py` fills spec defaults on the
+terminal response in both transports (non-stream JSON +
+`response.completed`/`response.incomplete` frames), mirroring the mock's
+`_base_response` defaults. Covered by
+`tests/test_v1_responses.py::test_non_stream_normalizes_sparse_provider_response`
+and `::test_stream_terminal_frame_is_normalized`.
+
+`compact-response` / `compact-missing-model` still 404 (no
+`/responses/compact` route — open scope decision).
+
 **Not applicable (transport removed):** all `websocket-*` tests —
 `websocket-response`, `websocket-sequential-responses`,
 `websocket-continuation`, `websocket-reconnect-store-false-recovery`,
@@ -102,4 +126,5 @@ Fidelity ground truth: `spike/litellm-fidelity/FINDINGS.md`.
 |---|---|---|---|---|---|
 | (overhaul reset) | — | — | — | 7 WS | Tracker reset for litellm overhaul; awaiting Phase 6 conformance run |
 | 2026-10-04 | 8d2d9b8 + docs-phase fixes | 8 | 2 | 7 WS | First post-overhaul run vs local uvicorn admin + mock. All 6 KEY tests pass; failures are `compact-response` / `compact-missing-model` (no `/responses/compact` route). Fixes listed above landed in this run. |
+| 2026-10-09 | `_normalize_response` fix (pre-deploy) | 1 | 9 | 7 WS | Full run vs deployment, `rocinante-tiny` (llama-cpp). All 7 HTTP+SSE tests failed on cluster 1 (null/missing terminal response fields from llama.cpp) + 2 compaction 404s. Fix landed admin-side; re-run after deploy. |
 | 2026-10-04 | Phase 7 (chat completions + models + stubs) | 4 | 0 | — | KEY-only regression re-run (`--filter basic-response,streaming-response,system-prompt,multi-turn`) vs local uvicorn admin (`p7-machine`/`p7-model` mock): **4/4 pass**. Proves the `alias_registry` mode change (`responses` → `chat` union registration, required for native chat `acompletion`) did not regress the Phase 6 responses path. Live chat spot-check also green: stream (data-only SSE, admin `chatcmpl-` ids, usage chunk, `[DONE]`), non-stream JSON, `/v1/models`, 501 stub envelope. |

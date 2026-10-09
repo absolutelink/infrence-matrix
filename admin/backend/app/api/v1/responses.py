@@ -172,6 +172,149 @@ def _clean_output_items(items: list[Any]) -> list[Any]:
     return [strip(item) for item in items]
 
 
+def _is_int(value: Any) -> bool:
+    """True for real ints only — bool is an int subclass."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_num(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _is_bool(value: Any) -> bool:
+    return isinstance(value, bool)
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    return value if _is_int(value) else default
+
+
+# Schema-type gates for the required non-nullable response fields: a value
+# (provider- OR request-sourced) that fails its check is replaced by the
+# next tier down, so wrong-typed upstream/client values can never reach
+# the client (e.g. llama.cpp sending ``tools: {}`` or a client echoing
+# ``temperature: "0.7"``).
+_FIELD_CHECKS: dict[str, Any] = {
+    "tools": lambda v: isinstance(v, list),
+    "tool_choice": lambda v: isinstance(v, (str, dict)),
+    "truncation": lambda v: v in ("auto", "disabled"),
+    "parallel_tool_calls": _is_bool,
+    "text": lambda v: isinstance(v, dict),
+    "top_p": _is_num,
+    "temperature": _is_num,
+    "presence_penalty": _is_num,
+    "frequency_penalty": _is_num,
+    "top_logprobs": _is_int,
+    "background": _is_bool,
+    "service_tier": lambda v: isinstance(v, str),
+}
+
+
+def _normalize_response(
+    data: dict[str, Any],
+    *,
+    store: bool,
+    requested: dict[str, Any] | None = None,
+    default_status: str = "completed",
+) -> None:
+    """Coerce a provider terminal response into the spec ResponseResource.
+
+    Backends (e.g. llama.cpp) omit or null out required fields of the
+    terminal response. The admin owns the client-facing contract, so fill
+    values in place with precedence provider value -> value the client
+    requested (the spec requires the response to echo the parameters
+    actually used) -> spec default, with each tier type-gated
+    (``_FIELD_CHECKS``). Required nullable fields are made present;
+    ``store`` is always the admin's own (request-derived) value;
+    ``status``/``model``/``object`` are defaulted when missing or
+    wrong-typed (``default_status`` derives from the terminal frame
+    type). Mutates ``data`` only — nested provider objects are copied,
+    never mutated (litellm may share them with its own accumulated
+    state).
+    """
+    requested = requested or {}
+    now = int(datetime.now(UTC).timestamp())
+    if not isinstance(data.get("model"), str):
+        data["model"] = requested.get("model") or "unknown"
+    if not isinstance(data.get("status"), str):
+        data["status"] = default_status
+    if data.get("object") != "response":
+        data["object"] = "response"
+
+    if not _is_int(data.get("created_at")):
+        data["created_at"] = now
+    if data.get("status") == "completed" and not _is_int(data.get("completed_at")):
+        data["completed_at"] = now
+    else:
+        data.setdefault("completed_at", None)
+
+    spec_defaults: dict[str, Any] = {
+        "tools": [],
+        "tool_choice": "auto",
+        "truncation": "disabled",
+        "parallel_tool_calls": True,
+        "text": {"format": {"type": "text"}},
+        "top_p": 1,
+        "temperature": 1,
+        "presence_penalty": 0,
+        "frequency_penalty": 0,
+        "top_logprobs": 0,
+        "background": False,
+        "service_tier": "default",
+    }
+    for key, fallback in spec_defaults.items():
+        check = _FIELD_CHECKS[key]
+        value = data.get(key)
+        if not check(value):
+            value = requested.get(key)
+        if not check(value):
+            value = fallback
+        data[key] = value
+    data["store"] = store
+    for key in (
+        "incomplete_details",
+        "error",
+        "previous_response_id",
+        "instructions",
+        "reasoning",
+        "max_output_tokens",
+        "max_tool_calls",
+        "safety_identifier",
+        "prompt_cache_key",
+    ):
+        data.setdefault(key, None)
+    data.setdefault("metadata", None)
+
+    usage = data.get("usage")
+    if isinstance(usage, dict):
+        usage = dict(usage)
+        if not _is_int(usage.get("input_tokens")):
+            usage["input_tokens"] = 0
+        if not _is_int(usage.get("output_tokens")):
+            usage["output_tokens"] = 0
+        in_details = usage.get("input_tokens_details")
+        if not isinstance(in_details, dict):
+            in_details = {}
+        usage["input_tokens_details"] = {
+            **{k: v for k, v in in_details.items() if v is not None},
+            "cached_tokens": _as_int(in_details.get("cached_tokens")),
+        }
+        out_details = usage.get("output_tokens_details")
+        if not isinstance(out_details, dict):
+            out_details = {}
+        usage["output_tokens_details"] = {
+            **{k: v for k, v in out_details.items() if v is not None},
+            "reasoning_tokens": _as_int(out_details.get("reasoning_tokens")),
+        }
+        if not _is_int(usage.get("total_tokens")):
+            usage["total_tokens"] = _as_int(usage.get("input_tokens")) + _as_int(
+                usage.get("output_tokens")
+            )
+        data["usage"] = usage
+    else:
+        data["usage"] = None
+
+
 def _usage_tokens(usage: dict[str, Any]) -> tuple[int, int, int, int]:
     """(input, output, total, cached) from a spec usage dict, tolerating
     legacy prompt_tokens/completion_tokens aliases."""
@@ -421,7 +564,7 @@ async def _stream_response(
     terminal_usage: dict[str, Any] | None = None
     litellm_wrapped_id: str | None = None
     failed_error: dict[str, Any] | None = None
-    completed = False
+    terminal_status: str | None = None
     admission: Admission | None = None
 
     # Cold-boot keepalive: scheduler.acquire can block for minutes
@@ -457,7 +600,10 @@ async def _stream_response(
                 **passthrough,
             )
             async for event in stream:
-                data = to_dict(event)
+                # Shallow copy: to_dict passes plain dicts through, and we
+                # may rewrite keys (id capture, terminal normalization) —
+                # never mutate litellm's own event objects.
+                data = dict(to_dict(event))
                 response = data.get("response")
                 if isinstance(response, dict):
                     # Capture litellm's affinity-wrapped id before the
@@ -468,18 +614,37 @@ async def _stream_response(
                         "response.completed",
                         "response.incomplete",
                     ):
+                        # Work on a copy: litellm may hand us its own
+                        # accumulated response dict (to_dict passes plain
+                        # dicts through) — never mutate upstream state.
+                        response = dict(response)
+                        data["response"] = response
                         terminal_output = _clean_output_items(
                             _as_item_list(response.get("output"))
                         )
                         # Emit the cleaned output too: the client validates
                         # the terminal frame against the spec schema.
                         response["output"] = terminal_output
+                        _normalize_response(
+                            response,
+                            store=store,
+                            requested={**passthrough, "model": alias},
+                            default_status=(
+                                "completed"
+                                if data["type"] == "response.completed"
+                                else "incomplete"
+                            ),
+                        )
                         terminal_usage = (
                             to_dict(response["usage"])
                             if response.get("usage")
                             else None
                         )
-                        completed = data["type"] == "response.completed"
+                        terminal_status = (
+                            "completed"
+                            if data["type"] == "response.completed"
+                            else "incomplete"
+                        )
                 yield emitter.frame(data)
             yield emitter.done()
         except Exception as exc:  # noqa: BLE001 - MidStreamFallbackError et al.
@@ -548,9 +713,9 @@ async def _stream_response(
                 "api_base": admission.base_url if admission else None,
                 "stream": True,
             },
-            status="completed" if completed else "failed",
-            usage=terminal_usage if completed else None,
-            error=failed_error if not completed else None,
+            status=terminal_status or "failed",
+            usage=terminal_usage if terminal_status else None,
+            error=failed_error if terminal_status is None else None,
             store=store,
         )
 
@@ -610,13 +775,18 @@ async def _non_stream_response(
                 },
             )
 
-        data = to_dict(result)
+        # Copy: to_dict passes plain dicts through — don't mutate litellm's
+        # accumulated response object.
+        data = dict(to_dict(result))
         litellm_wrapped_id = data.get("id")
         # The admin owns the client-facing id.
         data["id"] = client_response_id
-        usage = data.get("usage")
         output_items = _clean_output_items(_as_item_list(data.get("output")))
         data["output"] = output_items
+        _normalize_response(
+            data, store=store, requested={**passthrough, "model": alias}
+        )
+        usage = data.get("usage")
 
         persist_turn_logged(
             client_response_id=client_response_id,

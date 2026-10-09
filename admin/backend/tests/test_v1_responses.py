@@ -11,6 +11,7 @@ response.failed path, and previous_response_id reconstruction.
 """
 
 import asyncio
+import copy
 import json
 import uuid
 from typing import Any
@@ -64,9 +65,7 @@ def seed_instance(
         enabled=enabled,
         backend_config={"model": {"file": "m.gguf"}},
     )
-    instance = make_instance(
-        session, agent, definition, backend_status=backend_status
-    )
+    instance = make_instance(session, agent, definition, backend_status=backend_status)
     return instance
 
 
@@ -496,6 +495,307 @@ def test_non_stream_returns_json(
 
     scheduler = client.app.state.scheduler
     assert scheduler.active_count("rt-ns") == 0
+
+
+def llama_cpp_sparse_response() -> dict[str, Any]:
+    """Terminal response shaped like llama.cpp's: required fields null or
+    absent, usage details full of nulls."""
+    return {
+        "id": WRAPPED_ID,
+        "object": "response",
+        "created_at": 1791512825,
+        "error": None,
+        "incomplete_details": None,
+        "instructions": None,
+        "metadata": None,
+        "model": "m.gguf",
+        "output": [
+            {
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "hi", "annotations": []}],
+            }
+        ],
+        "parallel_tool_calls": None,
+        "temperature": None,
+        "tool_choice": None,
+        "tools": None,
+        "top_p": None,
+        "max_output_tokens": None,
+        "previous_response_id": None,
+        "reasoning": None,
+        "status": "completed",
+        "text": None,
+        "truncation": None,
+        "usage": {
+            "input_tokens": 10,
+            "input_tokens_details": {
+                "audio_tokens": None,
+                "cached_tokens": 3,
+                "cached_tokens_details": None,
+                "image_tokens": None,
+                "text_tokens": None,
+                "video_tokens": None,
+            },
+            "output_tokens": 46,
+            "output_tokens_details": None,
+            "total_tokens": 56,
+            "cost": None,
+        },
+        "user": None,
+        "store": None,
+    }
+
+
+def assert_spec_normalized(body: dict[str, Any]) -> None:
+    assert isinstance(body["completed_at"], int)
+    assert body["tools"] == []
+    assert body["tool_choice"] == "auto"
+    assert body["truncation"] == "disabled"
+    assert body["parallel_tool_calls"] is True
+    assert body["text"] == {"format": {"type": "text"}}
+    assert body["top_p"] == 1
+    assert body["temperature"] == 1
+    assert body["presence_penalty"] == 0
+    assert body["frequency_penalty"] == 0
+    assert body["top_logprobs"] == 0
+    assert body["store"] is True
+    assert body["background"] is False
+    assert body["service_tier"] == "default"
+    assert body["max_tool_calls"] is None
+    assert body["safety_identifier"] is None
+    assert body["prompt_cache_key"] is None
+    usage = body["usage"]
+    assert usage["input_tokens_details"] == {"cached_tokens": 3}
+    assert usage["output_tokens_details"] == {"reasoning_tokens": 0}
+
+
+def test_non_stream_normalizes_sparse_provider_response(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    seed_instance(session, alias="rt-sparse", machine_uid="rt-sparse-m")
+    final = llama_cpp_sparse_response()
+
+    async def fake_aresponses(*args, **kwargs):  # noqa: ARG001
+        return final
+
+    monkeypatch.setattr(litellm, "aresponses", fake_aresponses)
+
+    resp = client.post("/v1/responses", json={"model": "rt-sparse", "input": "hi"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"].startswith(CLIENT_ID_PREFIX)
+    assert_spec_normalized(body)
+
+
+def test_stream_terminal_frame_is_normalized(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    seed_instance(session, alias="rt-sparse-s", machine_uid="rt-sparse-sm")
+    events = [completed_event([], llama_cpp_sparse_response()["usage"])]
+    events[0]["response"].update(
+        {k: v for k, v in llama_cpp_sparse_response().items() if k != "id"}
+    )
+    pristine = copy.deepcopy(events)
+    monkeypatch.setattr(litellm, "aresponses", make_fake_stream(events, {}))
+
+    resp = client.post(
+        "/v1/responses",
+        json={"model": "rt-sparse-s", "input": "hi", "stream": True},
+    )
+    assert resp.status_code == 200
+    frames = parse_sse(resp.text)
+    terminal = next(data for etype, data in frames if etype == "response.completed")
+    assert_spec_normalized(terminal["response"])
+    # The route must not mutate litellm's own event dicts.
+    assert events == pristine
+
+
+def test_stream_incomplete_frame_and_persistence(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    seed_instance(session, alias="rt-inc", machine_uid="rt-inc-m")
+    event = {
+        "type": "response.incomplete",
+        "response": {
+            "id": WRAPPED_ID,
+            "object": "response",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [],
+            "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+        },
+    }
+    monkeypatch.setattr(litellm, "aresponses", make_fake_stream([event], {}))
+
+    resp = client.post(
+        "/v1/responses",
+        json={"model": "rt-inc", "input": "hi", "stream": True},
+    )
+    assert resp.status_code == 200
+    frames = parse_sse(resp.text)
+    terminal = next(data for etype, data in frames if etype == "response.incomplete")
+    body = terminal["response"]
+    assert body["status"] == "incomplete"
+    assert body["completed_at"] is None
+    assert body["store"] is True
+
+    record = (
+        session.query(ResponseRecord)
+        .filter(ResponseRecord.response_id == body["id"])
+        .first()
+    )
+    assert record is not None
+    assert record.status == "incomplete"
+    assert record.output_tokens == 1
+
+
+def test_non_stream_echoes_requested_params(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    """Provider-null fields fall back to the REQUEST values, not constants."""
+    seed_instance(session, alias="rt-req", machine_uid="rt-req-m")
+    final = llama_cpp_sparse_response()
+
+    async def fake_aresponses(*args, **kwargs):  # noqa: ARG001
+        return final
+
+    monkeypatch.setattr(litellm, "aresponses", fake_aresponses)
+
+    resp = client.post(
+        "/v1/responses",
+        json={
+            "model": "rt-req",
+            "input": "hi",
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "tools": [{"type": "function", "name": "x", "parameters": {}}],
+            "tool_choice": "required",
+            "parallel_tool_calls": False,
+            "store": False,
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["temperature"] == 0.7
+    assert body["top_p"] == 0.9
+    assert body["tools"] == [{"type": "function", "name": "x", "parameters": {}}]
+    assert body["tool_choice"] == "required"
+    assert body["parallel_tool_calls"] is False
+    assert body["store"] is False
+
+
+def test_normalize_noop_on_spec_complete_response() -> None:
+    from app.api.v1.responses import _normalize_response
+
+    data: dict[str, Any] = {
+        "id": "resp_x",
+        "object": "response",
+        "created_at": 1,
+        "completed_at": 2,
+        "status": "completed",
+        "incomplete_details": None,
+        "model": "m",
+        "previous_response_id": None,
+        "instructions": None,
+        "output": [],
+        "error": None,
+        "tools": [],
+        "tool_choice": "auto",
+        "truncation": "disabled",
+        "parallel_tool_calls": True,
+        "text": {"format": {"type": "text"}},
+        "top_p": 1,
+        "presence_penalty": 0,
+        "frequency_penalty": 0,
+        "top_logprobs": 0,
+        "temperature": 1,
+        "reasoning": None,
+        "usage": {
+            "input_tokens": 1,
+            "output_tokens": 2,
+            "total_tokens": 3,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0},
+        },
+        "max_output_tokens": None,
+        "max_tool_calls": None,
+        "store": True,
+        "background": False,
+        "service_tier": "default",
+        "metadata": {},
+        "safety_identifier": None,
+        "prompt_cache_key": None,
+    }
+    before = copy.deepcopy(data)
+    _normalize_response(data, store=True)
+    assert data == before
+
+
+def test_normalize_defaults_missing_identity_and_rejects_wrong_types() -> None:
+    from app.api.v1.responses import _normalize_response
+
+    # Provider omits status/model/object entirely and sends wrong-typed
+    # values for tools/temperature/truncation; client echoes a string
+    # temperature (invalid too).
+    data: dict[str, Any] = {
+        "output": [],
+        "tools": {},
+        "temperature": "0.7",
+        "truncation": 123,
+    }
+    _normalize_response(
+        data, store=True, requested={"model": "rt-x", "temperature": "0.7"}
+    )
+    assert data["status"] == "completed"
+    assert data["model"] == "rt-x"
+    assert data["object"] == "response"
+    assert data["tools"] == []
+    assert data["temperature"] == 1  # request tier gated out too
+    assert data["truncation"] == "disabled"
+    assert isinstance(data["created_at"], int)
+    # status defaults BEFORE completed_at logic: defaulted-completed
+    # responses still get a concrete completed_at.
+    assert isinstance(data["completed_at"], int)
+
+
+def test_normalize_coerces_usage_token_counters() -> None:
+    from app.api.v1.responses import _normalize_response
+
+    data: dict[str, Any] = {
+        "status": "completed",
+        "usage": {
+            "input_tokens": None,
+            "output_tokens": None,
+            "total_tokens": 56,
+        },
+    }
+    _normalize_response(data, store=True)
+    assert data["usage"]["input_tokens"] == 0
+    assert data["usage"]["output_tokens"] == 0
+    assert data["usage"]["total_tokens"] == 56
+
+    data = {"status": "completed", "usage": {"input_tokens": 3, "output_tokens": 4}}
+    _normalize_response(data, store=True)
+    assert data["usage"]["total_tokens"] == 7
+
+
+def test_normalize_incomplete_keeps_null_completed_at() -> None:
+    from app.api.v1.responses import _normalize_response
+
+    data: dict[str, Any] = {"status": "incomplete"}
+    _normalize_response(data, store=True)
+    assert data["completed_at"] is None
+    assert data["usage"] is None
+    assert isinstance(data["created_at"], int)
+
+    # Missing status on an incomplete terminal frame derives from the frame.
+    data = {}
+    _normalize_response(data, store=True, default_status="incomplete")
+    assert data["status"] == "incomplete"
+    assert data["completed_at"] is None
 
 
 # ---------------------------------------------------------------------------
