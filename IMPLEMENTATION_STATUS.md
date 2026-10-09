@@ -2610,6 +2610,35 @@ blank LLM-only stats.
 
 ---
 
+## Log-panel layout fix — viewport-locked app shell (2026-10-08) ✅
+
+**Goal:** with the logs dock open, the main content area must scroll
+internally and the dock must stay pinned to the bottom of the viewport
+regardless of how much content the page holds.
+
+**Root cause:** the `SidebarProvider` wrapper (`components/ui/sidebar.tsx`)
+is `flex min-h-svh w-full`. `min-h-svh` lets the shell grow past the
+viewport when `<main>` content is long, so `<main>`'s
+`flex-1 min-h-0 overflow-y-auto` never gets a bounded height — the whole
+document scrolls instead and the `LogsDock` (a `shrink-0` flex sibling
+after `<main>`) is pushed below the fold. This contradicts the Phase 19
+design intent (fixed header / scrollable body / pinned dock).
+
+**Locked decision:** lock the shell to the viewport height at the app-shell
+call site (`routes/_layout.tsx`) rather than editing the vendored shadcn
+`sidebar.tsx` default — pass `h-svh overflow-hidden` to `SidebarProvider`
+so the wrapper is exactly viewport-tall and clips overflow; `<main>` then
+scrolls internally and the dock stays pinned. No backend, wire, or client
+changes.
+
+**Slices:**
+
+- [x] **S1 — frontend shell:** `_layout.tsx` `SidebarProvider` gains
+      `className="h-svh overflow-hidden"`. tsc + biome lint + `vite build`
+      green.
+
+---
+
 ## Accepted Regressions (do NOT restore from `legacy/`)
 
 These existed in the pre-overhaul system and are intentionally removed or

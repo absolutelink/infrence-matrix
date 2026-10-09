@@ -17,7 +17,7 @@ export const Route = createFileRoute("/_layout")({
 function Layout() {
   return (
     <LogsDockProvider>
-      <SidebarProvider>
+      <SidebarProvider className="h-svh overflow-hidden">
         <AppSidebar />
         <SidebarInset>
           <header className="sticky top-0 z-10 flex h-16 shrink-0 items-center gap-2 overflow-x-auto border-b bg-background px-4">
