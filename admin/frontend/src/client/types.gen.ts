@@ -1555,6 +1555,22 @@ export type responsesCreateResponseResponses = {
     200: unknown;
 };
 
+export type responsesCompactResponseData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/responses/compact';
+};
+
+export type responsesCompactResponseResponses = {
+    /**
+     * Response Responses-Compact Response
+     *
+     * Successful Response
+     */
+    200: unknown;
+};
+
 export type chatCreateChatCompletionData = {
     body?: never;
     path?: never;

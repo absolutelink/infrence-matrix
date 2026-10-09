@@ -13,6 +13,7 @@ from app.api.v1.chat_completions import router as v1_chat_router
 from app.api.v1.embeddings import router as v1_embeddings_router
 from app.api.v1.models import router as v1_models_router
 from app.api.v1.responses import router as v1_responses_router
+from app.api.v1.responses_compact import router as v1_compact_router
 from app.api.v1.stubs import router as v1_stubs_router
 from app.api.ws import router as provider_ws_router
 
@@ -35,6 +36,8 @@ api_router.include_router(admin_responses_router)
 api_router.include_router(admin_agents_router)
 # Public OpenAI-compatible inference API lives at /v1 (NOT under /admin/api).
 api_router.include_router(v1_responses_router)
+# Phase 20: response compaction (non-stream only).
+api_router.include_router(v1_compact_router)
 api_router.include_router(v1_chat_router)
 api_router.include_router(v1_embeddings_router)
 api_router.include_router(v1_models_router)
