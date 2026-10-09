@@ -47,6 +47,7 @@ from provider_lib.schema import load_schema, validate_backend_config
 from provider_lib.wire import BackendStatusValue
 
 from provider_halogen.env import (
+    DRIVER_ENV_KEYS,
     allocate_ports,
     build_argv,
     build_env,
@@ -244,6 +245,14 @@ class HalogenBackend(BackendDriver):
             " ".join(cmd),
             api_port,
             engine_port,
+        )
+        logger.info(
+            "halogen env: %s",
+            " ".join(
+                f"{k}={str(env[k]).replace(chr(10), ' ').replace(chr(13), ' ')}"
+                for k in sorted(DRIVER_ENV_KEYS)
+                if k in env
+            ),
         )
         try:
             proc = subprocess.Popen(

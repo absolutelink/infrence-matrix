@@ -48,6 +48,20 @@ ENV_MAP: dict[str, str] = {
     "sse_keepalive_s": "HALOGEN_SSE_KEEPALIVE_S",
 }
 
+# The exact set of env keys build_env() may set (fixed ports/bind/paths + the
+# ENV_MAP-derived option vars). Used by the driver to log only what it controls,
+# never a pre-existing HALOGEN_* var inherited from the container environment.
+DRIVER_ENV_KEYS: frozenset[str] = frozenset(
+    {
+        "HALOGEN_API_PORT",
+        "HALOGEN_PORT",
+        "HALOGEN_BIND",
+        "HALOGEN_ENGINE",
+        "HALOGEN_CHECKPOINT",
+        "HALOGEN_TOKENIZER",
+    }
+) | frozenset(ENV_MAP.values())
+
 # backend_config sections whose leaf keys flatten into the semantic
 # `options` dict consumed by ENV_MAP / build_env (Phase 12). `artifacts`
 # is excluded: the driver resolves those descriptors to local paths and

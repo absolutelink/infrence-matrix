@@ -7,6 +7,7 @@ start→healthy, streaming, stop, early-exit, and missing-binary errors.
 """
 
 import json
+import logging
 import time
 from typing import Any
 
@@ -113,6 +114,38 @@ async def test_env_mapping_through_real_spawn(
         assert recorded["HALOGEN_TOKENIZER"] == local_artifacts["tokenizer"]
     finally:
         await driver.aclose()
+
+
+async def test_start_logs_halogen_env_only(
+    tmp_path,
+    fake_halogen_binary,
+    local_artifacts,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Starting must log the HALOGEN_* env being set, and never the full env
+    (which copies os.environ and can carry secrets)."""
+    monkeypatch.setenv("MACHINE_SECRET", "super-secret-value")
+    monkeypatch.setenv("HALOGEN_DOWNLOAD_TOKEN", "leak-me")
+    driver = _backend(
+        tmp_path, fake_halogen_binary, local_artifacts, concurrency={"kv_slots": 4}
+    )
+    with caplog.at_level(logging.INFO, logger="provider.halogen"):
+        try:
+            await driver.start()
+        finally:
+            await driver.aclose()
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "halogen env:" in text
+    assert "HALOGEN_KV_SLOTS=4" in text
+    assert "HALOGEN_API_PORT=" in text
+    # Negative / discriminating: only driver-managed keys are logged, never the
+    # inherited os.environ secrets nor a pre-existing HALOGEN_* var the driver
+    # does not set.
+    assert "super-secret-value" not in text
+    assert "MACHINE_SECRET" not in text
+    assert "leak-me" not in text
+    assert "HALOGEN_DOWNLOAD_TOKEN" not in text
 
 
 async def test_stream_responses_passthrough(
