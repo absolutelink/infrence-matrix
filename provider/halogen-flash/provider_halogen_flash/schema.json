@@ -44,10 +44,12 @@
               "$ref": "#/$defs/hfFile"
             },
             {
-              "type": "boolean"
+              "type": "boolean",
+              "title": "Auto (true = beside checkpoint) / Off (false = disabled)"
             },
             {
               "type": "string",
+              "title": "Local path (must already exist)",
               "minLength": 1
             }
           ]

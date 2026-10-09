@@ -139,7 +139,9 @@ def test_schema_has_the_planned_sections() -> None:
 # pair), bumping the fp.
 # cache_entries default corrected 1024 -> 24 to match the real engine default,
 # bumping the fp.
-SHIPPED_SCHEMA_FP = "a6d54e33cd8c09bc26aa413b519b3c7a1a773295e3a6ffe4e5a4b8a0d1b2e633"
+# vision_tower oneOf branches titled (boolean + local-path string) so the
+# admin form dropdown reads meaningfully instead of "option 2/3", bumping the fp.
+SHIPPED_SCHEMA_FP = "5d29689168e8eb8a7f8872a9fc692bea3853321cc101b577017f1fe8948d9919"
 
 
 def test_schema_fingerprint_is_stable() -> None:
