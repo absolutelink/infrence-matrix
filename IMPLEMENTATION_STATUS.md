@@ -1,8 +1,13 @@
 # Inference Matrix — Implementation Status
 
 **Overhaul branch:** `litellm-architecture-overhaul`
-**Last updated:** 2026-10-08 (**Port model overhaul — agent-owned ports +
-model-routed `/v1`: ✅ SHIPPED (all 5 slices done).**
+**Last updated:** 2026-10-09 (**Phase 20 — response compaction endpoint:
+planned (S0).** Closes the last two applicable compliance failures; see
+the Phase 20 section below. Also today: the llama-cpp compliance
+framing fixes shipped (terminal + lifecycle response normalization,
+SSEEmitter position filling) — deployment suite now **8/17 passed,
+7 WS N/A, 2 compaction pending Phase 20**. Prior: **Port model overhaul
+— agent-owned ports + model-routed `/v1`: ✅ SHIPPED (all 5 slices done).**
 Fixes the production `port_conflict` cross-agent collision by moving to one
 published `PROVIDER_PORT` per agent that routes `/v1` by model; the admin stops
 allocating/policing ports and `ProviderInstance.port` is dropped (migration
@@ -2638,6 +2643,39 @@ changes.
       green.
 
 ---
+
+## Phase 20 — Response compaction endpoint (planned)
+
+Closes the last two applicable compliance failures (`compact-response`,
+`compact-missing-model` in `docs/integration-testing.md`). Spec:
+`POST /responses/compact` (OpenResponses, added 2026-04-24) — request
+`{model (required), input?, previous_response_id?, instructions?,
+prompt_cache_key?}` (no `stream` — non-stream only), response
+`CompactResource {id, object: "response.compaction", output[] (≥1
+compaction item {type, id, encrypted_content}), created_at, usage}`.
+
+**Locked decisions** (see also the `/v1/responses/compact` row in
+ARCHITECTURE.md §Public endpoint scope):
+
+1. New route in `admin/backend/app/api/v1/` reusing the Phase 6
+   machinery: alias resolution (404 unknown/disabled/non-llm),
+   `ensure_registered`, `scheduler.acquire`, `litellm.aresponses`
+   non-stream, `_normalize_response` usage extraction, `persist_turn`
+   with `parameters.api_format="compaction"`.
+2. Model-driven compaction: input items (+ chain via
+   `build_litellm_input` when `previous_response_id` is given, +
+   `instructions`/`prompt_cache_key` passthrough) sent with a fixed
+   compression prompt; the model's summary is wrapped as one
+   `compaction` item, `encrypted_content = base64(json({summary,
+   source_count}))`. Admin-owned ids: `cmp_<uuid>` / `cmpitem_<uuid>`.
+3. Error contract mirrors the non-stream path: missing `model` → 400,
+   neither `input` nor `previous_response_id` → 400, no provider → 503,
+   queue timeout → 504, upstream failure → 502.
+4. Route/schema change → `bash scripts/generate-client.sh` in the same
+   slice.
+
+**Slices:** S0 law docs (this) → S1 route + tests + client regen →
+S2 local-stack compliance verification vs mock + tracker/status update.
 
 ## Accepted Regressions (do NOT restore from `legacy/`)
 
