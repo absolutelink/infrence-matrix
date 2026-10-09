@@ -260,14 +260,17 @@ async def _run_turn(
     previous: ChainSource | None,
     previous_response_id: str | None,
     store: bool,
+    terminal_sent: asyncio.Event,
 ) -> None:
     """Execute one turn and forward its event dicts as JSON frames.
 
     Handles cold-boot lifecycle synthesis + provider-duplicate drop
     (decision 7), terminal capture, and the post-turn cache update / eviction
     (decisions 3/4). Runs to the terminal event; the caller races this against a
-    client disconnect and cancels it (which drives ``stream_turn_events``'s
-    cancellation-safe ``finally`` to release the slot).
+    client disconnect. ``terminal_sent`` is set the instant the terminal frame
+    reaches the client so the caller knows the turn is committed and must NOT be
+    cancelled (cancelling here would detach the runner's shielded cleanup and
+    skip ``persist_turn_logged``, losing the turn record).
     """
     client_response_id = f"resp_{uuid.uuid4().hex}"
     ensure_registered(alias)
@@ -301,16 +304,23 @@ async def _run_turn(
     async def _emit(event: dict[str, Any]) -> bool:
         nonlocal terminal_status, terminal_output
         etype = event.get("type")
+        is_terminal = etype in _TERMINAL_TYPES
         if etype in _LIFECYCLE_ONCE:
             if etype in sent_lifecycle:
                 return True  # drop provider's duplicate lifecycle frame
             sent_lifecycle.add(etype)
-        if etype in _TERMINAL_TYPES:
+        if is_terminal:
             terminal_status = etype.split(".", 1)[1]
             response = event.get("response")
             if isinstance(response, dict):
                 terminal_output = _as_item_list(response.get("output"))
-        return await _send(websocket, event)
+        sent = await _send(websocket, event)
+        if sent and is_terminal:
+            # The client has its terminal frame: the turn is committed. Signal
+            # the racer so a concurrent disconnect awaits cleanup instead of
+            # cancelling (which would skip persist_turn_logged).
+            terminal_sent.set()
+        return sent
 
     try:
         async for item in runner:
@@ -496,8 +506,17 @@ async def _run_turn_raced(
     shielded ``finally``). Returns ``True`` if the client disconnected (the
     caller must stop), ``False`` if the turn finished. Any stray message that
     arrives mid-turn is pushed onto ``pending`` for the main loop (never
-    swallowed)."""
-    turn_task = asyncio.create_task(_run_turn(websocket, scheduler, cache, **params))
+    swallowed).
+
+    A turn whose terminal frame already reached the client (``terminal_sent``)
+    is never cancelled: it is already committed and only finishing its
+    shielded release + ``persist_turn_logged``; cancelling there would detach
+    that cleanup as an orphan and lose the turn record (the CI race this
+    guards). Such a disconnect is requeued so the main loop exits cleanly."""
+    terminal_sent = asyncio.Event()
+    turn_task = asyncio.create_task(
+        _run_turn(websocket, scheduler, cache, terminal_sent=terminal_sent, **params)
+    )
     try:
         while True:
             get_task = asyncio.create_task(inbox.get())
@@ -514,9 +533,21 @@ async def _run_turn_raced(
                         await inbox.put(message)
                         turn_task.result()
                         return False
-                    # Mid-turn disconnect: cancel the turn (its shielded finally
-                    # releases the slot) and drop any stray buffered messages so
-                    # they cannot run turns against a dead socket.
+                    if terminal_sent.is_set():
+                        # Committed turn: let it finish release + persist rather
+                        # than cancelling (which would skip persist_turn_logged).
+                        with contextlib.suppress(asyncio.CancelledError, Exception):
+                            await turn_task
+                        # Drop any stray mid-turn messages: the socket is gone,
+                        # so they would only run doomed turns before the
+                        # requeued disconnect is read.
+                        pending.clear()
+                        await inbox.put(message)  # requeue for the main loop
+                        return False
+                    # Mid-turn disconnect (no terminal sent): cancel the turn
+                    # (its shielded finally releases the slot) and drop any
+                    # stray buffered messages so they cannot run turns against
+                    # a dead socket.
                     turn_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await turn_task
@@ -536,7 +567,9 @@ async def _run_turn_raced(
             turn_task.result()
             return False
     finally:
-        if not turn_task.done():
+        # Safety net: only a genuinely in-flight (uncommitted) turn is cancelled
+        # here; a committed one is left to finish its shielded cleanup.
+        if not turn_task.done() and not terminal_sent.is_set():
             turn_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await turn_task

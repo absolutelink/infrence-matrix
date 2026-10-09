@@ -2715,6 +2715,18 @@ provider recreate required). Full compliance suite vs
 `wss://` through Traefik): **17/17 — the entire OpenResponses
 compliance suite is now green on the deployment.**
 
+**Post-ship CI fix**: the close-out push exposed a WS race — a client
+disconnect arriving after a turn's terminal frame but before the
+runner's shielded release+persist completed cancelled the committed
+turn and dropped the `store=true` record (CI-only timing; local runs
+won the race). The racer now never cancels a turn whose terminal frame
+was sent (`terminal_sent` event → await instead of cancel; `pending`
+cleared on both disconnect branches). Deterministic regression test
+(slow-release + close + DB poll) added; suite 495→**496** green, WS
+file 10x stable. Accepted tradeoff: a provider that stalls the stream
+*after* emitting terminal delays the disconnect-await until its own
+read timeout.
+
 **S3**: full compliance suite vs local stack + mock = **17/17** (first
 run, no transport fixes required; independently re-verified by the
 orchestrator). All 7 `websocket-*` green: single turn, sequential,

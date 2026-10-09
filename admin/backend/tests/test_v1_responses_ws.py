@@ -348,6 +348,106 @@ def test_ws_store_true_continuation_across_sockets(
 
 
 # ---------------------------------------------------------------------------
+# (5b) REGRESSION: store=true persist survives an immediate post-terminal
+# disconnect (the CI race). Without the terminal_sent guard the racer cancels
+# the turn while it is parked in the runner's shielded release, skipping
+# persist_turn_logged -> the next socket's Postgres lookup misses.
+# ---------------------------------------------------------------------------
+def test_ws_store_true_persist_survives_immediate_disconnect(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    import time as _time
+
+    from sqlalchemy import select as _select
+    from sqlmodel import Session as _Session
+
+    from app.core.db import engine
+
+    def _record_present(rid: str) -> bool:
+        with _Session(engine) as s:
+            return (
+                s.exec(
+                    _select(ResponseRecord).where(ResponseRecord.response_id == rid)
+                ).first()
+                is not None
+            )
+
+    seed_instance(session, alias="ws-race", machine_uid="ws-race-m")
+    scheduler = client.app.state.scheduler
+
+    prior_output = [
+        {
+            "id": "msg_r",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "stored before disconnect"}],
+        }
+    ]
+    events = [
+        created_event(),
+        completed_event(
+            prior_output, {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        ),
+    ]
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(litellm, "aresponses", make_recording_stream(events, calls))
+
+    # Widen the terminal->persist window deterministically: the runner's
+    # finally awaits scheduler.release (shielded) BEFORE persist_turn_logged,
+    # so a slow release parks the committed turn exactly where a cancel would
+    # orphan the cleanup and drop the record.
+    original_release = scheduler.release
+
+    async def slow_release(alias: str, request_id: str) -> None:
+        await asyncio.sleep(0.3)
+        await original_release(alias, request_id)
+
+    monkeypatch.setattr(scheduler, "release", slow_release)
+
+    with client.websocket_connect("/v1/responses") as ws:
+        ws.send_json(
+            {
+                "type": "response.create",
+                "model": "ws-race",
+                "store": True,
+                "input": "remember this",
+            }
+        )
+        first = drain_turn(ws)
+        prior_id = first[-1]["response"]["id"]
+        # Deliver the disconnect while the committed turn is still finishing its
+        # release + persist -- the race trigger. close() queues a
+        # websocket.disconnect without tearing down the handler's task scope, so
+        # the racer sees it exactly as a real server would.
+        ws.close()
+        # Poll for the persisted record: with the terminal_sent guard the racer
+        # awaits the committed turn and persist lands; without it the turn is
+        # cancelled and persist_turn_logged is skipped, so this never appears.
+        deadline = _time.monotonic() + 5.0
+        while _time.monotonic() < deadline and not _record_present(prior_id):
+            _time.sleep(0.05)
+        assert _record_present(prior_id), "store=true turn was not persisted"
+
+    # A brand-new socket must resolve the store=true chain from Postgres.
+    with client.websocket_connect("/v1/responses") as ws2:
+        ws2.send_json(
+            {
+                "type": "response.create",
+                "model": "ws-race",
+                "store": True,
+                "previous_response_id": prior_id,
+                "input": "continue",
+            }
+        )
+        frames2 = drain_turn(ws2)
+
+    assert frames2[-1]["type"] == "response.completed", frames2[-1]
+    assert len(calls) == 2
+    assert calls[1]["input"][0] == {"role": "user", "content": "remember this"}
+    assert calls[1]["input"][1] == prior_output[0]
+
+
+# ---------------------------------------------------------------------------
 # (6) call_id validation failure -> 400 + eviction -> retry -> not found
 # ---------------------------------------------------------------------------
 def test_ws_call_id_validation_evicts_previous(
