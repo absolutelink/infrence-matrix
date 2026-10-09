@@ -271,6 +271,41 @@ services:
   #   depends_on:
   #     admin:
   #       condition: service_healthy
+  #
+  # provider-talkies (Phase 24, speech: tts + asr):
+  #   build:
+  #     context: .
+  #     dockerfile: provider/talkies/Dockerfile
+  #   restart: unless-stopped
+  #   ports:
+  #     - "8085:8081"
+  #   environment:
+  #     - MACHINE_UID=cuda-speech-1
+  #     - MACHINE_SECRET=<machine-registration-secret>
+  #     - AGENT_ID=<talkies-agent-1>
+  #     - ADMIN_BASE_URL=http://admin:8000
+  #     - PROVIDER_PORT=8081
+  #     - CACHE_DIR=/cache
+  #     - MODELS_DIR=/models
+  #     # Engine wiring (baked defaults shown; override only to relocate).
+  #     - TALKIES_PYTHON=/opt/venv/bin/python
+  #     - TALKIES_MODELS_FILE=/app/models.json
+  #     # One talkies process runs per placed definition (single-slug engine);
+  #     # definitions e.g. model.slug=qwen3-tts-1.7b-custom / whisper-large-v3-turbo.
+  #     # Snapshots + custom voices live under MODELS_DIR unless TALKIES_DATA_DIR
+  #     # is set (then that path must be writable by the talkies user).
+  #     - METRICS_CATEGORIES=gpu_usage vram os_ram cpu storage
+  #   volumes:
+  #     - talkies_cache:/cache
+  #     - talkies_models:/models
+  #   devices:
+  #     - /dev/nvidia0
+  #     - /dev/nvidiactl
+  #     - /dev/nvidia-uvm
+  #     - /dev/nvidia-uvm-tools
+  #   depends_on:
+  #     admin:
+  #       condition: service_healthy
 
 volumes:
   postgres_data:
@@ -286,3 +321,5 @@ volumes:
   # halogen_models:
   # flash_cache:
   # flash_models:
+  # talkies_cache:
+  # talkies_models:

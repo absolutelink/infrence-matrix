@@ -1,0 +1,46 @@
+# Stub reproduction of the psyb0t/talkies:latest-cuda properties the
+# provider Dockerfile must overcome (review round 1: B1 / B2 / H1 / M1),
+# on a pull-cheap base so the semantics can be validated without the
+# multi-GB CUDA image:
+#
+#   * ENTRYPOINT talkies-entrypoint that IGNORES "$@" and execs stock talkies
+#   * final USER talkies (uid 1000) with a root-owned /opt
+#   * ENV TALKIES_DATA_DIR=/data + HF_HOME=/data/hf
+#   * HEALTHCHECK probing http://127.0.0.1:8000/healthz
+#
+# Validation (requires a container runtime; none exists in the dev sandbox):
+#
+#   docker build -f provider/talkies/Dockerfile.stubtest -t talkies-stubbase .
+#   docker build -f provider/talkies/Dockerfile \
+#       --build-arg BASE_IMAGE=talkies-stubbase -t im-talkies-test .
+#   docker run --rm \
+#     -e MACHINE_UID=smoke -e MACHINE_SECRET=s -e AGENT_ID=a \
+#     -e ADMIN_BASE_URL=http://127.0.0.1:9 \
+#     im-talkies-test
+#   # expect: the PROVIDER agent runs (not stock talkies), and it attempts
+#   # registration against ADMIN_BASE_URL (ConnectError traceback mentioning
+#   # /admin/api/providers/register) before exiting — no admin in a smoke run.
+#
+FROM python:3.12-slim
+
+RUN useradd -u 1000 --create-home talkies \
+    && mkdir -p /opt/venv/bin /data \
+    && chown -R talkies:talkies /data \
+    && printf '%s\n' \
+        '#!/bin/sh' \
+        '# stock talkies launcher: deliberately ignores "$@" (B1)' \
+        'echo "[talkies-entrypoint] stock talkies would bind 0.0.0.0:8000"' \
+        'exec python3 -c "print(1)"' \
+        > /usr/local/bin/talkies-entrypoint \
+    && chmod +x /usr/local/bin/talkies-entrypoint
+
+ENV TALKIES_DATA_DIR=/data \
+    HF_HOME=/data/hf \
+    PATH=/opt/venv/bin:$PATH
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz').status==200 else 1)" || exit 1
+
+USER talkies
+
+ENTRYPOINT ["/usr/local/bin/talkies-entrypoint"]

@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "talkies backend_config",
+  "description": "Sectioned backend_config for the talkies provider (Phase 24). One talkies process runs per backend definition: the engine is launched as `<TALKIES_PYTHON> -m uvicorn talkies.server:app --host 127.0.0.1 --port <private>` with the TALKIES_* environment below, enabled to exactly this definition's registry slug. x-flag names the exact upstream env var this maps to; env.py remains the executable mapping. There is deliberately NO x-max-running-backends cap: VRAM admission governs how many talkies processes share a machine.",
+  "type": "object",
+  "x-serves-modalities": ["tts", "asr"],
+  "additionalProperties": false,
+  "required": ["model"],
+  "properties": {
+    "model": {
+      "type": "object",
+      "title": "Model",
+      "description": "The single talkies registry slug this backend serves. The driver prefetches its snapshot into $TALKIES_DATA_DIR/models/<slug> before spawn and exports it as TALKIES_ENABLED_MODELS / TALKIES_PRELOAD.",
+      "x-order": 1,
+      "additionalProperties": false,
+      "required": ["slug"],
+      "properties": {
+        "slug": {
+          "type": "string",
+          "minLength": 1,
+          "title": "Registry slug",
+          "description": "Slug of the bundled (or custom-registry) talkies model this definition serves, e.g. 'qwen3-tts-1.7b-custom' or 'whisper-large-v3-turbo'. Must exist in the registry JSON at TALKIES_MODELS_FILE; an unknown slug fails the start.",
+          "x-flag": "TALKIES_ENABLED_MODELS",
+          "x-order": 1
+        },
+        "revision": {
+          "type": ["string", "null"],
+          "default": null,
+          "minLength": 1,
+          "title": "Snapshot revision",
+          "description": "Optional immutable HuggingFace commit for the prefetch snapshot_download. null/absent = the registry entry's own revision (or the repo default).",
+          "x-flag": "prefetch revision",
+          "x-order": 2
+        }
+      }
+    },
+    "engine": {
+      "type": "object",
+      "title": "Engine",
+      "description": "talkies server knobs. The engine binds a private OS-assigned loopback port allocated at start (never a config field); the agent's single /v1 surface routes to it by model.",
+      "x-order": 2,
+      "additionalProperties": false,
+      "properties": {
+        "device": {
+          "type": "string",
+          "default": "cuda",
+          "title": "Device",
+          "description": "Compute device: 'auto', 'cpu', 'cuda', or 'cuda:N'. The CUDA image defaults to 'cuda'; set 'cpu' only for CPU-capable slugs on a CPU box.",
+          "x-flag": "TALKIES_DEVICE",
+          "x-order": 1
+        }
+      }
+    },
+    "defaults": {
+      "type": "object",
+      "title": "Request Defaults",
+      "description": "Recorded synthesis/transcription defaults used as fallbacks when a client request omits the field (the driver fills them into the forwarded body). They never override an explicit request value.",
+      "x-order": 3,
+      "additionalProperties": false,
+      "properties": {
+        "voice": {
+          "type": ["string", "null"],
+          "default": null,
+          "title": "Default voice",
+          "description": "Default TTS voice name (must exist in the model's voice catalog). null/absent = the engine's model default.",
+          "x-order": 1
+        },
+        "language": {
+          "type": ["string", "null"],
+          "default": null,
+          "title": "Default language",
+          "description": "Default language label for synthesis / ASR source hint. null/absent = the engine's registry default.",
+          "x-order": 2
+        },
+        "response_format": {
+          "type": ["string", "null"],
+          "enum": ["mp3", "opus", "aac", "flac", "wav", "pcm", null],
+          "default": null,
+          "title": "Default response format",
+          "description": "Default SPEECH response_format ('pcm' selects Qwen3 incremental raw PCM + X-Sample-Rate). Applies to /v1/audio/speech only — a transcription response_format always comes from the client request and is never defaulted from here. null/absent = the engine default (mp3).",
+          "x-order": 3
+        },
+        "speed": {
+          "type": ["number", "null"],
+          "default": null,
+          "minimum": 0.25,
+          "maximum": 4.0,
+          "title": "Default speed",
+          "description": "Default speech speed multiplier (0.25-4.0; backend support varies). null/absent = 1.0.",
+          "x-order": 4
+        },
+        "instructions": {
+          "type": ["string", "null"],
+          "default": null,
+          "title": "Default instructions",
+          "description": "Default Qwen3 mode instruction/voice-description text (emotion/style prompt for CustomVoice, required voice description for VoiceDesign). null/absent = none.",
+          "x-order": 5
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "title": "Limits & Lifecycle",
+      "description": "Per-model admission and residency limits exported to the engine.",
+      "x-order": 4,
+      "additionalProperties": false,
+      "properties": {
+        "model_concurrency": {
+          "type": "integer",
+          "default": 1,
+          "minimum": 1,
+          "maximum": 1024,
+          "title": "Model concurrency",
+          "description": "Active inference requests the engine admits for this slug (HTTP ASR + TTS + live WS together; excess fails 429, never queues). Exported as TALKIES_MODEL_CONCURRENCY '<slug>=N'. Reported as effective_capacity.",
+          "x-flag": "TALKIES_MODEL_CONCURRENCY",
+          "x-order": 1
+        },
+        "max_upload_bytes": {
+          "type": ["integer", "null"],
+          "default": null,
+          "minimum": 0,
+          "title": "Max upload bytes",
+          "description": "Engine-side multipart transcription / file-stage upload cap in bytes. null/absent = talkies default (104857600).",
+          "x-flag": "TALKIES_MAX_UPLOAD_BYTES",
+          "x-order": 2
+        },
+        "model_ttl": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "title": "Model idle TTL (seconds)",
+          "description": "Idle eviction TTL exported as TALKIES_MODEL_TTL. 0 (default) disables eviction and pins the model so 'backend running' <=> weights resident, which is what keeps the admin's per-instance VRAM ledger exact. A nonzero value lets talkies unload the idle model while the backend still reports running — the VRAM accounting then UNDER-counts; only set it deliberately on shared boxes.",
+          "x-flag": "TALKIES_MODEL_TTL",
+          "x-order": 3
+        }
+      }
+    },
+    "security": {
+      "type": "object",
+      "title": "Security",
+      "description": "Engine-facing shared bearer secret. talkies enforces it on every HTTP/WS route except /healthz; the driver attaches it to all proxied requests.",
+      "x-order": 5,
+      "additionalProperties": false,
+      "properties": {
+        "auth_token": {
+          "type": "string",
+          "default": "",
+          "title": "Engine auth token",
+          "description": "Bearer token exported as TALKIES_AUTH_TOKEN. Empty (default) = the driver generates a random token per start (the engine is loopback-only inside the container, but a fixed secret is defense-in-depth). Never logged.",
+          "x-flag": "TALKIES_AUTH_TOKEN",
+          "x-secret": true,
+          "x-order": 1
+        }
+      }
+    }
+  }
+}

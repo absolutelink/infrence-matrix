@@ -79,6 +79,19 @@ class ProviderSettings(BaseSettings):
     # halogen-flash backend (provider_halogen_flash).
     HALOGEN_FLASH_SERVER_PATH: str = "halogen-flash-server"
 
+    # talkies backend (provider_talkies, Phase 24). The engine is the talkies
+    # speech server (python 3.12 venv baked in the image) launched as
+    # `<TALKIES_PYTHON> -m uvicorn talkies.server:app`; its registry file and
+    # data root are container-environment concerns, never backend_config.
+    TALKIES_PYTHON: str = "/opt/venv/bin/python"
+    TALKIES_MODELS_FILE: str = "/app/models.json"
+    # Empty (default) = derive from MODELS_DIR (models/ + files/ +
+    # custom-voices/ live on the models volume).
+    TALKIES_DATA_DIR: str = ""
+    # Health budget for the first model load (cold prefetch + preload can take
+    # minutes on big checkpoints); heartbeats `initializing` while it runs.
+    TALKIES_BOOT_TIMEOUT: int = 600
+
     # halogen-flash NPU (Ryzen AI) host paths, used by the NPU probe to
     # decide whether small models can be pinned to the NPU.
     NPU_DEVICE_PATH: str = "/dev/accel/accel0"
