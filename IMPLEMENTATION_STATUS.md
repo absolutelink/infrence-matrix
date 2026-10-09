@@ -2683,9 +2683,19 @@ Found via user compliance runs against `rocinante` (halogen-flash):
 mapping ✅ (`cef18b9`: `reasoning_text.{delta,done}` →
 `response.reasoning.{delta,done}` + `content_index` fill; summary
 events confirmed spec-conformant and pass through; 175 provider tests
-green; review CLEAN) → A-S2 admin WS silence guard ✅ → A-S3 deploy
-(admin + halogen-flash agent) + compliance vs `rocinante` +
-`rocinante-tiny` regression + tracker.
+green; review CLEAN) → A-S2 admin WS silence guard ✅ (`f0871b8`) →
+A-S4 reasoning-ITEM sanitize ✅ → A-S3 deploy + compliance close-out.
+
+**A-S4** (added after A-S3's first `rocinante` run exposed it): the
+Flash backend's reasoning *item payloads* also violate
+`reasoningBodySchema` — `encrypted_content: null` (spec: optional
+string) and missing required `summary`. Driver now sanitizes reasoning
+items on `output_item.added/done` + terminal `response.output` (drop
+null `encrypted_content`, default `summary: []`, preserve strings,
+non-reasoning untouched); 177 provider tests green, review CLEAN.
+Also observed: `image-input` 502s on `rocinante` — the Flash backend
+is not vision-capable (capability gap, not a protocol bug; use
+`rocinante-tiny` for image compliance).
 
 **A-S2**: `WS_TURN_SILENCE_SECONDS=300` guard in `responses_ws._run_turn`
 (`asyncio.wait` + explicit cancel so a new `failure_sink` on

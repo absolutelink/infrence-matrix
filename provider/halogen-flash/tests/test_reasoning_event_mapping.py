@@ -133,3 +133,65 @@ async def test_usage_still_counts_reasoning_tokens(
     assert usage["output_tokens_details"]["reasoning_tokens"] == (
         _EXPECTED_REASONING_TOKENS
     )
+
+
+async def test_reasoning_items_sanitized_on_item_events(
+    tmp_path, fake_flash_binary, local_artifacts, monkeypatch
+) -> None:
+    """output_item.added/done reasoning items must drop a null
+    encrypted_content and gain a summary array."""
+    monkeypatch.setenv("FAKE_REASONING", "1")
+    driver = _driver(tmp_path, fake_flash_binary, local_artifacts)
+    try:
+        await driver.start()
+        events = [e async for e in driver.stream_responses({"input": "go"})]
+    finally:
+        await driver.aclose()
+
+    item_events = [
+        e
+        for e in events
+        if e["type"] in ("response.output_item.added", "response.output_item.done")
+    ]
+    assert len(item_events) == 2
+    for event in item_events:
+        item = event["item"]
+        assert item["type"] == "reasoning"
+        # null encrypted_content removed entirely.
+        assert "encrypted_content" not in item
+        # summary present (added when missing, kept when provided).
+        assert isinstance(item["summary"], list)
+
+
+async def test_reasoning_items_sanitized_in_terminal_output(
+    tmp_path, fake_flash_binary, local_artifacts, monkeypatch
+) -> None:
+    """The terminal response.output reasoning items are sanitized: null
+    encrypted_content dropped, missing summary defaulted to [], a string
+    encrypted_content preserved, and non-reasoning items untouched."""
+    monkeypatch.setenv("FAKE_REASONING", "1")
+    driver = _driver(tmp_path, fake_flash_binary, local_artifacts)
+    try:
+        await driver.start()
+        events = [e async for e in driver.stream_responses({"input": "go"})]
+    finally:
+        await driver.aclose()
+
+    output = events[-1]["response"]["output"]
+    by_id = {item["id"]: item for item in output}
+
+    # rs_1: null encrypted_content removed, summary defaulted to [].
+    rs1 = by_id["rs_1"]
+    assert "encrypted_content" not in rs1
+    assert rs1["summary"] == []
+
+    # rs_2: string encrypted_content preserved, existing summary kept.
+    rs2 = by_id["rs_2"]
+    assert rs2["encrypted_content"] == "secret"
+    assert rs2["summary"] == []
+
+    # Non-reasoning message item untouched (no keys injected).
+    msg = by_id["msg_1"]
+    assert msg["type"] == "message"
+    assert "summary" not in msg
+    assert "encrypted_content" not in msg

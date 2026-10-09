@@ -98,6 +98,27 @@ _REASONING_EVENT_RENAMES = {
     "response.reasoning_text.done": "response.reasoning.done",
 }
 
+# Events that carry a single reasoning item payload in ``item``.
+_ITEM_EVENT_TYPES = ("response.output_item.added", "response.output_item.done")
+
+
+def _sanitize_reasoning_item(item: Any) -> None:
+    """Coerce a ``reasoning`` item into spec shape (reasoningBodySchema).
+
+    The Flash backend emits reasoning items that fail the spec zod:
+    ``encrypted_content`` present as ``null`` (spec: optional *string*) and
+    a missing ``summary`` (spec: required array). Drop a null
+    ``encrypted_content`` and default ``summary`` to ``[]``. A string
+    ``encrypted_content`` is preserved. Non-reasoning items are untouched.
+    Mutates in place (events are freshly json-parsed per SSE line).
+    """
+    if not isinstance(item, dict) or item.get("type") != "reasoning":
+        return
+    if "encrypted_content" in item and item["encrypted_content"] is None:
+        del item["encrypted_content"]
+    item.setdefault("summary", [])
+
+
 # The halogen-flash committed backend_config schema (Phase 12): the
 # sectioned shape the admin registers, validates against, and renders in
 # the UI. Shared with main.py (single load → registration + driver
@@ -719,8 +740,14 @@ class HalogenFlashBackend(BackendDriver):
                 ):
                     # Rough token estimate from reasoning deltas: ~4 chars.
                     reasoning_tokens += len(event.get("delta") or "") // 4
+                if etype in _ITEM_EVENT_TYPES:
+                    _sanitize_reasoning_item(event.get("item"))
                 if etype in _TERMINAL_TYPES and isinstance(event.get("response"), dict):
                     response = event["response"]
+                    output = response.get("output")
+                    if isinstance(output, list):
+                        for item in output:
+                            _sanitize_reasoning_item(item)
                     raw_usage = response.get("usage")
                     if not isinstance(raw_usage, dict):
                         raw_usage = response

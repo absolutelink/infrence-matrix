@@ -121,7 +121,19 @@ FAKE_SCRIPT = textwrap.dedent(
                         yield sse({"type": "response.output_text.delta",
                                    "item_id": "msg_1", "output_index": 0,
                                    "content_index": 0, "delta": "tok%d" % i})
+                    terminal_output = []
                     if os.environ.get("FAKE_REASONING"):
+                        # Reasoning ITEMS that fail the spec zod
+                        # (reasoningBodySchema): encrypted_content present
+                        # as null (spec: optional string) and/or summary
+                        # missing (spec: required array). The driver must
+                        # sanitize them on output_item.added/done and in the
+                        # terminal response output.
+                        yield sse({"type": "response.output_item.added",
+                                   "output_index": 0,
+                                   "item": {"id": "rs_1", "type": "reasoning",
+                                            "encrypted_content": None,
+                                            "content": []}})
                         # Spec-shaped summary events (must pass through
                         # untouched) + NON-SPEC dual-name reasoning_text
                         # events (the driver must rename them to
@@ -142,12 +154,29 @@ FAKE_SCRIPT = textwrap.dedent(
                         yield sse({"type": "response.reasoning_summary_text.done",
                                    "item_id": "rs_1", "output_index": 0,
                                    "summary_index": 0, "text": "sum" * 4})
+                        yield sse({"type": "response.output_item.done",
+                                   "output_index": 0,
+                                   "item": {"id": "rs_1", "type": "reasoning",
+                                            "encrypted_content": None,
+                                            "summary": [{"type": "summary_text",
+                                                         "text": "sum" * 4}]}})
+                        terminal_output = [
+                            # null encrypted_content + missing summary → both fixed
+                            {"id": "rs_1", "type": "reasoning",
+                             "encrypted_content": None},
+                            # string encrypted_content preserved, summary kept
+                            {"id": "rs_2", "type": "reasoning",
+                             "encrypted_content": "secret", "summary": []},
+                            # non-reasoning item: untouched
+                            {"id": "msg_1", "type": "message",
+                             "role": "assistant", "content": []},
+                        ]
                     # NON-SPEC terminal usage: chat-style counts + native
                     # timings, no input_tokens/output_tokens. The driver's
                     # calculate_usage override must normalize it.
                     yield sse({"type": "response.completed", "response": {
                         "id": "resp_flash_1", "object": "response",
-                        "status": "completed", "output": [],
+                        "status": "completed", "output": terminal_output,
                         "usage": {
                             "prompt_tokens": 100,
                             "completion_tokens": N_DELTAS,
