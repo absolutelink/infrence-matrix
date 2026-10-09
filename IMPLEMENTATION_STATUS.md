@@ -2,7 +2,7 @@
 
 **Overhaul branch:** `litellm-architecture-overhaul`
 **Last updated:** 2026-10-09 (**Phase 24 — Audio (talkies provider): 🟡 in
-progress (S0–S1 done).** Speech ships as two modalities — `tts` + `asr` — served by a new
+progress (S0–S2 done).** Speech ships as two modalities — `tts` + `asr` — served by a new
 `talkies` provider type: a thin proxy agent around
 `psyb0t/talkies:latest-cuda` (Qwen3-TTS variants, Kokoro, Chatterbox Turbo;
 Whisper/Parakeet/Canary/Sherpa ASR). Client surface: `POST /v1/audio/speech`
@@ -3078,15 +3078,16 @@ work, and per-engine translation layers entirely.
 - **Modalities:** `tts` and `asr` join `_VALID_MODALITIES` (the Phase 18
   reserved `audio` bucket is retired, never was valid). Route gating per
   modality mirrors Phase 18's clean-404 discipline.
-- **Backend shape:** one talkies process per agent serving all placed slugs
-  (`x-max-running-backends: 1`); the agent rewrites request `model`
-  (our alias) → talkies slug. One multi-model backend beats N processes
-  (shared model cache, talkies-native admission).
-- **VRAM exactness:** `TALKIES_PRELOAD=<placed slugs>` +
-  `TALKIES_MODEL_TTL=0` pin models so `backend running` ⇔ resident;
-  admin per-instance VRAM accounting stays honest. `/api/ps` +
-  `DELETE /api/ps/{slug}` are **driver-internal** (readiness,
-  assignment-remove eviction) — never client-facing.
+- **Backend shape (REVISED at S2):** one talkies process **per
+  definition/backend** (single-slug `TALKIES_ENABLED_MODELS`), not one
+  shared multi-model process — talkies reads its registry at import only
+  (no dynamic model add), incompatible with per-definition lifecycles.
+  The agent rewrites request `model` (our alias) → talkies slug. No
+  `x-max-running-backends` cap; VRAM admission governs.
+- **VRAM exactness:** `TALKIES_PRELOAD=<slug>` +
+  `TALKIES_MODEL_TTL=0` pin the model so `backend running` ⇔ resident;
+  admin per-instance VRAM accounting stays honest. `/api/ps` is
+  **driver-internal** (readiness) — never client-facing.
 - **litellm bypassed for audio:** direct httpx passthrough (binary /
   multipart / WS); no `alias_registry` audio branch; scheduler
   acquire/release + shielded-`finally` discipline unchanged.
@@ -3136,7 +3137,20 @@ work, and per-engine translation layers entirely.
   health, voice-dir writes), `schema.json`
   (`x-serves-modalities: ["tts","asr"]`, `x-max-running-backends: 1`),
   `main.py` (gufo-style registry), workspace member + CI + compose example.
-  Tests with a stubbed talkies engine (no GPU). ⬜
+  Tests with a stubbed talkies engine (no GPU). ✅ done — **revision:
+  per-definition single-slug process instead of one shared multi-model
+  process (see locked decisions); no backend cap.** talkies `main()`
+  hardcodes `0.0.0.0:8000` → engine launched via
+  `python -m uvicorn talkies.server:app --host 127.0.0.1 --port <OS>`;
+  entrypoint-parity HF prefetch (`HF_HUB_CACHE=$DATA/hf` agreed between
+  prefetch and engine); health = `/healthz` + `/api/ps` pin. Dockerfile
+  overrides the CUDA base's four hazards (inherited ENTRYPOINT, root-owned
+  /opt venv build, `TALKIES_DATA_DIR=/data` inheritance, `:8000`
+  HEALTHCHECK) and pre-owns `/models`+`/cache` for uid 1000 — pinned by
+  daemon-free structural tests (no container runtime in the devbox;
+  **real `docker build` + run smoke is a deploy-host task**). provider/lib
+  gained `TALKIES_*` env knobs. talkies 53 green, lib 204, mock 60.
+  Review: 3 rounds, CLEAN.
 - **S3.** Admin: `tts`/`asr` in `_VALID_MODALITIES` + gating matrix,
   `audio_speech.py` + `audio_transcriptions.py` (httpx passthrough, usage
   samples), `audio_voices.py` (client GET proxy) + `/admin/api` enrollment

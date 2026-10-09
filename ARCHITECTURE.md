@@ -918,15 +918,18 @@ speech server (Qwen3-TTS variants, Kokoro, Chatterbox Turbo; Whisper /
 Parakeet / Canary / Sherpa / Vosk ASR). Key locked decisions (full rationale
 in IMPLEMENTATION_STATUS.md Phase 24):
 
-- **One multi-model backend per agent** (gufo precedent): one talkies
-  process serves every placed slug of the definition set; the agent
-  rewrites the request `model` (our alias) → talkies slug on the forwarded
-  request. `x-max-running-backends: 1`.
+- **One talkies process per backend (definition).** The S0 plan said "one
+  multi-model process per agent"; **revised in S2** — talkies reads its
+  registry/allowlist at import only (no dynamic model add), which is
+  incompatible with per-definition `ProviderInstance` lifecycles (start/stop/
+  drain/slots). Each backend runs a single-slug talkies process
+  (`TALKIES_ENABLED_MODELS=<slug>`); the agent rewrites the request `model`
+  (our alias) → slug on forwarded requests. No `x-max-running-backends` cap
+  — VRAM admission governs how many fit per agent.
 - **Exact VRAM accounting via pinning:** the provider exports
-  `TALKIES_PRELOAD=<placed slugs>` + `TALKIES_MODEL_TTL=0`, so `backend
-  running` ⇔ all its models resident; the admin's per-booted-instance VRAM
-  ledger stays honest. `/api/ps` is driver-internal (readiness +
-  assignment-remove eviction), never client-facing.
+  `TALKIES_PRELOAD=<slug>` + `TALKIES_MODEL_TTL=0`, so `backend running` ⇔
+  the model resident; the admin's per-booted-instance VRAM ledger stays
+  honest. `/api/ps` is driver-internal (readiness), never client-facing.
 - **litellm is bypassed for audio.** Binary/multipart/WS payloads don't fit
   litellm's call surface; the admin routes use **direct httpx passthrough**
   to `{admission.base_url}/v1/...` with the same scheduler
