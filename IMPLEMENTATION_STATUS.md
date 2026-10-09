@@ -2649,6 +2649,41 @@ changes.
 
 ---
 
+## Phase 21 addendum — reasoning-event conformance + WS silence guard (planned)
+
+Found via user compliance runs against `rocinante` (halogen-flash):
+
+1. **Non-spec reasoning events.** The Flash backend emits
+   `response.reasoning_text.delta` (and `.done`) — not spec event types
+   (spec: `response.reasoning.delta` / `response.reasoning.done`, each
+   requiring `item_id`, `output_index`, `content_index`, and `delta`/
+   `text`). The compliance client zod-rejects every such event (error
+   storm; also affects HTTP SSE, not just WS). **Locked fix (provider
+   side — no provider-specific code may ever land in the admin):** the
+   halogen-flash driver renames/maps the events in its
+   `_stream_native_responses` relay — `reasoning_text.delta` →
+   `response.reasoning.delta`, `reasoning_text.done` →
+   `response.reasoning.done`, filling `content_index: 0` when the
+   backend omits it. The admin emitter already assigns
+   `sequence_number` and fills positions for known event types.
+2. **WS force-close during silent provider phases.** Client death is
+   detected via failed writes (verified: slot released ≤5s while
+   streaming) or via Traefik closing the upstream on socket RST — but
+   a client that is stuck-yet-open (event loop saturated by the error
+   storm above) or a provider that goes silent mid-turn leaves the
+   admin blocked on the runner with no write to fail. **Locked fix
+   (admin, provider-agnostic):** bound WS turn silence —
+   `asyncio.wait_for` around each runner event with
+   `WS_TURN_SILENCE_SECONDS` (default 300); on timeout fail the turn
+   (spec `response.failed` + error envelope via the emitter) and
+   release the slot. The turn was already bounded in practice by the
+   litellm read timeout; this makes the guarantee explicit.
+
+**Slices:** A-S0 docs (this) → A-S1 halogen-flash driver mapping +
+provider tests → A-S2 admin WS silence guard + tests → A-S3 deploy
+(admin + halogen-flash agent) + compliance vs `rocinante` +
+`rocinante-tiny` regression + tracker.
+
 ## Phase 21 — Responses-over-WebSocket transport ✅ SHIPPED
 
 Implements the OpenResponses §WebSocket Transport (added 2026-04-24) and
