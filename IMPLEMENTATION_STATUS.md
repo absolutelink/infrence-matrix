@@ -2701,9 +2701,37 @@ closes the 7 `websocket-*` compliance tests (currently N/A in
 9. No OpenAPI surface change → no client regen. Persistence identical to
    the SSE path (`persist_turn_logged`, respects `store`).
 
-**Slices:** S0 law docs (this) → S1 pipeline refactor → S2 WS endpoint +
-tests → S3 local-stack compliance vs mock (target 17/17) → S4 push +
-deploy + `rocinante-tiny` close-out.
+**Slices:** S0 law docs ✅ (`4726e8b`) → S1 pipeline refactor ✅ →
+S2 WS endpoint + tests ✅ → S3 local-stack compliance vs mock (target
+17/17) → S4 push + deploy + `rocinante-tiny` close-out.
+
+**S1 (`8a7258d`)**: `SSEEmitter` split into dict producers
+(`event_data`/`failed_events`) + SSE wrappers; `_stream_response` body
+extracted into transport-agnostic `stream_turn_events()` yielding event
+dicts + a `KEEPALIVE` sentinel (owns acquire/stream/terminal-normalize/
+persist/shielded-release). SSE byte-identical; 459→470 green. Review:
+CLEAN round 1 (deferred: pre-existing double-cancellation persist edge
+shared with `_non_stream_response`; cosmetic nits).
+
+**S2**: `WS /v1/responses` (`responses_ws.py`) — admin-terminated,
+providers unchanged (decision 0). Per-connection sequential turns over
+`stream_turn_events`; bounded `_TurnCache` LRU (8) continuation state
+with store=true Postgres fallback; `previous_response_not_found` +
+evict-on-failed-continuation; WS-only `function_call_output.call_id`
+validation (400 + eviction); single-owner reader task → mid-turn
+disconnect cancels the turn and frees the slot; cold-boot synthesized
+`response.created`/`in_progress` with provider-duplicate drop; no
+`[DONE]`; 60-min limit (per-message + timer); `WS_INBOX_MAX=64`
+backpressure (400 close); generic 500 envelope (no detail leak);
+`has_candidates` 503 pre-check. `build_litellm_input` decodes
+`compaction` items → `[Compacted context]` user message (both
+transports; 1 MiB decode cap); `ChainSource` Protocol. 470→**495**
+green (25 WS tests). Review: round 1 → 2 Medium + 2 Low + nits fixed
+(LRU, disconnect race, 500 wrapper, pre-check, typing, tests); round 2
+→ 4 Low + 2 nits fixed (requeue-before-raise, pending clear, inbox
+backpressure, overflow/500 tests, decode cap, generic message); round 3
+**CLEAN** (one accepted nit: abuse closes after draining ≤64 queued
+valid messages — memory bound holds).
 
 ## Phase 20 — Response compaction endpoint ✅ SHIPPED
 

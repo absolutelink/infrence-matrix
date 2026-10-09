@@ -49,12 +49,14 @@ Auth model: trusted LAN — this public route is unauthenticated (see
 """
 
 import asyncio
+import base64
 import contextlib
+import json
 import logging
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 
 import litellm
 from fastapi import APIRouter, HTTPException, Request
@@ -363,18 +365,89 @@ def _usage_tokens(usage: dict[str, Any]) -> tuple[int, int, int, int]:
     return input_tokens, output_tokens, total_tokens, cached
 
 
-def build_litellm_input(body: dict[str, Any], previous: ResponseRecord | None) -> Any:
+# Upper bound on a compaction item's ``encrypted_content`` payload; larger
+# blobs are treated as undecodable and dropped before any base64/JSON work.
+_COMPACTION_MAX_ENCRYPTED_BYTES = 1024 * 1024  # 1 MiB
+
+
+def _decode_compaction(item: dict[str, Any]) -> str | None:
+    """Return the summary text of a ``compaction`` input item, or ``None`` if
+    its ``encrypted_content`` is undecodable (Phase 21 decision 5).
+
+    The compaction endpoint (Phase 20) writes ``encrypted_content`` as base64
+    JSON ``{"summary": str, "source_count": int}``; decode the inverse.
+    """
+    encrypted = item.get("encrypted_content")
+    if not isinstance(encrypted, str):
+        return None
+    # Bound the decode work: an oversized blob is treated as undecodable and
+    # dropped rather than base64/JSON-parsed (guards against a client flooding
+    # the input with huge payloads).
+    if len(encrypted) > _COMPACTION_MAX_ENCRYPTED_BYTES:
+        return None
+    try:
+        payload = json.loads(base64.b64decode(encrypted))
+    except Exception:  # noqa: BLE001 - undecodable payloads are dropped
+        return None
+    if not isinstance(payload, dict):
+        return None
+    summary = payload.get("summary")
+    return summary if isinstance(summary, str) else None
+
+
+def _expand_compaction_items(items: list[Any]) -> list[Any]:
+    """Replace each ``compaction`` input item with a user text message and
+    silently drop undecodable ones (Phase 21 decision 5). Non-compaction items
+    pass through untouched."""
+    out: list[Any] = []
+    for item in items:
+        if isinstance(item, dict) and item.get("type") == "compaction":
+            summary = _decode_compaction(item)
+            if summary is None:
+                continue
+            out.append(
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": f"[Compacted context]\n{summary}",
+                        }
+                    ],
+                }
+            )
+        else:
+            out.append(item)
+    return out
+
+
+class ChainSource(Protocol):
+    """Anything that can act as a continuation's ``previous`` for
+    :func:`build_litellm_input`: it only reads ``input_items``/``output_items``.
+    Both :class:`ResponseRecord` (Postgres) and the WebSocket transport's
+    in-memory ``_TurnState`` (Phase 21) satisfy it structurally."""
+
+    input_items: list[dict[str, Any]]
+    output_items: list[dict[str, Any]]
+
+
+def build_litellm_input(body: dict[str, Any], previous: ChainSource | None) -> Any:
     """Reconstruct the litellm input for a (possibly continued) turn.
 
     Always returns a list of input items: a bare string input is wrapped
     as a user message so the stored ``input_items`` and the litellm
     payload share one shape. On continuation, the prior record's
     ``input_items`` (the full conversation up to that turn) plus its
-    ``output_items`` are prepended to this turn's new input.
+    ``output_items`` are prepended to this turn's new input. ``compaction``
+    input items are decoded into plain user text messages (both transports,
+    Phase 21 decision 5).
     """
     new_input = body.get("input")
     if isinstance(new_input, str):
         new_input = [{"role": "user", "content": new_input}]
+    if isinstance(new_input, list):
+        new_input = _expand_compaction_items(new_input)
     if previous is None:
         return new_input
     combined: list[dict[str, Any]] = list(previous.input_items)
