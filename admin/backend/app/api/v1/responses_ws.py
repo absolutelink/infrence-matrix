@@ -82,6 +82,17 @@ WS_CONNECTION_LIMIT_SECONDS = 3600.0
 # growing O(N^2) over a long-lived connection.
 WS_CACHE_MAX_TURNS = 8
 
+# Phase 21 addendum (fix 2): bound a turn when the provider stream goes silent.
+# A stuck-open client with a stalled backend can otherwise hold a scheduler slot
+# indefinitely (no write fails, no disconnect is observed, and the runner is
+# parked awaiting the next upstream event). Every await of the runner's next
+# event is capped at this many seconds; on expiry the turn fails cleanly
+# (``response.failed`` + ``error`` via the emitter's failure path) and the
+# runner's shielded cleanup releases the slot. Complements — does not replace —
+# the litellm read timeout, and applies to the WS transport only (SSE keeps its
+# existing litellm-timeout behavior).
+WS_TURN_SILENCE_SECONDS = 300.0
+
 # Backpressure bound: the reader stops accepting inbound frames once the sum of
 # queued (inbox + pending) messages reaches this, treating a client that floods
 # a slow turn with messages as protocol abuse — the connection is closed with a
@@ -271,6 +282,19 @@ async def _run_turn(
     reaches the client so the caller knows the turn is committed and must NOT be
     cancelled (cancelling here would detach the runner's shielded cleanup and
     skip ``persist_turn_logged``, losing the turn record).
+
+    Each await of the runner's next event is bounded by
+    ``WS_TURN_SILENCE_SECONDS`` (Phase 21 addendum fix 2): a provider stream
+    that goes silent mid-turn fails the turn cleanly (synthesized
+    ``response.failed`` + ``error`` via the emitter, slot released by the
+    runner's shielded cleanup) instead of holding the slot forever; the socket
+    stays open. The guard can only fire while waiting for the NEXT event: the
+    loop breaks the instant a ``response.completed``/``response.incomplete``
+    reaches the client, and refuses to synthesize once ANY terminal has been
+    emitted — so a provider that stalls the stream open after its own terminal
+    frame can never produce a second terminal (finding 1). A mid-turn silence
+    arms the runner's ``failure_sink`` before cancelling it so the persisted
+    record carries the same timeout error the client received (finding 3).
     """
     client_response_id = f"resp_{uuid.uuid4().hex}"
     ensure_registered(alias)
@@ -281,6 +305,7 @@ async def _run_turn(
     requested = {**passthrough, "model": alias}
 
     emitter = SSEEmitter(client_response_id)
+    failure_sink: dict[str, Any] = {}
     runner = stream_turn_events(
         emitter=emitter,
         scheduler=scheduler,
@@ -294,6 +319,7 @@ async def _run_turn(
         passthrough=passthrough,
         base_params=base_params,
         store=store,
+        failure_sink=failure_sink,
     )
 
     synthesized = False
@@ -322,8 +348,83 @@ async def _run_turn(
             terminal_sent.set()
         return sent
 
+    async def _await_next(anext) -> tuple[bool, asyncio.Future]:
+        """Await the runner's next event bounded by the silence guard.
+
+        Returns ``(timed_out, task)``. On timeout the pending ``__anext__``
+        task is returned un-cancelled so the caller can arm ``failure_sink``
+        first and then cancel it (steering the runner's shielded finally to
+        persist the right error). A cancellation of this turn (client
+        disconnect) cancels the pending task before re-raising so it is never
+        orphaned."""
+        task = asyncio.ensure_future(anext())
+        try:
+            done, _ = await asyncio.wait({task}, timeout=WS_TURN_SILENCE_SECONDS)
+        except asyncio.CancelledError:
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+            raise
+        return (not done), task
+
     try:
-        async for item in runner:
+        anext = runner.__anext__
+        while True:
+            timed_out, task = await _await_next(anext)
+            if timed_out:
+                if terminal_status is not None:
+                    # A terminal already reached the client this turn: a
+                    # misbehaving provider stalled the stream open after its
+                    # own terminal frame. Never synthesize a SECOND terminal
+                    # (finding 1) — unwind the runner (its shielded finally
+                    # releases the slot + persists the committed turn) and end.
+                    task.cancel()
+                    with contextlib.suppress(BaseException):
+                        await task
+                    break
+                # Silence guard (Phase 21 addendum fix 2): the provider stream
+                # stalled mid-turn. Arm the shared failure sink FIRST so the
+                # runner's shielded finally (which persists the turn as failed)
+                # records the same timeout error the client is about to receive
+                # (finding 3), THEN cancel the pending __anext__ — the resulting
+                # CancelledError unwinds the acquire + releases the slot.
+                # Synthesize the terminal exactly like the runner's own
+                # mid-stream failure path; the socket stays open.
+                logger.warning(
+                    "provider stream silent for %gs on %s; failing turn",
+                    WS_TURN_SILENCE_SECONDS,
+                    client_response_id,
+                )
+                silence_error = {
+                    "type": "server_error",
+                    "code": "timeout",
+                    "message": (
+                        f"provider stream timed out after "
+                        f"{WS_TURN_SILENCE_SECONDS:g}s of silence"
+                    ),
+                }
+                failure_sink["error"] = silence_error
+                task.cancel()
+                with contextlib.suppress(BaseException):
+                    await task
+                failed_skeleton: dict[str, Any] = {
+                    "status": "failed",
+                    "error": silence_error,
+                }
+                _normalize_response(
+                    failed_skeleton,
+                    store=store,
+                    requested=requested,
+                    default_status="failed",
+                )
+                for event in emitter.failed_events(silence_error, failed_skeleton):
+                    if not await _emit(event):
+                        return
+                break
+            try:
+                item = task.result()
+            except StopAsyncIteration:
+                break
             if item is KEEPALIVE:
                 # Decision 7: synthesize the lifecycle pair exactly once, on
                 # the first keepalive; later keepalives are silent (no SSE
@@ -349,6 +450,17 @@ async def _run_turn(
                 continue
             if not await _emit(item):
                 return
+            if item.get("type") in ("response.completed", "response.incomplete"):
+                # Terminal reached the client: end the turn now so the silence
+                # guard can never fire post-terminal and synthesize a SECOND
+                # terminal against a provider that stalls the stream open after
+                # its own terminal frame (finding 1). The runner's persist +
+                # release still run via the finally's shielded aclose. A
+                # ``response.failed`` is NOT broken on here: the runner's own
+                # failure path yields a trailing ``error`` frame that must still
+                # reach the client; the terminal_status check above stops a
+                # second synthesis if the provider then stalls.
+                break
     finally:
         # Propagate an early exit (client gone / return above / cancellation)
         # into the runner so its cancellation-safe finally unwinds the acquire

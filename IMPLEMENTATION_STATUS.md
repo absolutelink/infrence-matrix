@@ -2679,10 +2679,26 @@ Found via user compliance runs against `rocinante` (halogen-flash):
    release the slot. The turn was already bounded in practice by the
    litellm read timeout; this makes the guarantee explicit.
 
-**Slices:** A-S0 docs (this) → A-S1 halogen-flash driver mapping +
-provider tests → A-S2 admin WS silence guard + tests → A-S3 deploy
+**Slices:** A-S0 docs ✅ (`5c79cdd`) → A-S1 halogen-flash driver
+mapping ✅ (`cef18b9`: `reasoning_text.{delta,done}` →
+`response.reasoning.{delta,done}` + `content_index` fill; summary
+events confirmed spec-conformant and pass through; 175 provider tests
+green; review CLEAN) → A-S2 admin WS silence guard ✅ → A-S3 deploy
 (admin + halogen-flash agent) + compliance vs `rocinante` +
 `rocinante-tiny` regression + tracker.
+
+**A-S2**: `WS_TURN_SILENCE_SECONDS=300` guard in `responses_ws._run_turn`
+(`asyncio.wait` + explicit cancel so a new `failure_sink` on
+`stream_turn_events` is armed before the runner unwinds — the persisted
+failed record carries the same `timeout` error the client received).
+Loop breaks on the first `completed`/`incomplete` terminal (no
+double-terminal if the provider stalls after its terminal frame);
+`failed` terminals let the trailing `error` frame flow with synthesis
+blocked post-terminal. Slot always freed via the shielded cleanup;
+exactly one `ResponseRecord` per turn on every ordering. SSE
+byte-identical (sink param defaults None). Admin suite 496→**500**
+green. Review: round 1 → 1 low-med + 1 low + 1 nit fixed; round 2
+**CLEAN**.
 
 ## Phase 21 — Responses-over-WebSocket transport ✅ SHIPPED
 

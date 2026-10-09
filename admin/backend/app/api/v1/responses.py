@@ -667,6 +667,7 @@ async def stream_turn_events(
     passthrough: dict[str, Any],
     base_params: dict[str, Any],
     store: bool,
+    failure_sink: dict[str, Any] | None = None,
 ) -> AsyncIterator[dict[str, Any] | Keepalive]:
     """Transport-agnostic streaming turn pipeline (Phase 21 S1 refactor).
 
@@ -693,8 +694,14 @@ async def stream_turn_events(
       ``KEEPALIVE_COMMENT``; WS: nothing / its own pre-events).
 
     The runner never emits the SSE ``[DONE]`` terminator (SSE-only, decision
-    6): the caller knows the turn ended when this generator is exhausted.
-    The ``emitter`` is passed in so the caller shares its id/sequence state.
+    6): the caller knows the turn ended when this generator is exhausted. The
+    ``emitter`` is passed in so the caller shares its id/sequence state.
+
+    ``failure_sink`` (optional, WS-only): a shared mutable the transport arms
+    with a synthesized error dict *before* cancelling a stalled ``__anext__``
+    so this runner's shielded ``finally`` persists the turn with that error
+    (the silence guard's ``response.failed`` reaches the client and the DB
+    record agrees). SSE omits it and is unaffected.
     """
     requested = {**passthrough, "model": alias}
 
@@ -893,6 +900,15 @@ async def stream_turn_events(
             await asyncio.shield(_cleanup())
         # Persist once at terminal. Synchronous DB work: runs to completion
         # without needing to be awaited, so cancellation cannot interrupt it.
+        # On the cancellation path (no terminal captured) the WS silence guard
+        # may have armed ``failure_sink`` with the synthesized error before
+        # throwing CancelledError into us; fall back to it so the persisted
+        # record matches the ``response.failed`` the client received.
+        persist_error: dict[str, Any] | None = None
+        if terminal_status is None:
+            persist_error = failed_error
+            if persist_error is None and failure_sink is not None:
+                persist_error = failure_sink.get("error")
         persist_turn_logged(
             client_response_id=client_response_id,
             previous_response_id=previous_response_id,
@@ -908,7 +924,7 @@ async def stream_turn_events(
             },
             status=terminal_status or "failed",
             usage=terminal_usage if terminal_status else None,
-            error=failed_error if terminal_status is None else None,
+            error=persist_error,
             store=store,
         )
 

@@ -1015,3 +1015,218 @@ def test_ws_inbox_overflow_closes(
     assert msg["status"] == 400
     assert msg["error"]["code"] == "invalid_request"
     assert msg["error"]["message"] == "too many queued messages"
+
+
+# ---------------------------------------------------------------------------
+# (19) silence guard (Phase 21 addendum fix 2): a stalled provider stream
+# fails the turn cleanly, releases the slot, and keeps the socket usable
+# ---------------------------------------------------------------------------
+def test_ws_silence_timeout_fails_turn_and_releases_slot(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    seed_instance(session, alias="ws-sil", machine_uid="ws-sil-m")
+    scheduler = client.app.state.scheduler
+    monkeypatch.setattr(route_mod_ws, "WS_TURN_SILENCE_SECONDS", 0.2)
+
+    stall = asyncio.Event()  # never set: the first turn blocks forever
+    calls: list[int] = []
+
+    async def stalling_aresponses(*args, **kwargs):  # noqa: ARG001
+        calls.append(1)
+        stalled = len(calls) == 1
+
+        async def gen():
+            yield created_event()
+            if stalled:
+                await stall.wait()
+            yield completed_event(
+                [], {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+            )
+
+        return gen()
+
+    monkeypatch.setattr(litellm, "aresponses", stalling_aresponses)
+
+    with client.websocket_connect("/v1/responses") as ws:
+        ws.send_json({"type": "response.create", "model": "ws-sil", "input": "x"})
+        frames = drain_turn(ws, extra=1)
+        assert [f["type"] for f in frames] == [
+            "response.created",
+            "response.failed",
+            "error",
+        ]
+        # Same mapping shape as in-stream scheduler failures: server_error +
+        # a specific code (here "timeout").
+        err = frames[2]["error"]
+        assert err["type"] == "server_error"
+        assert err["code"] == "timeout"
+        assert "silence" in err["message"]
+        assert frames[1]["response"]["error"]["code"] == "timeout"
+        assert _seqs(frames) == [0, 1, 2]
+        # The stalled turn's slot was released by the runner's shielded
+        # cleanup before the terminal frames reached the client.
+        assert scheduler.active_count("ws-sil") == 0
+        # Exactly ONE ResponseRecord for the timed-out id: the silence guard
+        # persists once via the runner's shielded finally (no double-persist
+        # from the handler side), and the persisted record carries the same
+        # timeout error the client received (finding 3).
+        timed_out_id = frames[1]["response"]["id"]
+        from sqlmodel import select as _select
+
+        from app.core.db import engine
+
+        with Session(engine) as s:
+            records = s.exec(
+                _select(ResponseRecord).where(
+                    ResponseRecord.response_id == timed_out_id
+                )
+            ).all()
+        assert len(records) == 1, f"expected one record, got {len(records)}"
+        assert records[0].status == "failed"
+        assert records[0].error_code == "timeout"
+
+        # Socket stays usable: the next turn completes.
+        ws.send_json({"type": "response.create", "model": "ws-sil", "input": "y"})
+        frames2 = drain_turn(ws)
+    assert frames2[-1]["type"] == "response.completed"
+    assert scheduler.active_count("ws-sil") == 0
+
+
+# ---------------------------------------------------------------------------
+# (19b) REGRESSION (finding 1): a provider that emits response.completed and
+# then stalls the stream open must NOT trigger the silence guard into
+# synthesizing a SECOND terminal (response.failed) to a client that already
+# received its terminal.
+# ---------------------------------------------------------------------------
+def test_ws_silence_guard_does_not_double_terminal_after_completed(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    seed_instance(session, alias="ws-sil4", machine_uid="ws-sil4-m")
+    scheduler = client.app.state.scheduler
+    monkeypatch.setattr(route_mod_ws, "WS_TURN_SILENCE_SECONDS", 0.2)
+
+    stall = asyncio.Event()  # never set: the provider hangs after its terminal
+
+    async def stalling_after_terminal(*args, **kwargs):  # noqa: ARG001
+
+        async def gen():
+            yield created_event()
+            yield completed_event(
+                [], {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+            )
+            await stall.wait()
+
+        return gen()
+
+    monkeypatch.setattr(litellm, "aresponses", stalling_after_terminal)
+
+    with client.websocket_connect("/v1/responses") as ws:
+        ws.send_json({"type": "response.create", "model": "ws-sil4", "input": "x"})
+        frames = drain_turn(ws)
+
+    types = [f["type"] for f in frames]
+    # Exactly one terminal (completed); no synthesized response.failed/error.
+    assert types == ["response.created", "response.completed"]
+    assert sum(1 for t in types if t in TERMINAL_TYPES) == 1
+    # The stalled turn's slot was released via the runner's shielded aclose.
+    assert scheduler.active_count("ws-sil4") == 0
+
+
+# ---------------------------------------------------------------------------
+# (20) silence guard does not fire on sub-timeout pauses
+# ---------------------------------------------------------------------------
+def test_ws_silence_guard_not_triggered_by_short_pause(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    seed_instance(session, alias="ws-sil3", machine_uid="ws-sil3-m")
+    monkeypatch.setattr(route_mod_ws, "WS_TURN_SILENCE_SECONDS", 5.0)
+
+    async def slow_aresponses(*args, **kwargs):  # noqa: ARG001
+
+        async def gen():
+            yield created_event()
+            await asyncio.sleep(0.05)  # well under the guard
+            yield completed_event(
+                [], {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+            )
+
+        return gen()
+
+    monkeypatch.setattr(litellm, "aresponses", slow_aresponses)
+
+    with client.websocket_connect("/v1/responses") as ws:
+        ws.send_json({"type": "response.create", "model": "ws-sil3", "input": "x"})
+        frames = drain_turn(ws)
+    assert frames[-1]["type"] == "response.completed"
+
+
+# ---------------------------------------------------------------------------
+# (21) a silence-timed-out CONTINUATION evicts the referenced previous id
+# ---------------------------------------------------------------------------
+def test_ws_silence_timeout_evicts_continuation(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    seed_instance(session, alias="ws-sil2", machine_uid="ws-sil2-m")
+    monkeypatch.setattr(route_mod_ws, "WS_TURN_SILENCE_SECONDS", 0.2)
+
+    stall = asyncio.Event()  # never set
+    calls: list[int] = []
+
+    async def stalling_aresponses(*args, **kwargs):  # noqa: ARG001
+        calls.append(1)
+        stalled = len(calls) == 2  # only the continuation turn stalls
+
+        async def gen():
+            yield created_event()
+            if stalled:
+                await stall.wait()
+            yield completed_event(
+                [], {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+            )
+
+        return gen()
+
+    monkeypatch.setattr(litellm, "aresponses", stalling_aresponses)
+
+    with client.websocket_connect("/v1/responses") as ws:
+        # Turn 1 (store=false): completes -> cached under its id.
+        ws.send_json(
+            {
+                "type": "response.create",
+                "model": "ws-sil2",
+                "store": False,
+                "input": "one",
+            }
+        )
+        first = drain_turn(ws)
+        prior_id = first[-1]["response"]["id"]
+
+        # Turn 2: continuation from turn 1 stalls -> silence timeout.
+        ws.send_json(
+            {
+                "type": "response.create",
+                "model": "ws-sil2",
+                "store": False,
+                "previous_response_id": prior_id,
+                "input": "two",
+            }
+        )
+        frames = drain_turn(ws, extra=1)
+        assert frames[1]["type"] == "response.failed"
+        assert frames[2]["error"]["code"] == "timeout"
+
+        # The failed continuation evicted turn 1's id (store=false, so the
+        # Postgres fallback cannot resurrect it): turn 3 misses.
+        ws.send_json(
+            {
+                "type": "response.create",
+                "model": "ws-sil2",
+                "store": False,
+                "previous_response_id": prior_id,
+                "input": "three",
+            }
+        )
+        err = ws.receive_json()
+    assert err["type"] == "error"
+    assert err["status"] == 404
+    assert err["error"]["code"] == "previous_response_not_found"
