@@ -5,6 +5,7 @@ description = "Shared library for Inference Matrix provider instances"
 requires-python = ">=3.14,<4.0"
 dependencies = [
     "fastapi>=0.141.0",
+    "python-multipart>=0.0.27,<1.0.0",
     "uvicorn[standard]>=0.30.0",
     "httpx>=0.27.0",
     "websockets>=12.0",

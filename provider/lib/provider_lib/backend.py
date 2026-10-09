@@ -17,16 +17,22 @@ Provider-side admission is defense-in-depth; the admin scheduler
 (Phase 6) is what queues requests globally.
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from provider_lib.wire import BackendStatusValue
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, avoids a hard import cycle
+    from fastapi import WebSocket
 
 logger = logging.getLogger("provider.backend")
 
@@ -67,6 +73,30 @@ class _StreamFailure:
 
     def __init__(self, exc: BaseException) -> None:
         self.exc = exc
+
+
+@dataclass
+class SpeechStream:
+    """Contract for a slot-admitted speech (TTS) response.
+
+    A driver's :meth:`BackendDriver.speech` returns one of these instead of a
+    bare byte iterator so it can convey the response headers the OpenAI TTS
+    contract requires (``Content-Type`` and, for raw PCM, ``X-Sample-Rate``)
+    alongside the audio chunks:
+
+    * ``headers`` — response headers to place on the HTTP ``StreamingResponse``
+      (e.g. ``{"Content-Type": "audio/wav"}`` for a buffered format, or
+      ``{"Content-Type": "application/octet-stream", "X-Sample-Rate": "24000"}``
+      for incremental PCM). The route layer forwards these verbatim.
+    * ``chunks`` — an async iterator of already-encoded audio byte buffers.
+      Buffered formats (wav/mp3/opus/...) yield once; streaming PCM yields
+      incrementally. The iterator MUST be a closeable async generator so the
+      lifecycle's pump can drive the release-on-upstream-close invariant
+      exactly like the SSE streams.
+    """
+
+    headers: dict[str, str]
+    chunks: AsyncIterator[bytes]
 
 
 class BackendDriver(ABC):
@@ -132,6 +162,80 @@ class BackendDriver(ABC):
         (raises NotImplementedError -> HTTP 501).
         """
         raise NotImplementedError("this backend has no embeddings surface")
+
+    # ------------------------------------------------------------------
+    # Phase 24 (audio) — optional speech / transcription / voice surface.
+    # Every hook defaults to NotImplementedError so a provider without an
+    # audio surface answers 501 (exactly the embeddings pattern). The
+    # lifecycle wraps the slot-consuming ones (speech / transcribe /
+    # transcribe_stream) with the same eager-acquire + release-on-upstream-
+    # close discipline as stream_responses / embeddings.
+    # ------------------------------------------------------------------
+    def speech(self, request: dict[str, Any]) -> SpeechStream:
+        """Return a :class:`SpeechStream` (headers + audio byte chunks).
+
+        Synchronous (returns an async iterator) so the lifecycle can start
+        draining it in a background pump and observe close semantics, exactly
+        like ``stream_responses``. Buffered formats yield once; streaming PCM
+        yields incrementally. Optional; the default raises NotImplementedError
+        -> HTTP 501.
+        """
+        raise NotImplementedError("this backend has no audio/speech surface")
+
+    async def transcribe(
+        self,
+        form: dict[str, str],
+        files: list[tuple[str, str, bytes, str]],
+    ) -> tuple[int, dict[str, str], bytes]:
+        """Relay a multipart transcription request to the engine.
+
+        ``form`` holds non-file text fields; ``files`` is a list of
+        ``(field_name, filename, body_bytes, content_type)`` tuples. Returns
+        the upstream ``(status, headers, body)`` triple so the response format
+        (json / text / verbose_json / srt / vtt) passes through untouched.
+        Optional; the default raises NotImplementedError -> HTTP 501.
+        """
+        raise NotImplementedError("this backend has no audio/transcription surface")
+
+    async def voices(self) -> dict[str, Any]:
+        """Return the saved-voice catalog (GET passthrough).
+
+        Optional; the default raises NotImplementedError -> HTTP 501. Catalog
+        reads do not consume an inference slot.
+        """
+        raise NotImplementedError("this backend has no voice catalog surface")
+
+    async def voice_put(
+        self,
+        name: str,
+        wav: bytes,
+        ref_text: str | None,
+        language: str | None,
+    ) -> dict[str, Any]:
+        """Write a saved voice clip into the agent-side store (enrollment).
+
+        The driver decides the on-disk layout (e.g. a ``custom-voices/`` dir
+        with ``<name>.wav`` + sibling ``.txt``/``.lang`` sidecars). Returns a
+        JSON-serializable summary dict. Optional; default -> HTTP 501. Does
+        not consume an inference slot.
+        """
+        raise NotImplementedError("this backend has no voice enrollment surface")
+
+    async def voice_delete(self, name: str) -> dict[str, Any]:
+        """Remove a saved voice from the agent-side store. Returns a summary
+        dict. Optional; default -> HTTP 501. Does not consume a slot."""
+        raise NotImplementedError("this backend has no voice enrollment surface")
+
+    async def transcribe_stream(self, websocket: WebSocket) -> None:
+        """Bridge a live ASR WebSocket between the agent and the engine.
+
+        The driver owns pumping bytes/messages between the agent-facing
+        FastAPI ``WebSocket`` and its engine's WS. The lifecycle holds an
+        inference slot for the full connection lifetime and releases it when
+        this coroutine returns (on any disconnect). Optional; the default
+        raises NotImplementedError -> the route closes the socket with 1011.
+        """
+        raise NotImplementedError("this backend has no live ASR stream surface")
 
     def apply_config(self, backend_config: dict[str, Any]) -> None:  # noqa: B027
         """Adopt a (possibly updated) backend_config.
@@ -405,9 +509,94 @@ class BackendLifecycle:
             # sufficient -- no lingering downstream consumer can hold the slot.
             await self.release_slot()
 
-    def _owned_stream(
-        self, upstream: AsyncIterator[dict[str, Any]]
-    ) -> AsyncIterator[dict[str, Any]]:
+    # ------------------------------------------------------------------
+    # Phase 24 (audio) — slot-admitted wrappers.
+    # ------------------------------------------------------------------
+    def _require_serving(self) -> None:
+        """Raise BackendNotReady unless RUNNING/IN_USE, WITHOUT taking a slot.
+
+        Voice catalog / enrollment ops (voices / voice_put / voice_delete)
+        require a serving backend but are not inference, so they gate on the
+        state directly instead of acquiring a slot.
+        """
+        if self._status not in _SERVING_STATES:
+            raise BackendNotReady(f"backend is {self._status}; not accepting requests")
+
+    async def speech(self, request: dict[str, Any]) -> SpeechStream:
+        """Acquire a slot and return a slot-owned speech stream.
+
+        The slot is acquired eagerly (so BackendBusy / BackendNotReady map to
+        real HTTP statuses before any audio bytes are committed). The driver's
+        ``speech()`` is called synchronously (a NotImplementedError from a
+        provider without the surface releases the slot and re-raises -> 501);
+        its byte chunks are then wrapped in the same pump as the SSE streams
+        so the slot releases on upstream close, never on client disconnect.
+        """
+        await self.acquire_slot()
+        try:
+            stream = self._driver.speech(request)
+        except BaseException:
+            await self.release_slot()
+            raise
+        return SpeechStream(
+            headers=dict(stream.headers), chunks=self._owned_stream(stream.chunks)
+        )
+
+    async def transcribe(
+        self,
+        form: dict[str, str],
+        files: list[tuple[str, str, bytes, str]],
+    ) -> tuple[int, dict[str, str], bytes]:
+        """Slot-admitted, non-streaming transcription relay.
+
+        Mirrors :meth:`embeddings`: a single awaited driver call returns the
+        upstream ``(status, headers, body)`` triple, so no pump is needed; the
+        slot is acquired eagerly and released in a ``finally`` on every exit
+        path (including a driver exception).
+        """
+        await self.acquire_slot()
+        try:
+            return await self._driver.transcribe(form, files)
+        finally:
+            await self.release_slot()
+
+    async def transcribe_stream(self, websocket: WebSocket) -> None:
+        """Slot-admitted live ASR WebSocket bridge.
+
+        The slot is held for the full connection lifetime and released when the
+        driver's bridge coroutine returns (on any disconnect). A provider
+        without the surface raises NotImplementedError (the route closes the
+        socket with 1011); BackendBusy / BackendNotReady surface before the
+        bridge starts.
+        """
+        await self.acquire_slot()
+        try:
+            await self._driver.transcribe_stream(websocket)
+        finally:
+            await self.release_slot()
+
+    async def voices(self) -> dict[str, Any]:
+        """Voice catalog passthrough (no slot; requires a serving backend)."""
+        self._require_serving()
+        return await self._driver.voices()
+
+    async def voice_put(
+        self,
+        name: str,
+        wav: bytes,
+        ref_text: str | None,
+        language: str | None,
+    ) -> dict[str, Any]:
+        """Saved-voice enrollment write (no slot; requires a serving backend)."""
+        self._require_serving()
+        return await self._driver.voice_put(name, wav, ref_text, language)
+
+    async def voice_delete(self, name: str) -> dict[str, Any]:
+        """Saved-voice removal (no slot; requires a serving backend)."""
+        self._require_serving()
+        return await self._driver.voice_delete(name)
+
+    def _owned_stream(self, upstream: AsyncIterator[Any]) -> AsyncIterator[Any]:
         """Return a consumer stream whose slot is owned by a pump task.
 
         The pump starts immediately, so the upstream is always drained and
@@ -416,11 +605,14 @@ class BackendLifecycle:
         abandons the stream, closing the returned generator cancels the
         pump, which closes the upstream — so the release is still driven
         by the upstream generator's lifetime, never by the client's.
+
+        Item-type agnostic: it drains SSE event dicts for chat/responses and
+        raw ``bytes`` for the Phase 24 speech stream alike.
         """
         queue: asyncio.Queue[Any] = asyncio.Queue()
         pump = asyncio.create_task(self._pump(upstream, queue))
 
-        async def consume() -> AsyncIterator[dict[str, Any]]:
+        async def consume() -> AsyncIterator[Any]:
             try:
                 while True:
                     item = await queue.get()
@@ -438,7 +630,7 @@ class BackendLifecycle:
         return consume()
 
     async def _pump(
-        self, upstream: AsyncIterator[dict[str, Any]], queue: asyncio.Queue[Any]
+        self, upstream: AsyncIterator[Any], queue: asyncio.Queue[Any]
     ) -> None:
         """Drain the upstream driver stream; own the slot release.
 

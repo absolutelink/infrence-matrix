@@ -8,6 +8,14 @@ Every provider type gets a base app that serves:
     slot-admitted; non-stream aggregates the driver's chunk stream)
   - POST /v1/embeddings  OpenAI embeddings (single JSON response,
     slot-admitted; non-streaming only)
+  - POST /v1/audio/speech  OpenAI TTS (binary audio out, slot-admitted
+    streaming; Phase 24)
+  - POST /v1/audio/transcriptions  OpenAI ASR multipart relay
+    (slot-admitted; upstream status/headers/body pass through; Phase 24)
+  - WS   /v1/audio/transcriptions/stream  live ASR WS bridge (slot held for
+    the connection lifetime; Phase 24)
+  - GET/PUT/DELETE /v1/audio/voices[/{name}]  voice catalog + enrollment
+    (no slot; Phase 24)
 
 Admin's litellm client targets ``http://<machine>:<PROVIDER_PORT>/v1``;
 the provider normalizes its backend into a clean OpenAI-compatible
@@ -23,11 +31,13 @@ the downstream client disconnects. See `provider_lib.backend`.
 import contextlib
 import json
 import logging
+import re
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.datastructures import UploadFile
 
 from provider_lib.backend import (
     BackendBusy,
@@ -39,6 +49,59 @@ from provider_lib.registry import BackendRegistry
 from provider_lib.wire import BackendStatusValue
 
 logger = logging.getLogger("provider.app_factory")
+
+# Phase 24 (audio): response headers that must NEVER be relayed from an
+# upstream transcription back to the client. These are hop-by-hop (RFC 9110
+# §7.6.1) plus ``content-encoding`` / ``content-length``: httpx has already
+# decoded the body and starlette recomputes the length, so forwarding the
+# upstream's would corrupt the relayed response.
+_HOP_BY_HOP_HEADERS = frozenset(
+    {
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "content-encoding",
+        "content-length",
+    }
+)
+
+# Phase 24 (audio): upload ceilings (bytes) enforced by the route before any
+# body is buffered into memory. These are the agent-side hard caps; an
+# individual driver may lower them further inside its own hook, never raise
+# them here.
+MAX_TRANSCRIPTION_BYTES = 100 * 1024 * 1024  # 100 MiB
+MAX_VOICE_BYTES = 32 * 1024 * 1024  # 32 MiB
+
+# Phase 24 (audio): saved-voice names must be filesystem-safe and bounded so a
+# name can never escape the driver's custom-voices directory. ``.`` / ``..``
+# are additionally rejected as reserved traversal segments (the character class
+# alone would otherwise admit them).
+_VOICE_NAME_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
+def _validate_voice_name(name: str) -> None:
+    """Reject unsafe / traversal voice names with HTTP 400 before dispatch."""
+    if name in (".", "..") or not _VOICE_NAME_RE.fullmatch(name):
+        raise HTTPException(status_code=400, detail="invalid voice name")
+
+
+async def _read_body_capped(request: Request, limit: int) -> bytes:
+    """Read a raw request body, refusing (413) once it exceeds ``limit``.
+
+    Streams rather than calling ``request.body()`` so an oversized upload is
+    rejected without ever fully buffering into memory.
+    """
+    buffer = bytearray()
+    async for chunk in request.stream():
+        buffer.extend(chunk)
+        if len(buffer) > limit:
+            raise HTTPException(status_code=413, detail="request body too large")
+    return bytes(buffer)
 
 
 class BackendOverrides:
@@ -317,6 +380,136 @@ def create_provider_app(
         except NotImplementedError as exc:
             raise HTTPException(status_code=501, detail=str(exc)) from exc
         return JSONResponse(content=result)
+
+    # ------------------------------------------------------------------
+    # Phase 24 (audio): speech / transcription / voice catalog.
+    # Same resolution + slot discipline as /v1/embeddings: the target
+    # lifecycle is chosen by the request's ``model`` (unknown -> 404), an
+    # unset driver hook -> 501, busy -> 429, not-ready -> 503. Slots are
+    # acquired before any bytes are committed and released on upstream close.
+    # ------------------------------------------------------------------
+    @app.post("/v1/audio/speech")
+    async def audio_speech(request: Request) -> Response:
+        body = await request.json()
+        lifecycle = _resolve_lifecycle(body)
+        try:
+            # Eager acquire inside: busy/not-ready surface before the
+            # StreamingResponse starts.
+            stream = await lifecycle.speech(body)
+        except BackendBusy as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        except BackendNotReady as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except NotImplementedError as exc:
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
+        headers = dict(stream.headers)
+        media_type = headers.pop("Content-Type", None) or "application/octet-stream"
+        return StreamingResponse(stream.chunks, media_type=media_type, headers=headers)
+
+    @app.post("/v1/audio/transcriptions")
+    async def audio_transcriptions(request: Request) -> Response:
+        form = await request.form()
+        # Collect text fields and file references first; resolve the target
+        # backend from the text fields BEFORE buffering any upload body into
+        # memory (an unknown model is a 404 without reading the files).
+        fields: dict[str, str] = {}
+        uploads: list[tuple[str, UploadFile]] = []
+        for key, value in form.multi_items():
+            if isinstance(value, UploadFile):
+                uploads.append((key, value))
+            else:
+                fields[key] = str(value)
+        lifecycle = _resolve_lifecycle(fields)
+        files: list[tuple[str, str, bytes, str]] = []
+        for key, upload in uploads:
+            data = await upload.read(MAX_TRANSCRIPTION_BYTES + 1)
+            if len(data) > MAX_TRANSCRIPTION_BYTES:
+                raise HTTPException(
+                    status_code=413, detail="transcription upload too large"
+                )
+            files.append(
+                (
+                    key,
+                    upload.filename or "",
+                    data,
+                    upload.content_type or "application/octet-stream",
+                )
+            )
+        try:
+            status, headers, body = await lifecycle.transcribe(fields, files)
+        except BackendBusy as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        except BackendNotReady as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except NotImplementedError as exc:
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
+        # Upstream status/body pass through untouched (json / text /
+        # verbose_json / srt / vtt); hop-by-hop + content-encoding/length are
+        # stripped so the relayed response is not corrupted.
+        relay_headers = {
+            k: v for k, v in headers.items() if k.lower() not in _HOP_BY_HOP_HEADERS
+        }
+        return Response(content=body, status_code=status, headers=relay_headers)
+
+    @app.get("/v1/audio/voices")
+    async def audio_voices(request: Request) -> JSONResponse:
+        lifecycle = _resolve_lifecycle({"model": request.query_params.get("model")})
+        try:
+            result = await lifecycle.voices()
+        except BackendNotReady as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except NotImplementedError as exc:
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
+        return JSONResponse(content=result)
+
+    @app.put("/v1/audio/voices/{name:path}")
+    async def audio_voice_put(name: str, request: Request) -> JSONResponse:
+        _validate_voice_name(name)
+        lifecycle = _resolve_lifecycle({"model": request.query_params.get("model")})
+        wav = await _read_body_capped(request, MAX_VOICE_BYTES)
+        ref_text = request.query_params.get("ref_text")
+        language = request.query_params.get("language")
+        try:
+            result = await lifecycle.voice_put(name, wav, ref_text, language)
+        except BackendNotReady as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except NotImplementedError as exc:
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
+        return JSONResponse(content=result)
+
+    @app.delete("/v1/audio/voices/{name:path}")
+    async def audio_voice_delete(name: str, request: Request) -> JSONResponse:
+        _validate_voice_name(name)
+        lifecycle = _resolve_lifecycle({"model": request.query_params.get("model")})
+        try:
+            result = await lifecycle.voice_delete(name)
+        except BackendNotReady as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except NotImplementedError as exc:
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
+        return JSONResponse(content=result)
+
+    @app.websocket("/v1/audio/transcriptions/stream")
+    async def audio_transcriptions_ws(websocket: WebSocket) -> None:
+        try:
+            lifecycle = _resolve_lifecycle(
+                {"model": websocket.query_params.get("model")}
+            )
+        except HTTPException:
+            # Unknown model / unwired backend: close with a policy code (no
+            # HTTP status exists on an accepted WS handshake).
+            await websocket.close(code=1008)
+            return
+        await websocket.accept()
+        try:
+            # Slot held for the connection lifetime; released when the driver
+            # bridge returns (any disconnect) via the lifecycle's finally.
+            await lifecycle.transcribe_stream(websocket)
+        # Parenthesized deliberately (py314's ruff format would strip it).
+        except (BackendBusy, BackendNotReady):  # fmt: skip
+            await websocket.close(code=1013)
+        except NotImplementedError:
+            await websocket.close(code=1011)
 
     return app
 

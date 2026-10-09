@@ -24,7 +24,9 @@ async def _collect(aiter) -> list[dict[str, Any]]:
 
 async def test_responses_terminal_carries_completion_tokens_details() -> None:
     driver = MockBackend(model="mock-model")
-    frames = await _collect(driver.stream_responses({"model": "mock-model", "input": "hi"}))
+    frames = await _collect(
+        driver.stream_responses({"model": "mock-model", "input": "hi"})
+    )
     completed = next(f for f in frames if f["type"] == "response.completed")
     details = completed["response"]["usage"]["completion_tokens_details"]
     assert details == EXPECTED_DETAILS

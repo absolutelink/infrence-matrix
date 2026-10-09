@@ -8,22 +8,36 @@ emits a configurable OpenResponses SSE event sequence, and
 (fake fixed-length vectors derived from sha256) so the full local
 `/v1/embeddings` path runs with no GPU (Phase 18 slice 6).
 
+Phase 24 (audio): `speech()` returns a deterministic sine-wave WAV (or
+incremental PCM chunks), `transcribe()` echoes a fake transcript, and an
+in-memory voice store (seeded with two voices) backs `voices()` /
+`voice_put()` / `voice_delete()`, so the whole `/v1/audio/*` data plane runs
+with no GPU.
+
 The stream generator records its own close (normal exhaustion or early
 aclose) in `stream_close_count` so tests can assert the
 release-on-upstream-close invariant end to end.
 """
 
 import asyncio
+import contextlib
 import hashlib
+import io
 import json
 import logging
+import math
+import struct
 import time
 import uuid
+import wave
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from provider_lib.backend import BackendDriver
+from provider_lib.backend import BackendDriver, SpeechStream
 from provider_lib.schema import load_schema, validate_backend_config
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from fastapi import WebSocket
 
 logger = logging.getLogger("provider.mock.backend")
 
@@ -61,6 +75,24 @@ class MockBackend(BackendDriver):
         # Phase 18 slice 6: embeddings call counter (mirrors the stream
         # counters) so tests can assert the driver was reached.
         self.embeddings_calls = 0
+        # Phase 24 (audio): call counters + close tracking for the speech /
+        # transcription surface (mirrors the stream/embeddings counters).
+        self.speech_calls = 0
+        self.speech_close_count = 0
+        self.transcribe_calls = 0
+        self.transcribe_stream_calls = 0
+        # Audio behavioral knobs (overridable via backend_config `audio`).
+        self.audio_sample_rate = 24000
+        self.audio_duration = 0.5
+        self.audio_frequency = 440
+        self.pcm_chunk_count = 4
+        self.pcm_chunk_delay = 0.0
+        # In-memory saved-voice store, seeded with two fake voices so the
+        # catalog + enrollment roundtrip is exercisable with no engine.
+        self._voices: dict[str, dict[str, Any]] = {
+            "alloy": {"voice_id": "alloy", "name": "alloy", "language": "en"},
+            "echo": {"voice_id": "echo", "name": "echo", "language": "en"},
+        }
         # Phase 9: artifact tracking for storage.prune_unused. The mock
         # downloads nothing; tests can seed this list directly.
         self.resolved_artifacts: list[str] = []
@@ -97,6 +129,18 @@ class MockBackend(BackendDriver):
             self.delta_count = stream["delta_count"]
         if isinstance(stream.get("delta_delay"), (int, float)):
             self.delta_delay = float(stream["delta_delay"])
+
+        audio = cfg.get("audio") or {}
+        if isinstance(audio.get("sample_rate"), int):
+            self.audio_sample_rate = audio["sample_rate"]
+        if isinstance(audio.get("duration_seconds"), (int, float)):
+            self.audio_duration = float(audio["duration_seconds"])
+        if isinstance(audio.get("frequency"), int):
+            self.audio_frequency = audio["frequency"]
+        if isinstance(audio.get("pcm_chunk_count"), int):
+            self.pcm_chunk_count = max(1, audio["pcm_chunk_count"])
+        if isinstance(audio.get("pcm_chunk_delay"), (int, float)):
+            self.pcm_chunk_delay = float(audio["pcm_chunk_delay"])
 
         self.artifacts = dict(cfg.get("artifacts") or {})
         self.context = dict(cfg.get("context") or {})
@@ -519,3 +563,156 @@ class MockBackend(BackendDriver):
                 "total_tokens": prompt_tokens,
             },
         }
+
+    # ------------------------------------------------------------------
+    # Phase 24 (audio): deterministic fakes for speech / transcription /
+    # voices so the whole provider data-plane path runs with no GPU.
+    # ------------------------------------------------------------------
+    def _sine_pcm16(self, sample_rate: int, duration: float, freq: float) -> bytes:
+        """Little-endian mono 16-bit sine-wave PCM frames (no container)."""
+        n = max(1, int(sample_rate * duration))
+        amp = 0.3 * 32767
+        return b"".join(
+            struct.pack("<h", int(amp * math.sin(2 * math.pi * freq * i / sample_rate)))
+            for i in range(n)
+        )
+
+    def _make_wav(self, sample_rate: int, duration: float, freq: float) -> bytes:
+        """Wrap the sine PCM in a valid single-frame WAV container."""
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(sample_rate)
+            w.writeframes(self._sine_pcm16(sample_rate, duration, freq))
+        return buf.getvalue()
+
+    def speech(self, request: dict[str, Any]) -> SpeechStream:
+        """Return a deterministic fake speech stream.
+
+        ``response_format`` selects the container: ``pcm`` yields raw 16-bit
+        PCM split into ``pcm_chunk_count`` incremental chunks (with
+        ``pcm_chunk_delay`` between them) and an ``X-Sample-Rate`` header;
+        any other format (``wav`` default, ``mp3``/``opus``/``flac`` treated
+        identically) yields a single valid WAV buffer. The byte generator is
+        a closeable async generator so the lifecycle pump drives the
+        release-on-upstream-close invariant end to end.
+        """
+        self.speech_calls += 1
+        fmt = str(request.get("response_format") or "wav").lower()
+        sr = self.audio_sample_rate
+        if fmt == "pcm":
+            headers = {
+                "Content-Type": "application/octet-stream",
+                "X-Sample-Rate": str(sr),
+            }
+            chunks = self._stream_pcm()
+        else:
+            headers = {"Content-Type": f"audio/{fmt}"}
+            chunks = self._stream_wav(
+                self._make_wav(sr, self.audio_duration, self.audio_frequency)
+            )
+        return SpeechStream(headers=headers, chunks=chunks)
+
+    async def _stream_wav(self, data: bytes) -> AsyncIterator[bytes]:
+        try:
+            yield data
+        finally:
+            self.speech_close_count += 1
+
+    async def _stream_pcm(self) -> AsyncIterator[bytes]:
+        try:
+            pcm = self._sine_pcm16(
+                self.audio_sample_rate, self.audio_duration, self.audio_frequency
+            )
+            size = max(1, len(pcm) // self.pcm_chunk_count)
+            for i in range(0, len(pcm), size):
+                if self.pcm_chunk_delay:
+                    await asyncio.sleep(self.pcm_chunk_delay)
+                yield pcm[i : i + size]
+        finally:
+            self.speech_close_count += 1
+
+    async def transcribe(
+        self,
+        form: dict[str, str],
+        files: list[tuple[str, str, bytes, str]],
+    ) -> tuple[int, dict[str, str], bytes]:
+        """Echo a deterministic transcription.
+
+        The transcript text is derived from the ``prompt`` form field, else
+        the first uploaded filename, else a fixed string. ``response_format``
+        (json default / text) selects the body shape; other formats pass
+        through as JSON. Returns ``(status, headers, body)`` for the relay.
+        """
+        self.transcribe_calls += 1
+        text = form.get("prompt") or (files[0][1] if files else "") or "mock transcript"
+        fmt = str(form.get("response_format") or "json").lower()
+        if fmt == "text":
+            return 200, {"content-type": "text/plain"}, text.encode()
+        body = json.dumps({"text": text}).encode()
+        return 200, {"content-type": "application/json"}, body
+
+    async def voices(self) -> dict[str, Any]:
+        """Return the in-memory voice catalog."""
+        return {
+            "object": "list",
+            "data": [
+                {
+                    "voice_id": v.get("voice_id", name),
+                    "name": v.get("name", name),
+                    "language": v.get("language"),
+                }
+                for name, v in self._voices.items()
+            ],
+        }
+
+    async def voice_put(
+        self,
+        name: str,
+        wav: bytes,
+        ref_text: str | None,
+        language: str | None,
+    ) -> dict[str, Any]:
+        """Store a saved voice in the in-memory catalog (fake enrollment)."""
+        entry: dict[str, Any] = {"voice_id": name, "name": name}
+        if language is not None:
+            entry["language"] = language
+        if ref_text is not None:
+            entry["ref_text"] = ref_text
+        self._voices[name] = entry
+        return {
+            "object": "voice",
+            "voice_id": name,
+            "name": name,
+            "language": language,
+            "ref_text": ref_text,
+            "size_bytes": len(wav),
+            "deleted": False,
+        }
+
+    async def voice_delete(self, name: str) -> dict[str, Any]:
+        """Remove a saved voice from the in-memory catalog."""
+        existed = self._voices.pop(name, None) is not None
+        return {"object": "voice", "voice_id": name, "deleted": existed}
+
+    async def transcribe_stream(self, websocket: WebSocket) -> None:
+        """Live ASR bridge fake: send one canned transcript, then drain until
+        the client disconnects (the lifecycle releases the slot on return)."""
+        self.transcribe_stream_calls += 1
+        from starlette.websockets import WebSocketState
+
+        try:
+            await websocket.send_json(
+                {"type": "transcript", "text": "mock live transcript", "is_final": True}
+            )
+            while True:
+                message = await websocket.receive()
+                if message.get("type") == "websocket.disconnect":
+                    break
+        except Exception:  # noqa: BLE001 - client gone / socket closed
+            pass
+        finally:
+            if getattr(websocket, "client_state", None) == WebSocketState.CONNECTED:
+                with contextlib.suppress(Exception):
+                    await websocket.close()

@@ -3,7 +3,7 @@
   "title": "Mock backend_config",
   "description": "Sectioned backend_config for the hardware-free mock provider. The mock fakes inference: no real engine, no downloads. Sections mirror the canonical layout used by real providers (Phase 12).",
   "type": "object",
-  "x-serves-modalities": ["llm", "embedding"],
+  "x-serves-modalities": ["llm", "embedding", "tts", "asr"],
   "additionalProperties": false,
   "properties": {
     "artifacts": {
@@ -120,6 +120,50 @@
           "maximum": 65535,
           "title": "Backend port",
           "description": "Port the fake backend would listen on (recorded; the mock has no subprocess)."
+        }
+      }
+    },
+    "audio": {
+      "type": "object",
+      "title": "Mock audio",
+      "description": "Phase 24: behavioral knobs for the mock's fake speech/transcription surface (no real engine).",
+      "x-order": 6,
+      "additionalProperties": false,
+      "properties": {
+        "sample_rate": {
+          "type": "integer",
+          "default": 24000,
+          "minimum": 1,
+          "title": "Sample rate (Hz)",
+          "description": "Sine-wave sample rate for fake speech output."
+        },
+        "duration_seconds": {
+          "type": "number",
+          "default": 0.5,
+          "minimum": 0,
+          "title": "Duration (s)",
+          "description": "Length of the generated sine wave."
+        },
+        "frequency": {
+          "type": "integer",
+          "default": 440,
+          "minimum": 1,
+          "title": "Frequency (Hz)",
+          "description": "Sine-wave frequency."
+        },
+        "pcm_chunk_count": {
+          "type": "integer",
+          "default": 4,
+          "minimum": 1,
+          "title": "PCM chunk count",
+          "description": "Number of chunks a response_format=pcm stream is split into."
+        },
+        "pcm_chunk_delay": {
+          "type": "number",
+          "default": 0.0,
+          "minimum": 0,
+          "title": "PCM chunk delay (s)",
+          "description": "Seconds to sleep between emitted PCM chunks."
         }
       }
     }
