@@ -328,3 +328,34 @@ def test_annotation_events_get_position_fields() -> None:
     assert ann["output_index"] == 0
     assert ann["content_index"] == 0
     assert ann["annotation_index"] == 0
+
+
+def test_content_part_added_gets_annotations_array() -> None:
+    emitter = SSEEmitter(CLIENT_ID)
+    frame = emitter.frame(
+        {
+            "type": "response.content_part.added",
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": ""},
+        }
+    )
+    _, payload = parse_frame(frame)
+    assert payload["part"]["annotations"] == []
+    # Provider-sent annotations are never overwritten.
+    frame = emitter.frame(
+        {
+            "type": "response.content_part.done",
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {
+                "type": "output_text",
+                "text": "x",
+                "annotations": [{"type": "url_citation"}],
+            },
+        }
+    )
+    _, payload = parse_frame(frame)
+    assert payload["part"]["annotations"] == [{"type": "url_citation"}]

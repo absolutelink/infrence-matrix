@@ -16,6 +16,8 @@ re-frames them for the client with the admin's own identity and ordering:
   omit from item/part/delta events are filled from the emitter's tracked
   stream position — provider-sent values are never overwritten. The
   tracking assumes items stream sequentially (one in flight at a time).
+  ``output_text`` parts missing their required ``annotations`` array are
+  likewise filled with ``[]``.
 - Everything else (usage, output[], non-canonical event types) passes
   through untouched — native streaming preserves them (FINDINGS.md
   results table).
@@ -202,6 +204,16 @@ class SSEEmitter:
                 data["response"] = response
         self._track_position(event_type, data)
         self._fill_position(event_type, data)
+        if event_type in ("response.content_part.added", "response.content_part.done"):
+            # output_text parts require an `annotations` array; llama.cpp's
+            # content_part.added omits it. Fill on a copy (shared upstream).
+            part = data.get("part")
+            if (
+                isinstance(part, dict)
+                and part.get("type") == "output_text"
+                and "annotations" not in part
+            ):
+                data["part"] = {**part, "annotations": []}
         data["sequence_number"] = self._seq
         self._seq += 1
         return _sse(event_type, data)

@@ -91,6 +91,13 @@ New tests: `test_stream_lifecycle_frames_are_normalized`,
 `test_position_fields_filled_when_provider_omits_them`,
 `test_position_fields_never_overwrite_provider_values`.
 
+**Rerun after second deploy: 7 passed / 10 failed** (7 WS N/A + 2
+compaction + 1 real). Tool-calling went green; `streaming-response` now
+fails on a single event: llama.cpp's `response.content_part.added` part
+lacks the required `annotations` array (its `.done` carries it). Fixed:
+`SSEEmitter` fills `annotations: []` on output_text parts when absent
+(fill-only, on a copy).
+
 **Not applicable (transport removed):** all `websocket-*` tests —
 `websocket-response`, `websocket-sequential-responses`,
 `websocket-continuation`, `websocket-reconnect-store-false-recovery`,
