@@ -30,6 +30,9 @@ reported. Rules (ported from the legacy translator/router):
 - Rate fields (`prompt_per_second` / `predicted_per_second`) from the
   raw `timings` are carried into `completion_tokens_details` so the
   admin's TokenUsageSample gets them.
+- Native `timings` latency (`prompt_ms` / `predicted_ms`, in
+  milliseconds) is converted to seconds and carried into
+  `completion_tokens_details` as `prompt_time` / `prediction_time`.
 """
 
 from typing import Any
@@ -132,18 +135,27 @@ def calculate_usage(
         "output_tokens_details": {"reasoning_tokens": reasoning},
     }
 
-    # Rate passthrough: the admin's persist_turn reads these from
-    # completion_tokens_details.
-    rates: dict[str, float] = {}
+    # Rate + latency passthrough: the admin's persist_turn reads these from
+    # completion_tokens_details. Rates land verbatim (per_second); native
+    # `timings` latency (prompt_ms/predicted_ms, MILLISECONDS) is converted
+    # to seconds (prompt_time/prediction_time). Missing/zero/non-numeric
+    # values leave the corresponding key absent — never a fabricated number.
+    details: dict[str, float] = {}
     for key in ("prompt_per_second", "predicted_per_second"):
         value = raw.get(key)
         if value is None:
             value = timings.get(key)
         if value is not None:
             try:
-                rates[key] = float(value)
+                details[key] = float(value)
             except (TypeError, ValueError):  # fmt: skip
                 pass
-    if rates:
-        usage["completion_tokens_details"] = rates
+    for src, dst in (("prompt_ms", "prompt_time"), ("predicted_ms", "prediction_time")):
+        value = timings.get(src)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if value > 0:
+            details[dst] = float(value) / 1000.0
+    if details:
+        usage["completion_tokens_details"] = details
     return usage

@@ -142,6 +142,45 @@ async def test_terminal_usage_enriched_with_rate_gauges(
         await driver.aclose()
 
 
+async def test_terminal_usage_enriched_with_latency(
+    tmp_path, fake_llama_binary, local_model_file
+) -> None:
+    driver = _backend(tmp_path, fake_llama_binary, local_model_file)
+    try:
+        await driver.start()
+        events = [e async for e in driver.stream_responses({"input": "go"})]
+        usage = events[-1]["response"]["usage"]
+        # The fake's native `timings` (ms) were mapped to
+        # completion_tokens_details latency (seconds) before the terminal
+        # event was yielded.
+        assert usage["completion_tokens_details"]["prompt_time"] == 0.1205
+        assert usage["completion_tokens_details"]["prediction_time"] == 3.4
+    finally:
+        await driver.aclose()
+
+
+async def test_terminal_usage_latency_from_usage_nested_timings(
+    tmp_path, fake_llama_binary, local_model_file
+) -> None:
+    driver = _backend(tmp_path, fake_llama_binary, local_model_file)
+    try:
+        await driver.start()
+        events = [
+            e
+            async for e in driver.stream_responses(
+                {"input": "go", "__timings_in_usage__": True}
+            )
+        ]
+        usage = events[-1]["response"]["usage"]
+        # timings nested inside usage (not beside it) must still map to
+        # completion_tokens_details latency via the driver's fallback.
+        assert "timings" not in events[-1]["response"]
+        assert usage["completion_tokens_details"]["prompt_time"] == 0.1205
+        assert usage["completion_tokens_details"]["prediction_time"] == 3.4
+    finally:
+        await driver.aclose()
+
+
 async def test_stream_chat_completions_skips_done_sentinel(
     tmp_path, fake_llama_binary, local_model_file
 ) -> None:

@@ -141,14 +141,21 @@ FAKE_SCRIPT = textwrap.dedent(
                         yield sse({"type": "response.output_text.delta",
                                    "item_id": "msg_1", "output_index": 0,
                                    "content_index": 0, "delta": "tok%d" % i})
-                    yield sse({"type": "response.completed", "response": {
-                        "id": "resp_gufo_1", "object": "response",
-                        "status": "completed", "output": [],
-                        "usage": {"input_tokens": 3,
+                    term_usage = {"input_tokens": 3,
                                   "output_tokens": N_DELTAS,
                                   "total_tokens": 3 + N_DELTAS,
                                   "input_tokens_details":
-                                      {"cached_tokens": 1}}}})
+                                      {"cached_tokens": 1}}
+                    term_resp = {"id": "resp_gufo_1", "object": "response",
+                                 "status": "completed", "output": [],
+                                 "usage": term_usage}
+                    term_timings = {"prompt_ms": 120.5, "predicted_ms": 3400.0}
+                    if request.get("__timings_in_usage__"):
+                        term_usage["timings"] = term_timings
+                    else:
+                        term_resp["timings"] = term_timings
+                    yield sse({"type": "response.completed",
+                               "response": term_resp})
                 self._stream(frames, "responses_cancelled")
             elif self.path == "/v1/chat/completions":
                 def frames():

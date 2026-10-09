@@ -32,7 +32,7 @@ from provider_lib.log_ring import CursorLogRing
 from provider_lib.schema import load_schema, validate_backend_config
 
 from provider_llama_cpp.command import build_llama_command
-from provider_llama_cpp.rates import inject_rates, parse_rate_gauges
+from provider_llama_cpp.rates import inject_latency, inject_rates, parse_rate_gauges
 
 logger = logging.getLogger("provider.llama_cpp")
 
@@ -413,6 +413,14 @@ class LlamaCppBackend(BackendDriver):
                     # reflect it).
                     rates = await self._scrape_rate_gauges()
                     inject_rates(event["response"]["usage"], rates)
+                    # Map the engine's native per-request timings (ms) into
+                    # completion_tokens_details latency (seconds). Telemetry
+                    # only: absent/invalid timings leave the key out.
+                    response = event["response"]
+                    timings = response.get("timings")
+                    if not isinstance(timings, dict):
+                        timings = response["usage"].get("timings")
+                    inject_latency(response["usage"], timings)
                 yield event
         # Exiting the `async with` (normal end OR GeneratorExit from an
         # early aclose) closes the upstream response, which cancels the

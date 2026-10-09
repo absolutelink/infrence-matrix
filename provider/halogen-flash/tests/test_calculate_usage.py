@@ -143,6 +143,36 @@ CASES = [
         0,
         _spec(3, 4, 100, 0, 0),
     ),
+    # Native timings latency (ms) -> completion_tokens_details seconds,
+    # alongside the rate passthrough.
+    (
+        "latency from timings alongside rates",
+        {
+            "input_tokens": 100,
+            "output_tokens": 10,
+            "timings": {
+                "prompt_per_second": 1412.21,
+                "predicted_per_second": 36.2534,
+                "prompt_ms": 120.5,
+                "predicted_ms": 3400.0,
+            },
+        },
+        0,
+        0,
+        _spec(
+            100,
+            10,
+            110,
+            0,
+            0,
+            rates={
+                "prompt_per_second": 1412.21,
+                "predicted_per_second": 36.2534,
+                "prompt_time": 0.1205,
+                "prediction_time": 3.4,
+            },
+        ),
+    ),
 ]
 
 

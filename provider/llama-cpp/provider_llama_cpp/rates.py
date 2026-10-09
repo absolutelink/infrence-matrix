@@ -75,3 +75,38 @@ def inject_rates(usage: dict[str, Any], rates: dict[str, float]) -> dict[str, An
     details.update(rates)
     usage["completion_tokens_details"] = details
     return usage
+
+
+# Engine-native timing keys -> admin completion_tokens_details latency keys.
+_LATENCY_KEYS = {"prompt_ms": "prompt_time", "predicted_ms": "prediction_time"}
+
+
+def inject_latency(
+    usage: dict[str, Any], timings: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Map engine-native timings into completion_tokens_details latency.
+
+    The admin's `persist_turn` reads `prompt_time` / `prediction_time`
+    (SECONDS) from `usage.completion_tokens_details`. Engines report
+    per-request latency in a native `timings` dict in MILLISECONDS under
+    `prompt_ms` / `predicted_ms`, so each present, positive, numeric value
+    is divided by 1000 and merged in (existing rate keys are preserved).
+    Missing / zero / negative / non-numeric values leave the corresponding
+    key absent — never a fabricated number. Non-dict usage is returned
+    as-is. This is telemetry: it must never raise.
+    """
+    if not isinstance(usage, dict) or not isinstance(timings, dict):
+        return usage
+    latency: dict[str, float] = {}
+    for src, dst in _LATENCY_KEYS.items():
+        value = timings.get(src)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if value > 0:
+            latency[dst] = float(value) / 1000.0
+    if not latency:
+        return usage
+    details = dict(usage.get("completion_tokens_details") or {})
+    details.update(latency)
+    usage["completion_tokens_details"] = details
+    return usage

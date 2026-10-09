@@ -45,7 +45,7 @@ from provider_lib.log_ring import CursorLogRing
 from provider_lib.schema import load_schema, validate_backend_config
 
 from provider_gufo.command import build_command, effective_capacity, flatten_args
-from provider_gufo.rates import inject_rates, parse_rate_gauges
+from provider_gufo.rates import inject_latency, inject_rates, parse_rate_gauges
 
 logger = logging.getLogger("provider.gufo")
 
@@ -442,7 +442,8 @@ class GufoBackend(BackendDriver):
                     logger.debug("skipping unparseable SSE data: %r", data[:120])
                     continue
                 if (
-                    event.get("type") in self._TERMINAL_TYPES
+                    isinstance(event, dict)
+                    and event.get("type") in self._TERMINAL_TYPES
                     and isinstance(event.get("response"), dict)
                     and isinstance(event["response"].get("usage"), dict)
                 ):
@@ -452,6 +453,14 @@ class GufoBackend(BackendDriver):
                     # reflect it).
                     rates = await self._scrape_rate_gauges()
                     inject_rates(event["response"]["usage"], rates)
+                    # Map the engine's native per-request timings (ms) into
+                    # completion_tokens_details latency (seconds). Telemetry
+                    # only: absent/invalid timings leave the key out.
+                    response = event["response"]
+                    timings = response.get("timings")
+                    if not isinstance(timings, dict):
+                        timings = response["usage"].get("timings")
+                    inject_latency(response["usage"], timings)
                 yield event
         # Exiting the `async with` (normal end OR GeneratorExit from an
         # early aclose) closes the upstream response, cancelling the gufo

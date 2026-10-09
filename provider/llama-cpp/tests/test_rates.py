@@ -1,6 +1,10 @@
 """Rate-gauge parsing tests (canned llama-server /metrics shapes)."""
 
-from provider_llama_cpp.rates import inject_rates, parse_rate_gauges
+from provider_llama_cpp.rates import (
+    inject_latency,
+    inject_rates,
+    parse_rate_gauges,
+)
 
 LLAMA_CPP_METRICS = """# HELP llamacpp:prompt_tokens_total Total prompt tokens processed
 # TYPE llamacpp:prompt_tokens_total counter
@@ -91,3 +95,54 @@ def test_inject_rates_preserves_existing_details() -> None:
 def test_inject_rates_noop_on_empty_rates() -> None:
     usage = {"input_tokens": 3}
     assert inject_rates(usage, {}) == usage
+
+
+def test_inject_latency_maps_ms_to_seconds() -> None:
+    usage = {"input_tokens": 3, "output_tokens": 8}
+    out = inject_latency(usage, {"prompt_ms": 120.5, "predicted_ms": 3400.0})
+    assert out["completion_tokens_details"]["prompt_time"] == 0.1205
+    assert out["completion_tokens_details"]["prediction_time"] == 3.4
+
+
+def test_inject_latency_partial_only_present_key() -> None:
+    usage = {"input_tokens": 3}
+    out = inject_latency(usage, {"predicted_ms": 2000.0})
+    assert out["completion_tokens_details"] == {"prediction_time": 2.0}
+
+
+def test_inject_latency_missing_timings_adds_no_key() -> None:
+    usage = {"input_tokens": 3}
+    assert inject_latency(usage, None) == usage
+    assert "completion_tokens_details" not in inject_latency(usage, None)
+    assert "completion_tokens_details" not in inject_latency(usage, {})
+
+
+def test_inject_latency_zero_negative_nonnumeric_ignored() -> None:
+    usage = {"input_tokens": 3}
+    out = inject_latency(
+        usage,
+        {
+            "prompt_ms": 0,
+            "predicted_ms": -5,
+        },
+    )
+    assert "completion_tokens_details" not in out
+    usage2 = {"input_tokens": 3}
+    out2 = inject_latency(usage2, {"prompt_ms": "x", "predicted_ms": True})
+    assert "completion_tokens_details" not in out2
+
+
+def test_inject_latency_preserves_existing_rates() -> None:
+    usage = {
+        "input_tokens": 3,
+        "completion_tokens_details": {"prompt_per_second": 1412.21},
+    }
+    out = inject_latency(usage, {"predicted_ms": 3400.0})
+    assert out["completion_tokens_details"] == {
+        "prompt_per_second": 1412.21,
+        "prediction_time": 3.4,
+    }
+
+
+def test_inject_latency_non_dict_usage_returned_as_is() -> None:
+    assert inject_latency("nope", {"prompt_ms": 10.0}) == "nope"  # type: ignore[arg-type]
