@@ -2,9 +2,10 @@
 
 **Overhaul branch:** `litellm-architecture-overhaul`
 **Last updated:** 2026-10-09 (**Phase 21 — Responses-over-WebSocket
-transport: S0–S3 ✅ — full compliance suite 17/17 vs local mock.**
-S4 = deploy + `rocinante-tiny` close-out remains; see the Phase 21
-section below. Prior today: **Phase 20 — response
+transport: ✅ SHIPPED (all 4 slices).** Full OpenResponses compliance
+suite **17/17 green on the deployment** (`rocinante-tiny`, WS over
+`wss://` through Traefik); see the Phase 21 section below. Earlier
+today: S0–S3 (pipeline refactor, WS endpoint, local mock 17/17). Prior today: **Phase 20 — response
 compaction endpoint: ✅ SHIPPED (S1 + S2).**
 `POST /v1/responses/compact` implemented and compliance-verified against
 the local mock; the deployed suite is now **10/10 applicable green**
@@ -2648,7 +2649,7 @@ changes.
 
 ---
 
-## Phase 21 — Responses-over-WebSocket transport (planned)
+## Phase 21 — Responses-over-WebSocket transport ✅ SHIPPED
 
 Implements the OpenResponses §WebSocket Transport (added 2026-04-24) and
 closes the 7 `websocket-*` compliance tests (currently N/A in
@@ -2704,7 +2705,15 @@ closes the 7 `websocket-*` compliance tests (currently N/A in
 
 **Slices:** S0 law docs ✅ (`4726e8b`) → S1 pipeline refactor ✅
 (`8a7258d`) → S2 WS endpoint + tests ✅ (`d3f721b`) → S3 local-stack
-compliance vs mock ✅ → S4 push + deploy + `rocinante-tiny` close-out.
+compliance vs mock ✅ (`dea38bc`) → S4 deploy + close-out ✅.
+
+**S4**: pushed `develop`, CI built `matrix-app:develop`, admin
+redeployed on the app host (systemd unit `inference-matrix`); provider
+agents re-registered cleanly (both sides report version `dev` — no
+provider recreate required). Full compliance suite vs
+`matrix.thelink.family` with `rocinante-tiny` (llama-cpp, WS over
+`wss://` through Traefik): **17/17 — the entire OpenResponses
+compliance suite is now green on the deployment.**
 
 **S3**: full compliance suite vs local stack + mock = **17/17** (first
 run, no transport fixes required; independently re-verified by the
@@ -2805,7 +2814,7 @@ stubbed. Re-implement against the new model only when a feature needs it.
 | `/v1/completions` (legacy) | 501 stub | Legacy text completions |
 | `/v1/rerank`, `/v1/moderations`, `/v1/decisions` | 501 stub | Not in core path |
 | `/v1/audio/*`, `/v1/files`, `/v1/batches` | 501 stub | File/audio/batch subsystem dropped with old `files`/`batch_jobs`/`audio_jobs` tables |
-| Responses-over-WebSocket transport | ~~Removed~~ → **Phase 21** (WS upgrade on `/v1/responses`, admin-terminated) | Was "not part of the spec" when the overhaul scoped `/v1`; the spec added the transport 2026-04-24 |
+| Responses-over-WebSocket transport | ~~Removed~~ → **implemented Phase 21** (WS upgrade on `/v1/responses`, admin-terminated) | Was "not part of the spec" when the overhaul scoped `/v1`; the spec added the transport 2026-04-24 |
 | Benchmarks (`llama-bench`) | Removed | All tables/services/UI/events dropped |
 | `PromptCache` table / hybrid cache tracking | Removed | Cache is provider-local via fingerprint (Phase 9) |
 | `Model` registry table | Removed | Artifacts folded into `backend_config` JSON |
