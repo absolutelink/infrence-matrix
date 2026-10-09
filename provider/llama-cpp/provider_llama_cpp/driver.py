@@ -32,6 +32,7 @@ from provider_lib.log_ring import CursorLogRing
 from provider_lib.schema import load_schema, validate_backend_config
 
 from provider_llama_cpp.command import build_llama_command
+from provider_llama_cpp.rates import inject_rates, parse_rate_gauges
 
 logger = logging.getLogger("provider.llama_cpp")
 
@@ -40,6 +41,7 @@ ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 _LOG_BUFFER_LINES = 2000
 _HEALTH_POLL_INTERVAL = 0.25
 _STDERR_TAIL_LINES = 5
+_METRICS_TIMEOUT = 5.0
 
 # The llama-cpp committed backend_config schema (Phase 12): the sectioned
 # shape the admin registers, validates against, and renders in the UI.
@@ -355,9 +357,25 @@ class LlamaCppBackend(BackendDriver):
             self._client = httpx.AsyncClient(timeout=None)
         return self._client
 
+    async def _scrape_rate_gauges(self) -> dict[str, float]:
+        """Best-effort: read llama-server's Prometheus gauges. Never raises."""
+        try:
+            client = self._http_client()
+            resp = await client.get(
+                f"{self.base_url}/metrics", timeout=_METRICS_TIMEOUT
+            )
+            if resp.status_code != 200:
+                return {}
+            return parse_rate_gauges(resp.text)
+        except Exception:  # noqa: BLE001 - rates are telemetry, not critical
+            logger.debug("llama-cpp rate scrape failed", exc_info=True)
+            return {}
+
     # ------------------------------------------------------------------
     # Streaming (SSE proxy)
     # ------------------------------------------------------------------
+    _TERMINAL_TYPES = ("response.completed", "response.incomplete")
+
     async def _stream_sse(
         self, path: str, request: dict[str, Any]
     ) -> AsyncIterator[dict[str, Any]]:
@@ -379,9 +397,23 @@ class LlamaCppBackend(BackendDriver):
                 if not data or data == "[DONE]":
                     continue
                 try:
-                    yield json.loads(data)
+                    event = json.loads(data)
                 except ValueError:
                     logger.debug("skipping unparseable SSE data: %r", data[:120])
+                    continue
+                if (
+                    isinstance(event, dict)
+                    and event.get("type") in self._TERMINAL_TYPES
+                    and isinstance(event.get("response"), dict)
+                    and isinstance(event["response"].get("usage"), dict)
+                ):
+                    # Enrich the terminal usage with the live rate gauges
+                    # before the admin persists the turn (scrape happens
+                    # while the request just finished, so the gauges
+                    # reflect it).
+                    rates = await self._scrape_rate_gauges()
+                    inject_rates(event["response"]["usage"], rates)
+                yield event
         # Exiting the `async with` (normal end OR GeneratorExit from an
         # early aclose) closes the upstream response, which cancels the
         # llama-server request. This is what makes the lifecycle's

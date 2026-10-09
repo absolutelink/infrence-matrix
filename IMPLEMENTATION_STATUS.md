@@ -144,7 +144,7 @@ starting a feature, read the linked protocol/doc first.
 | 17 | Per-GPU machine metrics + hardware union: device-isolated agents (one GPU each) merge into a full machine inventory and live snapshot | ✅ Complete |
 | 18 | Embeddings + modality-scoped endpoints: `ProviderDefinition.modality` (`llm`/`embedding`, `audio` reserved), `ProviderType.serves_modalities`, spec `POST /v1/embeddings` via litellm, llama-cpp `--embedding`/`--pooling` + mock fake embeddings | ✅ shipped (all 7 slices green + e2e verified vs local admin + mock) |
 | 19 | Live stats bar (tokens/sec, queue/active, VRAM/GPU + popovers incl. queue clear) + UI ergonomics: create/edit forms → right-side drawers, logs → bottom-docked tabbed panel | ✅ shipped (S0–S5) |
-| 23 | Token rate & latency telemetry plumbing: llama-cpp rate-gauge scrape (port gufo `rates.py`), latency fields across drivers, admin responses-path preservation check, real-turn integration test + mock rates | 🟡 in progress (S0 done) |
+| 23 | Token rate & latency telemetry plumbing: llama-cpp rate-gauge scrape (port gufo `rates.py`), latency fields across drivers, admin responses-path preservation check, real-turn integration test + mock rates | 🟡 in progress (S0–S1 done) |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
 
@@ -3019,7 +3019,8 @@ so `avg gen latency` shows `—` for every provider.
   `provider/llama-cpp/provider_llama_cpp/`, add `_scrape_rate_gauges()`
   hitting `{base_url}/metrics`, call `inject_rates` on the terminal
   `response.completed` frame in the stream path. Unit test with a
-  raw-metrics→rates table (mirror gufo's).
+  raw-metrics→rates table (mirror gufo's). ✅ done (driver-level test +
+  fake `/metrics` mirror gufo's coverage; non-dict SSE payload guarded).
 - **S2.** Latency plumbing: map engine timing → `prompt_time`/`prediction_time`
   for llama-cpp (from `/metrics` counters or terminal `timings`), and extend
   gufo + halogen-flash to emit them.

@@ -124,6 +124,24 @@ async def test_stream_responses_yields_event_dicts_with_usage(
         await driver.aclose()
 
 
+async def test_terminal_usage_enriched_with_rate_gauges(
+    tmp_path, fake_llama_binary, local_model_file
+) -> None:
+    driver = _backend(tmp_path, fake_llama_binary, local_model_file)
+    try:
+        await driver.start()
+        events = [e async for e in driver.stream_responses({"input": "go"})]
+        usage = events[-1]["response"]["usage"]
+        assert usage["input_tokens"] == 3
+        assert usage["output_tokens"] == 8
+        # The fake's /metrics gauges were scraped and merged before the
+        # terminal event was yielded.
+        assert usage["completion_tokens_details"]["prompt_per_second"] == 1412.21
+        assert usage["completion_tokens_details"]["predicted_per_second"] == 36.2534
+    finally:
+        await driver.aclose()
+
+
 async def test_stream_chat_completions_skips_done_sentinel(
     tmp_path, fake_llama_binary, local_model_file
 ) -> None:

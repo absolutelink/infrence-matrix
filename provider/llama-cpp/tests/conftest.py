@@ -37,6 +37,23 @@ FAKE_SCRIPT = textwrap.dedent(
     DELAY = float(os.environ.get("FAKE_SSE_DELAY", "0.02"))
     N_DELTAS = int(os.environ.get("FAKE_N_DELTAS", "8"))
 
+    METRICS_TEXT = \"\"\"# HELP llamacpp:prompt_tokens_total Total prompt tokens processed
+    # TYPE llamacpp:prompt_tokens_total counter
+    llamacpp:prompt_tokens_total 7920
+    # HELP llamacpp:tokens_predicted_total Total tokens generated
+    # TYPE llamacpp:tokens_predicted_total counter
+    llamacpp:tokens_predicted_total 120
+    # HELP llamacpp:prompt_tokens_seconds Prompt processing speed in tokens per second
+    # TYPE llamacpp:prompt_tokens_seconds gauge
+    llamacpp:prompt_tokens_seconds 1412.21
+    # HELP llamacpp:predicted_tokens_seconds Generation speed in tokens per second
+    # TYPE llamacpp:predicted_tokens_seconds gauge
+    llamacpp:predicted_tokens_seconds 36.2534
+    # HELP llamacpp:kv_cache_usage_ratio KV cache usage ratio
+    # TYPE llamacpp:kv_cache_usage_ratio gauge
+    llamacpp:kv_cache_usage_ratio 0.0
+    \"\"\"
+
 
     def mark(name):
         with open(os.path.join(STATE_DIR, name), "w") as fh:
@@ -72,6 +89,13 @@ FAKE_SCRIPT = textwrap.dedent(
         def do_GET(self):
             if self.path == "/health":
                 self._send(200, {"status": "ok"})
+            elif self.path == "/metrics":
+                data = METRICS_TEXT.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; version=0.0.4")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
             elif self.path == "/v1/models":
                 self._send(200, {"object": "list", "data": [
                     {"id": "fake-llama-model", "object": "model",
