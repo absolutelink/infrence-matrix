@@ -2,9 +2,9 @@
 
 **Overhaul branch:** `litellm-architecture-overhaul`
 **Last updated:** 2026-10-09 (**Phase 22 — chat-completions response
-normalization: planned (S0).** `llm-comply --format openai-chat`
-exposed non-stream schema gaps on `/v1/chat/completions`; see the
-Phase 22 section. Prior: **Phase 21 addendum ✅ SHIPPED** (halogen-flash
+normalization: ✅ SHIPPED (S0–S2).** Non-stream chat bodies now pass
+`llm-comply --format openai-chat` 8/9+skip on both deployment aliases;
+see the Phase 22 section. Prior: **Phase 21 addendum ✅ SHIPPED** (halogen-flash
 reasoning-event/item conformance + WS silence guard; `rocinante`
 16/17 — image 502 was transient, `rocinante-tiny` 17/17; llm-comply
 open-responses 12/13+skip on both). Prior: **Phase 21 —
@@ -2655,7 +2655,7 @@ changes.
 
 ---
 
-## Phase 22 — Chat-completions response normalization (planned)
+## Phase 22 — Chat-completions response normalization ✅ SHIPPED
 
 Found via `llm-comply --format openai-chat` (vendored OpenAI spec
 `specs/openai_chat.json`): the non-stream `/v1/chat/completions` body
@@ -2704,7 +2704,15 @@ Admin 500→**509** green, mock 51→53; local llm-comply gate:
 openai-chat **8/9 + 1 skip**, open-responses 12/13 + skip unchanged
 (both independently re-verified). Review: round 1 → 1 Medium
 (finish_reason overwrite) + 1 Low (usage ints) fixed, content-type
-gate accepted-skipped; round 2 **CLEAN**.
+gate accepted-skipped; round 2 **CLEAN**. Committed `75a0f10`.
+
+**S22-S2 (deploy + close-out)**: pushed, CI green, admin redeployed to
+`75a0f10`. Deployment verification: llm-comply openai-chat **8/9 + 1
+skip on both `rocinante-tiny` and `rocinante`**; bun open-responses
+regression on tiny **17/17**. (First `rocinante` attempt failed 7/9 —
+the Flash engine had crashed on its own; agent service restart
+resolved, unrelated to this change. Watch for engine crashes on that
+box.) Phase 22: SHIPPED.
 
 ## Phase 21 addendum — reasoning-event conformance + WS silence guard ✅ SHIPPED
 
