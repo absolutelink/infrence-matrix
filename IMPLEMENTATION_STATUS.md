@@ -1,13 +1,15 @@
 # Inference Matrix — Implementation Status
 
 **Overhaul branch:** `litellm-architecture-overhaul`
-**Last updated:** 2026-10-09 (**Phase 20 — response compaction endpoint:
-✅ SHIPPED (S1 + S2).** `POST /v1/responses/compact` implemented and
-compliance-verified against the local mock — the last two applicable
-compliance failures are closed; see the Phase 20 section below. Also today: the llama-cpp compliance
+**Last updated:** 2026-10-09 (**Phase 21 — Responses-over-WebSocket
+transport: planned (S0).** Closes the 7 `websocket-*` compliance tests;
+see the Phase 21 section below. Prior today: **Phase 20 — response
+compaction endpoint: ✅ SHIPPED (S1 + S2).**
+`POST /v1/responses/compact` implemented and compliance-verified against
+the local mock; the deployed suite is now **10/10 applicable green**
+(7 `websocket-*` N/A pending Phase 21). Earlier: the llama-cpp compliance
 framing fixes shipped (terminal + lifecycle response normalization,
-SSEEmitter position filling) — deployment suite now **8/17 passed,
-7 WS N/A, 2 compaction pending Phase 20**. Prior: **Port model overhaul
+SSEEmitter position filling). Prior: **Port model overhaul
 — agent-owned ports + model-routed `/v1`: ✅ SHIPPED (all 5 slices done).**
 Fixes the production `port_conflict` cross-agent collision by moving to one
 published `PROVIDER_PORT` per agent that routes `/v1` by model; the admin stops
@@ -2645,6 +2647,64 @@ changes.
 
 ---
 
+## Phase 21 — Responses-over-WebSocket transport (planned)
+
+Implements the OpenResponses §WebSocket Transport (added 2026-04-24) and
+closes the 7 `websocket-*` compliance tests (currently N/A in
+`docs/integration-testing.md`). Spec ground truth:
+`https://www.openresponses.org/specification` +
+`/workspaces/openresponses/src/lib/compliance-tests.ts`
+(`makeWebSocketSession` + the 7 runners).
+
+**Locked decisions:**
+
+0. **Admin terminates the client WS; providers unchanged.** WS upgrade
+   at the same `/v1/responses` path; each turn runs the identical
+   `litellm.aresponses(stream=True)` HTTP/SSE call to the admitted
+   backend and re-emits the normalized event dicts as WS JSON. Client
+   socket death mid-turn → cancel the litellm stream → TCP close →
+   provider frees the slot (existing connection-lifecycle rule). The
+   internal admin↔agent control WS (`docs/ws-protocol.md`) is NOT
+   involved.
+1. **Transport-agnostic pipeline.** `SSEEmitter.frame()` splits into
+   event-dict production + SSE serialization; the `_stream_response`
+   body extracts into a shared turn runner yielding event dicts. SSE
+   output stays byte-identical (459-test guard).
+2. **Request contract.** `{type:"response.create", ...create body}`;
+   `stream`/`stream_options`/`background` present → error envelope
+   (`invalid_request`); bad JSON / missing model / unknown alias →
+   error envelope, socket stays open. One in-flight turn per connection,
+   sequential.
+3. **Continuation cache** (per connection): `resp_id → turn state`
+   (input_items, output_items, definition_id, store). Resolution:
+   cache → Postgres (only `store=true` records). Miss with
+   `store=false` → `{type:"error", status:404, error:{code:
+   "previous_response_not_found", param:"previous_response_id"}}`.
+   A continuation turn that fails 4xx/5xx evicts the referenced id.
+4. **Deterministic continuation failure:** the WS handler validates
+   `function_call_output.call_id` against the previous turn's
+   accumulated items — unknown call_id → 4xx envelope + eviction (WS
+   only; HTTP unchanged).
+5. **Compaction items in input** are decoded: base64
+   `encrypted_content` → `{summary, source_count}` → injected as a text
+   message item (`[Compacted context]` prefix) in
+   `build_litellm_input` (both transports); undecodable payloads are
+   stripped rather than failing the turn.
+6. **No `[DONE]` on WS** (the compliance client errors if it lands after
+   a turn advanced); terminal events end turns.
+7. **Cold boot:** synthesize `response.created` + `response.in_progress`
+   while `scheduler.acquire` blocks (SSE keepalive comments have no WS
+   equivalent; client per-turn timeout is 30s).
+8. **60-min connection limit** enforced: per-message elapsed check +
+   background timer → `websocket_connection_limit_reached` envelope,
+   then close.
+9. No OpenAPI surface change → no client regen. Persistence identical to
+   the SSE path (`persist_turn_logged`, respects `store`).
+
+**Slices:** S0 law docs (this) → S1 pipeline refactor → S2 WS endpoint +
+tests → S3 local-stack compliance vs mock (target 17/17) → S4 push +
+deploy + `rocinante-tiny` close-out.
+
 ## Phase 20 — Response compaction endpoint ✅ SHIPPED
 
 **S1 (`b891664`)**: `POST /v1/responses/compact` in
@@ -2705,7 +2765,7 @@ stubbed. Re-implement against the new model only when a feature needs it.
 | `/v1/completions` (legacy) | 501 stub | Legacy text completions |
 | `/v1/rerank`, `/v1/moderations`, `/v1/decisions` | 501 stub | Not in core path |
 | `/v1/audio/*`, `/v1/files`, `/v1/batches` | 501 stub | File/audio/batch subsystem dropped with old `files`/`batch_jobs`/`audio_jobs` tables |
-| Responses-over-WebSocket transport | Removed | Not part of the OpenResponses spec |
+| Responses-over-WebSocket transport | ~~Removed~~ → **Phase 21** (WS upgrade on `/v1/responses`, admin-terminated) | Was "not part of the spec" when the overhaul scoped `/v1`; the spec added the transport 2026-04-24 |
 | Benchmarks (`llama-bench`) | Removed | All tables/services/UI/events dropped |
 | `PromptCache` table / hybrid cache tracking | Removed | Cache is provider-local via fingerprint (Phase 9) |
 | `Model` registry table | Removed | Artifacts folded into `backend_config` JSON |
