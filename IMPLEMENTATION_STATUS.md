@@ -1,8 +1,14 @@
 # Inference Matrix — Implementation Status
 
 **Overhaul branch:** `litellm-architecture-overhaul`
-**Last updated:** 2026-10-09 (**Phase 21 — Responses-over-WebSocket
-transport: ✅ SHIPPED (all 4 slices).** Full OpenResponses compliance
+**Last updated:** 2026-10-09 (**Phase 22 — chat-completions response
+normalization: planned (S0).** `llm-comply --format openai-chat`
+exposed non-stream schema gaps on `/v1/chat/completions`; see the
+Phase 22 section. Prior: **Phase 21 addendum ✅ SHIPPED** (halogen-flash
+reasoning-event/item conformance + WS silence guard; `rocinante`
+16/17 — image 502 was transient, `rocinante-tiny` 17/17; llm-comply
+open-responses 12/13+skip on both). Prior: **Phase 21 —
+Responses-over-WebSocket transport: ✅ SHIPPED (all 4 slices).** Full OpenResponses compliance
 suite **17/17 green on the deployment** (`rocinante-tiny`, WS over
 `wss://` through Traefik); see the Phase 21 section below. Earlier
 today: S0–S3 (pipeline refactor, WS endpoint, local mock 17/17). Prior today: **Phase 20 — response
@@ -2649,7 +2655,42 @@ changes.
 
 ---
 
-## Phase 21 addendum — reasoning-event conformance + WS silence guard (planned)
+## Phase 22 — Chat-completions response normalization (planned)
+
+Found via `llm-comply --format openai-chat` (vendored OpenAI spec
+`specs/openai_chat.json`): the non-stream `/v1/chat/completions` body
+fails schema validation on every alias (both llama-cpp and
+halogen-flash) — litellm's dict is returned verbatim. Required per the
+spec: `choices[].{finish_reason(enum: stop|length|tool_calls|
+content_filter|function_call), index, message, logprobs(nullable)}`
+and `message.{role, content(nullable string), refusal(nullable)}`;
+`tool_calls`/`function_call`/`audio`/`service_tier`/
+`system_fingerprint` must be typed-or-absent (**never null**).
+Streaming already conforms (delta schema has no required fields) —
+3/9 passes today are streaming + usage + error-handling.
+
+**Locked decisions:**
+
+1. New `_normalize_chat_response(data, requested)` in
+   `chat_completions.py`, mirroring `_normalize_response`'s precedence
+   (provider value → request echo → spec default), type-gated:
+   fill `choices[].logprobs: null`, `choices[].message.refusal: null`,
+   `choices[].index` (positional), `choices[].finish_reason`
+   (`"stop"` when absent/null), top-level `id`/`object`/`created`/
+   `model` when missing; DROP null-valued `message.tool_calls`,
+   `message.function_call`, `message.audio`, `service_tier`,
+   `system_fingerprint`. Never overwrite provider-present non-null
+   values.
+2. Non-stream response body only; stream frames and persistence
+   unchanged (streaming passes; minimal blast radius).
+3. No OpenAPI surface change → no client regen.
+
+**Slices:** S22-S0 docs (this) → S22-S1 implementation + tests →
+S22-S2 deploy + `llm-comply --format openai-chat` on `rocinante-tiny`
+and `rocinante` (target 8/8 run, 1 name-heuristic skip) + bun
+open-responses regression + tracker.
+
+## Phase 21 addendum — reasoning-event conformance + WS silence guard ✅ SHIPPED
 
 Found via user compliance runs against `rocinante` (halogen-flash):
 
