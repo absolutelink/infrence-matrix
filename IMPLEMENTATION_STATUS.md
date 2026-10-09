@@ -2,16 +2,16 @@
 
 **Overhaul branch:** `litellm-architecture-overhaul`
 **Last updated:** 2026-10-09 (**Phase 23 — token rate & latency telemetry
-plumbing: 🟡 in progress.** The header StatsBar tok/s and per-instance
-speed/latency read 0/`—` because the llama-cpp driver never mapped its
-engine rate gauges into `usage.completion_tokens_details` (the canonical
-provider-supplied contract gufo + halogen-flash already honor), and no
-driver emitted latency (`prompt_time`/`prediction_time`). Fix is
-provider-side (Approach A): port gufo's `rates.py` scrape-and-inject to
-llama-cpp, plumb latency across drivers, verify the admin responses path
-preserves the extras, and cover with a real-turn integration test + mock.
-See the Phase 23 section. Prior: **Phase 22 — chat-completions response
-normalization: ✅ SHIPPED (S0–S2).** Non-stream chat bodies now pass
+plumbing: ✅ SHIPPED (S0–S4).** The header StatsBar tok/s and per-instance
+speed/latency no longer read 0/`—`: llama-cpp now scrapes its `llamacpp:*`
+Prometheus rate gauges into `usage.completion_tokens_details` (porting gufo's
+`rates.py`), and llama-cpp/gufo/halogen-flash map native `timings.{prompt_ms,
+predicted_ms}` → `completion_tokens_details.{prompt_time, prediction_time}`
+(seconds). Verified (and test-locked) that litellm's typed `ResponseAPIUsage`
+(`extra: allow`) preserves these extras into `persist_turn` on both stream and
+non-stream paths — no admin code change. Mock now emits the telemetry so
+dev/smoke exercises it. See the Phase 23 section. Prior: **Phase 22 —
+chat-completions response normalization: ✅ SHIPPED (S0–S2).** Non-stream chat bodies now pass
 `llm-comply --format openai-chat` 8/9+skip on both deployment aliases;
 see the Phase 22 section. Prior: **Phase 21 addendum ✅ SHIPPED** (halogen-flash
 reasoning-event/item conformance + WS silence guard; `rocinante`
@@ -144,7 +144,7 @@ starting a feature, read the linked protocol/doc first.
 | 17 | Per-GPU machine metrics + hardware union: device-isolated agents (one GPU each) merge into a full machine inventory and live snapshot | ✅ Complete |
 | 18 | Embeddings + modality-scoped endpoints: `ProviderDefinition.modality` (`llm`/`embedding`, `audio` reserved), `ProviderType.serves_modalities`, spec `POST /v1/embeddings` via litellm, llama-cpp `--embedding`/`--pooling` + mock fake embeddings | ✅ shipped (all 7 slices green + e2e verified vs local admin + mock) |
 | 19 | Live stats bar (tokens/sec, queue/active, VRAM/GPU + popovers incl. queue clear) + UI ergonomics: create/edit forms → right-side drawers, logs → bottom-docked tabbed panel | ✅ shipped (S0–S5) |
-| 23 | Token rate & latency telemetry plumbing: llama-cpp rate-gauge scrape (port gufo `rates.py`), latency fields across drivers, admin responses-path preservation check, real-turn integration test + mock rates | 🟡 in progress (S0–S2 done) |
+| 23 | Token rate & latency telemetry plumbing: llama-cpp rate-gauge scrape (port gufo `rates.py`), latency fields across drivers, admin responses-path preservation check, real-turn integration test + mock rates | ✅ shipped (S0–S4) |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
 
@@ -3030,11 +3030,20 @@ so `avg gen latency` shows `—` for every provider.
   covered; gufo non-dict-frame guard aligned with llama-cpp).
 - **S3.** Admin responses-path verification: confirm `litellm.aresponses`
   preserves `completion_tokens_details`; add a minimal passthrough only if
-  stripped.
+  stripped. ✅ done — **no admin code change needed.** Empirically verified
+  (and test-locked in S4) that litellm parses the terminal frame's usage into
+  the typed `ResponseAPIUsage` model, whose `model_config["extra"] == "allow"`
+  carries `completion_tokens_details` (rates + latency) through `to_dict` into
+  `persist_turn`, on both the streaming and non-streaming paths.
 - **S4.** Tests + mock: discriminating integration test asserting
   `TokenUsageSample.predicted_per_second > 0` and latency > 0 after a real
   turn; make the mock emit `completion_tokens_details` rates+latency so
-  dev/smoke exercises the path.
+  dev/smoke exercises the path. ✅ done — mock `/v1/responses` terminal frame
+  and `/v1/chat/completions` final usage chunk now carry
+  `completion_tokens_details.{prompt_per_second, predicted_per_second,
+  prompt_time, prediction_time}`; admin tests lock the `persist_turn` mapping
+  (stream + non-stream: rates verbatim, `*_time` seconds → `*_ms` ×1000) and
+  the S3 litellm-extras-survive finding (typed `ResponseAPIUsage` path).
 
 ---
 

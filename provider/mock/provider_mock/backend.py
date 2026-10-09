@@ -260,6 +260,14 @@ class MockBackend(BackendDriver):
                         "output_tokens_details": {"reasoning_tokens": 0},
                         "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens,
+                        # Phase 23: representative rate + latency telemetry so
+                        # dev/smoke exercises the admin persist_turn path.
+                        "completion_tokens_details": {
+                            "prompt_per_second": 1412.21,
+                            "predicted_per_second": 36.2534,
+                            "prompt_time": 0.12,
+                            "prediction_time": 3.4,
+                        },
                     },
                 },
             }
@@ -387,6 +395,14 @@ class MockBackend(BackendDriver):
                     "completion_tokens": completion_tokens,
                     "total_tokens": prompt_tokens + completion_tokens,
                     "prompt_tokens_details": {"cached_tokens": 0},
+                    # Phase 23: representative rate + latency telemetry so
+                    # dev/smoke exercises the admin persist_turn path.
+                    "completion_tokens_details": {
+                        "prompt_per_second": 1412.21,
+                        "predicted_per_second": 36.2534,
+                        "prompt_time": 0.12,
+                        "prediction_time": 3.4,
+                    },
                 },
             }
         finally:

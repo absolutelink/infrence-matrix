@@ -1468,3 +1468,162 @@ def test_stream_zero_candidates_precheck_is_http_503(
         "/v1/responses", json={"model": "sc503", "input": "x", "stream": True}
     )
     assert resp.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# Phase 23 S4: rate + latency telemetry end-to-end into TokenUsageSample
+# ---------------------------------------------------------------------------
+def test_stream_persists_rate_and_latency_telemetry(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    """Terminal completion_tokens_details (rates + seconds) map into the
+    persisted TokenUsageSample (rates verbatim, *_time seconds -> *_ms)."""
+    instance = seed_instance(session, alias="rt-tel", machine_uid="rt-tel-m")
+
+    output = [
+        {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "hello"}],
+        }
+    ]
+    usage = {
+        "input_tokens": 11,
+        "output_tokens": 4,
+        "total_tokens": 15,
+        "input_tokens_details": {"cached_tokens": 3},
+        "output_tokens_details": {"reasoning_tokens": 1},
+        "completion_tokens_details": {
+            "prompt_per_second": 1412.21,
+            "predicted_per_second": 36.2534,
+            "prompt_time": 0.12,
+            "prediction_time": 3.4,
+        },
+    }
+    events = [
+        {
+            "type": "response.created",
+            "response": {"id": WRAPPED_ID, "status": "in_progress", "output": []},
+        },
+        completed_event(output, usage),
+    ]
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(litellm, "aresponses", make_fake_stream(events, captured))
+
+    resp = client.post(
+        "/v1/responses", json={"model": "rt-tel", "input": "hi", "stream": True}
+    )
+    assert resp.status_code == 200
+
+    from app.models import TokenUsageSample
+
+    sample = (
+        session.query(TokenUsageSample)
+        .filter(TokenUsageSample.provider_instance_id == instance.id)
+        .first()
+    )
+    assert sample is not None
+    assert sample.prompt_per_second > 0
+    assert sample.predicted_per_second > 0
+    assert sample.prompt_per_second == pytest.approx(1412.21)
+    assert sample.predicted_per_second == pytest.approx(36.2534)
+    # seconds -> ms (admin x1000).
+    assert sample.predicted_ms == pytest.approx(3400.0)
+    assert sample.prompt_ms == pytest.approx(120.0)
+
+
+def test_non_stream_persists_rate_and_latency_telemetry(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    """The non-streaming path maps the same completion_tokens_details."""
+    instance = seed_instance(session, alias="rt-nstel", machine_uid="rt-nstel-m")
+    output = [{"id": "msg_1", "type": "message", "role": "assistant"}]
+    final = {
+        "id": WRAPPED_ID,
+        "object": "response",
+        "status": "completed",
+        "output": output,
+        "usage": {
+            "input_tokens": 5,
+            "output_tokens": 2,
+            "total_tokens": 7,
+            "input_tokens_details": {"cached_tokens": 1},
+            "completion_tokens_details": {
+                "prompt_per_second": 1412.21,
+                "predicted_per_second": 36.2534,
+                "prompt_time": 0.12,
+                "prediction_time": 3.4,
+            },
+        },
+    }
+
+    async def fake_aresponses(*args, **kwargs):  # noqa: ARG001
+        assert kwargs.get("stream") is False
+        return final
+
+    monkeypatch.setattr(litellm, "aresponses", fake_aresponses)
+
+    resp = client.post(
+        "/v1/responses", json={"model": "rt-nstel", "input": "hi", "stream": False}
+    )
+    assert resp.status_code == 200
+
+    from app.models import TokenUsageSample
+
+    sample = (
+        session.query(TokenUsageSample)
+        .filter(TokenUsageSample.provider_instance_id == instance.id)
+        .first()
+    )
+    assert sample is not None
+    assert sample.prompt_per_second > 0
+    assert sample.predicted_per_second > 0
+    assert sample.predicted_ms == pytest.approx(3400.0)
+    assert sample.prompt_ms == pytest.approx(120.0)
+
+
+def test_litellm_preserves_completion_tokens_details_extras() -> None:
+    """S3 finding lock: on a realistic terminal frame (with ``created_at``)
+    litellm parses usage into the typed ``ResponseAPIUsage`` model, whose
+    ``extra="allow"`` config carries the provider rate/latency extras
+    through to ``to_dict`` so ``persist_turn`` can read them.
+
+    Discriminating: without ``created_at`` litellm leaves ``usage`` unset
+    (model_construct path), and if the typed model dropped extras the
+    dumped ``completion_tokens_details`` would be absent — either way the
+    assertions below fail.
+    """
+    from litellm.llms.openai.responses.transformation import OpenAIResponsesAPIConfig
+    from litellm.types.llms.openai import ResponseAPIUsage
+
+    from app.services.sse import to_dict
+
+    chunk = {
+        "type": "response.completed",
+        "response": {
+            "id": "r",
+            "object": "response",
+            "created_at": 1,
+            "status": "completed",
+            "output": [],
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "total_tokens": 2,
+                "completion_tokens_details": {
+                    "predicted_per_second": 36.25,
+                    "prediction_time": 3.4,
+                },
+            },
+        },
+    }
+    evt = OpenAIResponsesAPIConfig().transform_streaming_response(
+        model="m", parsed_chunk=chunk, logging_obj=None
+    )
+    # Realistic path: usage is the typed model, not a raw dict.
+    assert isinstance(evt.response.usage, ResponseAPIUsage)
+    data = to_dict(evt)
+    ctd = data["response"]["usage"]["completion_tokens_details"]
+    assert ctd["predicted_per_second"] == 36.25
+    assert ctd["prediction_time"] == 3.4
