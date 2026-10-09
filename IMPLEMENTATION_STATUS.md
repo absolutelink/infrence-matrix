@@ -2685,10 +2685,26 @@ Streaming already conforms (delta schema has no required fields) —
    unchanged (streaming passes; minimal blast radius).
 3. No OpenAPI surface change → no client regen.
 
-**Slices:** S22-S0 docs (this) → S22-S1 implementation + tests →
-S22-S2 deploy + `llm-comply --format openai-chat` on `rocinante-tiny`
-and `rocinante` (target 8/8 run, 1 name-heuristic skip) + bun
-open-responses regression + tracker.
+**Slices:** S22-S0 docs ✅ (`9f7d905`) → S22-S1 implementation +
+tests ✅ → S22-S2 deploy + `llm-comply --format openai-chat` on
+`rocinante-tiny` and `rocinante` (target 8/8 run, 1 name-heuristic
+skip) + bun open-responses regression + tracker.
+
+**S22-S1**: `_normalize_chat_response` in `chat_completions.py`
+(non-stream body only; provider→request→spec-default precedence;
+fills `logprobs`/`refusal`/`annotations`/`index`/`role`/`content`
+nullables, `finish_reason`→`stop` ONLY when absent/null (provider
+strings pass through), usage required ints coerced when absent/null,
+null typed-or-absent keys dropped: `tool_calls`, `function_call`,
+`audio`, `service_tier`, `system_fingerprint`, `usage.*_details` +
+null members). Copy-before-mutate throughout; streaming + persistence
+unchanged. Mock provider gained a canned chat tool_call turn (parity
+with its responses path) so `chat-tool-calling` passes semantically.
+Admin 500→**509** green, mock 51→53; local llm-comply gate:
+openai-chat **8/9 + 1 skip**, open-responses 12/13 + skip unchanged
+(both independently re-verified). Review: round 1 → 1 Medium
+(finish_reason overwrite) + 1 Low (usage ints) fixed, content-type
+gate accepted-skipped; round 2 **CLEAN**.
 
 ## Phase 21 addendum — reasoning-event conformance + WS silence guard ✅ SHIPPED
 

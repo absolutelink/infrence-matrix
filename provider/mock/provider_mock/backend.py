@@ -349,6 +349,11 @@ class MockBackend(BackendDriver):
         self.stream_open_count += 1
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
         model = request.get("model") or self.model
+        tools = request.get("tools")
+        if isinstance(tools, list) and tools:
+            async for chunk in self._stream_chat_tool_call(completion_id, model, tools):
+                yield chunk
+            return
         try:
             for i in range(self.delta_count):
                 if self.hold is not None:
@@ -377,6 +382,74 @@ class MockBackend(BackendDriver):
                 "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
                 # Honors stream_options.include_usage: final usage chunk
                 # with empty delta so admin can persist token counts.
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                    "prompt_tokens_details": {"cached_tokens": 0},
+                },
+            }
+        finally:
+            self.stream_close_count += 1
+
+    async def _stream_chat_tool_call(
+        self, completion_id: str, model: str, tools: list[Any]
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Canned chat.completion tool_call turn (mirrors ``_stream_tool_call``
+        for the chat surface): calls the first tool with fixed arguments so the
+        full chat tool-forwarding path (client -> litellm -> provider) is
+        exercisable without a real model."""
+        first = tools[0] if isinstance(tools[0], dict) else {}
+        fn = first.get("function") if isinstance(first.get("function"), dict) else {}
+        name = fn.get("name") or first.get("name") or "mock_tool"
+        call_id = f"call_{uuid.uuid4().hex[:12]}"
+        arguments = '{"location": "San Francisco, CA"}'
+        completion_tokens = max(1, self.delta_count)
+        prompt_tokens = 1
+        try:
+            yield {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": call_id,
+                                    "type": "function",
+                                    "function": {"name": name, "arguments": ""},
+                                }
+                            ],
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+            }
+            yield {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {"index": 0, "function": {"arguments": arguments}}
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+            }
+            yield {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "model": model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
                 "usage": {
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,

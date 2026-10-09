@@ -38,6 +38,7 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 
 import litellm
@@ -169,6 +170,111 @@ def _normalize_chat_usage(usage: Any) -> dict[str, Any] | None:
     if "input_tokens_details" not in u and u.get("prompt_tokens_details"):
         u["input_tokens_details"] = u["prompt_tokens_details"]
     return u
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+# Top-level / message / usage keys that are typed-or-absent (never null) in
+# the vendored OpenAI schema: a null-valued one is a schema violation, so it
+# is dropped rather than coerced. litellm's ``model_dump(exclude_none=False)``
+# emits several of these as null (system_fingerprint, message.tool_calls,
+# message.function_call, usage.*_details).
+_CHAT_DROP_IF_NULL_TOP = ("service_tier", "system_fingerprint")
+_CHAT_DROP_IF_NULL_MESSAGE = ("tool_calls", "function_call", "audio")
+_CHAT_DROP_IF_NULL_USAGE = ("prompt_tokens_details", "completion_tokens_details")
+
+
+def _normalize_chat_response(data: dict[str, Any], requested: dict[str, Any]) -> dict:
+    """Coerce a litellm chat.completion dict into the spec ``CreateChatCompletionResponse``.
+
+    Backends (and litellm's own ``model_dump(exclude_none=False)``) omit or
+    null out required fields of the OpenAI chat.completion body, so the raw
+    dict fails schema validation (found via ``llm-comply --format
+    openai-chat``). The admin owns the client-facing contract, so build a
+    spec-conformant copy with precedence provider value -> request echo ->
+    spec default, type-gated so a wrong-typed upstream value never reaches the
+    client. Required-nullable fields (``choices[].logprobs``,
+    ``choices[].message.refusal``) are made present; typed-or-absent fields
+    (``service_tier``/``system_fingerprint``, ``message.tool_calls``/
+    ``function_call``/``audio``, ``usage.*_details``) are dropped when null.
+    Provider-present non-null values are never overwritten.
+
+    Returns a new dict and copies every nested provider object it touches —
+    litellm may share those with its own accumulated state, and persistence
+    reads the original ``data`` unchanged.
+    """
+    requested = requested or {}
+    now = int(datetime.now(UTC).timestamp())
+    out = dict(data)
+
+    # -- top-level required: id / object / created / model --
+    if not isinstance(out.get("id"), str) or not out["id"]:
+        out["id"] = f"chatcmpl-{uuid.uuid4().hex}"
+    if out.get("object") != "chat.completion":
+        out["object"] = "chat.completion"
+    if not _is_int(out.get("created")):
+        out["created"] = now
+    if not isinstance(out.get("model"), str):
+        out["model"] = requested.get("model") or "unknown"
+    for key in _CHAT_DROP_IF_NULL_TOP:
+        if key in out and out[key] is None:
+            del out[key]
+
+    # -- choices[]: index (positional) / finish_reason (enum) / logprobs
+    #    (required nullable) / message --
+    raw_choices = out.get("choices")
+    choices: list[Any] = []
+    for pos, choice in enumerate(raw_choices if isinstance(raw_choices, list) else []):
+        ch = dict(choice) if isinstance(choice, dict) else {}
+        if not _is_int(ch.get("index")):
+            ch["index"] = pos
+        # finish_reason is required: fill "stop" only when absent/null; any
+        # provider-present value (even off-enum, e.g. "eos_token") passes
+        # through untouched so a real signal is never masked.
+        if ch.get("finish_reason") is None:
+            ch["finish_reason"] = "stop"
+        if "logprobs" not in ch:
+            ch["logprobs"] = None
+
+        raw_msg = ch.get("message")
+        msg = dict(raw_msg) if isinstance(raw_msg, dict) else {}
+        if not isinstance(msg.get("role"), str):
+            msg["role"] = "assistant"
+        msg.setdefault("content", None)  # required, nullable string
+        if "refusal" not in msg:  # required, nullable
+            msg["refusal"] = None
+        if not isinstance(msg.get("annotations"), list):
+            msg["annotations"] = []
+        for key in _CHAT_DROP_IF_NULL_MESSAGE:
+            if key in msg and msg[key] is None:
+                del msg[key]
+        ch["message"] = msg
+        choices.append(ch)
+    out["choices"] = choices
+
+    # -- usage (optional, not nullable): ensure the three required ints, drop
+    #    null detail sub-objects, and null sub-fields inside the detail
+    #    objects (CompletionUsage details declare integer members that are
+    #    typed-or-absent, never null). --
+    usage = out.get("usage")
+    if usage is None:
+        out.pop("usage", None)
+    elif isinstance(usage, dict):
+        usage = dict(usage)
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            if not _is_int(usage.get(key)):
+                usage[key] = 0
+        for key in _CHAT_DROP_IF_NULL_USAGE:
+            value = usage.get(key)
+            if value is None:
+                usage.pop(key, None)
+            elif isinstance(value, dict):
+                usage[key] = {k: v for k, v in value.items() if v is not None}
+        out["usage"] = usage
+
+    return out
 
 
 def _chat_error_body(error: dict[str, Any]) -> str:
@@ -547,7 +653,10 @@ async def _non_stream_chat(
             error=None,
             store=store,
         )
-        return JSONResponse(content=data)
+        # Normalize the client-facing body only (persistence above read the
+        # raw litellm dict); copy-before-mutate keeps provider objects intact.
+        body = _normalize_chat_response(data, {"model": alias})
+        return JSONResponse(content=body)
     finally:
         # Guaranteed slot release on EVERY exit path — including
         # asyncio.CancelledError (client disconnect during the await), which

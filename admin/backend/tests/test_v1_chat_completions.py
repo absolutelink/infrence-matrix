@@ -18,6 +18,7 @@ contract:
 """
 
 import asyncio
+import copy
 import json
 import uuid
 from typing import Any
@@ -27,6 +28,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
+from app.api.v1.chat_completions import _normalize_chat_response
 from app.core.db import engine
 from app.models import (
     ProviderInstance,
@@ -70,9 +72,7 @@ def seed_instance(
         enabled=enabled,
         backend_config={"model": {"file": "m.gguf"}},
     )
-    return make_instance(
-        session, agent, definition, backend_status="running"
-    )
+    return make_instance(session, agent, definition, backend_status="running")
 
 
 def chat_chunk(
@@ -709,3 +709,267 @@ async def test_non_stream_cancel_releases_slot(session, monkeypatch) -> None:
     assert scheduler.active_count("ct-nsx") == 0
     assert await aredis.smembers("im:sched:active:ct-nsx") == set()
     await aredis.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Phase 22 S1: _normalize_chat_response (non-stream body normalization)
+# ---------------------------------------------------------------------------
+def _minimal_litellm_dict() -> dict[str, Any]:
+    """The smallest realistic litellm chat.completion dict: only id + a
+    single choice whose message carries content (mirrors what
+    ``to_dict(acompletion(...))`` yields for a terse backend)."""
+    return {
+        "id": "chatcmpl-upstream",
+        "choices": [{"message": {"content": "hi"}}],
+    }
+
+
+def test_normalize_minimal_fills_all_required_fields() -> None:
+    out = _normalize_chat_response(_minimal_litellm_dict(), {"model": "alias-x"})
+    # top-level required: id / object / created / model / choices
+    assert isinstance(out["id"], str) and out["id"]
+    assert out["object"] == "chat.completion"
+    assert isinstance(out["created"], int) and not isinstance(out["created"], bool)
+    assert out["model"] == "alias-x"
+    assert isinstance(out["choices"], list) and out["choices"]
+    choice = out["choices"][0]
+    # choice required: index / finish_reason / message / logprobs(nullable)
+    assert choice["index"] == 0
+    assert choice["finish_reason"] == "stop"
+    assert "logprobs" in choice and choice["logprobs"] is None
+    msg = choice["message"]
+    # message required: role / content(nullable) / refusal(nullable)
+    assert msg["role"] == "assistant"
+    assert msg["content"] == "hi"
+    assert "refusal" in msg and msg["refusal"] is None
+    assert msg["annotations"] == []
+
+
+def test_normalize_preserves_provider_present_values() -> None:
+    data = {
+        "id": "chatcmpl-keep",
+        "object": "chat.completion",
+        "created": 1700000000,
+        "model": "provider-model",
+        "service_tier": "default",
+        "system_fingerprint": "fp-abc",
+        "choices": [
+            {
+                "index": 3,
+                "finish_reason": "length",
+                "logprobs": {"content": None, "refusal": None},
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "refusal": "no",
+                    "annotations": [{"type": "url_citation"}],
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "f", "arguments": "{}"},
+                        }
+                    ],
+                },
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 1,
+            "completion_tokens": 2,
+            "total_tokens": 3,
+            "prompt_tokens_details": {"cached_tokens": 1},
+        },
+    }
+    snapshot = copy.deepcopy(data)
+    out = _normalize_chat_response(data, {"model": "alias-x"})
+    # provider values win over request echo / defaults
+    assert out["id"] == "chatcmpl-keep"
+    assert out["created"] == 1700000000
+    assert out["model"] == "provider-model"
+    assert out["service_tier"] == "default"
+    assert out["system_fingerprint"] == "fp-abc"
+    ch = out["choices"][0]
+    assert ch["index"] == 3
+    assert ch["finish_reason"] == "length"
+    assert ch["logprobs"] == {"content": None, "refusal": None}
+    assert ch["message"]["content"] is None
+    assert ch["message"]["refusal"] == "no"
+    assert ch["message"]["annotations"] == [{"type": "url_citation"}]
+    assert (
+        ch["message"]["tool_calls"] == snapshot["choices"][0]["message"]["tool_calls"]
+    )
+    assert out["usage"]["prompt_tokens_details"] == {"cached_tokens": 1}
+    # input untouched
+    assert data == snapshot
+
+
+def test_normalize_drops_null_optionals() -> None:
+    data = {
+        "id": "chatcmpl-nulls",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "m",
+        "service_tier": None,
+        "system_fingerprint": None,
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "x",
+                    "refusal": None,
+                    "tool_calls": None,
+                    "function_call": None,
+                    "audio": None,
+                },
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2,
+            "prompt_tokens_details": None,
+            "completion_tokens_details": None,
+        },
+    }
+    out = _normalize_chat_response(data, {"model": "m"})
+    assert "service_tier" not in out
+    assert "system_fingerprint" not in out
+    msg = out["choices"][0]["message"]
+    assert "tool_calls" not in msg
+    assert "function_call" not in msg
+    assert "audio" not in msg
+    assert "refusal" in msg and msg["refusal"] is None  # required nullable stays
+    assert "prompt_tokens_details" not in out["usage"]
+    assert "completion_tokens_details" not in out["usage"]
+
+
+def test_normalize_finish_reason_absent_or_none_defaults_to_stop() -> None:
+    # absent finish_reason -> "stop"
+    out = _normalize_chat_response(
+        {"id": "x", "choices": [{"index": 0, "message": {"content": "x"}}]},
+        {"model": "m"},
+    )
+    assert out["choices"][0]["finish_reason"] == "stop"
+    # explicit null finish_reason -> "stop"
+    out = _normalize_chat_response(
+        {
+            "id": "x",
+            "choices": [
+                {"index": 0, "finish_reason": None, "message": {"content": "x"}}
+            ],
+        },
+        {"model": "m"},
+    )
+    assert out["choices"][0]["finish_reason"] == "stop"
+
+
+def test_normalize_finish_reason_provider_value_preserved() -> None:
+    # Any provider-present finish_reason (even off-enum) passes through:
+    # the admin never masks a real signal.
+    for reason in ("length", "tool_calls", "content_filter", "eos_token", "custom"):
+        out = _normalize_chat_response(
+            {
+                "id": "x",
+                "choices": [
+                    {"index": 0, "finish_reason": reason, "message": {"content": "x"}}
+                ],
+            },
+            {"model": "m"},
+        )
+        assert out["choices"][0]["finish_reason"] == reason
+
+
+def test_normalize_usage_fills_required_ints() -> None:
+    # absent / null required ints -> 0; provider values kept.
+    out = _normalize_chat_response(
+        {"id": "x", "choices": [], "usage": {"prompt_tokens": 5, "total_tokens": None}},
+        {"model": "m"},
+    )
+    assert out["usage"]["prompt_tokens"] == 5
+    assert out["usage"]["completion_tokens"] == 0
+    assert out["usage"]["total_tokens"] == 0
+
+
+def test_normalize_does_not_mutate_input() -> None:
+    data = {
+        "id": "chatcmpl-immutable",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "hi",
+                    "tool_calls": None,
+                    "function_call": None,
+                },
+            }
+        ],
+        "system_fingerprint": None,
+    }
+    snapshot = copy.deepcopy(data)
+    _normalize_chat_response(data, {"model": "m"})
+    # original still carries its nulls (they were dropped only on the copy)
+    assert data == snapshot
+    assert data["system_fingerprint"] is None
+    assert data["choices"][0]["message"]["tool_calls"] is None
+    assert data["choices"][0]["message"]["function_call"] is None
+
+
+def test_normalize_absent_id_mints_chatcmpl() -> None:
+    out = _normalize_chat_response({"choices": []}, {"model": "m"})
+    assert out["id"].startswith("chatcmpl-")
+
+
+def test_non_stream_response_body_is_normalized(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    """End-to-end: the non-stream body the client receives carries the
+    required nullable fields and no null-valued typed-or-absent fields."""
+    seed_instance(session, alias="ct-norm", machine_uid="ct-norm-m")
+
+    async def fake_acompletion(*args, **kwargs):  # noqa: ARG001
+        return {
+            "id": UPSTREAM_ID,
+            "object": "chat.completion",
+            "created": 1700000000,
+            "model": "raw-backend-path",
+            "system_fingerprint": None,
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": "hi back",
+                        "tool_calls": None,
+                        "function_call": None,
+                    },
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 5,
+                "completion_tokens": 2,
+                "total_tokens": 7,
+                "prompt_tokens_details": None,
+            },
+        }
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"model": "ct-norm", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"].startswith(CLIENT_ID_PREFIX)
+    assert body["model"] == "ct-norm"
+    assert "system_fingerprint" not in body
+    msg = body["choices"][0]["message"]
+    assert msg["refusal"] is None
+    assert msg["annotations"] == []
+    assert "tool_calls" not in msg
+    assert "function_call" not in msg
+    assert body["choices"][0]["logprobs"] is None
+    assert "prompt_tokens_details" not in body["usage"]
