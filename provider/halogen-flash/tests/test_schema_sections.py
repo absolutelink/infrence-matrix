@@ -137,7 +137,9 @@ def test_schema_has_the_planned_sections() -> None:
 # Port model overhaul: the operator-facing `networking.{api_port,engine_port}`
 # fields were removed (the engine always uses the static MACHINE_UID-derived
 # pair), bumping the fp.
-SHIPPED_SCHEMA_FP = "3d17412ba54ddc3713e9fc9be984541ca181b9863b9b3e559b75d22d2b9b7bf1"
+# cache_entries default corrected 1024 -> 24 to match the real engine default,
+# bumping the fp.
+SHIPPED_SCHEMA_FP = "a6d54e33cd8c09bc26aa413b519b3c7a1a773295e3a6ffe4e5a4b8a0d1b2e633"
 
 
 def test_schema_fingerprint_is_stable() -> None:

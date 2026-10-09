@@ -209,7 +209,7 @@
         },
         "cache_entries": {
           "type": "integer",
-          "default": 1024,
+          "default": 24,
           "minimum": 0,
           "title": "Cache entries",
           "description": "Maximum number of cached prompt entries.",
