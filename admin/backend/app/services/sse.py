@@ -27,7 +27,8 @@ re-frames them for the client with the admin's own identity and ordering:
 
 litellm events are pydantic objects or plain dicts; :func:`to_dict`
 normalizes both. Pydantic serializer warnings on ``model_dump()`` of
-plain-dict upstream payloads are harmless (values still correct).
+plain-dict upstream payloads are suppressed (``warnings=False``) since
+they are expected noise (values still correct).
 """
 
 import enum
@@ -73,7 +74,9 @@ def to_dict(event: Any) -> dict[str, Any]:
     dump = getattr(event, "model_dump", None)
     if callable(dump):
         try:
-            return dump(exclude_none=False)
+            # litellm stuffs raw dicts into typed model fields (part/item/usage);
+            # serializer warnings are expected noise, output is unaffected.
+            return dump(exclude_none=False, warnings=False)
         except Exception:  # noqa: BLE001 - fall back to a loose conversion
             logger.debug("model_dump failed for event %r", type(event), exc_info=True)
     try:

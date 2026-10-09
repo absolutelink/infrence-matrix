@@ -3,8 +3,11 @@ replacement on lifecycle frames, non-canonical event passthrough, [DONE],
 and synthesized response.failed frames."""
 
 import json
+import warnings
 
-from app.services.sse import SSEEmitter
+from pydantic import BaseModel
+
+from app.services.sse import SSEEmitter, to_dict
 
 CLIENT_ID = "resp_" + "c" * 32
 WRAPPED_ID = "resp_bGl0ZWxsbTpjdXN0b21fbGxtX3Byb3ZpZGVyOm9wZW5haTttb2RlbF9pZDpOb25lO3Jlc3BvbnNlX2lkOnJlc3BfdG95MTIz"
@@ -135,7 +138,7 @@ def test_failed_synthesizes_spec_frames_with_our_id() -> None:
 
 def test_to_dict_handles_objects_with_model_dump() -> None:
     class FakeEvent:
-        def model_dump(self, exclude_none: bool = False) -> dict:
+        def model_dump(self, exclude_none: bool = False, warnings: bool = True) -> dict:
             return {"type": "response.created", "response": {"id": WRAPPED_ID}}
 
     emitter = SSEEmitter(CLIENT_ID)
@@ -359,3 +362,31 @@ def test_content_part_added_gets_annotations_array() -> None:
     )
     _, payload = parse_frame(frame)
     assert payload["part"]["annotations"] == [{"type": "url_citation"}]
+
+
+def test_to_dict_suppresses_pydantic_serializer_warnings() -> None:
+    """litellm stuffs raw dicts into typed model fields; to_dict must not
+    emit UserWarning (pydantic serializer noise) and must still produce
+    the correct dict."""
+
+    class Inner(BaseModel):
+        a: int
+
+    class Outer(BaseModel):
+        part: Inner
+
+    obj = Outer.model_construct(part={"a": 1})
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = to_dict(obj)
+
+    user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+    assert user_warnings == []
+    assert result["part"] == {"a": 1}
+
+
+def test_to_dict_passthrough_returns_same_object() -> None:
+    """The dict branch must return the identical object (no copy)."""
+    d = {"type": "response.created", "id": "x"}
+    assert to_dict(d) is d
