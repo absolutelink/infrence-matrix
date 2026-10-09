@@ -933,11 +933,15 @@ in IMPLEMENTATION_STATUS.md Phase 24):
   acquire/release + cancellation-safe `finally` discipline as Phase 18.
   `alias_registry` has no audio branch.
 - **Provider side:** `provider_lib` gains optional driver hooks
-  `speech()` / `transcribe()` / `voices_list()` / `voices_put()` /
-  `voices_delete()` (default 501, embeddings pattern) + slot-admitted
-  routes on the agent's env-port `/v1` surface, including a **WS relay**
-  for live ASR. Slots are held for the full stream/connection lifetime and
-  released on upstream close (pump invariant unchanged).
+  `speech()` (returns a `SpeechStream{headers, chunks}` so Content-Type /
+  `X-Sample-Rate` ride along), `transcribe()` (multipart relay returning
+  upstream status/headers/body), `voices()` / `voice_put()` /
+  `voice_delete()` (catalog + enrollment, serving-gated, **no slot**), and
+  `transcribe_stream()` (WS bridge, slot held for the connection lifetime)
+  — default 501, embeddings pattern — + slot-admitted routes on the
+  agent's env-port `/v1` surface. Slots are held for the full
+  stream/connection lifetime and released on upstream close (pump
+  invariant unchanged; the pump is item-type agnostic: dicts and bytes).
 - **Saved voices:** `TTSVoice` rows (admin DB) + on-disk clips on the agent
   (`custom-voices/`); enrollment is admin-UI only and rides the agent HTTP
   surface — **no new WS frame kinds**.

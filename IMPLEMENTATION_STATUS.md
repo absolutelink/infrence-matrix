@@ -1,8 +1,8 @@
 # Inference Matrix — Implementation Status
 
 **Overhaul branch:** `litellm-architecture-overhaul`
-**Last updated:** 2026-10-09 (**Phase 24 — Audio (talkies provider): 🟡 planned
-(S0 done).** Speech ships as two modalities — `tts` + `asr` — served by a new
+**Last updated:** 2026-10-09 (**Phase 24 — Audio (talkies provider): 🟡 in
+progress (S0–S1 done).** Speech ships as two modalities — `tts` + `asr` — served by a new
 `talkies` provider type: a thin proxy agent around
 `psyb0t/talkies:latest-cuda` (Qwen3-TTS variants, Kokoro, Chatterbox Turbo;
 Whisper/Parakeet/Canary/Sherpa ASR). Client surface: `POST /v1/audio/speech`
@@ -3118,7 +3118,18 @@ work, and per-engine translation layers entirely.
   slot-admitted wrappers (incl. WS slot hold), `app_factory` routes
   (`speech`, `transcriptions`, `voices` GET/PUT/DELETE, WS stream), mock
   provider fake speech/transcribe/voices. Tests: admission 429/503,
-  release-on-close, multipart relay, WS relay. ⬜
+  release-on-close, multipart relay, WS relay. ✅ done — `SpeechStream`
+  header contract; pump generalized (dicts + bytes); hop-by-hop header
+  filtering on the transcriptions relay; voice-name validation
+  (`{name:path}` + regex + `.`/`..` guard → 400); upload caps
+  (100 MiB transcription / 32 MiB voice clip → 413); fixed a real
+  FastAPI-vs-Starlette `UploadFile` isinstance bug the new 413 test
+  exposed. Mock schema now declares `["llm","embedding","tts","asr"]` —
+  **deploy note: mock schema fingerprint changed → schema-consensus gate
+  (409 `schema_pending`) until mock agents re-register / operator
+  force-commits.** Admin-side `_KNOWN_MODALITIES` silently drops `tts`/`asr`
+  from type registration until S3 widens it (harmless in between).
+  provider/lib 204 green, provider/mock 60 green. Review: 2 rounds, CLEAN.
 - **S2.** `provider/talkies` package: Dockerfile spike (`FROM
   psyb0t/talkies:latest-cuda`, private-port launch verification first),
   proxy driver (env construction, alias→slug rewrite, `/healthz`+`/api/ps`
