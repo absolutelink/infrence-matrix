@@ -2,8 +2,9 @@
 
 **Overhaul branch:** `litellm-architecture-overhaul`
 **Last updated:** 2026-10-09 (**Phase 21 — Responses-over-WebSocket
-transport: planned (S0).** Closes the 7 `websocket-*` compliance tests;
-see the Phase 21 section below. Prior today: **Phase 20 — response
+transport: S0–S3 ✅ — full compliance suite 17/17 vs local mock.**
+S4 = deploy + `rocinante-tiny` close-out remains; see the Phase 21
+section below. Prior today: **Phase 20 — response
 compaction endpoint: ✅ SHIPPED (S1 + S2).**
 `POST /v1/responses/compact` implemented and compliance-verified against
 the local mock; the deployed suite is now **10/10 applicable green**
@@ -2701,9 +2702,20 @@ closes the 7 `websocket-*` compliance tests (currently N/A in
 9. No OpenAPI surface change → no client regen. Persistence identical to
    the SSE path (`persist_turn_logged`, respects `store`).
 
-**Slices:** S0 law docs ✅ (`4726e8b`) → S1 pipeline refactor ✅ →
-S2 WS endpoint + tests ✅ → S3 local-stack compliance vs mock (target
-17/17) → S4 push + deploy + `rocinante-tiny` close-out.
+**Slices:** S0 law docs ✅ (`4726e8b`) → S1 pipeline refactor ✅
+(`8a7258d`) → S2 WS endpoint + tests ✅ (`d3f721b`) → S3 local-stack
+compliance vs mock ✅ → S4 push + deploy + `rocinante-tiny` close-out.
+
+**S3**: full compliance suite vs local stack + mock = **17/17** (first
+run, no transport fixes required; independently re-verified by the
+orchestrator). All 7 `websocket-*` green: single turn, sequential,
+store=false continuation, reconnect miss → `previous_response_not_found`
++ recovery, call_id eviction, compact-new-chain. Tracker flipped.
+Side finding (out of scope): `scripts/dev.sh` seeds the mock definition
+before any provider registers its `ProviderType` → cold-DB seed 422s;
+worked around manually. Follow-up: reorder dev.sh seed after first
+registration (or bootstrap known types at admin startup); local dev DB
+must be UTF8.
 
 **S1 (`8a7258d`)**: `SSEEmitter` split into dict producers
 (`event_data`/`failed_events`) + SSE wrappers; `_stream_response` body

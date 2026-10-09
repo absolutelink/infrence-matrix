@@ -23,9 +23,12 @@ bun run test:compliance --base-url http://localhost:8000/v1 \
 
 This tracker was **reset for the `litellm-architecture-overhaul`**
 (Phase 6 in progress). The Responses API is now litellm-driven
-(`admin/backend/app/api/v1/responses.py` + `app/services/sse.py`), and
-the **Responses-over-WebSocket transport was removed** (not part of the
-OpenResponses spec). All pre-overhaul run history (old leases,
+(`admin/backend/app/api/v1/responses.py` + `app/services/sse.py`). The
+**Responses-over-WebSocket transport was removed** during the overhaul
+(then not part of the spec) and **re-added in Phase 21** as a WS upgrade on
+`/v1/responses` (`admin/backend/app/api/v1/responses_ws.py`) once the spec
+added the transport — the 7 `websocket-*` tests are now applicable again
+(see the WS table below). All pre-overhaul run history (old leases,
 `server_instances`, `inference_slot_protocol`, WS-transport clusters)
 lives in git history and is intentionally not carried forward.
 
@@ -45,6 +48,23 @@ commit `8d2d9b8` + this phase's fixes):
 | `multi-turn` | Multi-turn Conversation | ✅ pass |
 | `compact-response` | Compaction Endpoint | ✅ pass (Phase 20 `POST /v1/responses/compact`; local mock run 2026-10-09 — `prompt_cache_key` forwarded through litellm `aresponses` `**kwargs` and accepted) |
 | `compact-missing-model` | Compaction Missing Required Model | ✅ pass (route returns 400 on missing `model`; local mock run 2026-10-09) |
+
+**Applicable tests (Responses-over-WebSocket, Phase 21):** run 2026-10-09
+against a local uvicorn admin + mock provider (branch
+`litellm-architecture-overhaul`, commit `d3f721b` — WS transport on
+`/v1/responses`). All 7 pass on the first run with **no transport fixes
+required**; the admin log shows clean WS accept/open/close per turn with
+no errors.
+
+| Test ID | Name | Status |
+|---|---|---|
+| `websocket-response` | WebSocket Response | ✅ pass (local mock run 2026-10-09) |
+| `websocket-sequential-responses` | WebSocket Sequential Responses | ✅ pass (local mock run 2026-10-09) |
+| `websocket-continuation` | WebSocket Continuation | ✅ pass (store:false continuation via the per-connection `_TurnCache`; local mock run 2026-10-09) |
+| `websocket-reconnect-store-false-recovery` | WebSocket Store False Reconnect Recovery | ✅ pass (store:false id not resurrected across sockets → `previous_response_not_found`, then clean recovery; local mock run 2026-10-09) |
+| `websocket-previous-response-not-found` | WebSocket Missing Previous Response | ✅ pass (`previous_response_not_found` error envelope, socket stays open; local mock run 2026-10-09) |
+| `websocket-failed-continuation-evicts-cache` | WebSocket Failed Continuation Evicts Cache | ✅ pass (WS-only `function_call_output.call_id` validation fails the turn + evicts the referenced id; local mock run 2026-10-09) |
+| `websocket-compact-new-chain` | WebSocket Compact New Chain | ✅ pass (`/responses/compact` output fed back as WS input, no `previous_response_id`; local mock run 2026-10-09) |
 
 ### Run 2026-10-09 — deployment (`matrix.thelink.family`, alias `rocinante-tiny`, llama-cpp provider)
 
@@ -98,13 +118,17 @@ lacks the required `annotations` array (its `.done` carries it). Fixed:
 `SSEEmitter` fills `annotations: []` on output_text parts when absent
 (fill-only, on a copy).
 
-**Not applicable (transport removed):** all `websocket-*` tests —
-`websocket-response`, `websocket-sequential-responses`,
+**WebSocket tests (were N/A at that deployment run):** all `websocket-*`
+tests — `websocket-response`, `websocket-sequential-responses`,
 `websocket-continuation`, `websocket-reconnect-store-false-recovery`,
 `websocket-previous-response-not-found`,
 `websocket-failed-continuation-evicts-cache`,
-`websocket-compact-new-chain`. Record as **N/A — WS Responses transport
-dropped in the overhaul.** Do not chase.
+`websocket-compact-new-chain` — were recorded **N/A** in that run because
+the WS Responses transport had been dropped in the overhaul. **Phase 21
+re-added the transport** (`admin/backend/app/api/v1/responses_ws.py`,
+commit `d3f721b`); all 7 now pass against the local mock (see the WS
+applicable-tests table above). A deployment run against `rocinante-tiny`
+(llama-cpp) is the remaining Phase 21 S4 close-out.
 
 All six KEY tests (basic/streaming/system/assistant-phase/output-phase/
 multi-turn) pass, plus tool-calling and image-input. The two compaction
@@ -160,3 +184,4 @@ Fidelity ground truth: `spike/litellm-fidelity/FINDINGS.md`.
 | 2026-10-09 | Phase 20 deploy (`ba2a799`) | 10 | 0 | 7 WS | **FULL SUITE GREEN on deployment** (`rocinante-tiny`, llama-cpp): all 10 applicable HTTP+SSE tests pass, incl. both compaction tests via the new `/v1/responses/compact`. The 7 `websocket-*` remain N/A (transport dropped). Phase 6 conformance gate: closed. |
 | 2026-10-04 | Phase 7 (chat completions + models + stubs) | 4 | 0 | — | KEY-only regression re-run (`--filter basic-response,streaming-response,system-prompt,multi-turn`) vs local uvicorn admin (`p7-machine`/`p7-model` mock): **4/4 pass**. Proves the `alias_registry` mode change (`responses` → `chat` union registration, required for native chat `acompletion`) did not regress the Phase 6 responses path. Live chat spot-check also green: stream (data-only SSE, admin `chatcmpl-` ids, usage chunk, `[DONE]`), non-stream JSON, `/v1/models`, 501 stub envelope. |
 | 2026-10-09 | Phase 20 S2 (`b891664` compact route) | 10 | 0 | 7 WS | **Phase 20 verification vs local uvicorn admin + mock (`mock-model`): all applicable HTTP+SSE tests green, including both compaction tests.** `compact-response` (with `prompt_cache_key: "openresponses-compact-test"`) and `compact-missing-model` (400 on missing `model`) pass. The known `prompt_cache_key` risk did NOT materialize — litellm 1.103.2 `aresponses` accepts it via `**kwargs` and the mock tolerates it, so no route fix was needed. Full run: 10 passed / 0 failed / 7 N/A (`websocket-*`, transport dropped). No admin code or test changes. |
+| 2026-10-09 | Phase 21 S3 (`d3f721b` WS transport) | 17 | 0 | 0 | **FULL SUITE GREEN incl. WebSocket vs local uvicorn admin + mock (`mock-model`): 17 passed / 0 failed / 0 N/A.** The 7 `websocket-*` tests (re-enabled by the Phase 21 WS transport on `/v1/responses`) all pass on the first run — **no transport fixes required**. Verified: single WS turn, sequential turns on one socket, store:false continuation via the per-connection `_TurnCache`, cross-socket store:false miss → `previous_response_not_found` + clean recovery, WS-only `function_call_output.call_id` validation + evict-on-failed-continuation, and `/responses/compact` output fed back as WS input. Admin log shows clean WS accept/open/close per turn, no errors. No admin/provider code or test changes. Remaining: Phase 21 S4 deployment run vs `rocinante-tiny` (llama-cpp). |
