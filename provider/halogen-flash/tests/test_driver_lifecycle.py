@@ -7,6 +7,7 @@ stream cancellation.
 """
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any
@@ -112,6 +113,38 @@ async def test_static_ports_are_pinned_in_env(
         assert recorded["HALOGEN_ENGINE"] == f"127.0.0.1:{expected_engine}"
     finally:
         await driver.aclose()
+
+
+async def test_start_logs_halogen_env_only(
+    tmp_path,
+    fake_flash_binary,
+    local_artifacts,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Starting must log the HALOGEN_* env the driver sets, and never the full
+    env (which copies os.environ and can carry secrets)."""
+    monkeypatch.setenv("MACHINE_SECRET", "super-secret-value")
+    monkeypatch.setenv("HALOGEN_DOWNLOAD_TOKEN", "leak-me")
+    driver = _backend(
+        tmp_path, fake_flash_binary, local_artifacts, context={"ctx": 4096}
+    )
+    with caplog.at_level(logging.INFO, logger="provider.halogen_flash"):
+        try:
+            await driver.start()
+        finally:
+            await driver.aclose()
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "halogen-flash env:" in text
+    assert "HALOGEN_CTX=4096" in text
+    assert "HALOGEN_API_PORT=" in text
+    # Negative / discriminating: only driver-managed keys are logged, never the
+    # inherited os.environ secrets nor a pre-existing HALOGEN_* var the driver
+    # does not set.
+    assert "super-secret-value" not in text
+    assert "MACHINE_SECRET" not in text
+    assert "leak-me" not in text
+    assert "HALOGEN_DOWNLOAD_TOKEN" not in text
 
 
 async def test_explicit_ports_override_derivation(

@@ -54,6 +54,7 @@ from provider_lib.wire import BackendStatusValue
 
 from provider_halogen_flash.env import (
     DEFAULT_DOWNLOAD_REPO,
+    DRIVER_ENV_KEYS,
     build_argv,
     build_env,
     effective_capacity,
@@ -439,6 +440,14 @@ class HalogenFlashBackend(BackendDriver):
             " ".join(cmd),
             api_port,
             engine_port,
+        )
+        logger.info(
+            "halogen-flash env: %s",
+            " ".join(
+                f"{k}={str(env[k]).replace(chr(10), ' ').replace(chr(13), ' ')}"
+                for k in sorted(DRIVER_ENV_KEYS)
+                if k in env
+            ),
         )
         try:
             proc = subprocess.Popen(

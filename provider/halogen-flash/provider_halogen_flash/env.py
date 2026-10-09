@@ -93,6 +93,24 @@ ENV_MAP: dict[str, str] = {
     "download": "HALOGEN_DOWNLOAD",
 }
 
+# The exact set of env keys build_env() may set: the fixed ports/bind/paths
+# (checkpoint/tokenizer/cache-dir/npu-models are conditional but always
+# HALOGEN_* when present) plus every ENV_MAP-derived option var. The driver
+# logs only these on boot, so a pre-existing HALOGEN_* var inherited from the
+# container environment (which may carry a secret) is never emitted.
+DRIVER_ENV_KEYS: frozenset[str] = frozenset(
+    {
+        "HALOGEN_API_PORT",
+        "HALOGEN_PORT",
+        "HALOGEN_BIND",
+        "HALOGEN_ENGINE",
+        "HALOGEN_CHECKPOINT",
+        "HALOGEN_TOKENIZER",
+        "HALOGEN_CACHE_DIR",
+        "HALOGEN_NPU_MODELS",
+    }
+) | frozenset(ENV_MAP.values())
+
 # backend_config sections whose leaf keys flatten into the semantic
 # `options` dict consumed by ENV_MAP / build_env (Phase 12). `artifacts`
 # is excluded: the driver resolves those descriptors to local paths and
