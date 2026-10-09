@@ -2,8 +2,9 @@
 
 **Overhaul branch:** `litellm-architecture-overhaul`
 **Last updated:** 2026-10-09 (**Phase 20 — response compaction endpoint:
-planned (S0).** Closes the last two applicable compliance failures; see
-the Phase 20 section below. Also today: the llama-cpp compliance
+✅ SHIPPED (S1 + S2).** `POST /v1/responses/compact` implemented and
+compliance-verified against the local mock — the last two applicable
+compliance failures are closed; see the Phase 20 section below. Also today: the llama-cpp compliance
 framing fixes shipped (terminal + lifecycle response normalization,
 SSEEmitter position filling) — deployment suite now **8/17 passed,
 7 WS N/A, 2 compaction pending Phase 20**. Prior: **Port model overhaul
@@ -2644,7 +2645,23 @@ changes.
 
 ---
 
-## Phase 20 — Response compaction endpoint (planned)
+## Phase 20 — Response compaction endpoint ✅ SHIPPED
+
+**S1 (`b891664`)**: `POST /v1/responses/compact` in
+`admin/backend/app/api/v1/responses_compact.py` (15 tests in
+`tests/test_v1_compact.py`; admin suite 459 green; client regenerated).
+**S2**: compliance-verified against the local stack + mock —
+`compact-response` + `compact-missing-model` **pass**, full applicable
+HTTP+SSE set **10/10 green** (7 `websocket-*` N/A). No code fixes were
+needed; the `prompt_cache_key` → litellm `**kwargs` forward works on
+1.103.2 (re-check on bump). Review loop: S1 round 1 → 5 findings fixed
+(deepcopy usage fallback, provider-status respect, always-store,
+504/non-dict/unknown-param tests), round 2 **CLEAN**. Tracker flipped:
+all applicable compliance tests pass; remaining deployment run pending
+the next admin deploy.
+
+### Original plan
+
 
 Closes the last two applicable compliance failures (`compact-response`,
 `compact-missing-model` in `docs/integration-testing.md`). Spec:

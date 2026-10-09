@@ -43,8 +43,8 @@ commit `8d2d9b8` + this phase's fixes):
 | `tool-calling` | Tool Calling | ✅ pass (mock emits a canned `function_call` when `tools` present) |
 | `image-input` | Image Input | ✅ pass (mock echoes text; validates acceptance + schema, not vision) |
 | `multi-turn` | Multi-turn Conversation | ✅ pass |
-| `compact-response` | Compaction Endpoint | ❌ 404 — `POST /v1/responses/compact` not implemented (Phase 7+ scope decision; not a Phase 6 blocker) |
-| `compact-missing-model` | Compaction Missing Required Model | ❌ 404 — same missing route |
+| `compact-response` | Compaction Endpoint | ✅ pass (Phase 20 `POST /v1/responses/compact`; local mock run 2026-10-09 — `prompt_cache_key` forwarded through litellm `aresponses` `**kwargs` and accepted) |
+| `compact-missing-model` | Compaction Missing Required Model | ✅ pass (route returns 400 on missing `model`; local mock run 2026-10-09) |
 
 ### Run 2026-10-09 — deployment (`matrix.thelink.family`, alias `rocinante-tiny`, llama-cpp provider)
 
@@ -158,3 +158,4 @@ Fidelity ground truth: `spike/litellm-fidelity/FINDINGS.md`.
 | 2026-10-09 | terminal-normalize deploy (pre stream-frame fix) | 6 | 4 | 7 WS | Rerun after first deploy: cluster 1 cleared (basic/system/assistant/multi-turn/image now pass). Remaining: `streaming-response` (non-terminal lifecycle frames + delta events lack required fields — fixed via lifecycle normalization + emitter position tracking), `tool-calling` (`tools[].strict` — fixed), 2 compaction 404s. |
 | 2026-10-09 | lifecycle/emitter + annotations deploys | 8 | 2 | 7 WS | **All applicable HTTP+SSE tests green** (`streaming-response` cleared by the lifecycle-frame normalization + emitter position/annotations fills). Only the 2 compaction 404s remain — Phase 20 (`/v1/responses/compact`) planned; see IMPLEMENTATION_STATUS.md. |
 | 2026-10-04 | Phase 7 (chat completions + models + stubs) | 4 | 0 | — | KEY-only regression re-run (`--filter basic-response,streaming-response,system-prompt,multi-turn`) vs local uvicorn admin (`p7-machine`/`p7-model` mock): **4/4 pass**. Proves the `alias_registry` mode change (`responses` → `chat` union registration, required for native chat `acompletion`) did not regress the Phase 6 responses path. Live chat spot-check also green: stream (data-only SSE, admin `chatcmpl-` ids, usage chunk, `[DONE]`), non-stream JSON, `/v1/models`, 501 stub envelope. |
+| 2026-10-09 | Phase 20 S2 (`b891664` compact route) | 10 | 0 | 7 WS | **Phase 20 verification vs local uvicorn admin + mock (`mock-model`): all applicable HTTP+SSE tests green, including both compaction tests.** `compact-response` (with `prompt_cache_key: "openresponses-compact-test"`) and `compact-missing-model` (400 on missing `model`) pass. The known `prompt_cache_key` risk did NOT materialize — litellm 1.103.2 `aresponses` accepts it via `**kwargs` and the mock tolerates it, so no route fix was needed. Full run: 10 passed / 0 failed / 7 N/A (`websocket-*`, transport dropped). No admin code or test changes. |
