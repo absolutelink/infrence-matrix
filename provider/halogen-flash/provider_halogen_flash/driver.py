@@ -86,6 +86,18 @@ _HEARTBEAT_REASON_CHARS = 200
 
 _TERMINAL_TYPES = ("response.completed", "response.incomplete")
 
+# The Flash backend emits OpenWebUI-style dual-name reasoning events
+# (`response.reasoning_text.delta`/`.done`) that are NOT OpenResponses spec
+# event types. The spec names are `response.reasoning.delta`/`.done`, each
+# requiring `item_id`, `output_index`, `content_index` and `delta`/`text`.
+# The driver renames them on relay and fills `content_index` when the
+# backend omits it. `response.reasoning_summary_text.*` is already spec and
+# passes through untouched.
+_REASONING_EVENT_RENAMES = {
+    "response.reasoning_text.delta": "response.reasoning.delta",
+    "response.reasoning_text.done": "response.reasoning.done",
+}
+
 # The halogen-flash committed backend_config schema (Phase 12): the
 # sectioned shape the admin registers, validates against, and renders in
 # the UI. Shared with main.py (single load → registration + driver
@@ -694,10 +706,15 @@ class HalogenFlashBackend(BackendDriver):
         try:
             async for event in upstream:
                 etype = event.get("type")
+                renamed = _REASONING_EVENT_RENAMES.get(etype)
+                if renamed is not None:
+                    event["type"] = renamed
+                    event.setdefault("content_index", 0)
+                    etype = renamed
                 if etype == "response.output_text.delta":
                     text_chars += len(event.get("delta") or "")
                 elif etype in (
-                    "response.reasoning_text.delta",
+                    "response.reasoning.delta",
                     "response.reasoning_summary_text.delta",
                 ):
                     # Rough token estimate from reasoning deltas: ~4 chars.

@@ -121,6 +121,27 @@ FAKE_SCRIPT = textwrap.dedent(
                         yield sse({"type": "response.output_text.delta",
                                    "item_id": "msg_1", "output_index": 0,
                                    "content_index": 0, "delta": "tok%d" % i})
+                    if os.environ.get("FAKE_REASONING"):
+                        # Spec-shaped summary events (must pass through
+                        # untouched) + NON-SPEC dual-name reasoning_text
+                        # events (the driver must rename them to
+                        # response.reasoning.* and fill content_index).
+                        yield sse({"type": "response.reasoning_summary_text.delta",
+                                   "item_id": "rs_1", "output_index": 0,
+                                   "summary_index": 0, "delta": "sum" * 4})
+                        yield sse({"type": "response.reasoning_text.delta",
+                                   "item_id": "rs_1", "output_index": 0,
+                                   "content_index": 0, "delta": "x" * 40})
+                        # Second delta WITHOUT content_index (driver fills 0).
+                        yield sse({"type": "response.reasoning_text.delta",
+                                   "item_id": "rs_1", "output_index": 0,
+                                   "delta": "y" * 40})
+                        yield sse({"type": "response.reasoning_text.done",
+                                   "item_id": "rs_1", "output_index": 0,
+                                   "text": "x" * 40 + "y" * 40})
+                        yield sse({"type": "response.reasoning_summary_text.done",
+                                   "item_id": "rs_1", "output_index": 0,
+                                   "summary_index": 0, "text": "sum" * 4})
                     # NON-SPEC terminal usage: chat-style counts + native
                     # timings, no input_tokens/output_tokens. The driver's
                     # calculate_usage override must normalize it.
