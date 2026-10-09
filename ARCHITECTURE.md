@@ -354,7 +354,16 @@ the caller resends the full `messages`, which are stored as
 
 ### TokenUsageSample
 Per-request prompt/cached/completion token + rate telemetry, FK to
-provider instance + definition.
+provider instance + definition. **Rates and latency are provider-supplied**
+(Phase 23): each driver maps its engine's throughput gauges into the
+terminal `response.completed` frame's `usage.completion_tokens_details`
+(`prompt_per_second`/`predicted_per_second`, and `prompt_time`/
+`prediction_time` in seconds → `prompt_ms`/`predicted_ms`), which
+`persist_turn` reads verbatim. gufo scrapes `llamacpp:*` Prometheus gauges
+from `GET /metrics`; halogen-flash normalizes via `calculate_usage`;
+llama-cpp scrapes the same `/metrics` gauges (Phase 23). The `/v1`
+`stats/instances` rollup (`live_throughput_tps`, mean rates, `avg gen ms`)
+aggregates these columns.
 
 ### Dropped by the overhaul
 `agents`, `server_instances`, `models` (folded into `backend_config`),

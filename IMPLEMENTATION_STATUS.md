@@ -1,7 +1,16 @@
 # Inference Matrix — Implementation Status
 
 **Overhaul branch:** `litellm-architecture-overhaul`
-**Last updated:** 2026-10-09 (**Phase 22 — chat-completions response
+**Last updated:** 2026-10-09 (**Phase 23 — token rate & latency telemetry
+plumbing: 🟡 in progress.** The header StatsBar tok/s and per-instance
+speed/latency read 0/`—` because the llama-cpp driver never mapped its
+engine rate gauges into `usage.completion_tokens_details` (the canonical
+provider-supplied contract gufo + halogen-flash already honor), and no
+driver emitted latency (`prompt_time`/`prediction_time`). Fix is
+provider-side (Approach A): port gufo's `rates.py` scrape-and-inject to
+llama-cpp, plumb latency across drivers, verify the admin responses path
+preserves the extras, and cover with a real-turn integration test + mock.
+See the Phase 23 section. Prior: **Phase 22 — chat-completions response
 normalization: ✅ SHIPPED (S0–S2).** Non-stream chat bodies now pass
 `llm-comply --format openai-chat` 8/9+skip on both deployment aliases;
 see the Phase 22 section. Prior: **Phase 21 addendum ✅ SHIPPED** (halogen-flash
@@ -135,6 +144,7 @@ starting a feature, read the linked protocol/doc first.
 | 17 | Per-GPU machine metrics + hardware union: device-isolated agents (one GPU each) merge into a full machine inventory and live snapshot | ✅ Complete |
 | 18 | Embeddings + modality-scoped endpoints: `ProviderDefinition.modality` (`llm`/`embedding`, `audio` reserved), `ProviderType.serves_modalities`, spec `POST /v1/embeddings` via litellm, llama-cpp `--embedding`/`--pooling` + mock fake embeddings | ✅ shipped (all 7 slices green + e2e verified vs local admin + mock) |
 | 19 | Live stats bar (tokens/sec, queue/active, VRAM/GPU + popovers incl. queue clear) + UI ergonomics: create/edit forms → right-side drawers, logs → bottom-docked tabbed panel | ✅ shipped (S0–S5) |
+| 23 | Token rate & latency telemetry plumbing: llama-cpp rate-gauge scrape (port gufo `rates.py`), latency fields across drivers, admin responses-path preservation check, real-turn integration test + mock rates | 🟡 in progress (S0 done) |
 
 Legend: ✅ complete · 🟡 in progress · ⬜ pending
 
@@ -2966,6 +2976,62 @@ stubbed. Re-implement against the new model only when a feature needs it.
 | `InferenceLease` / reservation / slot_generation | Removed | Replaced by scheduler + provider connection-lifecycle admission |
 | Users / API keys | Removed | Trusted-LAN model |
 | Prometheus `/metrics` | Never existed in new code | Old `monitoring-guide.md` deleted |
+
+## Phase 23 — Token rate & latency telemetry plumbing 🟡
+
+**Problem.** The header StatsBar tok/s rates and the Instances-page
+per-instance speed/latency read `0`/`—` in production (llama-cpp cuda +
+halogen-flash), while token *counts* persist correctly.
+
+**Root cause.** All rate/latency UI reads derive from
+`TokenUsageSample.{prompt_per_second, predicted_per_second, prompt_ms,
+predicted_ms}`, which `persist_turn` (`app/api/v1/responses.py`) fills
+**only** from `usage.completion_tokens_details`
+(`{prompt_per_second, predicted_per_second, prompt_time, prediction_time}`)
+on the terminal `response.completed` frame — the canonical
+provider-supplied contract (`ARCHITECTURE.md` §4, `provider/README.md`
+"Overriding usage normalization"). gufo honors it (scrapes `llamacpp:*`
+Prometheus gauges from `GET /metrics` and `inject_rates` into
+`completion_tokens_details`); halogen-flash honors it via
+`calculate_usage`. The **llama-cpp driver is pure SSE passthrough** and
+never maps its engine's rate gauges, so llama-cpp rates are always 0.
+Separately, **no driver emits latency** (`prompt_time`/`prediction_time`),
+so `avg gen latency` shows `—` for every provider.
+
+**Locked decisions (Approach A — provider-supplied, matches the law docs).**
+- Rates/latency stay provider-supplied via `usage.completion_tokens_details`
+  on the terminal frame. No admin wall-clock timing (rejected: would require
+  rewriting the canonical contract and yields approximate numbers).
+- Reuse gufo's `rates.py` (`parse_rate_gauges` + `inject_rates`) as the
+  reference implementation for llama-cpp.
+- Latency lands in `completion_tokens_details.{prompt_time, prediction_time}`
+  in **seconds** (the admin multiplies by 1000 → `prompt_ms`/`predicted_ms`).
+- Admin `persist_turn` is unchanged unless S3 proves litellm's
+  `aresponses` strips `completion_tokens_details` extras (the chat
+  `Usage` model keeps them via `extra: allow`).
+- The reserved always-on `metrics.inference` frame stays out of scope
+  (remains reserved per Phase 8 deviation).
+
+**Slices.**
+- **S0 (orchestrator).** This law-docs update: record the contract + slice
+  breakdown. ✅ done.
+- **S1.** llama-cpp rate scraping: port `rates.py` into
+  `provider/llama-cpp/provider_llama_cpp/`, add `_scrape_rate_gauges()`
+  hitting `{base_url}/metrics`, call `inject_rates` on the terminal
+  `response.completed` frame in the stream path. Unit test with a
+  raw-metrics→rates table (mirror gufo's).
+- **S2.** Latency plumbing: map engine timing → `prompt_time`/`prediction_time`
+  for llama-cpp (from `/metrics` counters or terminal `timings`), and extend
+  gufo + halogen-flash to emit them.
+- **S3.** Admin responses-path verification: confirm `litellm.aresponses`
+  preserves `completion_tokens_details`; add a minimal passthrough only if
+  stripped.
+- **S4.** Tests + mock: discriminating integration test asserting
+  `TokenUsageSample.predicted_per_second > 0` and latency > 0 after a real
+  turn; make the mock emit `completion_tokens_details` rates+latency so
+  dev/smoke exercises the path.
+
+---
 
 ## Known Limitations
 
