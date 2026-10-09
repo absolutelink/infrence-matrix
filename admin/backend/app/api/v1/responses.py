@@ -76,7 +76,7 @@ from app.services.scheduler import (
     QueueTimeout,
     SchedulerError,
 )
-from app.services.sse import SSEEmitter, event_type_of, to_dict
+from app.services.sse import SSEEmitter, _sse, event_type_of, to_dict
 
 logger = logging.getLogger("admin.v1.responses")
 
@@ -88,6 +88,26 @@ router = APIRouter(tags=["responses"])
 # (model download + load) does not drop the connection before any event.
 KEEPALIVE_INTERVAL_SECONDS = 10.0
 KEEPALIVE_COMMENT = ": keep-alive\n\n"
+
+
+class Keepalive:
+    """Sentinel yielded by :func:`stream_turn_events` while
+    ``scheduler.acquire`` blocks (cold boot + FIFO wait can take minutes).
+
+    The runner is transport-agnostic and never formats bytes: it yields this
+    singleton instead of an event dict. Each transport renders it in its own
+    way — the SSE formatter (``_stream_response``) turns it into
+    ``KEEPALIVE_COMMENT``; the Phase 21 WebSocket transport has no keepalive
+    comment and instead synthesizes ``response.created``/``response.in_progress``
+    (locked decision 7). Compare with ``is`` (there is exactly one instance)."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "<KEEPALIVE>"
+
+
+KEEPALIVE = Keepalive()
 
 
 # Request fields forwarded straight to litellm.aresponses when present.
@@ -560,8 +580,9 @@ async def create_response(request: Request) -> Any:
     )
 
 
-async def _stream_response(
+async def stream_turn_events(
     *,
+    emitter: SSEEmitter,
     scheduler: InferenceScheduler,
     alias: str,
     request_id: str,
@@ -573,18 +594,45 @@ async def _stream_response(
     passthrough: dict[str, Any],
     base_params: dict[str, Any],
     store: bool,
-) -> AsyncIterator[str]:
-    emitter = SSEEmitter(client_response_id)
+) -> AsyncIterator[dict[str, Any] | Keepalive]:
+    """Transport-agnostic streaming turn pipeline (Phase 21 S1 refactor).
+
+    Owns the whole turn: ``scheduler.acquire`` (with the cold-boot keepalive
+    wait loop), the ``litellm.aresponses(stream=True)`` loop (terminal
+    capture, duplicate-terminal drop, terminal normalization via
+    ``_normalize_response``, failed-frame synthesis), one-shot persistence,
+    and the cancellation-safe shielded ``release`` in ``finally``.
+
+    **Yield contract** (consumed by both the SSE formatter below and the
+    Phase 21 WebSocket endpoint):
+
+    * ``dict`` — a normalized OpenResponses event already processed by
+      ``emitter.event_data`` (or ``emitter.failed_events``): the admin-owned
+      ``resp_`` id is substituted on lifecycle frames, ``sequence_number``
+      is assigned (monotonic from 0), and spec-required positional fields are
+      filled. The terminal event is the ``response.completed`` /
+      ``response.incomplete`` / ``response.failed`` dict; on failure the
+      runner yields the synthesized ``response.failed`` dict followed by the
+      ``error`` dict.
+    * ``KEEPALIVE`` — the module singleton, yielded once per
+      ``KEEPALIVE_INTERVAL_SECONDS`` while ``scheduler.acquire`` blocks
+      (cold boot + FIFO wait). Transports render it their own way (SSE:
+      ``KEEPALIVE_COMMENT``; WS: nothing / its own pre-events).
+
+    The runner never emits the SSE ``[DONE]`` terminator (SSE-only, decision
+    6): the caller knows the turn ended when this generator is exhausted.
+    The ``emitter`` is passed in so the caller shares its id/sequence state.
+    """
     requested = {**passthrough, "model": alias}
 
-    def failed_frames(error: dict[str, Any]) -> list[str]:
+    def failed_events(error: dict[str, Any]) -> list[dict[str, Any]]:
         # The suite validates failed frames against the full
         # ResponseResource schema too — synthesize a normalized skeleton.
         skeleton: dict[str, Any] = {"status": "failed", "error": error}
         _normalize_response(
             skeleton, store=store, requested=requested, default_status="failed"
         )
-        return emitter.failed(error, skeleton)
+        return emitter.failed_events(error, skeleton)
 
     terminal_output: list[dict[str, Any]] = []
     terminal_usage: dict[str, Any] | None = None
@@ -595,10 +643,11 @@ async def _stream_response(
     admission: Admission | None = None
 
     # Cold-boot keepalive: scheduler.acquire can block for minutes
-    # (download + load + FIFO wait). Run it as a task and emit SSE comment
-    # lines every KEEPALIVE_INTERVAL_SECONDS until it settles so proxies
-    # (Traefik) keep the connection open. ``shield`` keeps the acquire
-    # alive across the wait_for timeouts; the loop cancels it explicitly
+    # (download + load + FIFO wait). Run it as a task and yield a KEEPALIVE
+    # sentinel every KEEPALIVE_INTERVAL_SECONDS until it settles so the SSE
+    # transport can emit comment lines that keep proxies (Traefik) from
+    # dropping the connection before any event. ``shield`` keeps the acquire
+    # alive across the wait_for timeouts; the finally cancels it explicitly
     # if the client disconnects mid-admission.
     acquire_task = asyncio.create_task(scheduler.acquire(alias, request_id))
     stream = None
@@ -610,14 +659,14 @@ async def _stream_response(
                 )
                 break
             except TimeoutError:
-                yield KEEPALIVE_COMMENT
+                yield KEEPALIVE
 
         try:
             # The awaited call itself can raise (connection refused, bad
             # request, litellm APIError before the first event): keep it
             # inside the try so a call-time failure emits the same
-            # terminal response.failed + error + [DONE] frames as a
-            # mid-stream failure instead of truncating the SSE stream.
+            # terminal response.failed + error events as a mid-stream
+            # failure instead of truncating the stream.
             stream = await litellm.aresponses(
                 model=alias,
                 custom_llm_provider="openai",
@@ -713,8 +762,7 @@ async def _stream_response(
                                 "response.failed": "failed",
                             }.get(etype, "in_progress"),
                         )
-                yield emitter.frame(data)
-            yield emitter.done()
+                yield emitter.event_data(data)
         except Exception as exc:  # noqa: BLE001 - MidStreamFallbackError et al.
             # Only synthesize a terminal failed frame if the stream has
             # not already delivered one (completed/incomplete/failed) —
@@ -724,14 +772,13 @@ async def _stream_response(
                 logger.warning(
                     "litellm stream failed for %s: %s", client_response_id, exc
                 )
-                for frame in failed_frames(failed_error):
-                    yield frame
-            yield emitter.done()
+                for event in failed_events(failed_error):
+                    yield event
     except SchedulerError as exc:
-        # Admission failed after the SSE response started: NoProvider-
-        # Available / QueueTimeout / QueueCleared surface as the spec terminal
-        # failed frames (the admin synthesizes terminal frames — FINDINGS §2);
-        # an HTTP status is no longer possible.
+        # Admission failed after the stream started: NoProviderAvailable /
+        # QueueTimeout / QueueCleared surface as the spec terminal failed
+        # events (the admin synthesizes terminal frames — FINDINGS §2); an
+        # HTTP status is no longer possible once bytes are flowing.
         failed_error = {
             "type": "server_error",
             "code": (
@@ -744,9 +791,8 @@ async def _stream_response(
             "message": str(exc),
         }
         logger.warning("admission failed in-stream for %s: %s", client_response_id, exc)
-        for frame in failed_frames(failed_error):
-            yield frame
-        yield emitter.done()
+        for event in failed_events(failed_error):
+            yield event
     finally:
         # Single shielded cleanup so a cancelled aclose can never skip the
         # acquire unwind, slot release, or persistence on the client-
@@ -792,6 +838,56 @@ async def _stream_response(
             error=failed_error if terminal_status is None else None,
             store=store,
         )
+
+
+async def _stream_response(
+    *,
+    scheduler: InferenceScheduler,
+    alias: str,
+    request_id: str,
+    client_response_id: str,
+    previous_response_id: str | None,
+    input_items_for_record: list[dict[str, Any]],
+    definition_id: uuid.UUID,
+    litellm_input: Any,
+    passthrough: dict[str, Any],
+    base_params: dict[str, Any],
+    store: bool,
+) -> AsyncIterator[str]:
+    """SSE formatter over :func:`stream_turn_events` (byte-identical to the
+    pre-split pipeline): event dicts become ``event:``/``data:`` lines, the
+    ``KEEPALIVE`` sentinel becomes ``KEEPALIVE_COMMENT``, and the stream ends
+    with ``[DONE]``. The emitter is created here and shared with the runner so
+    ids and sequence numbers stay consistent (the runner already assigned
+    ``sequence_number`` inside ``event_data`` — never renumber here)."""
+    emitter = SSEEmitter(client_response_id)
+    runner = stream_turn_events(
+        emitter=emitter,
+        scheduler=scheduler,
+        alias=alias,
+        request_id=request_id,
+        client_response_id=client_response_id,
+        previous_response_id=previous_response_id,
+        input_items_for_record=input_items_for_record,
+        definition_id=definition_id,
+        litellm_input=litellm_input,
+        passthrough=passthrough,
+        base_params=base_params,
+        store=store,
+    )
+    try:
+        async for item in runner:
+            if item is KEEPALIVE:
+                yield KEEPALIVE_COMMENT
+            else:
+                yield _sse(item["type"], item)
+    finally:
+        # Propagate a client disconnect (GeneratorExit here) into the runner
+        # so its cancellation-safe finally (acquire unwind + slot release +
+        # persist) runs — an ``async for`` does not close its iterator on
+        # early exit. No-op on normal exhaustion.
+        await runner.aclose()
+    yield emitter.done()
 
 
 async def _non_stream_response(

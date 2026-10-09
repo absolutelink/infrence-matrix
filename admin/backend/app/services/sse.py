@@ -186,10 +186,12 @@ class SSEEmitter:
             if value is not None:
                 data[key] = value
 
-    def frame(self, event: Any) -> str:
-        """Serialize one event: replace our id on lifecycle frames,
-        reassign sequence_number, fill spec-required positional fields
-        some backends omit, and emit ``event:``/``data:`` lines.
+    def event_data(self, event: Any) -> dict[str, Any]:
+        """Produce the normalized event dict: replace our id on lifecycle
+        frames, reassign sequence_number, and fill spec-required positional
+        fields some backends omit. Transport-agnostic — SSE serializes the
+        result with :meth:`frame`; the WebSocket transport (Phase 21) emits
+        the dict as JSON.
 
         Operates on a shallow copy so the caller's ``response`` sub-dict
         is never mutated (the wrapped id stays intact for capture)."""
@@ -216,23 +218,35 @@ class SSEEmitter:
                 data["part"] = {**part, "annotations": []}
         data["sequence_number"] = self._seq
         self._seq += 1
-        return _sse(event_type, data)
+        return data
+
+    def frame(self, event: Any) -> str:
+        """Serialize one event as SSE ``event:``/``data:`` lines.
+
+        Delegates dict production to :meth:`event_data` (which assigns the
+        ``sequence_number`` and unwraps the ``type``) so the SSE and
+        WebSocket transports share identical event content; here we only
+        format. Byte-identical to the pre-split implementation."""
+        data = self.event_data(event)
+        return _sse(data["type"], data)
 
     def done(self) -> str:
-        """Stream terminator."""
+        """Stream terminator (SSE-only; the WebSocket transport has no
+        ``[DONE]`` — terminal events end a turn there)."""
         return "data: [DONE]\n\n"
 
-    def failed(
+    def failed_events(
         self, error: dict[str, Any], response: dict[str, Any] | None = None
-    ) -> list[str]:
-        """Synthesize the spec terminal ``response.failed`` frame(s).
+    ) -> list[dict[str, Any]]:
+        """Synthesize the spec terminal ``response.failed`` event dicts.
 
         ``response`` is the caller's spec-normalized response skeleton
         (the suite validates failed frames against the full
         ResponseResource schema); the id/status/error are always owned
-        by the emitter. Returns a list of SSE strings (the failed
-        lifecycle frame plus a trailing ``error`` frame) so callers can
-        ``yield from`` it.
+        by the emitter. Returns the event dicts (the failed lifecycle
+        event plus a trailing ``error`` event), each already carrying its
+        ``sequence_number``. Transport-agnostic: SSE serializes them with
+        :meth:`failed`; the WebSocket transport emits them as JSON.
         """
         # The streaming `error` event schema requires `param` (nullable).
         error = {**error, "param": error.get("param")}
@@ -245,25 +259,29 @@ class SSEEmitter:
                 "error": error,
             }
         )
-        failed_frame = _sse(
-            "response.failed",
-            {
-                "type": "response.failed",
-                "response": body,
-                "sequence_number": self._seq,
-            },
-        )
+        failed_event: dict[str, Any] = {
+            "type": "response.failed",
+            "response": body,
+            "sequence_number": self._seq,
+        }
         self._seq += 1
-        error_frame = _sse(
-            "error",
-            {
-                "type": "error",
-                "error": error,
-                "sequence_number": self._seq,
-            },
-        )
+        error_event: dict[str, Any] = {
+            "type": "error",
+            "error": error,
+            "sequence_number": self._seq,
+        }
         self._seq += 1
-        return [failed_frame, error_frame]
+        return [failed_event, error_event]
+
+    def failed(
+        self, error: dict[str, Any], response: dict[str, Any] | None = None
+    ) -> list[str]:
+        """Serialize :meth:`failed_events` to SSE strings so callers can
+        ``yield from`` the failed lifecycle frame plus a trailing
+        ``error`` frame."""
+        return [
+            _sse(event["type"], event) for event in self.failed_events(error, response)
+        ]
 
 
 def _sse(event_type: str, data: dict[str, Any]) -> str:
