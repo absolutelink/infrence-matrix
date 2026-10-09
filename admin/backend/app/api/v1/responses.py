@@ -76,7 +76,7 @@ from app.services.scheduler import (
     QueueTimeout,
     SchedulerError,
 )
-from app.services.sse import SSEEmitter, to_dict
+from app.services.sse import SSEEmitter, event_type_of, to_dict
 
 logger = logging.getLogger("admin.v1.responses")
 
@@ -241,6 +241,8 @@ def _normalize_response(
     if data.get("object") != "response":
         data["object"] = "response"
 
+    if not isinstance(data.get("output"), list):
+        data["output"] = []
     if not _is_int(data.get("created_at")):
         data["created_at"] = now
     if data.get("status") == "completed" and not _is_int(data.get("completed_at")):
@@ -271,6 +273,19 @@ def _normalize_response(
             value = fallback
         data[key] = value
     data["store"] = store
+    tools = data.get("tools")
+    if isinstance(tools, list):
+        # functionToolSchema requires description/parameters/strict
+        # (nullable) — request-echoed tools often omit them. Copy entries:
+        # the list may be the client's own request object.
+        fixed: list[Any] = []
+        for tool in tools:
+            if isinstance(tool, dict):
+                tool = {**tool, "type": tool.get("type") or "function"}
+                for k in ("description", "parameters", "strict"):
+                    tool.setdefault(k, None)
+            fixed.append(tool)
+        data["tools"] = fixed
     for key in (
         "incomplete_details",
         "error",
@@ -560,11 +575,23 @@ async def _stream_response(
     store: bool,
 ) -> AsyncIterator[str]:
     emitter = SSEEmitter(client_response_id)
+    requested = {**passthrough, "model": alias}
+
+    def failed_frames(error: dict[str, Any]) -> list[str]:
+        # The suite validates failed frames against the full
+        # ResponseResource schema too — synthesize a normalized skeleton.
+        skeleton: dict[str, Any] = {"status": "failed", "error": error}
+        _normalize_response(
+            skeleton, store=store, requested=requested, default_status="failed"
+        )
+        return emitter.failed(error, skeleton)
+
     terminal_output: list[dict[str, Any]] = []
     terminal_usage: dict[str, Any] | None = None
     litellm_wrapped_id: str | None = None
     failed_error: dict[str, Any] | None = None
     terminal_status: str | None = None
+    terminal_emitted = False
     admission: Admission | None = None
 
     # Cold-boot keepalive: scheduler.acquire can block for minutes
@@ -604,16 +631,30 @@ async def _stream_response(
                 # may rewrite keys (id capture, terminal normalization) —
                 # never mutate litellm's own event objects.
                 data = dict(to_dict(event))
+                # litellm may send `type` as a stream-events enum member;
+                # compare the unwrapped dotted string everywhere below.
+                etype = event_type_of(data.get("type", ""))
+                data["type"] = etype
+                if terminal_emitted and etype in (
+                    "response.completed",
+                    "response.incomplete",
+                    "response.failed",
+                ):
+                    # Exactly one terminal frame reaches the client
+                    # (FINDINGS §2): drop a misbehaving upstream's second.
+                    logger.warning(
+                        "dropping duplicate terminal frame %s for %s",
+                        etype,
+                        client_response_id,
+                    )
+                    continue
                 response = data.get("response")
                 if isinstance(response, dict):
                     # Capture litellm's affinity-wrapped id before the
                     # emitter replaces it with ours.
                     if litellm_wrapped_id is None:
                         litellm_wrapped_id = response.get("id")
-                    if data.get("type") in (
-                        "response.completed",
-                        "response.incomplete",
-                    ):
+                    if etype in ("response.completed", "response.incomplete"):
                         # Work on a copy: litellm may hand us its own
                         # accumulated response dict (to_dict passes plain
                         # dicts through) — never mutate upstream state.
@@ -628,10 +669,10 @@ async def _stream_response(
                         _normalize_response(
                             response,
                             store=store,
-                            requested={**passthrough, "model": alias},
+                            requested=requested,
                             default_status=(
                                 "completed"
-                                if data["type"] == "response.completed"
+                                if etype == "response.completed"
                                 else "incomplete"
                             ),
                         )
@@ -642,16 +683,49 @@ async def _stream_response(
                         )
                         terminal_status = (
                             "completed"
-                            if data["type"] == "response.completed"
+                            if etype == "response.completed"
                             else "incomplete"
+                        )
+                        terminal_emitted = True
+                    elif etype in (
+                        "response.created",
+                        "response.in_progress",
+                        "response.queued",
+                        "response.failed",
+                    ):
+                        # The suite validates EVERY lifecycle frame against
+                        # the full ResponseResource schema — llama.cpp's
+                        # skeleton only carries id/object/status. A raw
+                        # response.failed reaching us (litellm normally
+                        # raises instead) must not pass through sparse.
+                        response = dict(response)
+                        data["response"] = response
+                        if etype == "response.failed":
+                            terminal_emitted = True
+                            if isinstance(response.get("error"), dict):
+                                failed_error = response["error"]
+                        _normalize_response(
+                            response,
+                            store=store,
+                            requested=requested,
+                            default_status={
+                                "response.queued": "queued",
+                                "response.failed": "failed",
+                            }.get(etype, "in_progress"),
                         )
                 yield emitter.frame(data)
             yield emitter.done()
         except Exception as exc:  # noqa: BLE001 - MidStreamFallbackError et al.
-            failed_error = map_exception_to_error(exc)
-            logger.warning("litellm stream failed for %s: %s", client_response_id, exc)
-            for frame in emitter.failed(failed_error):
-                yield frame
+            # Only synthesize a terminal failed frame if the stream has
+            # not already delivered one (completed/incomplete/failed) —
+            # the spec allows exactly one terminal frame.
+            if not terminal_emitted:
+                failed_error = map_exception_to_error(exc)
+                logger.warning(
+                    "litellm stream failed for %s: %s", client_response_id, exc
+                )
+                for frame in failed_frames(failed_error):
+                    yield frame
             yield emitter.done()
     except SchedulerError as exc:
         # Admission failed after the SSE response started: NoProvider-
@@ -670,7 +744,7 @@ async def _stream_response(
             "message": str(exc),
         }
         logger.warning("admission failed in-stream for %s: %s", client_response_id, exc)
-        for frame in emitter.failed(failed_error):
+        for frame in failed_frames(failed_error):
             yield frame
         yield emitter.done()
     finally:

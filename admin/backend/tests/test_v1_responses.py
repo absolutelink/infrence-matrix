@@ -300,6 +300,16 @@ def test_midstream_failure_yields_failed_frame_and_persists(
     assert failed["response"]["id"] != WRAPPED_ID
     assert failed["response"]["status"] == "failed"
     assert failed["response"]["error"]["code"] == "upstream_failed"
+    # Failed frames are validated against the full ResponseResource schema.
+    body = failed["response"]
+    assert isinstance(body["created_at"], int)
+    assert body["completed_at"] is None
+    assert body["output"] == []
+    assert body["tools"] == []
+    assert body["tool_choice"] == "auto"
+    assert body["store"] is True
+    assert body["service_tier"] == "default"
+    assert body["model"] == "rt-fail"
 
     created = next(p for t, p in frames if t == "response.created")
     client_id = created["response"]["id"]
@@ -613,6 +623,155 @@ def test_stream_terminal_frame_is_normalized(
     assert events == pristine
 
 
+def test_stream_lifecycle_frames_are_normalized(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    """The suite validates created/in_progress frames against the full
+    ResponseResource schema — bare skeletons must be filled."""
+    seed_instance(session, alias="rt-lc", machine_uid="rt-lc-m")
+    skeleton = {
+        "id": WRAPPED_ID,
+        "object": "response",
+        "status": "in_progress",
+    }
+    events = [
+        {"type": "response.created", "response": dict(skeleton)},
+        {"type": "response.in_progress", "response": dict(skeleton)},
+        completed_event([], {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}),
+    ]
+    monkeypatch.setattr(litellm, "aresponses", make_fake_stream(events, {}))
+
+    resp = client.post(
+        "/v1/responses",
+        json={"model": "rt-lc", "input": "hi", "stream": True},
+    )
+    assert resp.status_code == 200
+    frames = parse_sse(resp.text)
+    for etype in ("response.created", "response.in_progress"):
+        frame = next(data for t, data in frames if t == etype)
+        body = frame["response"]
+        assert body["id"].startswith(CLIENT_ID_PREFIX)
+        assert body["status"] == "in_progress"
+        assert body["output"] == []
+        assert body["completed_at"] is None
+        assert body["tools"] == []
+        assert body["tool_choice"] == "auto"
+        assert body["temperature"] == 1
+        assert body["store"] is True
+        assert body["background"] is False
+        assert body["service_tier"] == "default"
+        assert body["usage"] is None
+
+
+def test_non_stream_echoed_tools_get_required_keys(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    """functionToolSchema requires description/parameters/strict
+    (nullable) — echoed request tools must carry them."""
+    seed_instance(session, alias="rt-tools", machine_uid="rt-tools-m")
+    final = llama_cpp_sparse_response()
+    final["tools"] = [{"type": "function", "name": "get_weather"}]
+
+    async def fake_aresponses(*args, **kwargs):  # noqa: ARG001
+        return final
+
+    monkeypatch.setattr(litellm, "aresponses", fake_aresponses)
+
+    resp = client.post(
+        "/v1/responses",
+        json={
+            "model": "rt-tools",
+            "input": "weather?",
+            "tools": [{"type": "function", "name": "get_weather"}],
+        },
+    )
+    assert resp.status_code == 200
+    tool = resp.json()["tools"][0]
+    assert tool["name"] == "get_weather"
+    assert tool["strict"] is None
+    assert tool["description"] is None
+    assert tool["parameters"] is None
+
+
+def test_stream_duplicate_terminal_frames_dropped(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    """Exactly one terminal frame may reach the client (FINDINGS §2)."""
+    seed_instance(session, alias="rt-dup", machine_uid="rt-dup-m")
+    ev = completed_event([], {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2})
+    events = [dict(ev), dict(ev)]
+    monkeypatch.setattr(litellm, "aresponses", make_fake_stream(events, {}))
+
+    resp = client.post(
+        "/v1/responses",
+        json={"model": "rt-dup", "input": "hi", "stream": True},
+    )
+    frames = parse_sse(resp.text)
+    assert [t for t, _ in frames].count("response.completed") == 1
+
+
+def test_stream_enum_typed_terminal_frame_is_normalized(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    """litellm may send `type` as an enum member — the route must still
+    recognize and normalize the terminal frame."""
+    from litellm.types.llms.openai import ResponsesAPIStreamEvents
+
+    seed_instance(session, alias="rt-enum", machine_uid="rt-enum-m")
+    ev = completed_event([], {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2})
+    ev["type"] = ResponsesAPIStreamEvents.RESPONSE_COMPLETED
+    monkeypatch.setattr(litellm, "aresponses", make_fake_stream([ev], {}))
+
+    resp = client.post(
+        "/v1/responses",
+        json={"model": "rt-enum", "input": "hi", "stream": True},
+    )
+    frames = parse_sse(resp.text)
+    terminal = next(data for etype, data in frames if etype == "response.completed")
+    assert terminal["response"]["tools"] == []
+    assert isinstance(terminal["response"]["completed_at"], int)
+
+
+def test_stream_upstream_failed_frame_is_normalized(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    """A raw response.failed passing through (litellm normally raises
+    instead) must not reach the client as a sparse skeleton."""
+    seed_instance(session, alias="rt-uf", machine_uid="rt-uf-m")
+    events = [
+        {
+            "type": "response.failed",
+            "response": {
+                "id": WRAPPED_ID,
+                "status": "failed",
+                "error": {"type": "server_error", "code": "c", "message": "m"},
+            },
+        }
+    ]
+    monkeypatch.setattr(litellm, "aresponses", make_fake_stream(events, {}))
+
+    resp = client.post(
+        "/v1/responses",
+        json={"model": "rt-uf", "input": "x", "stream": True},
+    )
+    assert resp.status_code == 200
+    frames = parse_sse(resp.text)
+    failed = next(p for t, p in frames if t == "response.failed")
+    assert failed["response"]["id"].startswith(CLIENT_ID_PREFIX)
+    assert isinstance(failed["response"]["created_at"], int)
+    assert failed["response"]["tools"] == []
+    assert failed["response"]["error"]["code"] == "c"
+
+    record = (
+        session.query(ResponseRecord)
+        .filter(ResponseRecord.response_id == failed["response"]["id"])
+        .first()
+    )
+    assert record is not None
+    assert record.status == "failed"
+    assert record.error_code == "c"
+
+
 def test_stream_incomplete_frame_and_persistence(
     client: TestClient, session: Session, monkeypatch
 ) -> None:
@@ -681,7 +840,15 @@ def test_non_stream_echoes_requested_params(
     body = resp.json()
     assert body["temperature"] == 0.7
     assert body["top_p"] == 0.9
-    assert body["tools"] == [{"type": "function", "name": "x", "parameters": {}}]
+    assert body["tools"] == [
+        {
+            "type": "function",
+            "name": "x",
+            "parameters": {},
+            "description": None,
+            "strict": None,
+        }
+    ]
     assert body["tool_choice"] == "required"
     assert body["parallel_tool_calls"] is False
     assert body["store"] is False

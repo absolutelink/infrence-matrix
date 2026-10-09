@@ -70,6 +70,27 @@ and `::test_stream_terminal_frame_is_normalized`.
 `compact-response` / `compact-missing-model` still 404 (no
 `/responses/compact` route — open scope decision).
 
+**Rerun after first deploy (same day): 6 passed / 11 failed** (7 WS N/A +
+2 compaction + 2 real). Remaining real failures:
+
+- `streaming-response` — the suite validates **every** lifecycle/delta
+  event, not just the terminal frame: llama.cpp's `response.created`/
+  `response.in_progress` are bare `{id, object, status}` skeletons, and
+  its `output_item.*`/`content_part.*`/`output_text.*` events omit
+  `output_index`/`content_index`/`item_id`. Fixed admin-side: lifecycle
+  skeletons now go through `_normalize_response` (status
+  `in_progress`/`queued`, `completed_at` null), and `SSEEmitter` tracks
+  item/content position and fills missing required indices (never
+  overwriting provider values).
+- `tool-calling` — echoed request tools lacked the required-nullable
+  `strict`/`description`/`parameters` keys; `_normalize_response` now
+  fills them per entry (on copies — the list may be the client's own).
+
+New tests: `test_stream_lifecycle_frames_are_normalized`,
+`test_non_stream_echoed_tools_get_required_keys`,
+`test_position_fields_filled_when_provider_omits_them`,
+`test_position_fields_never_overwrite_provider_values`.
+
 **Not applicable (transport removed):** all `websocket-*` tests —
 `websocket-response`, `websocket-sequential-responses`,
 `websocket-continuation`, `websocket-reconnect-store-false-recovery`,
@@ -127,4 +148,5 @@ Fidelity ground truth: `spike/litellm-fidelity/FINDINGS.md`.
 | (overhaul reset) | — | — | — | 7 WS | Tracker reset for litellm overhaul; awaiting Phase 6 conformance run |
 | 2026-10-04 | 8d2d9b8 + docs-phase fixes | 8 | 2 | 7 WS | First post-overhaul run vs local uvicorn admin + mock. All 6 KEY tests pass; failures are `compact-response` / `compact-missing-model` (no `/responses/compact` route). Fixes listed above landed in this run. |
 | 2026-10-09 | `_normalize_response` fix (pre-deploy) | 1 | 9 | 7 WS | Full run vs deployment, `rocinante-tiny` (llama-cpp). All 7 HTTP+SSE tests failed on cluster 1 (null/missing terminal response fields from llama.cpp) + 2 compaction 404s. Fix landed admin-side; re-run after deploy. |
+| 2026-10-09 | terminal-normalize deploy (pre stream-frame fix) | 6 | 4 | 7 WS | Rerun after first deploy: cluster 1 cleared (basic/system/assistant/multi-turn/image now pass). Remaining: `streaming-response` (non-terminal lifecycle frames + delta events lack required fields — fixed via lifecycle normalization + emitter position tracking), `tool-calling` (`tools[].strict` — fixed), 2 compaction 404s. |
 | 2026-10-04 | Phase 7 (chat completions + models + stubs) | 4 | 0 | — | KEY-only regression re-run (`--filter basic-response,streaming-response,system-prompt,multi-turn`) vs local uvicorn admin (`p7-machine`/`p7-model` mock): **4/4 pass**. Proves the `alias_registry` mode change (`responses` → `chat` union registration, required for native chat `acompletion`) did not regress the Phase 6 responses path. Live chat spot-check also green: stream (data-only SSE, admin `chatcmpl-` ids, usage chunk, `[DONE]`), non-stream JSON, `/v1/models`, 501 stub envelope. |

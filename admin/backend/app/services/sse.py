@@ -11,9 +11,14 @@ re-frames them for the client with the admin's own identity and ordering:
 - ``sequence_number`` is reassigned monotonically (0, 1, 2, ...) on every
   emitted event, overwriting whatever the upstream sent, so the client
   sees a gapless stream even if we synthesize terminal frames.
-- Everything else (usage, output[], non-canonical event types like
-  ``response.reasoning_text.delta``) passes through untouched — native
-  streaming preserves them (FINDINGS.md results table).
+- Spec-required positional fields (``output_index``/``content_index``/
+  ``summary_index``/``item_id``) that some backends (e.g. llama.cpp)
+  omit from item/part/delta events are filled from the emitter's tracked
+  stream position — provider-sent values are never overwritten. The
+  tracking assumes items stream sequentially (one in flight at a time).
+- Everything else (usage, output[], non-canonical event types) passes
+  through untouched — native streaming preserves them (FINDINGS.md
+  results table).
 - ``failed()`` synthesizes the spec ``response.failed`` frame because
   litellm raises ``MidStreamFallbackError`` instead of yielding it
   (FINDINGS.md §2).
@@ -51,6 +56,7 @@ LIFECYCLE_EVENTS = frozenset(
     {
         "response.created",
         "response.in_progress",
+        "response.queued",
         "response.completed",
         "response.failed",
         "response.incomplete",
@@ -74,16 +80,114 @@ def to_dict(event: Any) -> dict[str, Any]:
         raise TypeError(f"cannot convert event {type(event)!r} to dict") from exc
 
 
+# Event types whose spec schema requires positional fields that some
+# backends (e.g. llama.cpp) omit. The emitter tracks the current item /
+# content position as events flow and fills any missing required key.
+_INDEXED_EVENTS: dict[str, tuple[str, ...]] = {
+    "response.output_item.added": ("output_index",),
+    "response.output_item.done": ("output_index",),
+    "response.content_part.added": ("item_id", "output_index", "content_index"),
+    "response.content_part.done": ("item_id", "output_index", "content_index"),
+    "response.output_text.delta": ("item_id", "output_index", "content_index"),
+    "response.output_text.done": ("item_id", "output_index", "content_index"),
+    "response.refusal.delta": ("item_id", "output_index", "content_index"),
+    "response.refusal.done": ("item_id", "output_index", "content_index"),
+    "response.function_call_arguments.delta": ("item_id", "output_index"),
+    "response.function_call_arguments.done": ("item_id", "output_index"),
+    "response.reasoning.delta": ("item_id", "output_index", "content_index"),
+    "response.reasoning.done": ("item_id", "output_index", "content_index"),
+    "response.reasoning_summary_part.added": (
+        "item_id",
+        "output_index",
+        "summary_index",
+    ),
+    "response.reasoning_summary_part.done": (
+        "item_id",
+        "output_index",
+        "summary_index",
+    ),
+    "response.reasoning_summary_text.delta": (
+        "item_id",
+        "output_index",
+        "summary_index",
+    ),
+    "response.reasoning_summary_text.done": (
+        "item_id",
+        "output_index",
+        "summary_index",
+    ),
+    "response.output_text.annotation.added": (
+        "item_id",
+        "output_index",
+        "content_index",
+        "annotation_index",
+    ),
+}
+
+
 class SSEEmitter:
     """Frames OpenResponses events as SSE with our id and sequence numbers."""
 
     def __init__(self, client_response_id: str) -> None:
         self.client_response_id = client_response_id
         self._seq = 0
+        self._output_index = -1
+        self._content_index = -1
+        self._summary_index = -1
+        self._annotation_index = -1
+        self._item_id: str | None = None
+
+    def _track_position(self, event_type: str, data: dict[str, Any]) -> None:
+        """Advance the item/content/summary position from events that
+        carry it. Assumes items stream sequentially (one in flight)."""
+        if event_type == "response.output_item.added":
+            self._output_index += 1
+            self._content_index = -1
+            self._summary_index = -1
+            self._annotation_index = -1
+            item = data.get("item")
+            if isinstance(item, dict) and isinstance(item.get("id"), str):
+                self._item_id = item["id"]
+        elif event_type == "response.content_part.added":
+            self._content_index += 1
+            self._annotation_index = -1
+        elif event_type == "response.reasoning_summary_part.added":
+            self._summary_index += 1
+        elif event_type == "response.output_text.annotation.added":
+            self._annotation_index += 1
+        if isinstance(data.get("item_id"), str):
+            self._item_id = data["item_id"]
+        if isinstance(data.get("output_index"), int):
+            self._output_index = data["output_index"]
+        if isinstance(data.get("content_index"), int):
+            self._content_index = data["content_index"]
+        if isinstance(data.get("summary_index"), int):
+            self._summary_index = data["summary_index"]
+        if isinstance(data.get("annotation_index"), int):
+            self._annotation_index = data["annotation_index"]
+
+    def _fill_position(self, event_type: str, data: dict[str, Any]) -> None:
+        """Fill required positional keys the provider omitted (never
+        overwrite values the provider sent). Indices seen before any
+        corresponding ``*.added`` event clamp to 0."""
+        for key in _INDEXED_EVENTS.get(event_type, ()):
+            if data.get(key) is not None:
+                continue
+            value: Any = {
+                "output_index": max(self._output_index, 0),
+                # Deltas before any content_part.added belong to part 0.
+                "content_index": max(self._content_index, 0),
+                "summary_index": max(self._summary_index, 0),
+                "annotation_index": max(self._annotation_index, 0),
+                "item_id": self._item_id,
+            }[key]
+            if value is not None:
+                data[key] = value
 
     def frame(self, event: Any) -> str:
         """Serialize one event: replace our id on lifecycle frames,
-        reassign sequence_number, and emit ``event:``/``data:`` lines.
+        reassign sequence_number, fill spec-required positional fields
+        some backends omit, and emit ``event:``/``data:`` lines.
 
         Operates on a shallow copy so the caller's ``response`` sub-dict
         is never mutated (the wrapped id stays intact for capture)."""
@@ -96,6 +200,8 @@ class SSEEmitter:
                 response = dict(response)
                 response["id"] = self.client_response_id
                 data["response"] = response
+        self._track_position(event_type, data)
+        self._fill_position(event_type, data)
         data["sequence_number"] = self._seq
         self._seq += 1
         return _sse(event_type, data)
@@ -104,27 +210,47 @@ class SSEEmitter:
         """Stream terminator."""
         return "data: [DONE]\n\n"
 
-    def failed(self, error: dict[str, Any]) -> list[str]:
+    def failed(
+        self, error: dict[str, Any], response: dict[str, Any] | None = None
+    ) -> list[str]:
         """Synthesize the spec terminal ``response.failed`` frame(s).
 
-        Returns a list of SSE strings (the failed lifecycle frame plus a
-        trailing ``error`` frame) so callers can ``yield from`` it.
+        ``response`` is the caller's spec-normalized response skeleton
+        (the suite validates failed frames against the full
+        ResponseResource schema); the id/status/error are always owned
+        by the emitter. Returns a list of SSE strings (the failed
+        lifecycle frame plus a trailing ``error`` frame) so callers can
+        ``yield from`` it.
         """
+        # The streaming `error` event schema requires `param` (nullable).
+        error = {**error, "param": error.get("param")}
+        body: dict[str, Any] = dict(response) if response else {}
+        body.update(
+            {
+                "id": self.client_response_id,
+                "object": "response",
+                "status": "failed",
+                "error": error,
+            }
+        )
         failed_frame = _sse(
             "response.failed",
             {
                 "type": "response.failed",
-                "response": {
-                    "id": self.client_response_id,
-                    "object": "response",
-                    "status": "failed",
-                    "error": error,
-                },
+                "response": body,
                 "sequence_number": self._seq,
             },
         )
         self._seq += 1
-        error_frame = _sse("error", {"type": "error", "error": error})
+        error_frame = _sse(
+            "error",
+            {
+                "type": "error",
+                "error": error,
+                "sequence_number": self._seq,
+            },
+        )
+        self._seq += 1
         return [failed_frame, error_frame]
 
 

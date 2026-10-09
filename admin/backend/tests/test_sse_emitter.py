@@ -35,6 +35,7 @@ def test_response_id_replaced_on_all_lifecycle_events() -> None:
     lifecycle = (
         "response.created",
         "response.in_progress",
+        "response.queued",
         "response.completed",
         "response.failed",
         "response.incomplete",
@@ -124,12 +125,12 @@ def test_failed_synthesizes_spec_frames_with_our_id() -> None:
     assert failed_type == "response.failed"
     assert failed_payload["response"]["id"] == CLIENT_ID
     assert failed_payload["response"]["status"] == "failed"
-    assert failed_payload["response"]["error"] == error
+    assert failed_payload["response"]["error"] == {**error, "param": None}
     assert failed_payload["sequence_number"] == 1
 
     error_type, error_payload = parse_frame(frames[1])
     assert error_type == "error"
-    assert error_payload["error"] == error
+    assert error_payload["error"] == {**error, "param": None}
 
 
 def test_to_dict_handles_objects_with_model_dump() -> None:
@@ -179,3 +180,151 @@ def test_lifecycle_event_with_enum_type_still_gets_id_replaced() -> None:
     parsed_type, payload = parse_frame(frame)
     assert parsed_type == "response.completed"
     assert payload["response"]["id"] == CLIENT_ID
+
+
+def test_position_fields_filled_when_provider_omits_them() -> None:
+    """llama.cpp-style events carry no output_index/content_index; the
+    emitter must fill them from tracked position."""
+    emitter = SSEEmitter(CLIENT_ID)
+    _, added = parse_frame(
+        emitter.frame({"type": "response.output_item.added", "item": {"id": "msg_1"}})
+    )
+    _, part = parse_frame(
+        emitter.frame(
+            {
+                "type": "response.content_part.added",
+                "part": {"type": "output_text", "text": ""},
+            }
+        )
+    )
+    _, delta = parse_frame(
+        emitter.frame({"type": "response.output_text.delta", "delta": "hi"})
+    )
+    _, done = parse_frame(
+        emitter.frame({"type": "response.output_text.done", "text": "hi"})
+    )
+    assert added["output_index"] == 0
+    assert part["output_index"] == 0 and part["content_index"] == 0
+    assert part["item_id"] == "msg_1"
+    assert delta["output_index"] == 0 and delta["content_index"] == 0
+    assert delta["item_id"] == "msg_1"
+    assert done["output_index"] == 0 and done["content_index"] == 0
+    assert done["item_id"] == "msg_1"
+
+    # Second item advances output_index and resets content_index.
+    _, added2 = parse_frame(
+        emitter.frame(
+            {
+                "type": "response.output_item.added",
+                "item": {"id": "msg_2"},
+            }
+        )
+    )
+    _, delta2 = parse_frame(
+        emitter.frame({"type": "response.output_text.delta", "delta": "x"})
+    )
+    assert added2["output_index"] == 1
+    assert delta2["output_index"] == 1 and delta2["content_index"] == 0
+    assert delta2["item_id"] == "msg_2"
+
+
+def test_position_fields_never_overwrite_provider_values() -> None:
+    emitter = SSEEmitter(CLIENT_ID)
+    frame = emitter.frame(
+        {
+            "type": "response.output_text.delta",
+            "item_id": "msg_x",
+            "output_index": 5,
+            "content_index": 2,
+            "delta": "z",
+        }
+    )
+    _, payload = parse_frame(frame)
+    assert payload["item_id"] == "msg_x"
+    assert payload["output_index"] == 5
+    assert payload["content_index"] == 2
+
+
+def test_reasoning_events_get_position_fields() -> None:
+    emitter = SSEEmitter(CLIENT_ID)
+    _, added = parse_frame(
+        emitter.frame(
+            {
+                "type": "response.output_item.added",
+                "item": {"id": "rs_1", "type": "reasoning"},
+            }
+        )
+    )
+    assert added["output_index"] == 0
+    _, part = parse_frame(
+        emitter.frame(
+            {
+                "type": "response.reasoning_summary_part.added",
+                "part": {"type": "summary_text", "text": ""},
+            }
+        )
+    )
+    _, summ = parse_frame(
+        emitter.frame({"type": "response.reasoning_summary_text.delta", "delta": "s"})
+    )
+    assert part["item_id"] == "rs_1"
+    assert part["output_index"] == 0 and part["summary_index"] == 0
+    assert summ["item_id"] == "rs_1" and summ["summary_index"] == 0
+    _, rdelta = parse_frame(
+        emitter.frame({"type": "response.reasoning.delta", "delta": "r"})
+    )
+    assert rdelta["output_index"] == 0 and rdelta["content_index"] == 0
+    assert rdelta["item_id"] == "rs_1"
+
+
+def test_failed_accepts_normalized_response_base() -> None:
+    emitter = SSEEmitter(CLIENT_ID)
+    error = {"type": "server_error", "code": "x", "message": "y"}
+    frames = emitter.failed(
+        error,
+        {"status": "failed", "output": [], "tools": [], "usage": None},
+    )
+    _, payload = parse_frame(frames[0])
+    assert payload["response"]["id"] == CLIENT_ID
+    assert payload["response"]["status"] == "failed"
+    assert payload["response"]["error"] == {**error, "param": None}
+    assert payload["response"]["error"]["param"] is None
+    assert payload["response"]["tools"] == []
+    # Every synthesized frame carries a gapless sequence number.
+    assert payload["sequence_number"] == 0
+    _, err_frame = parse_frame(frames[1])
+    assert err_frame["sequence_number"] == 1
+    # Back-compat: without a base, the minimal frame still holds.
+    _, minimal = parse_frame(
+        emitter.failed({"type": "server_error", "code": "z", "message": ""})[0]
+    )
+    assert minimal["response"]["id"] == CLIENT_ID
+    assert minimal["response"]["status"] == "failed"
+
+
+def test_annotation_events_get_position_fields() -> None:
+    emitter = SSEEmitter(CLIENT_ID)
+    emitter.frame(
+        {
+            "type": "response.output_item.added",
+            "item": {"id": "msg_1"},
+        }
+    )
+    emitter.frame(
+        {
+            "type": "response.content_part.added",
+            "part": {"type": "output_text", "text": "x"},
+        }
+    )
+    _, ann = parse_frame(
+        emitter.frame(
+            {
+                "type": "response.output_text.annotation.added",
+                "annotation": {"type": "url_citation", "url": "u"},
+            }
+        )
+    )
+    assert ann["item_id"] == "msg_1"
+    assert ann["output_index"] == 0
+    assert ann["content_index"] == 0
+    assert ann["annotation_index"] == 0
