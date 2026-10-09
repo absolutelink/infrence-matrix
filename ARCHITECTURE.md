@@ -275,7 +275,7 @@ must reference a registered type.
 | `name` | Type id (`llama-cpp`, `halogen`, `halogen-flash`, `gufo`, `mock`, …). Unique. |
 | `schema` | Committed JSON Schema (2020-12) for this type's `backend_config`. Drives admin validation on write **and** the UI form render. |
 | `max_running_backends` | **Phase 16.** Per-agent cap on simultaneously `running` backends of this type, declared in the shipped `schema.json` (top-level `x-max-running-backends`, default unlimited). `1` for halogen-flash (single NPU). Enforced by the scheduler (§6). |
-| `serves_modalities` | **Phase 18.** Which client-facing endpoint kinds this type can host, declared in the shipped `schema.json` (top-level `x-serves-modalities`, default `["llm"]`). Values ∈ `llm` \| `embedding` (`audio` reserved). A `ProviderDefinition`'s `modality` must be in this list or create/PATCH is refused 422. `llama-cpp` (vulkan + cuda) declares `["llm","embedding"]`; every other type stays `["llm"]`. Read into the column at every schema-commit point exactly like `max_running_backends`. |
+| `serves_modalities` | **Phase 18.** Which client-facing endpoint kinds this type can host, declared in the shipped `schema.json` (top-level `x-serves-modalities`, default `["llm"]`). Values ∈ `llm` \| `embedding` \| `tts` \| `asr` (**Phase 24:** speech ships as the two concrete modalities `tts` + `asr`; the Phase 18 reserved `audio` bucket was never valid and stays retired). A `ProviderDefinition`'s `modality` must be in this list or create/PATCH is refused 422. `llama-cpp` (vulkan + cuda) declares `["llm","embedding"]`; `talkies` declares `["tts","asr"]`; every other type stays `["llm"]`. Read into the column at every schema-commit point exactly like `max_running_backends`. |
 | `schema_fingerprint` | SHA-256 of canonical `schema` (same canonicalization as `config_fingerprint`). |
 | `pending_schema` / `pending_fingerprint` | Staged schema awaiting consensus (null when none). |
 | `pending_voters` | JSON list of **agent ids** that have registered presenting `pending_fingerprint` (Phase 16: voters are agents, not backends). |
@@ -308,7 +308,7 @@ backend (`ProviderInstance`).
 | --- | --- |
 | `alias` | Public model name clients use in `/v1/models` and the `model` field. Unique. |
 | `provider_type` | Must reference a registered `ProviderType`. **Phase 16: required at create — the Phase 14 shell (NULL type adopted at registration) is removed.** A type change is refused 409 while backends are attached. |
-| `modality` | **Phase 18.** The endpoint kind this definition serves: `llm` (default) \| `embedding` (`audio` reserved). The admin's **routing key**: `/v1/embeddings` accepts only `embedding` aliases; `/v1/responses` + `/v1/chat/completions` accept only `llm` aliases (the other kind is a clean 404). Must be in the `ProviderType.serves_modalities` list or create/PATCH is refused 422. Pushed to the provider on the assignment / `provider.config.update` / registration payloads so the engine boots correctly (llama-cpp adds `--embedding` for `embedding`). Immutable while backends are attached (same gate as `provider_type`). |
+| `modality` | **Phase 18.** The endpoint kind this definition serves: `llm` (default) \| `embedding` \| `tts` \| `asr` (**Phase 24**). The admin's **routing key**: `/v1/embeddings` accepts only `embedding` aliases; `/v1/responses` + `/v1/chat/completions` accept only `llm` aliases; `/v1/audio/speech` + `/v1/audio/voices` only `tts`; `/v1/audio/transcriptions` (HTTP + WS) only `asr` (any other kind is a clean 404). Must be in the `ProviderType.serves_modalities` list or create/PATCH is refused 422. Pushed to the provider on the assignment / `provider.config.update` / registration payloads so the engine boots correctly (llama-cpp adds `--embedding` for `embedding`). Immutable while backends are attached (same gate as `provider_type`). |
 | `backend_config` | JSON handed to the agent to start a backend for this definition: model artifacts (main GGUF + mmproj + draft, each with source), engine args, engine options. **Validated against the committed JSON Schema of its `ProviderType` on create/PATCH (Phase 12)**; the UI form is rendered from that schema (collapseable sections, `hf-file` artifact widget). Required (no shells). |
 | `agent_placement` | **Phase 16.** `any_of_type` (host on every agent whose `provider_type` matches) or `specific` (host only on the agents listed in `definition_agents`). Drives which agents receive `agent.assignments.update` and which backends the scheduler may pick. |
 | `agents` (link) | **Phase 16.** `definition_agents` join table (`provider_definition_id`, `agent_id`) — populated only when `agent_placement = specific`. |
@@ -338,6 +338,18 @@ the per-backend state the scheduler and lifecycle act on.
 | `backend_loaded_at` | When the backend last entered `running`/`in_use` (stamped by the status ingest on transition; cleared when it leaves the loaded set or the agent's socket dies). The idle reaper's window baseline is `max(last_request_at, backend_loaded_at)` so a freshly booted, never-requested backend is not reaped against a stale clock. |
 | `config_fingerprint` | SHA-256 of the applied `backend_config`; drives auto cache-clear and the `provider.config.update` push (admin PATCH + reconnect self-heal). |
 | `assigned_gpus` | Reserved — currently unused (VRAM is accounted per booted instance; metrics attribution is per-agent). |
+
+### TTSVoice
+**Phase 24.** A saved cloned voice, scoped to a `tts` `ProviderDefinition`:
+`{id, definition_id, name, ref_text, language, created_at}`. The row is the
+**UI-visible catalog** — the actual audio lives on the agent's disk
+(`custom-voices/<name>.wav` + sibling `.txt`/`.lang` sidecars under the
+backend's data dir), so the list stays readable while the backend is
+stopped. Enrollment is **admin-UI only** (`/admin/api`): the admin proxies
+the write to the agent's HTTP `/v1/audio/voices` surface (data plane — no
+new WS frame kinds), the driver persists the clip, and the row is created
+after the agent acks. Delete mirrors it. Clients only ever `GET
+/v1/audio/voices` (proxied live) and reference names in `voice`.
 
 ### ResponseRecord
 Stored OpenResponses turn (spec `ResponseResource`), chained by
@@ -815,9 +827,13 @@ error contract is specific to `/v1/responses`; the Phase 7
 | `/v1/responses` | **Full** (stream + non-stream) — Phase 6 |
 | `/v1/responses/compact` | **Implemented — Phase 20** (`app/api/v1/responses_compact.py`) — non-stream only (the spec's compact body has no `stream` field). Model-driven: the input items (+ `previous_response_id` chain, `instructions`, `prompt_cache_key`) are sent through the same scheduler admission + `litellm.aresponses` path with a fixed compression prompt; the result is returned as a spec `CompactResource` — admin-owned `cmp_<uuid>` id, `object: "response.compaction"`, one `compaction` output item whose `encrypted_content` is base64 JSON of the summary, concrete `usage` from the provider response. Persisted as a `ResponseRecord` with `parameters.api_format="compaction"`. Errors mirror the non-stream contract: missing `model` → 400, unknown/disabled alias → 404, no provider → 503, queue timeout → 504, upstream failure → 502. `prompt_cache_key` rides to litellm via `**kwargs` (no named param in litellm 1.103.2) — re-verify on any litellm bump. |
 | `/v1/chat/completions` | **Full** (stream + non-stream) — Phase 7, via `litellm.acompletion`; admin-owned `chatcmpl-<uuid>` id on every chunk, data-only SSE, persisted as `ResponseRecord` with `parameters.api_format="chat_completions"`. **Phase 22:** non-stream bodies pass through `_normalize_chat_response` (OpenAI-spec required nullables filled: `choices[].logprobs`, `message.refusal`, `finish_reason`, `index`; null optionals dropped: `tool_calls`, `function_call`, `audio`, `service_tier`, `system_fingerprint`) — validated by `llm-comply --format openai-chat` |
-| `/v1/models` | **Implemented** — Phase 7; derived from enabled `ProviderDefinition`s (alias asc, `owned_by`=provider_type, `model_metadata` merged). **Phase 18:** lists `llm` **and** `embedding` definitions; each object carries a `modality` marker so clients can filter. |
+| `/v1/models` | **Implemented** — Phase 7; derived from enabled `ProviderDefinition`s (alias asc, `owned_by`=provider_type, `model_metadata` merged). **Phase 18:** lists `llm` **and** `embedding` definitions; each object carries a `modality` marker so clients can filter. **Phase 24:** also lists `tts` and `asr` definitions (same marker mechanism). |
 | `/v1/embeddings` | **Implemented** — Phase 18; non-streaming only, via `litellm.aembedding` against the same scheduler admission + the agent's env-port `/v1` surface. Accepts only `modality=embedding` aliases (an `llm` alias → 404). Returns the spec `CreateEmbeddingResponse`; persists a `TokenUsageSample` (prompt tokens) only — no `ResponseRecord` (embeddings are not conversation turns). |
-| `/v1/completions` (legacy), `/v1/rerank`, `/v1/moderations`, `/v1/decisions`, `/v1/audio/*`, `/v1/files`, `/v1/batches` | **501 stubs** — accepted regressions (§12). `/v1/audio/*` is the reserved landing spot for the future `audio` modality (§4). |
+| `/v1/audio/speech` | **Implemented — Phase 24** (`app/api/v1/audio_speech.py`). OpenAI TTS contract against a `tts`-modality alias: JSON in, **binary audio out** (buffered `audio/*` or incremental `application/octet-stream` PCM + `X-Sample-Rate` for Qwen3 streaming). **litellm is bypassed** — direct httpx passthrough to the agent's `/v1/audio/speech` (binary/multipart make litellm a liability). Scheduler acquire/release + cancellation-safe `finally` identical to Phase 18 discipline; persists a usage sample (chars + audio seconds), **no `ResponseRecord`** (synthesis is not a conversation turn). |
+| `/v1/audio/transcriptions` | **Implemented — Phase 24** (`app/api/v1/audio_transcriptions.py`). OpenAI ASR contract against an `asr` alias: multipart `file` upload (or `file_path`) relayed to the agent; JSON/text/verbose_json/srt/vtt response formats passed through. Same acquire/release + usage-sample discipline. |
+| `/v1/audio/transcriptions/stream` (WS) | **Implemented — Phase 24** (`app/api/v1/audio_transcriptions_ws.py`). Live 16 kHz PCM ASR: the admin **terminates the client WebSocket** and relays bytes bidirectionally to the agent's WS surface (precedent: Phase 21 transport discipline). The scheduler slot is held for the connection lifetime and released on every teardown path. |
+| `/v1/audio/voices` | **Implemented — Phase 24.** Client `GET` proxies the live voice catalog of a `tts` backend (`?model=<alias>`). Enrollment (create/delete) is **admin-UI only** (`/admin/api/voices`), persisted as `TTSVoice` rows + on-disk clips on the agent. |
+| `/v1/completions` (legacy), `/v1/rerank`, `/v1/moderations`, `/v1/decisions`, `/v1/audio/translations`, `/v1/files`, `/v1/batches` | **501 stubs** — accepted regressions (§12). |
 | Responses-over-WebSocket transport | **Implemented — Phase 21** (`app/api/v1/responses_ws.py`). WS upgrade on the same `/v1/responses` resource (spec §WebSocket Transport, added 2026-04-24). The **admin terminates the client socket**; each `response.create` message runs the identical litellm HTTP/SSE call to the agent's backend port as the SSE path, and the normalized event dicts are re-emitted as WS JSON messages — **providers are unchanged**. Sequential turns (one in-flight per connection), connection-local continuation cache for `store=false` chains (`previous_response_not_found` on miss, evict-on-failed-continuation), no `[DONE]` sentinel on WS, early synthesized `response.created`/`in_progress` during cold-boot admission, 60-min connection limit. See IMPLEMENTATION_STATUS.md Phase 21 for locked decisions. |
 | Benchmarks | **Dropped entirely** |
 
@@ -892,6 +908,42 @@ upstream `/v1/embeddings`; `--pooling` is a schema option. `--jinja` (the chat
 template) is suppressed by default for `embedding` backends — it would wrap the
 input in a chat template and pollute the vector — while llm backends keep it on.
 The mock serves deterministic fake vectors so the whole path runs with no GPU.
+
+### Audio specifics (Phase 24)
+
+Speech ships as **two modalities** (`tts`, `asr`) served by the new
+**`talkies` provider type** — a thin proxy agent around
+`psyb0t/talkies:latest-cuda`, a self-contained OpenAI-compatible multi-model
+speech server (Qwen3-TTS variants, Kokoro, Chatterbox Turbo; Whisper /
+Parakeet / Canary / Sherpa / Vosk ASR). Key locked decisions (full rationale
+in IMPLEMENTATION_STATUS.md Phase 24):
+
+- **One multi-model backend per agent** (gufo precedent): one talkies
+  process serves every placed slug of the definition set; the agent
+  rewrites the request `model` (our alias) → talkies slug on the forwarded
+  request. `x-max-running-backends: 1`.
+- **Exact VRAM accounting via pinning:** the provider exports
+  `TALKIES_PRELOAD=<placed slugs>` + `TALKIES_MODEL_TTL=0`, so `backend
+  running` ⇔ all its models resident; the admin's per-booted-instance VRAM
+  ledger stays honest. `/api/ps` is driver-internal (readiness +
+  assignment-remove eviction), never client-facing.
+- **litellm is bypassed for audio.** Binary/multipart/WS payloads don't fit
+  litellm's call surface; the admin routes use **direct httpx passthrough**
+  to `{admission.base_url}/v1/...` with the same scheduler
+  acquire/release + cancellation-safe `finally` discipline as Phase 18.
+  `alias_registry` has no audio branch.
+- **Provider side:** `provider_lib` gains optional driver hooks
+  `speech()` / `transcribe()` / `voices_list()` / `voices_put()` /
+  `voices_delete()` (default 501, embeddings pattern) + slot-admitted
+  routes on the agent's env-port `/v1` surface, including a **WS relay**
+  for live ASR. Slots are held for the full stream/connection lifetime and
+  released on upstream close (pump invariant unchanged).
+- **Saved voices:** `TTSVoice` rows (admin DB) + on-disk clips on the agent
+  (`custom-voices/`); enrollment is admin-UI only and rides the agent HTTP
+  surface — **no new WS frame kinds**.
+- **Persistence:** audio requests are not conversation turns — no
+  `ResponseRecord`; usage samples carry chars + audio seconds (tts) or
+  audio seconds (asr).
 
 ---
 

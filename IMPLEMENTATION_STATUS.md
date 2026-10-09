@@ -1,7 +1,17 @@
 # Inference Matrix — Implementation Status
 
 **Overhaul branch:** `litellm-architecture-overhaul`
-**Last updated:** 2026-10-09 (**Phase 23 — token rate & latency telemetry
+**Last updated:** 2026-10-09 (**Phase 24 — Audio (talkies provider): 🟡 planned
+(S0 done).** Speech ships as two modalities — `tts` + `asr` — served by a new
+`talkies` provider type: a thin proxy agent around
+`psyb0t/talkies:latest-cuda` (Qwen3-TTS variants, Kokoro, Chatterbox Turbo;
+Whisper/Parakeet/Canary/Sherpa ASR). Client surface: `POST /v1/audio/speech`
+(binary + Qwen3 PCM stream), `POST /v1/audio/transcriptions` (multipart),
+`WS /v1/audio/transcriptions/stream` (live ASR), `GET /v1/audio/voices`;
+saved-voice enrollment is admin-UI only (`TTSVoice` rows + on-disk clips).
+litellm bypassed (direct httpx passthrough); VRAM stays exact via
+`TALKIES_PRELOAD` + `TALKIES_MODEL_TTL=0` model pinning. See the Phase 24
+section. Prior: **Phase 23 — token rate & latency telemetry
 plumbing: ✅ SHIPPED (S0–S4).** The header StatsBar tok/s and per-instance
 speed/latency no longer read 0/`—`: llama-cpp now scrapes its `llamacpp:*`
 Prometheus rate gauges into `usage.completion_tokens_details` (porting gufo's
@@ -3044,6 +3054,90 @@ so `avg gen latency` shows `—` for every provider.
   prompt_time, prediction_time}`; admin tests lock the `persist_turn` mapping
   (stream + non-stream: rates verbatim, `*_time` seconds → `*_ms` ×1000) and
   the S3 litellm-extras-survive finding (typed `ResponseAPIUsage` path).
+
+---
+
+## Phase 24 — Audio (talkies provider) 🟡
+
+**Goal.** Add speech I/O to the matrix: OpenAI-compatible
+`/v1/audio/speech` (TTS), `/v1/audio/transcriptions` (ASR, file + live WS
+stream), and `/v1/audio/voices` (catalog + admin-side saved-voice
+enrollment), delivered through a new hardware-local provider type
+**`talkies`** driving `psyb0t/docker-talkies` (CUDA image).
+
+**Why talkies.** It is a self-contained OpenAI-compatible multi-model speech
+server: Qwen3-TTS (all 5 variants incl. Base voice-cloning + VoiceDesign)
+with **true incremental PCM streaming**, Kokoro, Chatterbox Turbo, and a
+broad ASR stable (Whisper/Parakeet/Canary/Sherpa/Vosk + phoneme models),
+plus a native voice catalog where cloning = dropping a `.wav` (+ sibling
+`.txt` transcript) into `custom-voices/`. Wrapping it as a thin proxy driver
+(gufo precedent) avoids in-process ML deps, the HF-directory downloader
+work, and per-engine translation layers entirely.
+
+**Locked decisions.**
+- **Modalities:** `tts` and `asr` join `_VALID_MODALITIES` (the Phase 18
+  reserved `audio` bucket is retired, never was valid). Route gating per
+  modality mirrors Phase 18's clean-404 discipline.
+- **Backend shape:** one talkies process per agent serving all placed slugs
+  (`x-max-running-backends: 1`); the agent rewrites request `model`
+  (our alias) → talkies slug. One multi-model backend beats N processes
+  (shared model cache, talkies-native admission).
+- **VRAM exactness:** `TALKIES_PRELOAD=<placed slugs>` +
+  `TALKIES_MODEL_TTL=0` pin models so `backend running` ⇔ resident;
+  admin per-instance VRAM accounting stays honest. `/api/ps` +
+  `DELETE /api/ps/{slug}` are **driver-internal** (readiness,
+  assignment-remove eviction) — never client-facing.
+- **litellm bypassed for audio:** direct httpx passthrough (binary /
+  multipart / WS); no `alias_registry` audio branch; scheduler
+  acquire/release + shielded-`finally` discipline unchanged.
+- **provider_lib surface:** optional driver hooks `speech()`,
+  `transcribe()`, `voices_list()`, `voices_put()`, `voices_delete()`
+  (embeddings pattern, default 501) + slot-admitted routes on the agent
+  env-port `/v1` surface incl. a WS relay for live ASR; slots held for
+  stream/connection lifetime, release-on-upstream-close pump invariant
+  preserved.
+- **Saved voices:** `TTSVoice` Postgres rows (UI-visible while backends are
+  stopped) + clips on the agent disk; enrollment is **admin-UI only**
+  (`/admin/api` → agent HTTP data plane); clients only `GET /v1/audio/voices`
+  and use names in `voice`. **No new WS frame kinds.**
+- **Persistence:** no `ResponseRecord` (audio is not a conversation turn);
+  usage samples carry chars + audio seconds (tts) / audio seconds (asr).
+- **Seed slugs (compose example + deploy):** `qwen3-tts-1.7b-custom`,
+  `qwen3-tts-1.7b` (clone), `qwen3-tts-1.7b-design`,
+  `whisper-large-v3-turbo` (~8–10 GB VRAM pinned; split agents or drop to
+  0.6B if the box is tight).
+- **Streaming formats:** buffered audio relays as-is; Qwen3
+  `response_format="pcm"` relays as incremental octet-stream +
+  `X-Sample-Rate` (no admin transcoding). `translations` stays 501.
+
+**Slices.**
+- **S0 (orchestrator).** This law-docs entry + `ARCHITECTURE.md` updates
+  (§4 modality values, `TTSVoice`, §7 endpoint table + Audio specifics).
+  ✅ done.
+- **S1.** `provider/lib` audio surface: driver hooks + `BackendLifecycle`
+  slot-admitted wrappers (incl. WS slot hold), `app_factory` routes
+  (`speech`, `transcriptions`, `voices` GET/PUT/DELETE, WS stream), mock
+  provider fake speech/transcribe/voices. Tests: admission 429/503,
+  release-on-close, multipart relay, WS relay. ⬜
+- **S2.** `provider/talkies` package: Dockerfile spike (`FROM
+  psyb0t/talkies:latest-cuda`, private-port launch verification first),
+  proxy driver (env construction, alias→slug rewrite, `/healthz`+`/api/ps`
+  health, voice-dir writes), `schema.json`
+  (`x-serves-modalities: ["tts","asr"]`, `x-max-running-backends: 1`),
+  `main.py` (gufo-style registry), workspace member + CI + compose example.
+  Tests with a stubbed talkies engine (no GPU). ⬜
+- **S3.** Admin: `tts`/`asr` in `_VALID_MODALITIES` + gating matrix,
+  `audio_speech.py` + `audio_transcriptions.py` (httpx passthrough, usage
+  samples), `audio_voices.py` (client GET proxy) + `/admin/api` enrollment
+  + `TTSVoice` model/migration, un-stub `stubs.py`,
+  `scripts/generate-client.sh`. ⬜
+- **S4.** Admin WS live-ASR relay (`audio_transcriptions_ws.py`, Phase 21
+  precedent): auth → modality gate → slot hold for connection lifetime →
+  bidirectional byte relay → shielded release on every teardown path. ⬜
+- **S5.** Frontend: modality enum/badges (`tts`/`asr`), voices panel
+  (list/enroll wav+transcript/delete), playground audio playback. ⬜
+- **S6.** Docs polish: `provider/README.md` talkies worked example,
+  `redis-keys.md` if new keys, `development.md`/compose notes. ⬜
 
 ---
 
