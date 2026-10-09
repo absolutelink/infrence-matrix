@@ -2693,9 +2693,16 @@ string) and missing required `summary`. Driver now sanitizes reasoning
 items on `output_item.added/done` + terminal `response.output` (drop
 null `encrypted_content`, default `summary: []`, preserve strings,
 non-reasoning untouched); 177 provider tests green, review CLEAN.
-Also observed: `image-input` 502s on `rocinante` — the Flash backend
-is not vision-capable (capability gap, not a protocol bug; use
-`rocinante-tiny` for image compliance).
+
+**A-S3 (deploy + close-out)**: admin on `f0871b8`, halogen-flash agent
+redeployed with `615b1ae`. Deployment compliance: **`rocinante`
+16/17** (all reasoning-event/item failures gone; sole failure
+`image-input` → 502 — the Flash backend is not vision-capable:
+capability gap, not a protocol bug; use `rocinante-tiny` for image
+tests) and **`rocinante-tiny` 17/17 warm**. Known limitation: WS turns
+against a COLD backend exceed the compliance client's 30s per-turn
+timeout during model load — warm the alias before WS compliance runs.
+Phase 21 addendum: SHIPPED.
 
 **A-S2**: `WS_TURN_SILENCE_SECONDS=300` guard in `responses_ws._run_turn`
 (`asyncio.wait` + explicit cancel so a new `failure_sink` on
