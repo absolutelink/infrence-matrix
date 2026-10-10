@@ -2,7 +2,7 @@
 
 **Overhaul branch:** `litellm-architecture-overhaul`
 **Last updated:** 2026-10-10 (**Phase 25 — Multi-model definitions: 🟡
-in progress (S0–S1 done).** One definition = one backend process serving multiple
+in progress (S0–S2 done).** One definition = one backend process serving multiple
 client-facing model names, each with its own modality + per-model config;
 provider declares capability (`x-multi-model`), admin owns the names, the
 driver routes. First consumer talkies (4 slugs → 1 def); later gufo /
@@ -3289,7 +3289,19 @@ satellites: embed/rerank/decision under one roof).
   lib 234 green (+30), mock 63; llama-cpp/gufo/halogen/halogen-flash
   regression-clean. Review: 2 rounds, CLEAN.
 - **S2.** `provider/talkies`: multi-slug engine env, name→slug routing,
-  all-slug health pin, schema `x-multi-model` + per-model config schema. ⬜
+  all-slug health pin, schema `x-multi-model` + per-model config schema.
+  ✅ done — driver `set_models` name→slug map; one uvicorn with
+  comma-joined `TALKIES_ENABLED_MODELS`/`PRELOAD` + merged per-slug
+  concurrency (max); health pins the **spawned** slug set (recorded at
+  start, cleared at stop) so a live assignments add of a not-yet-loaded
+  slug never flips a healthy backend unhealthy — new slugs load via the
+  `provider.config.update` restart path; speech/transcribe/WS rewrite
+  name→slug; voices/`voice_put`/`voice_delete` thread the requested served
+  name through the provider_lib seam (`model: str|None=None`,
+  source-compatible) to the routed slug; `list_models` advertises every
+  name. schema `x-multi-model` + `x-served-model-config-schema`, top-level
+  `model` now optional. Legacy single-slug byte-identical. talkies 76 /
+  lib 235 / mock 63 green. Review: 2 rounds, CLEAN.
 - **S3.** admin: `ProviderModel` + migration, `resolve_models`,
   scheduler name lookup + per-name acquire/instance boot, endpoint gates
   via per-model modality, `/v1/models` expansion, definition API
