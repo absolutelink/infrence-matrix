@@ -3,7 +3,7 @@
 This document specifies the registration handshake and the provider WebSocket
 protocol between a **provider agent** (a hardware-local container —
 `provider/mock`, `provider/llama-cpp`, `provider/halogen`,
-`provider/halogen-flash`, `provider/gufo`) and the **admin**
+`provider/halogen-flash`, `provider/gufo`, `provider/talkies`) and the **admin**
 (`admin/backend`, the stateless broker).
 
 **Phase 16 (machine-scoped agents) is the live model.** A provider container is
@@ -21,6 +21,11 @@ Auth model: **trusted LAN**. The shared **machine secret**
 registration; the per-**agent** `agent_secret` (minted at registration, stored
 only in Redis) gates the WebSocket. `/admin/api` and `/v1` are unauthenticated
 by design.
+
+> **Data plane note (Phase 24).** The agent's single `base_port` `/v1` surface
+> also carries the `/v1/audio/*` routes (speech / transcriptions / live-ASR WS /
+> voices). These ride the same HTTP data plane as `/v1/responses` — **no new WS
+> frame kinds** were added; the control plane is unchanged.
 
 The frame envelope, `FrameKind` set, and `Ack` shape are canonical in
 `provider/lib/provider_lib/wire.py` and mirrored in

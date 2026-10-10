@@ -37,6 +37,11 @@ Deployment of the overhauled stack. Architecture:
 - **Other providers** (`gufo`, `halogen`, `halogen-flash`): built from
   `provider/<type>/Dockerfile` out-of-band — they gate on NPU/ROCm
   hardware and their backend binaries are not in CI.
+- **talkies** (`provider/talkies/Dockerfile`, Phase 24 speech: TTS + ASR):
+  built out-of-band on `ARG BASE_IMAGE=psyb0t/talkies:latest-cuda` (the image
+  only layers the provider venv on top — the heavy talkies ML layers are never
+  rebuilt). **Requires an NVIDIA GPU** (CUDA base). See the talkies deploy note
+  below.
 
 CI (`build-and-push.yml`) builds `matrix-app` and `provider-llama-cpp` on
 push to `main`/`develop` and version tags. Tags follow the ref pushed
@@ -151,6 +156,44 @@ sudo podman run -d --name provider-llama-cpp-cuda12 \
   --force-recreate provider-<type>` where Compose is used).
 - The admin assigns machine-level metrics ownership and drives
   `backend.start`/`backend.stop` over the WS as requests arrive.
+
+### talkies (Phase 24 speech: TTS + ASR)
+
+The talkies agent runs a CUDA speech engine; one talkies process boots **per
+placed definition** (single-slug engine — the registry is read at import), so
+each definition pins its model into VRAM for its whole lifetime.
+
+- **Image**: `docker build -f provider/talkies/Dockerfile -t
+  matrix-provider-talkies .` (context = repo root). The base is
+  `psyb0t/talkies:latest-cuda` (`ARG BASE_IMAGE`); override only to relocate the
+  engine venv (`TALKIES_PYTHON`) or registry file (`TALKIES_MODELS_FILE`).
+- **GPU**: expose the NVIDIA device nodes (`/dev/nvidia0`, `/dev/nvidiactl`,
+  `/dev/nvidia-uvm`, `/dev/nvidia-uvm-tools`) or use the Container Toolkit
+  (`gpus: all`). The engine defaults to `TALKIES_DEVICE=cuda`.
+- **Volumes**: `/models` (prefetched snapshots + staged files + custom voices)
+  and `/cache` (`provider_config.json`) **must be writable by uid 1000** (the
+  `talkies` user). The Dockerfile pre-creates them owned by uid 1000, but
+  **pre-existing volumes from an earlier deploy keep their old ownership** — run
+  a one-time `chown -R 1000:1000` on the host volume (or remove it) once.
+- **First boot**: the driver prefetches the definition's snapshot into
+  `MODELS_DIR/models/<slug>` before spawn (network egress happens only here;
+  the server then runs `HF_HUB_OFFLINE=1`), then loads the checkpoint — minutes
+  on a cold box. `backend.start` heartbeats `initializing` throughout; budget
+  `TALKIES_BOOT_TIMEOUT` (default 600s).
+- **Seed slugs** (bundled talkies registry): `qwen3-tts-1.7b-custom`,
+  `qwen3-tts-1.7b`, `qwen3-tts-1.7b-design` (TTS) and `whisper-large-v3-turbo`
+  (ASR). Ballpark VRAM **per pinned process** (fp16, TTL=0): ~4–6 GiB for the
+  1.7B-class Qwen3-TTS slugs, ~2–3 GiB for whisper-large-v3-turbo — size
+  `vram_required_bytes` per definition accordingly (there is no
+  `x-max-running-backends` cap; VRAM admission governs how many share a box).
+- **Version hard-fail**: as with every provider, the talkies `VERSION` must
+  exactly match the admin `VERSION` or registration 409s — deploy the admin
+  first, then recreate every talkies agent.
+- **Smoke status**: the real `docker build` + `docker run` smoke is **still
+  pending on the deploy host** (no container runtime in the dev sandbox). The
+  `provider/talkies/Dockerfile.stubtest` header has the exact build+run
+  sequence (stub base → provider image → expect the agent, not stock talkies,
+  attempting registration).
 
 ## Database
 

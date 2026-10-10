@@ -2,7 +2,7 @@
 
 **Overhaul branch:** `litellm-architecture-overhaul`
 **Last updated:** 2026-10-09 (**Phase 24 — Audio (talkies provider): 🟡 in
-progress (S0–S4 done).** Speech ships as two modalities — `tts` + `asr` — served by a new
+progress (S0–S5 done).** Speech ships as two modalities — `tts` + `asr` — served by a new
 `talkies` provider type: a thin proxy agent around
 `psyb0t/talkies:latest-cuda` (Qwen3-TTS variants, Kokoro, Chatterbox Turbo;
 Whisper/Parakeet/Canary/Sherpa ASR). Client surface: `POST /v1/audio/speech`
@@ -3181,7 +3181,20 @@ work, and per-engine translation layers entirely.
   a double-cancellation test. 19 WS tests; admin suite **604 green**.
   Review: CLEAN (two Medium test gaps closed same slice).
 - **S5.** Frontend: modality enum/badges (`tts`/`asr`), voices panel
-  (list/enroll wav+transcript/delete), playground audio playback. ⬜
+  (list/enroll wav+transcript/delete), playground audio playback. ✅ done —
+  `definitions.tsx` modality schema/badges/detail extended; auto-reset now
+  gated on the loaded provider-type detail (cold-cache edits no longer
+  clobber stored `tts`/`asr`/`embedding` — was a MEDIUM found in review);
+  `VoicesPanel` in definition detail (list/enroll multipart + 32 MiB
+  client guard/delete, relayed error statuses surfaced); playground
+  branches on modality — TTS synthesize (live voice catalog, `pcm`
+  excluded as streaming-only, blob `<audio>` with unmount revoke,
+  blob/text error-body detail parsing) + ASR transcribe panel; llm/embedding
+  flows untouched. Shared helpers extracted to `src/lib/audio.ts` with 12
+  discriminating Playwright Node specs. `body?: never` casts on
+  speech/transcription calls are a known backend-openapi gap (routes read
+  raw `request.json()`/`form()`) — follow-up: declare Pydantic request
+  models + regen client. Review: 2 rounds, CLEAN.
 - **S6.** Docs polish: `provider/README.md` talkies worked example,
   `redis-keys.md` if new keys, `development.md`/compose notes. ⬜
 

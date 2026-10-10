@@ -23,7 +23,7 @@ that same type. It exposes:
 
 `provider/lib/provider_lib` holds the generic machinery; each provider
 package (`provider/mock`, `provider/llama-cpp`, `provider/halogen`,
-`provider/halogen-flash`, `provider/gufo`) implements the per-type
+`provider/halogen-flash`, `provider/gufo`, `provider/talkies`) implements the per-type
 driver and overrides only what its backend does differently. Since Phase 16
 slice 6 every package hosts N backends per process (a `BackendRegistry` of
 lifecycles served by a single `AgentServer` on the env `PROVIDER_PORT`); a
@@ -294,6 +294,33 @@ class BackendDriver(ABC):
         ...
         # Optional; default raises NotImplementedError -> HTTP 501.
 
+    # Phase 24 (audio): optional speech / transcription / voice surface.
+    # Every hook defaults to NotImplementedError -> HTTP 501 (the embeddings
+    # pattern). The lifecycle wraps the slot-consuming ones (speech /
+    # transcribe / transcribe_stream) with the same eager-acquire +
+    # release-on-upstream-close discipline; voices/voice_put/voice_delete are
+    # serving-gated but slot-free.
+    def speech(self, request: dict) -> SpeechStream:
+        ...
+        # Return a SpeechStream(headers=..., chunks=<closeable async byte
+        # iterator>). Content-Type (+ X-Sample-Rate for PCM) is fixed
+        # synchronously from the request; chunks are already-encoded audio.
+
+    async def transcribe(self, form: dict, files: list) -> tuple[int, dict, bytes]:
+        ...
+        # Relay a multipart transcription; returns the upstream
+        # (status, headers, body) triple so every response_format passes
+        # through untouched.
+
+    async def voices(self) -> dict: ...            # catalog passthrough (no slot)
+    async def voice_put(self, name, wav, ref_text, language) -> dict: ...  # enrollment (no slot)
+    async def voice_delete(self, name) -> dict: ...  # removal (no slot)
+
+    async def transcribe_stream(self, websocket) -> None:
+        ...
+        # Bridge a live-ASR WebSocket to the engine; the lifecycle holds a
+        # slot for the whole connection and releases it when this returns.
+
     def apply_config(self, backend_config: dict) -> None:
         ...
         # Phase 9: adopt an updated backend_config before the next start
@@ -420,6 +447,12 @@ Mounted when `BackendOverrides.lifecycle` is set; otherwise 503.
 | `GET /v1/models` | `{"object":"list","data":driver.list_models()}`. **503** unless backend RUNNING/IN_USE (a stopped backend has no cheap source of truth; the admin starts it on demand). |
 | `POST /v1/responses` | **`stream: true`**: slot-admitted SSE (`text/event-stream`). Each event: `event: <type>` + `data: <json>` lines (OpenResponses style, no `[DONE]`). **Default/false**: the event stream is drained and the terminal `response.*` object returned as JSON (spec default). **429** busy, **503** not ready. |
 | `POST /v1/chat/completions` | Same discipline; chunks are `chat.completion.chunk` events, terminated with `data: [DONE]`. **501** if the driver has no chat surface. |
+| `POST /v1/audio/speech` | OpenAI TTS (Phase 24). **Slot-admitted streaming**: the driver returns a `SpeechStream` (headers + audio byte chunks); the route serves a `StreamingResponse` preserving `Content-Type` (+ `X-Sample-Rate` for PCM). The slot is held for the whole stream and released on upstream close, never on client disconnect. **429** busy, **503** not ready, **501** if the driver has no speech surface. |
+| `POST /v1/audio/transcriptions` | OpenAI ASR multipart relay (Phase 24). **Slot-admitted**, non-streaming: the driver awaits one upstream call and returns `(status, headers, body)` so every `response_format` (json/text/verbose_json/srt/vtt) passes through untouched; the slot releases in a `finally`. **501** if the driver has no transcription surface. |
+| `WS /v1/audio/transcriptions/stream` | Live-ASR WebSocket bridge (Phase 24). **Slot held for the connection lifetime**, released when the driver's bridge coroutine returns (any disconnect). A driver without the surface closes the socket **1011**. |
+| `GET /v1/audio/voices` | Voice catalog passthrough (Phase 24). **Serving-gated, no slot** — requires a RUNNING/IN_USE backend (else **503**); **501** if the driver has no voice surface. |
+| `PUT /v1/audio/voices/{name}` | Saved-voice enrollment write (Phase 24). **Serving-gated, no slot**; name validated as a single filesystem-safe segment (else **400**). |
+| `DELETE /v1/audio/voices/{name}` | Saved-voice removal (Phase 24). **Serving-gated, no slot**; same name validation. |
 | `GET /health` | Provider identity + `backend_status`, `in_flight`, `capacity`. |
 
 Slots are acquired **before** the `StreamingResponse` starts so
@@ -1104,6 +1137,184 @@ See "Overriding usage normalization" above; the implementation is
 `response.incomplete`, accumulating `output_text.delta` characters and
 reasoning-delta tokens for the estimate inputs. Table-tested with every
 observed raw shape in `tests/test_calculate_usage.py`.
+
+## talkies provider (provider/talkies)
+
+`TalkiesBackend` (provider_talkies/driver.py) manages one **talkies** speech
+server subprocess (TTS + ASR). talkies is a **speech engine, not an LLM**: the
+driver implements the Phase 24 `/v1/audio/*` surface (speech / transcriptions /
+voices / live-ASR WS) and leaves the OpenResponses / chat / embeddings surfaces
+at the ABC defaults (`NotImplementedError` → 501). Because it speaks no LLM
+protocol, the admin's audio routes **bypass litellm** and dial the agent's
+`/v1/audio/*` directly (ARCHITECTURE.md §7 Audio specifics).
+
+**One process per backend definition (locked Phase 24 shape).** talkies reads
+its model registry and enabled-model set **only at import**, so a definition's
+slug set is process-scoped — a config change requires a restart (exactly the
+Phase 9 config-update flow). Each backend therefore boots a talkies process
+enabled to **exactly its single `model.slug`** (`TALKIES_ENABLED_MODELS` /
+`TALKIES_PRELOAD`). There is **no `x-max-running-backends` cap**: VRAM admission
+governs how many talkies processes share a machine.
+
+### Launch (uvicorn, private loopback)
+
+`python -m talkies` hardcodes `0.0.0.0:8000` — unusable for a private
+per-backend port. The driver launches the ASGI app directly:
+
+```
+<TALKIES_PYTHON> -m uvicorn talkies.server:app --host 127.0.0.1 --port <OS-assigned>
+```
+
+in its own session (`start_new_session=True`; `stop()` kills the process group).
+The engine port is OS-assigned at start (`bind 127.0.0.1:0`), private to the
+container — the admin reaches the backend through the agent's single
+`PROVIDER_PORT` `/v1` surface, routed by `model`.
+
+### Env mapping (env.py)
+
+The full subprocess env is the agent env plus the `TALKIES_*` set below
+(`build_env`). Every knob is fixed for the process lifetime (import-time
+registry); `env.py` is the executable mapping and the schema's `x-flag` names
+the exact upstream var.
+
+| Env | Value | Source |
+| --- | --- | --- |
+| `TALKIES_ENABLED_MODELS` | the definition's single `model.slug` | `model.slug` |
+| `TALKIES_PRELOAD` | same slug (loaded at boot) | `model.slug` |
+| `TALKIES_MODEL_TTL` | `0` (default) = **pin** the model resident | `limits.model_ttl` |
+| `TALKIES_MODEL_CONCURRENCY` | `"<slug>=N"` — engine admission (HTTP ASR+TTS + live WS together; excess 429, never queues) | `limits.model_concurrency` (default 1) |
+| `TALKIES_DATA_DIR` | `TALKIES_DATA_DIR` env if set, else `MODELS_DIR` | container env / `MODELS_DIR` |
+| `TALKIES_DEVICE` | `cuda` (default) / `cpu` / `auto` / `cuda:N` | `engine.device` |
+| `TALKIES_AUTH_TOKEN` | config `security.auth_token`, else **random per start** (`secrets.token_urlsafe`) | `security.auth_token` |
+| `TALKIES_MODELS_FILE` | bundled registry JSON (engine reads at import) | container env (default `/app/models.json`) |
+| `TALKIES_MAX_UPLOAD_BYTES` | engine upload cap; emitted only when `limits.max_upload_bytes` set | `limits.max_upload_bytes` |
+| `HF_HUB_OFFLINE` | `1` — the server never reaches the Hub at request time | fixed |
+| `HF_HOME` / `HF_HUB_CACHE` | both pinned to `$TALKIES_DATA_DIR/hf` (see below) | derived |
+
+`TALKIES_BOOT_TIMEOUT` (container env, default 600s) is the health budget for
+the cold first load (device init + multi-GB checkpoint); the driver heartbeats
+`initializing` (newest log line) every ~15s while waiting. It is a driver-side
+setting, not exported to the subprocess.
+
+**`HF_HOME` == `HF_HUB_CACHE` agreement:** the base image bakes
+`HF_HOME=/data/hf` (an unmounted path once `TALKIES_DATA_DIR` is blanked). The
+driver re-points both to `$TALKIES_DATA_DIR/hf` and pins `HF_HUB_CACHE`
+**explicitly** (not left to the `HF_HOME`/`$HOME` default) so it equals the
+`cache_dir` the prefetch pass hands `snapshot_download` for dependency repos —
+one level, not HF's implicit `<HOME>/hub`. Under offline mode the server only
+finds dependency repos under its effective hub cache, so a mismatch silently
+breaks request-time dependency loads.
+
+### Prefetch contract (prefetch.py)
+
+The image entrypoint normally prefetches enabled slugs before exec'ing the
+server; because this provider launches uvicorn directly, the driver does the
+equivalent fetch during the backend's `initializing` phase, **before spawn**
+(entrypoint-parity with `psyb0t/docker-talkies` `entrypoint.sh`):
+
+1. Resolve the slug in the registry JSON at `TALKIES_MODELS_FILE` (an unknown
+   slug fails the start).
+2. `snapshot_download` the repo into the **flat** dir
+   `$TALKIES_DATA_DIR/models/<slug>` (its mere non-emptiness is the "cached"
+   signal), honoring `download_patterns` (or the legacy `gguf_file` narrowing).
+3. `snapshot_download` each `dependencies` repo into the hub cache
+   (`$TALKIES_DATA_DIR/hf`, explicit `cache_dir`).
+
+`HF_HUB_OFFLINE` is cleared **in-process only** for the fetch (same trick as
+`provider_lib.downloader`); the spawned server keeps the offline env. The
+`/data` layout under `MODELS_DIR` is `models/` (snapshots) + `files/`
+(engine-staged uploads) + `custom-voices/` (enrolled clips) + `hf/` (hub
+cache); the driver `mkdir`s all four on start. `download.progress` events
+stream to the admin around the fetch.
+
+### Health
+
+Ready ⇔ process alive **AND** `/healthz` 200 **AND** `/api/ps` lists the slug.
+With `TALKIES_MODEL_TTL=0` + PRELOAD the slug appears the moment the load
+finishes, so a green health check means the weights are resident — which is what
+keeps the admin's per-instance VRAM ledger exact. `/api/ps` is driver-internal
+(readiness), never client-facing.
+
+### Audio proxy (driver)
+
+- **speech** (`/v1/audio/speech`): rewrites the request `model` from the
+  definition **alias → slug**, streams the upstream bytes, and derives response
+  headers from the request (`response_format` → Content-Type; `pcm` adds
+  `X-Sample-Rate: 24000` — talkies TTS is always 24 kHz mono). Recorded
+  `defaults` fill omitted fields (never overriding an explicit value). Upstream
+  non-2xx raises `HTTPException` from the chunk generator (the stream aborts +
+  slot releases, but the already-committed 200 cannot be remapped — the
+  `SpeechStream` contract fixes headers synchronously).
+- **transcribe** (`/v1/audio/transcriptions`): relays the multipart with the
+  alias→slug rewrite; upstream status/headers/body pass through untouched (every
+  `response_format`: json/text/verbose_json/srt/vtt). Only ASR-meaningful
+  defaults (`language`) merge in. Bounded by `TALKIES_BOOT_TIMEOUT`.
+- **transcribe_stream** (live-ASR WS): bidirectional bridge to the engine's
+  `/v1/audio/transcriptions/stream`; the lifecycle holds the slot for the whole
+  connection. The driver rewrites the `model` field of the **start control
+  frame** (alias→slug) — non-JSON / model-less frames pass through.
+- **voices / voice_put / voice_delete**: catalog passthrough + custom-voice
+  enrollment on the shared data dir. Enrollment writes
+  `custom-voices/<name>.wav` plus optional sibling sidecars `<name>.txt`
+  (reference transcript) and `<name>.lang` (language); talkies discovers them on
+  the next catalog read. Names are validated as single filesystem-safe segments
+  (route + driver, defense in depth).
+
+### backend_config schema
+
+The shipped `provider_talkies/schema.json` (2020-12) declares
+`x-serves-modalities: ["tts", "asr"]` and **no `x-max-running-backends`** (VRAM
+admission governs). Canonical example:
+
+```json
+{
+  "model":    {"slug": "qwen3-tts-1.7b-custom", "revision": null},
+  "engine":   {"device": "cuda"},
+  "defaults": {"voice": "Vivian", "language": "en", "response_format": "mp3",
+               "speed": 1.0, "instructions": null},
+  "limits":   {"model_concurrency": 1, "max_upload_bytes": null, "model_ttl": 0},
+  "security": {"auth_token": ""}
+}
+```
+
+- Sections (`x-order`): `model` (1) · `engine` (2) · `defaults` (3) ·
+  `limits` (4) · `security` (5); `additionalProperties: false` throughout;
+  `model` required.
+- `model.slug` is the single registry slug this definition serves (must exist in
+  `TALKIES_MODELS_FILE`); `model.revision` optionally pins the prefetch snapshot
+  commit.
+- `defaults` are recorded request fallbacks (the driver merges them into the
+  forwarded body); `defaults.response_format` applies to **speech only** and
+  never leaks into a transcription form.
+- `limits.model_ttl` default `0` pins the model (VRAM exactness); a nonzero value
+  lets talkies unload the idle model while the backend still reports running, so
+  the admin's VRAM accounting **under-counts** — set only deliberately on shared
+  boxes.
+- `security.auth_token` (`x-secret`) is the engine bearer; empty = random per
+  start (the engine is loopback-only inside the container). Never logged.
+
+### Dockerfile (base-image hazard overrides)
+
+Built on `psyb0t/talkies:latest-cuda` (`ARG BASE_IMAGE`); the image only layers
+the provider venv (`/opt/provider-venv`, python 3.14) on top — the heavy talkies
+ML layers are never rebuilt. The base ends as `USER talkies` (uid 1000) with a
+root-owned `/opt`, an `ENTRYPOINT` that ignores `$@` and execs stock talkies on
+`0.0.0.0:8000`, `ENV TALKIES_DATA_DIR=/data` + `HF_HOME=/data/hf`, and a
+`HEALTHCHECK` probing `:8000` — every one is wrong for the agent and overridden
+deliberately:
+
+| Base hazard | Override |
+| --- | --- |
+| `ENTRYPOINT` execs stock talkies, ignores `$@` | replaced with `python -m provider_talkies.main` |
+| `USER talkies` (uid 1000) + root-owned `/opt` | build layers run `USER root`, then hand back to `talkies` |
+| `ENV TALKIES_DATA_DIR=/data` (unmounted) | blanked (`TALKIES_DATA_DIR=`) → driver derives from `MODELS_DIR` |
+| `HEALTHCHECK` probes `:8000` | `HEALTHCHECK NONE` (agent liveness is `/health` on `PROVIDER_PORT`) |
+| `/models` + `/cache` not created | `mkdir -p` + `chown -R talkies:talkies` (uid 1000) |
+
+**Pre-existing volumes:** a fresh named volume is seeded root-owned by Docker, so
+the Dockerfile pre-creates `/models` + `/cache` owned by uid 1000. Volumes that
+already exist from a pre-fix deploy keep their old ownership — operators must
+`chown -R 1000:1000` on the host (or remove the volume) once.
 
 ## Phase 9: config update / cache clear / storage prune
 

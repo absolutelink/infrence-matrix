@@ -172,6 +172,21 @@ uv run --project provider/llama-cpp pytest provider/llama-cpp/tests -q
 Real-hardware providers (llama-cpp etc.) need `LLAMA_SERVER_PATH` and GPU
 access — use the mock provider for hardware-free development.
 
+### Audio (talkies) without a GPU
+
+The Phase 24 **talkies** provider (`provider/talkies`) is a CUDA speech engine
+(TTS + ASR): it needs an NVIDIA GPU and prefetches its model snapshot into
+`MODELS_DIR` on first boot (minutes), so it is not a hardware-free dev target.
+A commented `provider-talkies` example exists in `compose.yml` (CUDA device
+nodes + `talkies_cache`/`talkies_models` volumes) for when you do have a GPU.
+
+For GPU-free development the **mock provider now fakes the whole `/v1/audio/*`
+data plane**: `speech()` returns a deterministic sine-wave WAV (or incremental
+PCM chunks), `transcribe()` echoes a fake transcript, and an in-memory voice
+store (seeded with `alloy`/`echo`) backs `voices()` / `voice_put()` /
+`voice_delete()` and the live-ASR WS bridge — so the admin's audio routes,
+enrollment, and slot discipline are all exercisable with no model weights.
+
 ## Frontend dev loop
 
 From the repo root:
