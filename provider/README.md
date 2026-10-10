@@ -273,6 +273,89 @@ adapt to the backend. Example:
 - Test that the schema parses, validates the example configs in this
   README, and has a stable fingerprint.
 
+## Multi-model providers (Phase 25)
+
+A provider **type** may serve several client-facing model names from **one**
+backend process (one `ProviderInstance`, one boot, one VRAM admission, one
+capacity pool shared by all names). The division of responsibility is locked
+([../docs/multi-model-definitions.md](../docs/multi-model-definitions.md)):
+the **type** declares the capability, the **admin** owns the names, the
+**driver** routes a request's `model` name to the engine's internal model.
+
+### Opting in (schema.json)
+
+Add top-level keys to the type's `schema.json`:
+
+- `"x-multi-model": true` → the admin stores `ProviderType.multi_model` and
+  allows definitions of this type to carry a `served_models` list (a
+  non-multi-model type sending it is refused 422).
+- `"x-served-model-config-schema": { … }` (optional) — a JSON Schema validating
+  **each served model's** per-model `backend_config` (talkies:
+  `{slug, revision?, defaults?, limits?}`). Absent = any object accepted.
+
+The definition's top-level `backend_config` stays the **shared engine-level**
+config (talkies: `engine`/`limits`/`security`); per-model knobs live on each
+served model. `vram_required_bytes` is the **sum** for the one process.
+
+### What the agent receives
+
+The registration response `backends[].definition`, each
+`agent.assignments.update` entry, and `provider.config.update` gain an additive
+`served_models` key — always the canonical list (a single-model definition sends
+exactly one entry):
+
+```json
+"served_models": [
+  {"name": "qwen3-tts-1.7b", "modality": "tts",
+   "backend_config": {"slug": "qwen3-tts-1.7b"}, "enabled": true},
+  {"name": "whisper-large-v3-turbo", "modality": "asr",
+   "backend_config": {"slug": "whisper-large-v3-turbo"}, "enabled": true}
+]
+```
+
+`provider_lib.models.models_from_entry(entry)` parses that shape into a list of
+`ModelSpec(name, modality, backend_config, enabled)`, **preferring**
+`served_models` and falling back to the legacy `alias`/`modality`/`backend_config`
+trio when absent (old admins unchanged). A `BackendHandle` carries
+`models: list[ModelSpec]`; `handle.served_names` is the enabled subset.
+
+### Routing contract
+
+The agent's single `/v1` surface resolves the target backend by matching the
+request's `model` against **any enabled served name**
+(`BackendRegistry.resolve_by_model`): a disabled or unknown name is not indexed
+and answers **404** (no stale-alias fallback; cross-handle name collisions warn,
+last-write-wins). The **driver** then maps that served name to the engine's
+internal model id — talkies rewrites `name → slug` on the forwarded request
+(speech / transcribe / voices / live-ASR WS), reading the map from each served
+model's `backend_config`.
+
+### `BackendDriver.set_models(models)`
+
+A driver hook (default no-op) the registry calls with the handle's served-model
+list **at handle build and on every live refresh, before any restart** — so a
+served-list change reaches a running driver without a process restart where the
+engine supports it. The talkies pattern is to rebuild the internal
+`name → slug` map from the enabled specs (each spec's `backend_config.slug`).
+
+### Restart caveat
+
+Engines that read their model set **only at import** (talkies) cannot hot-load a
+**genuinely new** internal model: a live `set_models` add is only fully served
+when the new name maps to a model the process **already loaded**. Adding a new
+internal model must go through the `provider.config.update` **restart** path
+(which re-runs `start()` with the new set). The admin folds `served_models` into
+the definition fingerprint so a per-model edit drives that update.
+
+### Health for multi-model engines
+
+An engine whose readiness depends on which models are resident must pin the
+**spawned** set — the models the currently-running process actually loaded — not
+the live served list. talkies records `_spawned_slugs` at `start()` and its
+`/api/ps` health check requires exactly those, so a served name added live whose
+slug was never spawned never flips an otherwise-healthy backend unhealthy (that
+change lands on the next restart).
+
 ## BackendDriver (provider_lib/backend.py)
 
 A provider package implements this ABC around its real backend:
@@ -326,6 +409,12 @@ class BackendDriver(ABC):
         # Phase 9: adopt an updated backend_config before the next start
         # (default no-op; all five providers implement it). Must also
         # reset `resolved_artifacts` (see storage.prune_unused).
+
+    def set_models(self, models: list[ModelSpec]) -> None:
+        ...
+        # Phase 25 multi-model: adopt the served-model list at handle build and
+        # on every live refresh BEFORE any restart (default no-op). A driver that
+        # routes by request.model rebuilds its name→engine-internal map here.
 
     resolved_artifacts: list[str]
     # Phase 9: local artifact paths recorded during the last start
@@ -1148,13 +1237,17 @@ at the ABC defaults (`NotImplementedError` → 501). Because it speaks no LLM
 protocol, the admin's audio routes **bypass litellm** and dial the agent's
 `/v1/audio/*` directly (ARCHITECTURE.md §7 Audio specifics).
 
-**One process per backend definition (locked Phase 24 shape).** talkies reads
-its model registry and enabled-model set **only at import**, so a definition's
-slug set is process-scoped — a config change requires a restart (exactly the
-Phase 9 config-update flow). Each backend therefore boots a talkies process
-enabled to **exactly its single `model.slug`** (`TALKIES_ENABLED_MODELS` /
-`TALKIES_PRELOAD`). There is **no `x-max-running-backends` cap**: VRAM admission
-governs how many talkies processes share a machine.
+**One process per backend definition — now serving N names (Phase 25
+multi-model shipped).** talkies declares `x-multi-model: true`: one definition's
+single process enables and preloads **every** served model's slug
+(`TALKIES_ENABLED_MODELS` / `TALKIES_PRELOAD` = the comma-joined set), and the
+driver routes each request's served `model` name to its registry slug. A legacy
+single-slug definition (top-level `model.slug`, no served list) still boots
+exactly one slug, byte-identical to Phase 24. The registry is read **only at
+import**, so a genuinely new slug requires a restart (the Phase 9 config-update
+flow) — see "Multi-model providers" above. There is **no
+`x-max-running-backends` cap**: VRAM admission governs how many talkies
+processes share a machine.
 
 ### Launch (uvicorn, private loopback)
 
@@ -1179,10 +1272,10 @@ the exact upstream var.
 
 | Env | Value | Source |
 | --- | --- | --- |
-| `TALKIES_ENABLED_MODELS` | the definition's single `model.slug` | `model.slug` |
-| `TALKIES_PRELOAD` | same slug (loaded at boot) | `model.slug` |
-| `TALKIES_MODEL_TTL` | `0` (default) = **pin** the model resident | `limits.model_ttl` |
-| `TALKIES_MODEL_CONCURRENCY` | `"<slug>=N"` — engine admission (HTTP ASR+TTS + live WS together; excess 429, never queues) | `limits.model_concurrency` (default 1) |
+| `TALKIES_ENABLED_MODELS` | comma-joined **served slug set** (legacy: the single `model.slug`) | each served model's `backend_config.slug` |
+| `TALKIES_PRELOAD` | same set (all loaded at boot) | each served model's `backend_config.slug` |
+| `TALKIES_MODEL_TTL` | `0` (default) = **pin** every served model resident | `limits.model_ttl` |
+| `TALKIES_MODEL_CONCURRENCY` | `"<slug>=N,<slug2>=M"` — per-slug engine admission (HTTP ASR+TTS + live WS together; excess 429, never queues) | per-model `limits.model_concurrency`, else shared `limits.model_concurrency` (default 1) |
 | `TALKIES_DATA_DIR` | `TALKIES_DATA_DIR` env if set, else `MODELS_DIR` | container env / `MODELS_DIR` |
 | `TALKIES_DEVICE` | `cuda` (default) / `cpu` / `auto` / `cuda:N` | `engine.device` |
 | `TALKIES_AUTH_TOKEN` | config `security.auth_token`, else **random per start** (`secrets.token_urlsafe`) | `security.auth_token` |
@@ -1229,32 +1322,42 @@ stream to the admin around the fetch.
 
 ### Health
 
-Ready ⇔ process alive **AND** `/healthz` 200 **AND** `/api/ps` lists the slug.
-With `TALKIES_MODEL_TTL=0` + PRELOAD the slug appears the moment the load
-finishes, so a green health check means the weights are resident — which is what
-keeps the admin's per-instance VRAM ledger exact. `/api/ps` is driver-internal
-(readiness), never client-facing.
+Ready ⇔ process alive **AND** `/healthz` 200 **AND** `/api/ps` lists **every
+SPAWNED slug** (`_spawned_slugs` — the set this process actually loaded at
+`start()`, not the live served list). With `TALKIES_MODEL_TTL=0` + PRELOAD each
+slug appears the moment its load finishes, so a green health check means all those
+weights are resident — which is what keeps the admin's per-instance VRAM ledger
+exact. The pin is on the spawned set so a served name added live via `set_models`
+whose slug was never spawned here cannot spuriously fail health (that change
+reaches the engine via the config-update restart path). A legacy single-slug
+definition pins exactly one slug. `/api/ps` is driver-internal (readiness), never
+client-facing.
 
 ### Audio proxy (driver)
 
 - **speech** (`/v1/audio/speech`): rewrites the request `model` from the
-  definition **alias → slug**, streams the upstream bytes, and derives response
-  headers from the request (`response_format` → Content-Type; `pcm` adds
-  `X-Sample-Rate: 24000` — talkies TTS is always 24 kHz mono). Recorded
-  `defaults` fill omitted fields (never overriding an explicit value). Upstream
+  **served name → slug** (the name→slug map built from the served-model configs;
+  a legacy single-slug definition maps its one alias), streams the upstream
+  bytes, and derives response headers from the request (`response_format` →
+  Content-Type; `pcm` adds `X-Sample-Rate: 24000` — talkies TTS is always 24 kHz
+  mono). Recorded `defaults` fill omitted fields (never overriding an explicit
+  value); the routed served name selects its per-model `defaults`. Upstream
   non-2xx raises `HTTPException` from the chunk generator (the stream aborts +
   slot releases, but the already-committed 200 cannot be remapped — the
   `SpeechStream` contract fixes headers synchronously).
 - **transcribe** (`/v1/audio/transcriptions`): relays the multipart with the
-  alias→slug rewrite; upstream status/headers/body pass through untouched (every
-  `response_format`: json/text/verbose_json/srt/vtt). Only ASR-meaningful
+  served name→slug rewrite; upstream status/headers/body pass through untouched
+  (every `response_format`: json/text/verbose_json/srt/vtt). Only ASR-meaningful
   defaults (`language`) merge in. Bounded by `TALKIES_BOOT_TIMEOUT`.
 - **transcribe_stream** (live-ASR WS): bidirectional bridge to the engine's
   `/v1/audio/transcriptions/stream`; the lifecycle holds the slot for the whole
   connection. The driver rewrites the `model` field of the **start control
-  frame** (alias→slug) — non-JSON / model-less frames pass through.
-- **voices / voice_put / voice_delete**: catalog passthrough + custom-voice
-  enrollment on the shared data dir. Enrollment writes
+  frame** (served name→slug) — non-JSON / model-less frames pass through.
+- **voices / voice_put / voice_delete**: the served `model` name is threaded
+  through (`voices(model)` / `voice_put(..., model)` / `voice_delete(...,
+  model)`) and mapped to its slug, so a multi-model definition reads the catalog
+  of the RIGHT served model. Catalog passthrough + custom-voice enrollment on the
+  shared data dir (enrollment stays per-definition). Enrollment writes
   `custom-voices/<name>.wav` plus optional sibling sidecars `<name>.txt`
   (reference transcript) and `<name>.lang` (language); talkies discovers them on
   the next catalog read. Names are validated as single filesystem-safe segments
@@ -1263,8 +1366,12 @@ keeps the admin's per-instance VRAM ledger exact. `/api/ps` is driver-internal
 ### backend_config schema
 
 The shipped `provider_talkies/schema.json` (2020-12) declares
-`x-serves-modalities: ["tts", "asr"]` and **no `x-max-running-backends`** (VRAM
-admission governs). Canonical example:
+`x-serves-modalities: ["tts", "asr"]`, **`x-multi-model: true`** (one process
+serves N names), an **`x-served-model-config-schema`** validating each served
+model's per-model config (`{slug, revision?, defaults?, limits?}`), and **no
+`x-max-running-backends`** (VRAM admission governs). Canonical example (legacy
+single-slug shape — a multi-model definition instead puts each slug on its served
+model's `backend_config` and leaves the top-level `model` section off):
 
 ```json
 {
@@ -1278,11 +1385,15 @@ admission governs). Canonical example:
 ```
 
 - Sections (`x-order`): `model` (1) · `engine` (2) · `defaults` (3) ·
-  `limits` (4) · `security` (5); `additionalProperties: false` throughout;
-  `model` required.
-- `model.slug` is the single registry slug this definition serves (must exist in
-  `TALKIES_MODELS_FILE`); `model.revision` optionally pins the prefetch snapshot
-  commit.
+  `limits` (4) · `security` (5); `additionalProperties: false` throughout. The
+  top-level `model` section is **optional** (Phase 25): a legacy single-slug
+  definition uses it; a multi-model definition carries each slug on its served
+  model's `backend_config` instead (validated against
+  `x-served-model-config-schema`).
+- `model.slug` is the registry slug a legacy single-slug definition serves (must
+  exist in `TALKIES_MODELS_FILE`); `model.revision` optionally pins the prefetch
+  snapshot commit. On a multi-model definition the same `{slug, revision?,
+  defaults?, limits?}` shape lives per served model.
 - `defaults` are recorded request fallbacks (the driver merges them into the
   forwarded body); `defaults.response_format` applies to **speech only** and
   never leaks into a transcription form.

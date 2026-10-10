@@ -337,8 +337,10 @@ instances are attached). `alias` mirrors the first enabled name for
 display/back-compat; the definition-level `backend_config` holds the
 shared engine config. Single-model definitions have NO rows and are
 byte-for-byte unchanged. Every consumer resolves names through the
-canonical `resolve_models(definition)` accessor (rows when present, else
-the synthesized single entry from `alias/modality/backend_config`) —
+canonical `resolve_models(session, definition)` accessor in
+`app/services/served_models.py` (rows when present, else the synthesized
+single entry from `alias/modality/backend_config`; `resolve_served(session,
+name)` returns the owning `(definition, spec)` for a requested name) —
 scheduler, `/v1/models`, assignment payloads, endpoint gates.
 
 ### ProviderInstance
@@ -355,7 +357,7 @@ the per-backend state the scheduler and lifecycle act on.
 | `backend_status` | `stopped` `initializing` `starting` `running` `in_use` `stopping` `error` |
 | `last_request_at` | Idle tracking (liveness is the agent's). |
 | `backend_loaded_at` | When the backend last entered `running`/`in_use` (stamped by the status ingest on transition; cleared when it leaves the loaded set or the agent's socket dies). The idle reaper's window baseline is `max(last_request_at, backend_loaded_at)` so a freshly booted, never-requested backend is not reaped against a stale clock. |
-| `config_fingerprint` | SHA-256 of the applied `backend_config`; drives auto cache-clear and the `provider.config.update` push (admin PATCH + reconnect self-heal). |
+| `config_fingerprint` | SHA-256 of the applied `backend_config` — for **multi-model** definitions (Phase 25) the fingerprint folds `(backend_config, served_models)` via `compute_definition_fingerprint`, so a per-model edit triggers `provider.config.update`; drives auto cache-clear and the push (admin PATCH + reconnect self-heal). |
 | `assigned_gpus` | Reserved — currently unused (VRAM is accounted per booted instance; metrics attribution is per-agent). |
 
 ### TTSVoice

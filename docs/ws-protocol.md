@@ -211,7 +211,10 @@ Notes:
         "id": "<uuid str>", "alias": "my-model", "provider_type": "llama-cpp",
         "backend_config": { }, "config_fingerprint": "<sha256 hex>",
         "idle_timeout_seconds": 300, "capacity": 1,
-        "vram_required_bytes": 8589934592, "model_metadata": { }
+        "vram_required_bytes": 8589934592, "model_metadata": { },
+        "served_models": [
+          {"name": "my-model", "modality": "llm", "backend_config": { }, "enabled": true}
+        ]
       }
     }
   ]
@@ -225,6 +228,12 @@ per-backend `port` is sent — every backend is reached through the agent's sing
 `base_port` `/v1`. A single-backend agent gets exactly one entry. The
 agent persists this response to `CACHE_DIR/provider_config.json` and builds one
 hosted backend (`BackendLifecycle`) per entry.
+
+> **Phase 25 (additive).** `definition.served_models` is the canonical served-model
+> list `[{name, modality, backend_config, enabled}]` — always present (a
+> single-model definition sends exactly one entry). New agents prefer it and route
+> on **any enabled** served name; **old agents ignore the key** and keep routing
+> on `alias` (single-model behavior unchanged).
 
 The client derives the WS URL from `ADMIN_BASE_URL` (scheme swap `http→ws`,
 `https→wss`) and appends `?agent_id=<ProviderAgent PK uuid>`; a machine echo
@@ -389,7 +398,7 @@ carry the target `instance_id` in the payload**; the provider's
 | `backend.stop` | `{"instance_id": "..."}` | Live | Provider awaits `BackendLifecycle.stop()` (→ STOPPING → STOPPED, emitted) and acks ok. **No forced drain**: in-flight streams are not cancelled — their producer tasks release their slots as the upstream closes (the client may see the stream end early). Use `provider.config.update` or `backend.restart` when drain semantics matter. Refused `boot_in_progress` while an accepted-style transition is running. |
 | `backend.restart` | `{"instance_id": "...", "wait_for_running": bool = true}` | **Live** | Stop + start, same wait flag as `backend.start`. **Drain-checked first**: NAKs `{"ok": false, "error": "backend_in_use", "detail": {"step": "restart", "retry_after": 10, "in_flight": N}}` while live requests hold slots, so a restart never cuts a stream. |
 | `provider.initialize` | `{"instance_id": "...", "wait_for_running": bool = false}` | **Live** | Full re-provision, driven by the provider package's `re_register` callback: (1) POST `/admin/api/providers/register` again — re-checks the version + schema gates, re-adopts `capacity`/`backend_config`/fingerprint, mints a fresh agent secret and rewrites `CACHE_DIR/provider_config.json`; the live socket is **not** recycled (already authenticated at the current epoch; the new secret is for future reconnects). (2) Drain check — NAKs `backend_in_use` while slots are held. (3) ack (default `{"ok": true, "detail": {"accepted": true, "steps": ["stop","start","metadata"]}}`), then in the background: stop → start (engine downloads/loads, heartbeated as `initializing`) → `list_models()` → `backend.metadata`. Terminal state via `provider.status` (`running` / `error` + `error_message`). |
-| `provider.config.update` | `{"instance_id": "...", "backend_config": {...}, "config_fingerprint": "<sha256 hex>", "idle_timeout_seconds": int, "capacity": int}` | **Live (Phase 9)** | Apply a new definition config in place. Provider order matters: (1) **capacity adopt** — a differing `capacity` is applied to `lifecycle.capacity` immediately (no restart); (2) **noop** — received fingerprint == applied → ack `{"ok": true, "detail": {"noop": true, "capacity_adopted": bool, ...}}`, always safely ackable under load; (3) **drain** — `lifecycle.stop_if_idle()` checks busy and transitions STOPPING under the same lifecycle lock with no intervening await; busy → NAK `{"ok": false, "error": "backend_in_use", "detail": {"step": "drain", "retry_after": 10, "in_flight": N}}`; (4) otherwise emits `provider.status initializing`, clears the old fingerprint's prompt cache, `driver.apply_config`, starts (downloads stream `download.progress`), scrapes `list_models()`. **Ok ack detail:** `{"config_fingerprint", "capacity", "model_metadata": [...], "prompt_cache_deleted", "prompt_cache_bytes_freed"}` — the admin persists the echoed fingerprint on the instance and `model_metadata` on the definition. **Failure NAK:** `{"ok": false, "error": "<msg>", "detail": {"step": "validate|drain|cache_clear|apply_config|start"}}`. `idle_timeout_seconds` rides in the payload for observability only — the provider does not consume it (idle reaping is admin-side). Admin retry: 300s per-instance timeout, only `backend_in_use` retried (3 attempts, 10s apart). A stale fingerprint on (re)connect is healed automatically to the **stale instance only** (connect path + presence sweep, per-instance in-flight guard). Full semantics in `provider/README.md`. |
+| `provider.config.update` | `{"instance_id": "...", "backend_config": {...}, "config_fingerprint": "<sha256 hex>", "idle_timeout_seconds": int, "capacity": int}` | **Live (Phase 9)** | Apply a new definition config in place. Provider order matters: (1) **capacity adopt** — a differing `capacity` is applied to `lifecycle.capacity` immediately (no restart); (2) **noop** — received fingerprint == applied → ack `{"ok": true, "detail": {"noop": true, "capacity_adopted": bool, ...}}`, always safely ackable under load; (3) **drain** — `lifecycle.stop_if_idle()` checks busy and transitions STOPPING under the same lifecycle lock with no intervening await; busy → NAK `{"ok": false, "error": "backend_in_use", "detail": {"step": "drain", "retry_after": 10, "in_flight": N}}`; (4) otherwise emits `provider.status initializing`, clears the old fingerprint's prompt cache, `driver.apply_config`, starts (downloads stream `download.progress`), scrapes `list_models()`. **Ok ack detail:** `{"config_fingerprint", "capacity", "model_metadata": [...], "prompt_cache_deleted", "prompt_cache_bytes_freed"}` — the admin persists the echoed fingerprint on the instance and `model_metadata` on the definition. **Failure NAK:** `{"ok": false, "error": "<msg>", "detail": {"step": "validate|drain|cache_clear|apply_config|start"}}`. `idle_timeout_seconds` rides in the payload for observability only — the provider does not consume it (idle reaping is admin-side). Admin retry: 300s per-instance timeout, only `backend_in_use` retried (3 attempts, 10s apart). A stale fingerprint on (re)connect is healed automatically to the **stale instance only** (connect path + presence sweep, per-instance in-flight guard). **Phase 25 (additive):** the payload may carry `served_models` (the canonical list); the admin's definition fingerprint folds `(backend_config, served_models)` so a per-model edit changes it and drives this update, and the provider refreshes the handle's served list via `set_models` **before** the restart. Old agents ignore the key. Full semantics in `provider/README.md`. |
 | `metrics.assign` | `{"machine_uid": "...", "categories": [...]}` | Live (Phase 5; split Phase 17) | Grant **machine-wide** metrics ownership (`os_ram`/`cpu`/`storage`); admin `assign_ownership` sends it (only when the agent declares a machine-wide category). The emitter loop already runs from connect — this only flips `set_owned(True)` to include the machine-wide categories; GPU categories emit regardless. |
 | `metrics.unassign` | resource list | Provider handler live; admin send not yet wired (ownership currently lapses via Redis lease expiry) | Revoke **machine-wide** metrics ownership (`set_owned(False)`); the loop keeps running so GPU telemetry keeps flowing. |
 | `metrics.category.start` | category name | Reserved | Enable a `METRICS_CATEGORIES` category. |
@@ -415,11 +424,20 @@ Payload (admin → provider) — the agent's **full** current assignment set:
     {"instance_id": "<uuid>", "provider_definition_id": "<uuid>",
      "alias": "my-model", "backend_config": { }, "config_fingerprint": "<sha256>",
      "capacity": 1, "idle_timeout_seconds": 300,
-     "vram_required_bytes": 0}
+     "vram_required_bytes": 0,
+     "served_models": [
+       {"name": "my-model", "modality": "llm", "backend_config": { }, "enabled": true}
+     ]}
   ],
   "max_running_backends": 0
 }
 ```
+
+> **Phase 25 (additive).** Each entry carries the same canonical `served_models`
+> list as the registration `definition` (single-model definitions send one
+> entry). Old agents ignore the key; new agents prefer it (via
+> `provider_lib.models.models_from_entry`) and fall back to
+> `alias`/`modality`/`backend_config` otherwise.
 
 Ack (provider → admin):
 
@@ -437,9 +455,12 @@ The provider reconciles its `BackendRegistry` to the pushed set
   every provider package supplies a `make_handle` and hosts N backends per
   process, so adds are normally served. An agent built without a factory
   **refuses** an add it cannot serve (`reason: no_handle_factory`) rather than
-  crash. An already-hosted backend's alias/contents are **not** refreshed here
-  (that rides `provider.config.update`); assignments.update only governs which
-  backends exist.
+  crash. An already-hosted backend's lifecycle is **not** recreated here (that
+  would drop its running state), but **Phase 25**: a changed `served_models` list
+  IS refreshed in place via `registry.set_models` (a live add of a served name
+  reaches the driver without a restart where the engine supports it). Other
+  config changes still ride `provider.config.update`; assignments.update governs
+  which backends exist and their served lists.
 - **remove** — for each hosted handle no longer in the set, `stop_if_idle()` and
   drop it. A **busy** backend is refused (`reason: backend_in_use`) and kept
   until it frees — the exact mirror of the admin's busy-safe prune.

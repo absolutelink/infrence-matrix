@@ -1,8 +1,8 @@
 # Inference Matrix — Implementation Status
 
 **Overhaul branch:** `litellm-architecture-overhaul`
-**Last updated:** 2026-10-10 (**Phase 25 — Multi-model definitions: 🟡
-in progress (S0–S3 done).** One definition = one backend process serving multiple
+**Last updated:** 2026-10-10 (**Phase 25 — Multi-model definitions: 🟢 code
+complete (S0–S5 done; deploy + talkies cutover pending).** One definition = one backend process serving multiple
 client-facing model names, each with its own modality + per-model config;
 provider declares capability (`x-multi-model`), admin owns the names, the
 driver routes. First consumer talkies (4 slugs → 1 def); later gufo /
@@ -3325,8 +3325,32 @@ satellites: embed/rerank/decision under one roof).
   regenerated. Review: 3 rounds, CLEAN (rounds 2–3 caught warm-up
   double-boot + boot-lock leak).
 - **S4.** frontend + client regen: multi-model definition form, served-
-  name listing/badges. ⬜
-- **S5.** docs polish + optional deploy cutover (4 talkies defs → 1). ⬜
+  name listing/badges. ✅ done — `isMultiModelType` (schema
+  `x-multi-model`, false while loading) switches the editor to a shared
+  engine config + a repeatable served-models list (name, modality from
+  `serves_modalities`, enabled, per-model config via
+  `x-served-model-config-schema` subschema or JSON textarea); primary =
+  first enabled (Crown), hidden alias synced; §6 client validation (≥1,
+  unique non-empty names, modality served, name≤255) + server-422 inline
+  mapping; name+modality+add/remove disabled while instances attached
+  (enabled+config editable) mirroring the 409 gate; per-row secret
+  strip/restore; stable row ids (no index-key desync); relaxed alias zod
+  via a dynamic resolver so submit never silently no-ops; detail + list
+  badges. Single-model path byte-for-byte unchanged. Frontend 26 tests
+  (14 multiModel). Review: 2 rounds, CLEAN.
+- **S5.** docs polish + optional deploy cutover (4 talkies defs → 1). ✅
+  done (docs) — provider/README.md gained the "Multi-model providers
+  (Phase 25)" authoring section (x-multi-model + x-served-model-config-
+  schema, served_models payloads, set_models hook, restart caveat,
+  spawned-set health pin) + talkies worked-example update; ws-protocol.md
+  documents the additive `served_models` key on registration/assignments/
+  config.update; redis-keys: no new keys (boot locks are in-process
+  asyncio). ARCHITECTURE §4 corrected (fingerprint folds served_models;
+  accessor signature/module). **Deploy cutover deferred** — collapsing the
+  4 live single-slug talkies defs into one multi-model definition requires
+  the Phase 25 admin (migration `d5f9b2c8e041`) + a rebuilt talkies image
+  deployed first; run it after deploy (create the multi-model def, verify
+  name→slug routing + per-name gates, then delete the 4 old defs).
 
 ---
 
