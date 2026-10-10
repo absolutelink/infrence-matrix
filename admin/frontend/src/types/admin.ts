@@ -2,6 +2,8 @@
 // the Phase 9/10 endpoints as loose JSON maps; these mirror
 // admin/backend/app/api/admin/{machines,definitions,instances,responses}.py).
 
+import type { ServedModelIn } from "@/client"
+
 // Phase 12: provider types come from the admin registry
 // (AdminService.listProviderTypes) — no hardcoded list.
 export type ProviderType = string
@@ -158,6 +160,12 @@ export interface ConfigUpdateResult {
   config_fingerprint: string | null
 }
 
+// Phase 25: one entry of a definition's canonical served-model list. This is
+// exactly the generated wire shape (the GET response's served_models entries
+// mirror ServedModelIn / the resolved ModelSpec), so we alias the generated
+// type rather than duplicate it.
+export type ServedModelRow = ServedModelIn
+
 export interface ProviderDefinition {
   id: string
   alias: string
@@ -178,6 +186,9 @@ export interface ProviderDefinition {
   agents?: string[]
   /** Phase 18: endpoint kind this definition serves: 'llm' (default) | 'embedding'. */
   modality?: string
+  /** Phase 25: canonical served-model list (always present; single-model defs
+   *  return the one synthesized entry). Drives the multi-model badges/detail. */
+  served_models?: ServedModelRow[]
   created_at: string
   updated_at: string | null
   instances?: InstanceSummary[]
