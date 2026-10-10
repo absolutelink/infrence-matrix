@@ -2,7 +2,7 @@
 
 **Overhaul branch:** `litellm-architecture-overhaul`
 **Last updated:** 2026-10-09 (**Phase 24 — Audio (talkies provider): 🟡 in
-progress (S0–S3 done).** Speech ships as two modalities — `tts` + `asr` — served by a new
+progress (S0–S4 done).** Speech ships as two modalities — `tts` + `asr` — served by a new
 `talkies` provider type: a thin proxy agent around
 `psyb0t/talkies:latest-cuda` (Qwen3-TTS variants, Kokoro, Chatterbox Turbo;
 Whisper/Parakeet/Canary/Sherpa ASR). Client surface: `POST /v1/audio/speech`
@@ -3169,7 +3169,17 @@ work, and per-engine translation layers entirely.
   **585 green** (514 baseline + 71). Review: 2 rounds, CLEAN.
 - **S4.** Admin WS live-ASR relay (`audio_transcriptions_ws.py`, Phase 21
   precedent): auth → modality gate → slot hold for connection lifetime →
-  bidirectional byte relay → shielded release on every teardown path. ⬜
+  bidirectional byte relay → shielded release on every teardown path.
+  ✅ done — accept-then-close-code channel (1008 pre-flight incl.
+  wrong-modality, 1013 scheduler failures + relayed agent busy, 1011
+  upstream connect fail, 1009 oversized inbound frame, 1000 duration/idle
+  limits; agent close codes relayed verbatim post-accept); text+binary
+  passthrough both directions, parses nothing → **no `AudioUsageSample`
+  on the WS path** (HTTP transcriptions owns ASR telemetry); settings
+  `AUDIO_WS_MAX_DURATION_SECONDS` (4h) / `AUDIO_WS_IDLE_TIMEOUT_SECONDS`
+  (30s) / `AUDIO_WS_MAX_FRAME_BYTES` (64 KiB); shielded release proven by
+  a double-cancellation test. 19 WS tests; admin suite **604 green**.
+  Review: CLEAN (two Medium test gaps closed same slice).
 - **S5.** Frontend: modality enum/badges (`tts`/`asr`), voices panel
   (list/enroll wav+transcript/delete), playground audio playback. ⬜
 - **S6.** Docs polish: `provider/README.md` talkies worked example,
