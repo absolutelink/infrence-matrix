@@ -218,9 +218,11 @@ async def _relay_speech(
     usage sample, and release the slot (shielded) on every exit path."""
     sniff = bytearray()
     limit = audio_svc.sniff_limit()
+    total_bytes = 0
     completed = False
     try:
         async for chunk in upstream.aiter_raw():
+            total_bytes += len(chunk)
             if len(sniff) < limit:
                 sniff.extend(chunk[: limit - len(sniff)])
             yield chunk
@@ -248,6 +250,8 @@ async def _relay_speech(
                     instance_id=instance_id,
                     modality="tts",
                     chars=chars,
-                    audio_seconds=audio_svc.wav_duration_seconds(bytes(sniff)),
+                    audio_seconds=audio_svc.wav_duration_seconds(
+                        bytes(sniff), total_bytes=total_bytes
+                    ),
                 )
             )

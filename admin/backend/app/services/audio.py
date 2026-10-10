@@ -72,13 +72,19 @@ def agent_base_url_for_definition(
     return fallback
 
 
-def wav_duration_seconds(prefix: bytes) -> float | None:
+def wav_duration_seconds(prefix: bytes, total_bytes: int | None = None) -> float | None:
     """Duration (seconds) of a canonical PCM WAV from its leading bytes.
 
     Returns ``None`` unless the prefix holds a ``RIFF``/``WAVE`` header with a
     parseable ``fmt `` byte-rate and a ``data`` chunk size. Never raises — a
     truncated or non-WAV prefix simply yields ``None`` (the caller leaves
     ``audio_seconds`` null).
+
+    Streamed WAVs (e.g. talkies' Qwen3 output) write a ``0xFFFFFFFF``
+    placeholder for the ``data`` size because the total is unknown when the
+    header is emitted. When ``total_bytes`` (the actual delivered payload
+    size) is given and the header size is a placeholder or exceeds reality,
+    the real byte count is used instead.
     """
     if len(prefix) < 12 or prefix[:4] != b"RIFF" or prefix[8:12] != b"WAVE":
         return None
@@ -104,10 +110,17 @@ def wav_duration_seconds(prefix: bytes) -> float | None:
                 return None
         elif chunk_id == b"data":
             data_size = chunk_size
+            data_start = body
             break
         # Chunks are word-aligned (padded to an even byte count).
         pos = body + chunk_size + (chunk_size & 1)
     if not byte_rate or data_size is None or byte_rate <= 0:
+        return None
+    # Placeholder or impossible header size (streamed WAV): fall back to the
+    # actual delivered payload length when known.
+    if total_bytes is not None and (data_size >= 0xFFFFFFFE or data_size > total_bytes):
+        data_size = max(0, total_bytes - data_start)
+    if data_size >= 0xFFFFFFFE:
         return None
     return data_size / byte_rate
 

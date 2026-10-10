@@ -383,3 +383,31 @@ def test_wav_duration_parse() -> None:
     assert audio_svc.wav_duration_seconds(b"ID3notwav") is None
     assert audio_svc.wav_duration_seconds(b"") is None
     assert audio_svc.wav_duration_seconds(b"RIFFxxxxWAVE") is None
+
+
+def test_wav_duration_streamed_placeholder() -> None:
+    """Streamed WAVs carry a 0xFFFFFFFF data-size placeholder; the actual
+    delivered byte total must drive the duration instead."""
+    import struct as _struct
+
+    from app.services import audio as audio_svc
+
+    byte_rate = 24000 * 2  # 24 kHz 16-bit mono
+    header = b"RIFF" + _struct.pack("<I", 0xFFFFFFFE) + b"WAVE"
+    header += b"fmt " + _struct.pack("<IHHIIHH", 16, 1, 1, 24000, byte_rate, 2, 16)
+    header += b"data" + _struct.pack("<I", 0xFFFFFFFF)
+    payload = 48000  # exactly 1.0 s of audio actually delivered
+    total = len(header) + payload
+
+    # Placeholder header alone -> no trustworthy size -> None.
+    assert audio_svc.wav_duration_seconds(header) is None
+    # With the delivered total: (total - data_start) / byte_rate == 1.0 s.
+    assert (
+        audio_svc.wav_duration_seconds(header, total_bytes=total)
+        == pytest.approx(1.0)
+    )
+    # A lying (too-large but non-placeholder) size also falls back to reality.
+    lying = header[: len(header) - 4] + _struct.pack("<I", 10**9)
+    assert (
+        audio_svc.wav_duration_seconds(lying, total_bytes=total) == pytest.approx(1.0)
+    )
