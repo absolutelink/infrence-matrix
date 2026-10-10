@@ -17,6 +17,8 @@ Tables:
   DefinitionAgent    (Phase 16) link table for `specific` definition placement.
   ResponseRecord     stored OpenResponses turn, chained via previous_response_id.
   TokenUsageSample   per-request token/rate telemetry.
+  AudioUsageSample   per-request audio telemetry (chars + seconds; Phase 24).
+  TTSVoice           saved cloned voice scoped to a tts definition (Phase 24).
 
 The provider agent itself is stateless (no DB); it derives everything from
 env + the registration response, mirrored here by the admin.
@@ -37,7 +39,7 @@ import secrets
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import BigInteger, DateTime, Index, Text
+from sqlalchemy import BigInteger, DateTime, Index, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlmodel import Column, Field, Relationship, SQLModel
 
@@ -549,4 +551,98 @@ class TokenUsageSample(SQLModel, table=True):
 
     created_at: datetime = Field(
         default_factory=get_datetime_utc, sa_column=Column(DateTime(timezone=True))
+    )
+
+
+# ============================================================================
+# AudioUsageSample (Phase 24)
+# ============================================================================
+class AudioUsageSample(SQLModel, table=True):
+    """Per-request audio telemetry (Phase 24).
+
+    ``TokenUsageSample`` is token-shaped; speech/ASR have no tokens, so audio
+    requests persist this sibling instead — same FK/context discipline (a
+    nullable instance + definition link, a timezone-aware ``created_at``) but
+    carrying ``chars`` (synthesized / transcribed characters) and a nullable
+    ``audio_seconds`` (the clip duration, derived cheaply when the container
+    exposes it — a WAV header or a ``verbose_json`` duration field — never by
+    decoding compressed audio). Audio is not a conversation turn, so — like
+    embeddings — no ``ResponseRecord`` is written alongside it.
+    """
+
+    __tablename__ = "audio_usage_samples"
+    __table_args__ = (
+        Index(
+            "idx_audio_usage_samples_instance_created",
+            "provider_instance_id",
+            "created_at",
+        ),
+        Index("idx_audio_usage_samples_created_at", "created_at"),
+    )
+
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        sa_column=Column(_uuid_col(), primary_key=True),
+    )
+
+    provider_instance_id: uuid.UUID | None = Field(
+        default=None, foreign_key="provider_instances.id", ondelete="SET NULL"
+    )
+    provider_definition_id: uuid.UUID | None = Field(
+        default=None, foreign_key="provider_definitions.id", ondelete="SET NULL"
+    )
+
+    # "tts" | "asr" — mirrors ProviderDefinition.modality for the endpoint kind.
+    modality: str = Field(max_length=32)
+
+    # Synthesized (tts) or transcribed (asr) character count.
+    chars: int = 0
+    # Clip duration in seconds; None when not cheaply derivable (mp3/opus/etc.).
+    audio_seconds: float | None = None
+
+    created_at: datetime = Field(
+        default_factory=get_datetime_utc, sa_column=Column(DateTime(timezone=True))
+    )
+
+
+# ============================================================================
+# TTSVoice (Phase 24)
+# ============================================================================
+class TTSVoice(SQLModel, table=True):
+    """A saved cloned voice, scoped to a ``tts`` ``ProviderDefinition``.
+
+    The row is the **UI-visible catalog** — the actual audio clip lives on the
+    agent's disk (``custom-voices/<name>.wav`` + sibling sidecars), so the
+    list stays readable while the backend is stopped. Enrollment is admin-UI
+    only: the admin proxies the write to the agent's HTTP ``/v1/audio/voices``
+    surface and creates the row after the agent acks. Clients only ever
+    ``GET /v1/audio/voices`` (proxied live from the agent) and reference names
+    in the ``voice`` field — the live agent catalog is the source of truth.
+    """
+
+    __tablename__ = "tts_voices"
+    __table_args__ = (
+        UniqueConstraint("definition_id", "name", name="uq_tts_voices_definition_name"),
+        Index("idx_tts_voices_definition", "definition_id"),
+    )
+
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        sa_column=Column(_uuid_col(), primary_key=True),
+    )
+
+    definition_id: uuid.UUID = Field(
+        foreign_key="provider_definitions.id", ondelete="CASCADE"
+    )
+    # Filesystem-safe voice name (matches the agent's ``custom-voices`` stem).
+    name: str = Field(max_length=64)
+    ref_text: str | None = Field(default=None, sa_column=Column(Text))
+    language: str | None = Field(default=None, max_length=32)
+
+    created_at: datetime = Field(
+        default_factory=get_datetime_utc, sa_column=Column(DateTime(timezone=True))
+    )
+
+    provider_definition: ProviderDefinition = Relationship(
+        sa_relationship_kwargs={"lazy": "selectin"}
     )

@@ -28,8 +28,8 @@ STUBBED_ENDPOINTS: tuple[tuple[str, str], ...] = (
     ("POST", "/v1/rerank"),
     ("POST", "/v1/moderations"),
     ("POST", "/v1/decisions"),
-    ("POST", "/v1/audio/speech"),
-    ("POST", "/v1/audio/transcriptions"),
+    # Phase 24: /v1/audio/speech + /v1/audio/transcriptions + /v1/audio/voices
+    # are now real endpoints (app/api/v1/audio_*.py). translations stays 501.
     ("POST", "/v1/audio/translations"),
     ("POST", "/v1/files"),
     ("GET", "/v1/files"),

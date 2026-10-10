@@ -79,9 +79,11 @@ router = APIRouter(prefix="/admin/api/definitions", tags=["admin"])
 
 _VALID_PLACEMENTS = ("any_of_type", "specific")
 
-# Phase 18: modalities the admin accepts today. `audio` is reserved (the
-# /v1/audio/* landing spot) but NOT yet valid on a definition.
-_VALID_MODALITIES = ("llm", "embedding")
+# Phase 18: modalities the admin accepts. Phase 24 adds the two concrete
+# speech modalities (`tts`, `asr`); the Phase 18 reserved `audio` bucket was
+# never valid and stays retired. Audio aliases are NOT litellm-registered
+# (the /v1/audio/* routes bypass litellm with direct httpx passthrough).
+_VALID_MODALITIES = ("llm", "embedding", "tts", "asr")
 
 
 class DefinitionCreate(BaseModel):
@@ -135,6 +137,22 @@ _NON_NULLABLE_FIELDS = frozenset(
         "agent_placement",
     }
 )
+
+
+def _ensure_litellm_registered(definition: ProviderDefinition) -> None:
+    """Warm the litellm alias registration for litellm-backed modalities only.
+
+    ``llm`` -> ``chat`` mode, ``embedding`` -> ``embedding`` mode. The Phase 24
+    audio modalities (``tts``/``asr``) are served by direct httpx passthrough
+    (litellm is bypassed — see ARCHITECTURE.md §7 Audio specifics), so their
+    aliases must NEVER be registered with litellm: a stale ``chat`` entry would
+    mis-declare them and the fake-stream APIError this registry exists to
+    prevent would surface on the first (nonexistent) litellm call.
+    """
+    if definition.modality == "embedding":
+        alias_registry.ensure_registered(definition.alias, mode="embedding")
+    elif definition.modality == "llm":
+        alias_registry.ensure_registered(definition.alias, mode="chat")
 
 
 def _get_provider_type(session: Session, provider_type: str) -> ProviderType:
@@ -207,10 +225,10 @@ def _validate_backend_config(
 
 
 def _validate_modality(ptype: ProviderType, modality: str) -> None:
-    """Phase 18: a definition's modality must be a known value AND be hosted
+    """Phase 18/24: a definition's modality must be a known value AND be hosted
     by its provider type. Refuses 422 when ``modality`` is not in
-    ``{"llm", "embedding"}`` (``audio`` reserved, not accepted yet) or not in
-    ``ptype.serves_modalities``."""
+    ``{"llm", "embedding", "tts", "asr"}`` (the reserved ``audio`` bucket is
+    not accepted) or not in ``ptype.serves_modalities``."""
     if modality not in _VALID_MODALITIES:
         raise HTTPException(
             status_code=422,
@@ -408,10 +426,9 @@ async def create_definition(
         ) from None
     session.refresh(definition)
     # Warm the litellm alias registration before first use (checklist 4).
-    alias_registry.ensure_registered(
-        definition.alias,
-        mode="embedding" if definition.modality == "embedding" else "chat",
-    )
+    # Audio modalities are bypassed (direct httpx passthrough — see
+    # ``_ensure_litellm_registered``).
+    _ensure_litellm_registered(definition)
     # Phase 16 slice 5: a new definition is a placement change for every agent
     # of its type — push the updated assignment set to the live ones (an
     # any_of_type def now includes them; a specific def reaches only its links,
@@ -595,10 +612,7 @@ async def patch_definition(
             provider_type,
             scheduler=getattr(request.app.state, "scheduler", None),
         )
-    alias_registry.ensure_registered(
-        definition.alias,
-        mode="embedding" if definition.modality == "embedding" else "chat",
-    )
+    _ensure_litellm_registered(definition)
 
     # The provider-visible state: the config (fingerprint) or a capacity
     # change. A type-only change with the SAME config is not a push trigger

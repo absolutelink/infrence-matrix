@@ -55,6 +55,8 @@ def _create_schema() -> Generator[None]:
 
 _TABLE_ORDER = [
     models.TokenUsageSample,
+    models.AudioUsageSample,
+    models.TTSVoice,
     models.ResponseRecord,
     models.ProviderInstance,
     models.DefinitionAgent,

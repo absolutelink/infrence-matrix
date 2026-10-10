@@ -37,6 +37,32 @@ export type BackendActionBody = {
 };
 
 /**
+ * Body_admin-enroll_voice
+ */
+export type Body_admin_enroll_voice = {
+    /**
+     * Definition Id
+     */
+    definition_id: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Ref Text
+     */
+    ref_text?: string | null;
+    /**
+     * Language
+     */
+    language?: string | null;
+    /**
+     * File
+     */
+    file: Blob | File;
+};
+
+/**
  * DefinitionCreate
  */
 export type DefinitionCreate = {
@@ -1539,6 +1565,105 @@ export type adminGetAgentResponses = {
 
 export type adminGetAgentResponse = adminGetAgentResponses[keyof adminGetAgentResponses];
 
+export type adminListVoicesData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Definition Id
+         *
+         * tts definition id
+         */
+        definition_id: string;
+    };
+    url: '/admin/api/voices';
+};
+
+export type adminListVoicesErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminListVoicesError = adminListVoicesErrors[keyof adminListVoicesErrors];
+
+export type adminListVoicesResponses = {
+    /**
+     * Response Admin-List Voices
+     *
+     * Successful Response
+     */
+    200: Array<{
+        [key: string]: unknown;
+    }>;
+};
+
+export type adminListVoicesResponse = adminListVoicesResponses[keyof adminListVoicesResponses];
+
+export type adminEnrollVoiceData = {
+    body: Body_admin_enroll_voice;
+    path?: never;
+    query?: never;
+    url: '/admin/api/voices';
+};
+
+export type adminEnrollVoiceErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminEnrollVoiceError = adminEnrollVoiceErrors[keyof adminEnrollVoiceErrors];
+
+export type adminEnrollVoiceResponses = {
+    /**
+     * Response Admin-Enroll Voice
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminEnrollVoiceResponse = adminEnrollVoiceResponses[keyof adminEnrollVoiceResponses];
+
+export type adminDeleteVoiceData = {
+    body?: never;
+    path: {
+        /**
+         * Voice Id
+         */
+        voice_id: string;
+    };
+    query?: never;
+    url: '/admin/api/voices/{voice_id}';
+};
+
+export type adminDeleteVoiceErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type adminDeleteVoiceError = adminDeleteVoiceErrors[keyof adminDeleteVoiceErrors];
+
+export type adminDeleteVoiceResponses = {
+    /**
+     * Response Admin-Delete Voice
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type adminDeleteVoiceResponse = adminDeleteVoiceResponses[keyof adminDeleteVoiceResponses];
+
 export type responsesCreateResponseData = {
     body?: never;
     path?: never;
@@ -1598,6 +1723,68 @@ export type embeddingsCreateEmbeddingResponses = {
     /**
      * Response Embeddings-Create Embedding
      *
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type audioCreateSpeechData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/audio/speech';
+};
+
+export type audioCreateSpeechResponses = {
+    /**
+     * Response Audio-Create Speech
+     *
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type audioCreateTranscriptionData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/audio/transcriptions';
+};
+
+export type audioCreateTranscriptionResponses = {
+    /**
+     * Response Audio-Create Transcription
+     *
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type audioListVoicesData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Model
+         *
+         * tts alias
+         */
+        model: string;
+    };
+    url: '/v1/audio/voices';
+};
+
+export type audioListVoicesErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type audioListVoicesError = audioListVoicesErrors[keyof audioListVoicesErrors];
+
+export type audioListVoicesResponses = {
+    /**
      * Successful Response
      */
     200: unknown;

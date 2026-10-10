@@ -430,7 +430,8 @@ def instance_stats(session: Session = Depends(get_session)) -> dict[str, Any]:
     Embedding-modality instances blank every LLM-only field (they only write
     prompt-token samples): ``live_throughput_tps`` and, per window,
     ``avg_prompt_tps``/``avg_gen_tps``/``cache_hit_rate``/``avg_predicted_ms``/
-    ``p50_gen_tps``/``p95_gen_tps`` are ``null``.
+    ``p50_gen_tps``/``p95_gen_tps`` are ``null``. The Phase 24 audio modalities
+    (``tts``/``asr``) blank the same fields (they write no token samples at all).
     """
     now = datetime.now(UTC)
     cutoffs = {name: now - delta for name, delta in _INSTANCE_STAT_WINDOWS}
@@ -585,8 +586,14 @@ def instance_stats(session: Session = Depends(get_session)) -> dict[str, Any]:
 
     # --- Assemble + apply modality blanking / rounding ---
     for iid, entry in result.items():
-        embedding = modalities[iid] == "embedding"
-        if embedding:
+        # Non-LLM modalities write no token telemetry: embedding instances
+        # persist prompt-token samples only, and the Phase 24 audio modalities
+        # (tts/asr) persist AudioUsageSample rows (chars + seconds) and no
+        # TokenUsageSample/ResponseRecord at all. Blank the LLM-only fields for
+        # every modality that is not "llm" so the throughput columns never
+        # surface misleading zeros/nulls for them.
+        non_llm = modalities[iid] not in (None, "llm")
+        if non_llm:
             entry["live_throughput_tps"] = None
         for name, win in entry["windows"].items():
             counts = err_counts.get(iid)
@@ -594,7 +601,7 @@ def instance_stats(session: Session = Depends(get_session)) -> dict[str, Any]:
                 total = counts.get((name, "total"), 0)
                 failed = counts.get((name, "failed"), 0)
                 win["error_rate"] = round(failed / total, 4) if total > 0 else None
-            if embedding:
+            if non_llm:
                 for field in _LLM_ONLY_FIELDS:
                     win[field] = None
                 continue

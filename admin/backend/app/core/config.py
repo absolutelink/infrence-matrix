@@ -98,6 +98,19 @@ class Settings(BaseSettings):
     # Set false for strictly lazy (on-demand-only) booting.
     SCHEDULER_WARMUP_ON_CONNECT: bool = True
 
+    # --- Phase 24 (audio) request limits --------------------------------
+    # Hard ceiling on a /v1/audio/transcriptions multipart upload (bytes)
+    # and a saved-voice enrollment clip, enforced admin-side before relaying
+    # to the agent. Mirrors the agent's own caps (provider_lib.app_factory:
+    # 100 MiB transcription / 32 MiB voice) so an oversized body is refused
+    # at the edge rather than buffered and forwarded.
+    AUDIO_MAX_UPLOAD_BYTES: int = 100 * 1024 * 1024  # 100 MiB
+    AUDIO_MAX_VOICE_BYTES: int = 32 * 1024 * 1024  # 32 MiB
+    # Per-request httpx timeout for the audio passthrough (seconds). A long
+    # transcription runs for minutes; an unbounded hang would pin the
+    # inference slot forever.
+    AUDIO_REQUEST_TIMEOUT_SECONDS: float = 600.0
+
     # CORS: the UI is served same-origin from this app; allow Vite dev server.
     CORS_ALLOW_ALL_ORIGINS: bool = True
 

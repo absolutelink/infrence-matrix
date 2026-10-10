@@ -9,6 +9,10 @@ from app.api.admin.machines import router as admin_machines_router
 from app.api.admin.provider_types import router as admin_provider_types_router
 from app.api.admin.providers import router as admin_providers_router
 from app.api.admin.responses import router as admin_responses_router
+from app.api.admin.voices import router as admin_voices_router
+from app.api.v1.audio_speech import router as v1_audio_speech_router
+from app.api.v1.audio_transcriptions import router as v1_audio_transcriptions_router
+from app.api.v1.audio_voices import router as v1_audio_voices_router
 from app.api.v1.chat_completions import router as v1_chat_router
 from app.api.v1.embeddings import router as v1_embeddings_router
 from app.api.v1.models import router as v1_models_router
@@ -35,6 +39,8 @@ api_router.include_router(admin_huggingface_router)
 api_router.include_router(admin_responses_router)
 # Phase 16: provider-agent reads (containers bound to machine+type).
 api_router.include_router(admin_agents_router)
+# Phase 24: saved-voice enrollment (UI catalog; proxies the agent HTTP surface).
+api_router.include_router(admin_voices_router)
 # Public OpenAI-compatible inference API lives at /v1 (NOT under /admin/api).
 api_router.include_router(v1_responses_router)
 # Phase 21: Responses-over-WebSocket transport (same /v1/responses path).
@@ -43,6 +49,10 @@ api_router.include_router(v1_responses_ws_router)
 api_router.include_router(v1_compact_router)
 api_router.include_router(v1_chat_router)
 api_router.include_router(v1_embeddings_router)
+# Phase 24: audio (tts/asr) — direct httpx passthrough, litellm bypassed.
+api_router.include_router(v1_audio_speech_router)
+api_router.include_router(v1_audio_transcriptions_router)
+api_router.include_router(v1_audio_voices_router)
 api_router.include_router(v1_models_router)
 # 501 stubs for dropped endpoints (registered last; explicit paths only).
 api_router.include_router(v1_stubs_router)

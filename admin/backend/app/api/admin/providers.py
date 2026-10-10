@@ -314,7 +314,7 @@ def _apply_max_running_from_schema(ptype: ProviderType, schema: dict[str, Any]) 
         ptype.max_running_backends = 0
 
 
-_KNOWN_MODALITIES = ("llm", "embedding")
+_KNOWN_MODALITIES = ("llm", "embedding", "tts", "asr")
 
 
 def _apply_serves_modalities_from_schema(
