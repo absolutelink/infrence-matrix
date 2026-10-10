@@ -1,12 +1,14 @@
-"""Client ``GET /v1/audio/voices`` proxy (Phase 24).
+"""Client ``GET /v1/audio/voices`` proxy (Phase 24; boot-on-demand P25).
 
-The live agent catalog is the source of truth; the route takes no scheduler
-slot but requires a connected agent hosting the ``tts`` definition. Asserts:
+The live agent catalog is the source of truth. The route admits through the
+scheduler (BOOTING a stopped backend on demand — the playground voice dropdown
+must not dead-end on an idle-reaped model) and releases the slot after the
+relay. Asserts:
 
-- 200 relays the agent's JSON catalog;
+- 200 relays the agent's JSON catalog and leaves no slot held;
 - 404 unknown / disabled / non-tts alias;
 - 503 when no connected agent hosts the definition;
-- an agent 503 (backend not ready) is passed through.
+- an agent 503 (backend raced to stopped after admission) is passed through.
 """
 
 import httpx
@@ -70,6 +72,8 @@ def test_voices_relays_agent_catalog(client: TestClient, session: Session) -> No
     resp = client.get("/v1/audio/voices", params={"model": "v-a"})
     assert resp.status_code == 200
     assert resp.json()["data"][0]["voice_id"] == "alloy"
+    # The boot-on-demand slot is released after the relay (no leak).
+    assert client.app.state.scheduler.active_count("v-a") == 0
 
 
 def test_voices_unknown_alias_404(client: TestClient) -> None:
@@ -91,10 +95,13 @@ def test_voices_no_connected_agent_503(client: TestClient, session: Session) -> 
 
 @respx.mock
 def test_voices_agent_503_passthrough(client: TestClient, session: Session) -> None:
-    # Connected agent but the backend is stopped -> the agent answers 503.
-    seed_tts(session, alias="v-notready", machine_uid="v-nr-m", running=False)
+    # Admitted (DB says running) but the agent races to not-ready -> its 503
+    # passes through. (A DB-stopped backend is now BOOTED on demand instead,
+    # so the not-ready case is simulated at the agent boundary.)
+    seed_tts(session, alias="v-notready", machine_uid="v-nr-m", running=True)
     respx.get(f"{AGENT}/v1/audio/voices").mock(
         return_value=httpx.Response(503, json={"detail": "backend is stopped"})
     )
     resp = client.get("/v1/audio/voices", params={"model": "v-notready"})
     assert resp.status_code == 503
+    assert client.app.state.scheduler.active_count("v-notready") == 0
