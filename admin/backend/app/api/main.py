@@ -12,6 +12,9 @@ from app.api.admin.responses import router as admin_responses_router
 from app.api.admin.voices import router as admin_voices_router
 from app.api.v1.audio_speech import router as v1_audio_speech_router
 from app.api.v1.audio_transcriptions import router as v1_audio_transcriptions_router
+from app.api.v1.audio_transcriptions_ws import (
+    router as v1_audio_transcriptions_ws_router,
+)
 from app.api.v1.audio_voices import router as v1_audio_voices_router
 from app.api.v1.chat_completions import router as v1_chat_router
 from app.api.v1.embeddings import router as v1_embeddings_router
@@ -52,6 +55,8 @@ api_router.include_router(v1_embeddings_router)
 # Phase 24: audio (tts/asr) — direct httpx passthrough, litellm bypassed.
 api_router.include_router(v1_audio_speech_router)
 api_router.include_router(v1_audio_transcriptions_router)
+# Phase 24 S4: live-ASR WebSocket relay (WS /v1/audio/transcriptions/stream).
+api_router.include_router(v1_audio_transcriptions_ws_router)
 api_router.include_router(v1_audio_voices_router)
 api_router.include_router(v1_models_router)
 # 501 stubs for dropped endpoints (registered last; explicit paths only).

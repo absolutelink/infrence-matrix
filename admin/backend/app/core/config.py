@@ -111,6 +111,20 @@ class Settings(BaseSettings):
     # inference slot forever.
     AUDIO_REQUEST_TIMEOUT_SECONDS: float = 600.0
 
+    # --- Phase 24 S4: live-ASR WebSocket relay limits -------------------
+    # Hard ceiling on a single ``WS /v1/audio/transcriptions/stream`` client
+    # connection's lifetime (seconds). A live ASR session is bounded so a
+    # forgotten socket can never pin an inference slot forever; 4 h comfortably
+    # exceeds any realistic dictation session (mirrors the talkies stream caps).
+    AUDIO_WS_MAX_DURATION_SECONDS: float = 4 * 3600.0
+    # Close a live-ASR connection after this many seconds with no frame in
+    # either direction (a dead client that never sends a close). 0 disables.
+    AUDIO_WS_IDLE_TIMEOUT_SECONDS: float = 30.0
+    # Max size (bytes) of a single inbound client frame on the live-ASR relay;
+    # an oversized frame closes the socket with 1009. Live PCM chunks are small
+    # (a few tens of ms of 16 kHz audio), so 64 KiB is generous.
+    AUDIO_WS_MAX_FRAME_BYTES: int = 64 * 1024
+
     # CORS: the UI is served same-origin from this app; allow Vite dev server.
     CORS_ALLOW_ALL_ORIGINS: bool = True
 
