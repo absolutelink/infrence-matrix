@@ -708,18 +708,23 @@ class TalkiesBackend(BackendDriver):
         return self._slug_for_name(model)
 
     async def voices(self, model: str | None = None) -> dict[str, Any]:
-        """GET /v1/audio/voices?model=<slug> passthrough (no slot).
+        """GET /v1/audio/voices passthrough, filtered to the routed model.
 
         ``model`` is the served NAME the route resolved this request to; it is
-        mapped to its engine slug (name -> slug) before forwarding, so a
-        multi-model definition reads the catalog of the RIGHT served model.
-        When absent (legacy single-slug / direct call) the primary slug is used.
-        Custom-voices enrollment stays per-definition (shared data dir, spec §7).
+        mapped to its engine slug (name -> slug) before forwarding. Upstream
+        talkies ignores its own ``model`` query filter and returns the
+        catalogs of ALL loaded models (multi-model processes), so the response
+        is filtered here to the routed slug and each entry's ``model`` field
+        is rewritten back to the served NAME the client asked with. When
+        ``model`` is absent (legacy single-slug / direct call) the primary slug
+        is used. Custom-voices enrollment stays per-definition (shared data
+        dir, spec §7).
         """
         client = self._http_client()
+        slug = self._voice_slug(model)
         resp = await client.get(
             f"{self.base_url}/v1/audio/voices",
-            params={"model": self._voice_slug(model)},
+            params={"model": slug},
             headers=self._auth_headers(),
             timeout=15.0,
         )
@@ -728,7 +733,16 @@ class TalkiesBackend(BackendDriver):
                 status_code=resp.status_code,
                 detail=resp.text[:500],
             )
-        return resp.json()
+        data = resp.json()
+        served_name = model if isinstance(model, str) and model else slug
+        voices = data.get("voices")
+        if isinstance(voices, list):
+            data["voices"] = [
+                {**v, "model": served_name}
+                for v in voices
+                if isinstance(v, dict) and v.get("model") in (slug, served_name)
+            ]
+        return data
 
     def _custom_voices_dir(self) -> Path:
         data_dir = self._data_dir or talkies_env.resolve_data_dir(self._settings)

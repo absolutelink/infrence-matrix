@@ -323,20 +323,27 @@ def make_stub_engine(
     ) -> dict[str, Any]:
         _check(authorization)
         stub["last_voices_query"] = model
+        # Mimic real talkies: the endpoint IGNORES its model filter and
+        # returns the catalogs of every loaded slug (Phase 25 multi-model
+        # exposed this upstream quirk; the driver filters per served name).
         return {
             "voices": [
-                {
-                    "voice": "Vivian",
-                    "model": model or slug,
-                    "default": True,
-                    "origin": "builtin",
-                },
-                {
-                    "voice": "clone1",
-                    "model": model or slug,
-                    "default": False,
-                    "origin": "custom",
-                },
+                entry
+                for s in valid
+                for entry in (
+                    {
+                        "voice": "Vivian",
+                        "model": s,
+                        "default": True,
+                        "origin": "builtin",
+                    },
+                    {
+                        "voice": "clone1",
+                        "model": s,
+                        "default": False,
+                        "origin": "custom",
+                    },
+                )
             ]
         }
 

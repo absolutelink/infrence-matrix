@@ -234,6 +234,26 @@ async def test_multi_voices_routes_name_to_slug(tmp_path) -> None:
             await driver.aclose()
 
 
+async def test_multi_voices_filtered_to_routed_slug(tmp_path) -> None:
+    """Upstream talkies ignores its model filter and returns every loaded
+    slug's catalog; the driver must narrow the response to the routed slug
+    and rewrite entries to the served NAME the client asked with."""
+    engine, _stub = make_stub_engine(slugs=[TTS_SLUG, ASR_SLUG])
+    async with serve_stub(engine) as (_url, port):
+        driver = _connected_multi(tmp_path, port)
+        try:
+            for name, _slug in (("a", TTS_SLUG), ("b", ASR_SLUG)):
+                catalog = await driver.voices(name)
+                models = {v["model"] for v in catalog["voices"]}
+                assert models == {name}, f"name {name}: {catalog}"
+                assert {v["voice"] for v in catalog["voices"]} == {"Vivian", "clone1"}
+            # No name (legacy / direct) -> primary slug's voices, tagged slug.
+            catalog = await driver.voices()
+            assert {v["model"] for v in catalog["voices"]} == {TTS_SLUG}
+        finally:
+            await driver.aclose()
+
+
 async def test_multi_voice_put_routes_name_to_slug(tmp_path) -> None:
     engine, _stub = make_stub_engine(slugs=[TTS_SLUG, ASR_SLUG])
     async with serve_stub(engine) as (_url, port):
