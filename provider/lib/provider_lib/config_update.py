@@ -53,6 +53,7 @@ from typing import Any
 from provider_lib.admin_client import AdminClient
 from provider_lib.backend import BackendBusy, BackendLifecycle
 from provider_lib.config import ProviderSettings
+from provider_lib.models import models_from_entry
 from provider_lib.registry import (
     BackendHandle,
     BackendRegistry,
@@ -406,6 +407,16 @@ def install_config_handlers(
             apply = getattr(driver, "apply_config", None)
             if callable(apply):
                 apply(backend_config)
+            # Phase 25: a per-model (served_models) change rides this same
+            # update (the admin folds served_models into the fingerprint).
+            # Refresh the handle + driver served list before the restart so the
+            # booted backend exposes the new names. When the payload carries no
+            # ``served_models`` this is skipped (models_from_entry would find no
+            # alias in a config.update payload and return []).
+            if isinstance(payload.get("served_models"), list):
+                new_models = models_from_entry(payload)
+                if new_models:
+                    registry.set_models(handle, new_models)
             # 8. Start the backend (artifact resolution + download
             #    happens inside the driver; progress events flow).
             step = _STEP_START

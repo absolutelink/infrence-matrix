@@ -15,8 +15,20 @@ from provider_lib.assignments import install_assignment_handler
 from provider_lib.backend import BackendLifecycle
 from provider_lib.config import ProviderSettings
 from provider_lib.config_update import ConfigState
+from provider_lib.models import ModelSpec
 from provider_lib.registry import BackendHandle, BackendRegistry
 from provider_lib.wire import BackendStatusValue
+
+
+class _ModelTrackingDriver(TrackDriver):
+    """TrackDriver that records ``set_models`` calls."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.set_models_calls: list[list[ModelSpec]] = []
+
+    def set_models(self, models: list[ModelSpec]) -> None:
+        self.set_models_calls.append(list(models))
 
 
 def _entry(iid: str, **over: Any) -> dict[str, Any]:
@@ -200,3 +212,120 @@ async def test_max_running_callback_invoked() -> None:
         "agent.assignments.update", {"assignments": [], "max_running_backends": 1}
     )
     assert seen == [1]
+
+
+# ---------------------------------------------------------------------------
+# Phase 25 S1: served_models threading through the reconcile.
+# ---------------------------------------------------------------------------
+
+
+def _model_registry_client() -> tuple[
+    RecordingClient, BackendRegistry, list[BackendHandle]
+]:
+    client = RecordingClient(ProviderSettings())
+    registry = BackendRegistry()
+    created: list[BackendHandle] = []
+
+    def make_handle(entry: dict[str, Any]) -> BackendHandle:
+        driver = _ModelTrackingDriver()
+        lifecycle = BackendLifecycle(
+            driver,
+            capacity=entry.get("capacity", 1),
+            instance_id=entry["instance_id"],
+        )
+        handle = BackendHandle(str(entry["instance_id"]), lifecycle, ConfigState())
+        created.append(handle)
+        return handle
+
+    install_assignment_handler(client, registry, make_handle=make_handle)
+    return client, registry, created
+
+
+async def test_add_with_served_models_reaches_handle_and_driver() -> None:
+    client, registry, _created = _model_registry_client()
+    entry = _entry(
+        "i1",
+        served_models=[
+            {"name": "a", "modality": "tts"},
+            {"name": "b", "modality": "asr"},
+        ],
+    )
+    ack = await client.dispatch("agent.assignments.update", {"assignments": [entry]})
+    assert ack["added"] == ["i1"]
+    h = registry.get("i1")
+    assert h is not None
+    # The handle carries both served models (not just the legacy alias).
+    assert [m.name for m in h.models] == ["a", "b"]
+    # Both names route to the handle; the legacy alias does not (it was replaced).
+    assert registry.resolve_by_model("a") is h
+    assert registry.resolve_by_model("b") is h
+    # The driver hook fired with the parsed list.
+    assert h.lifecycle.driver.set_models_calls == [
+        [ModelSpec(name="a", modality="tts"), ModelSpec(name="b", modality="asr")]
+    ]
+
+
+async def test_live_add_of_served_name_refreshes_existing_backend() -> None:
+    """A changed served_models list on an ALREADY-HOSTED backend re-applies in
+    place (no restart): the new name reaches the handle + driver while the
+    backend keeps serving."""
+    client, registry, _created = _model_registry_client()
+    await client.dispatch(
+        "agent.assignments.update",
+        {"assignments": [_entry("i1", served_models=[{"name": "a"}])]},
+    )
+    h = registry.get("i1")
+    assert h is not None
+    await h.lifecycle.start()  # bring it up; a refresh must NOT stop it
+    assert h.lifecycle.in_flight == 0
+
+    # Push the same backend with an extra served name "b".
+    ack = await client.dispatch(
+        "agent.assignments.update",
+        {"assignments": [_entry("i1", served_models=[{"name": "a"}, {"name": "b"}])]},
+    )
+    assert ack["added"] == []  # already hosted, not re-added
+    assert ack["removed"] == []
+    assert h.lifecycle.backend_status == BackendStatusValue.RUNNING  # never stopped
+    assert [m.name for m in h.models] == ["a", "b"]
+    assert registry.resolve_by_model("b") is h
+    # The driver got a second set_models call with the expanded list.
+    assert len(h.lifecycle.driver.set_models_calls) == 2
+    assert [m.name for m in h.lifecycle.driver.set_models_calls[-1]] == ["a", "b"]
+
+
+async def test_unchanged_served_models_does_not_reapply() -> None:
+    client, registry, _created = _model_registry_client()
+    entry = _entry("i1", served_models=[{"name": "a"}])
+    await client.dispatch("agent.assignments.update", {"assignments": [entry]})
+    h = registry.get("i1")
+    assert h is not None
+    before = len(h.lifecycle.driver.set_models_calls)
+    # Re-push the identical entry: no change -> no extra set_models call.
+    await client.dispatch("agent.assignments.update", {"assignments": [entry]})
+    assert len(h.lifecycle.driver.set_models_calls) == before
+
+
+async def test_live_disable_of_served_name_is_unroutable() -> None:
+    """F1 via the reconcile: toggling the sole served name off must make it
+    unroutable (no alias resurrection), not leave it served."""
+    client, registry, _created = _model_registry_client()
+    await client.dispatch(
+        "agent.assignments.update",
+        {"assignments": [_entry("i1", served_models=[{"name": "x"}])]},
+    )
+    h = registry.get("i1")
+    assert h is not None
+    assert registry.resolve_by_model("x") is h
+
+    ack = await client.dispatch(
+        "agent.assignments.update",
+        {
+            "assignments": [
+                _entry("i1", served_models=[{"name": "x", "enabled": False}])
+            ]
+        },
+    )
+    assert ack["added"] == [] and ack["removed"] == []  # refreshed in place
+    assert registry.resolve_by_model("x") is None
+    assert h.served_names == []

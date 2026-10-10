@@ -12,7 +12,38 @@ from provider_lib.config_update import (
     install_config_handlers,
     prompt_cache_dir,
 )
+from provider_lib.models import ModelSpec
+from provider_lib.registry import BackendHandle, BackendRegistry
 from provider_lib.wire import BackendStatusValue
+
+
+class _ModelTrackingDriver(TrackDriver):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.set_models_calls: list[list[ModelSpec]] = []
+
+    def set_models(self, models: list[ModelSpec]) -> None:
+        self.set_models_calls.append(list(models))
+
+
+class _OrderTrackingDriver(_ModelTrackingDriver):
+    """Records the relative order of apply_config / set_models / start."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.calls: list[str] = []
+
+    def apply_config(self, backend_config: dict[str, Any]) -> None:
+        self.calls.append("apply_config")
+        super().apply_config(backend_config)
+
+    def set_models(self, models: list[ModelSpec]) -> None:
+        self.calls.append("set_models")
+        super().set_models(models)
+
+    async def start(self) -> None:
+        self.calls.append("start")
+        await super().start()
 
 
 @pytest.fixture
@@ -294,3 +325,85 @@ async def test_config_update_adopts_modality_on_noop(settings: Any) -> None:
     assert ack["ok"] is True
     assert ack["detail"]["noop"] is True
     assert driver.modality == "embedding"
+
+
+async def test_config_update_threads_served_models(settings: Any) -> None:
+    """Phase 25: a config.update carrying served_models refreshes the handle +
+    driver before the restart so the booted backend serves the new names."""
+    client = RecordingClient(settings)
+    driver = _ModelTrackingDriver()
+    lifecycle = BackendLifecycle(driver, instance_id="i1")
+    registry = BackendRegistry()
+    handle = BackendHandle("i1", lifecycle, ConfigState("fp-old"), alias="old")
+    registry.add(handle)
+    install_config_handlers(client, registry, handle.config_state, settings)
+
+    ack = await client.dispatch(
+        "provider.config.update",
+        {
+            "instance_id": "i1",
+            "backend_config": {"a": 1},
+            "config_fingerprint": "fp-new",
+            "served_models": [{"name": "x", "modality": "tts"}, {"name": "y"}],
+        },
+    )
+    assert ack["ok"] is True
+    assert [m.name for m in handle.models] == ["x", "y"]
+    assert registry.resolve_by_model("x") is handle
+    assert registry.resolve_by_model("y") is handle
+    assert registry.resolve_by_model("old") is None  # alias re-derived to "x"
+    assert driver.set_models_calls == [
+        [ModelSpec(name="x", modality="tts"), ModelSpec(name="y", modality="llm")]
+    ]
+
+
+async def test_config_update_without_served_models_leaves_models(settings: Any) -> None:
+    """A config.update with no served_models must NOT clobber the handle's list
+    (models_from_entry finds no alias in the payload -> [])."""
+    client = RecordingClient(settings)
+    driver = _ModelTrackingDriver()
+    lifecycle = BackendLifecycle(driver, instance_id="i1")
+    registry = BackendRegistry()
+    handle = BackendHandle(
+        "i1", lifecycle, ConfigState("fp-old"), alias="keep", models=[ModelSpec("keep")]
+    )
+    registry.add(handle)
+    install_config_handlers(client, registry, handle.config_state, settings)
+
+    ack = await client.dispatch(
+        "provider.config.update",
+        {
+            "instance_id": "i1",
+            "backend_config": {"a": 1},
+            "config_fingerprint": "fp-new",
+        },
+    )
+    assert ack["ok"] is True
+    assert [m.name for m in handle.models] == ["keep"]
+    assert driver.set_models_calls == []
+
+
+async def test_config_update_set_models_before_start(settings: Any) -> None:
+    """(d) ordering: the served-model refresh must land BEFORE the restart so the
+    booted backend comes up already serving the new names."""
+    client = RecordingClient(settings)
+    driver = _OrderTrackingDriver()
+    lifecycle = BackendLifecycle(driver, instance_id="i1")
+    registry = BackendRegistry()
+    handle = BackendHandle("i1", lifecycle, ConfigState("fp-old"), alias="old")
+    registry.add(handle)
+    install_config_handlers(client, registry, handle.config_state, settings)
+
+    ack = await client.dispatch(
+        "provider.config.update",
+        {
+            "instance_id": "i1",
+            "backend_config": {"a": 1},
+            "config_fingerprint": "fp-new",
+            "served_models": [{"name": "x"}, {"name": "y"}],
+        },
+    )
+    assert ack["ok"] is True
+    assert "set_models" in driver.calls
+    assert driver.calls.index("set_models") < driver.calls.index("start")
+    assert driver.calls.index("apply_config") < driver.calls.index("set_models")

@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from provider_lib.models import ModelSpec
 from provider_lib.wire import BackendStatusValue
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids a hard import cycle
@@ -236,6 +237,19 @@ class BackendDriver(ABC):
         raises NotImplementedError -> the route closes the socket with 1011.
         """
         raise NotImplementedError("this backend has no live ASR stream surface")
+
+    def set_models(self, models: list[ModelSpec]) -> None:  # noqa: B027
+        """Adopt the backend's served-model list (Phase 25 multi-model).
+
+        Called at handle construction (before ``start()``) and on every
+        ``agent.assignments.update`` / ``provider.config.update`` that changes
+        the served set, so a driver can rebuild its internal name->engine map
+        (talkies: name->slug; gufo: ``served_model_name``; halogen-flash: which
+        sub-model to invoke) **without a restart where possible**. ``models`` is
+        always non-empty for a real entry (a single-model definition carries one
+        synthesized spec). The default is a no-op for drivers that serve exactly
+        one model or read the request's ``model`` field directly.
+        """
 
     def apply_config(self, backend_config: dict[str, Any]) -> None:  # noqa: B027
         """Adopt a (possibly updated) backend_config.

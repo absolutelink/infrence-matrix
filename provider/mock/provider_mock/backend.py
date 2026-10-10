@@ -34,6 +34,7 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
 from provider_lib.backend import BackendDriver, SpeechStream
+from provider_lib.models import ModelSpec
 from provider_lib.schema import load_schema, validate_backend_config
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -62,6 +63,11 @@ class MockBackend(BackendDriver):
         hold: asyncio.Event | None = None,
     ) -> None:
         self.model = model
+        # Phase 25 multi-model: the served-model list adopted via set_models.
+        # Empty (default) => list_models falls back to the single ``self.model``
+        # so legacy single-model behavior is byte-identical.
+        self.models: list[ModelSpec] = []
+        self.set_models_calls = 0
         self.delta_count = delta_count
         self.delta_delay = delta_delay
         # When set, the stream pauses until this event is set before
@@ -160,13 +166,31 @@ class MockBackend(BackendDriver):
     async def health(self) -> bool:
         return self.started
 
+    def set_models(self, models: list[ModelSpec]) -> None:
+        """Adopt the served-model list (Phase 25 multi-model).
+
+        Records the specs (so ``list_models`` advertises every enabled served
+        name) and mirrors the first enabled name onto ``self.model`` for
+        back-compat with the single-model path. The mock serves all names from
+        its one lifecycle; ``stream_responses`` echoes the requested name back.
+        """
+        self.set_models_calls += 1
+        self.models = list(models)
+        enabled = [m.name for m in models if m.enabled]
+        if enabled:
+            self.model = enabled[0]
+
     async def list_models(self) -> list[dict[str, Any]]:
+        names = (
+            [m.name for m in self.models if m.enabled] if self.models else [self.model]
+        )
         return [
             {
-                "id": self.model,
+                "id": name,
                 "object": "model",
                 "owned_by": "inference-matrix-mock",
             }
+            for name in names
         ]
 
     def _base_response(self, response_id: str, model: str) -> dict[str, Any]:

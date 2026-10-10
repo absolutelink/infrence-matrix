@@ -19,19 +19,29 @@ dispatch layer is a transparent pass-through for them.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from provider_lib.backend import BackendLifecycle
+from provider_lib.models import ModelSpec
+
+logger = logging.getLogger("provider.registry")
 
 
 class BackendHandle:
     """One hosted backend: its lifecycle + applied-config state + identity.
 
-    ``alias`` is the ``ProviderDefinition.alias`` this backend serves. The
-    agent's single ``/v1`` surface routes an inbound request to this handle by
-    matching the request's ``model`` field against it (port model overhaul).
-    ``None`` for handles built before an alias is known (single-backend
-    convenience / pre-registration placeholder).
+    ``models`` is the list of client-facing served models this backend exposes
+    (Phase 25 multi-model). It is always non-empty for a handle built from a real
+    registration/assignment entry (a single-model definition carries exactly one
+    synthesized spec); a nameless placeholder handle (built before an alias is
+    known) carries an empty list and is unroutable. ``alias`` is kept as the
+    first enabled served name for display / back-compat (the ``/health`` summary
+    and older packages read it).
+
+    The agent's single ``/v1`` surface routes an inbound request to this handle
+    by matching the request's ``model`` field against ANY enabled served name
+    (see :meth:`BackendRegistry.resolve_by_model`).
     """
 
     def __init__(
@@ -40,30 +50,72 @@ class BackendHandle:
         lifecycle: BackendLifecycle,
         config_state: Any = None,
         alias: str | None = None,
+        models: list[ModelSpec] | None = None,
     ) -> None:
         self.instance_id = instance_id
         self.lifecycle = lifecycle
         self.config_state = config_state
         self.alias = alias
+        if models is None:
+            # Synthesize the single-model spec from the legacy alias so every
+            # existing construction site (which passes only ``alias``) carries a
+            # one-entry model list; a nameless placeholder stays empty.
+            models = [ModelSpec(name=alias)] if isinstance(alias, str) and alias else []
+        self.models = models
+
+    @property
+    def served_names(self) -> list[str]:
+        """Client-facing names this handle routes on (enabled served models).
+
+        There is deliberately **no alias fallback**: the constructor already
+        synthesizes a one-entry ``models`` list from a legacy ``alias`` (see
+        :meth:`__init__`), so a single-model handle routes on ``[alias]`` through
+        ``models`` itself. Falling back to ``alias`` here would resurrect a stale
+        name whenever ``models`` is empty — breaking both the all-disabled toggle
+        (spec §3/§5: disabled -> 404) and a ``set_models([])`` on a handle that
+        lost a name to a collision (it would steal the name back). A nameless
+        placeholder (``models == []``, ``alias is None``) correctly routes on
+        nothing.
+        """
+        return [m.name for m in self.models if m.enabled]
 
 
 class BackendRegistry:
     """``instance_id -> BackendHandle`` with single-backend convenience.
 
-    Also maintains an ``alias -> BackendHandle`` index so the agent's single
-    ``/v1`` surface can resolve the target backend from a request's ``model``
-    field (port model overhaul). The index is kept in sync by :meth:`add` /
-    :meth:`remove`.
+    Also maintains a ``model name -> BackendHandle`` index over every handle's
+    **enabled served names** so the agent's single ``/v1`` surface can resolve
+    the target backend from a request's ``model`` field (port model overhaul +
+    Phase 25 multi-model). The index is kept in sync by :meth:`add` /
+    :meth:`remove` / :meth:`set_models`.
     """
 
     def __init__(self) -> None:
         self._handles: dict[str, BackendHandle] = {}
-        self._by_alias: dict[str, BackendHandle] = {}
+        self._by_model: dict[str, BackendHandle] = {}
+
+    def _index(self, name: str, handle: BackendHandle) -> None:
+        """Point a served name at ``handle``, warning on a cross-handle clash.
+
+        Last-write-wins is preserved (the newest handle owns the name), but a
+        collision across two DIFFERENT handles is almost always a
+        misconfiguration (two definitions claiming one name), so it is logged
+        loudly rather than silently shadowing the previous owner.
+        """
+        existing = self._by_model.get(name)
+        if existing is not None and existing is not handle:
+            logger.warning(
+                "model name %r already served by another handle (%s); "
+                "overwriting (last-write-wins)",
+                name,
+                existing.instance_id,
+            )
+        self._by_model[name] = handle
 
     def add(self, handle: BackendHandle) -> None:
         self._handles[handle.instance_id] = handle
-        if handle.alias:
-            self._by_alias[handle.alias] = handle
+        for name in handle.served_names:
+            self._index(name, handle)
 
     def remove(self, instance_id: str) -> BackendHandle | None:
         """Drop a hosted handle by its key (slice 5 assignments reconcile).
@@ -73,12 +125,44 @@ class BackendRegistry:
         lifecycle first (busy-safe removal is enforced upstream).
         """
         handle = self._handles.pop(str(instance_id), None)
-        if handle is not None and handle.alias:
-            # Only clear the alias index if it still points at this handle (a
-            # later add of the same alias would have replaced it).
-            if self._by_alias.get(handle.alias) is handle:
-                del self._by_alias[handle.alias]
+        if handle is not None:
+            # Only clear an indexed name if it still points at this handle (a
+            # later add/set_models of the same name would have replaced it).
+            for name in handle.served_names:
+                if self._by_model.get(name) is handle:
+                    del self._by_model[name]
         return handle
+
+    def set_models(self, handle: BackendHandle, models: list[ModelSpec]) -> None:
+        """Re-apply a handle's served-model list in place (Phase 25).
+
+        Updates ``handle.models``, re-derives ``alias`` (first enabled name) for
+        display/back-compat, re-indexes the ``model -> handle`` map, and pushes
+        the list to the driver via ``driver.set_models`` so a driver can rebuild
+        its internal name->engine map **without a restart**. The lifecycle is
+        never touched (no stop/boot), which is exactly what makes a live add of a
+        served name safe on a running backend.
+
+        The re-index uses the explicit enabled-name set (never the alias
+        fallback), so toggling the sole name off — or an empty list — removes the
+        handle from the index instead of resurrecting a stale alias.
+        """
+        models = list(models)
+        # Drop the names this handle currently owns (guarded: only remove an
+        # entry that still points at THIS handle, so a name another handle won
+        # via a collision is left intact when this one moves away).
+        for name in handle.served_names:
+            if self._by_model.get(name) is handle:
+                del self._by_model[name]
+        handle.models = models
+        enabled = [m.name for m in models if m.enabled]
+        handle.alias = enabled[0] if enabled else handle.alias
+        for name in enabled:
+            self._index(name, handle)
+        driver = getattr(handle.lifecycle, "driver", None)
+        setter = getattr(driver, "set_models", None) if driver is not None else None
+        if callable(setter):
+            setter(models)
 
     def get(self, instance_id: str) -> BackendHandle | None:
         return self._handles.get(instance_id)
@@ -99,16 +183,18 @@ class BackendRegistry:
 
     def resolve_by_model(self, model: str | None) -> BackendHandle | None:
         """Resolve the handle that serves an inbound request's ``model`` field
-        (the port model overhaul: one agent ``/v1`` surface routes by alias).
+        (the port model overhaul: one agent ``/v1`` surface routes by model).
 
-        ``None`` model, a non-string model, or an alias this agent does not host
-        -> ``None`` (the caller answers 404). The non-string guard keeps a
-        malformed request (e.g. ``model`` as a list/int) from raising inside
-        ``dict.get`` — it degrades to a clean 404 instead of a 500.
+        Matches ANY **enabled** served name on a handle (Phase 25 multi-model):
+        a disabled or unknown name is not indexed and resolves to ``None``.
+        ``None`` model, a non-string model, or an empty string -> ``None`` (the
+        caller answers 404). The non-string guard keeps a malformed request
+        (e.g. ``model`` as a list/int) from raising inside ``dict.get`` — it
+        degrades to a clean 404 instead of a 500.
         """
         if not isinstance(model, str) or not model:
             return None
-        return self._by_alias.get(model)
+        return self._by_model.get(model)
 
     def resolve_target(self, instance_id: str | None) -> BackendHandle | None:
         """Resolve the handle a per-backend command targets, honoring a
@@ -168,4 +254,4 @@ def registry_from_lifecycle(
     return reg
 
 
-__all__ = ["BackendHandle", "BackendRegistry", "registry_from_lifecycle"]
+__all__ = ["BackendHandle", "BackendRegistry", "registry_from_lifecycle", "ModelSpec"]

@@ -34,6 +34,7 @@ from typing import Any
 
 from provider_lib.admin_client import AdminClient
 from provider_lib.backend import BackendBusy
+from provider_lib.models import models_from_entry
 from provider_lib.registry import BackendHandle, BackendRegistry
 from provider_lib.wire import Frame, FrameKind
 
@@ -90,13 +91,18 @@ def install_assignment_handler(
 
         # Add backends the agent does not yet host.
         for iid, entry in desired.items():
-            if registry.resolve_target(iid) is not None:
-                # Already hosted. NOTE (L2): an already-hosted backend's alias/
-                # metadata is NOT refreshed here — recreating the lifecycle would
-                # drop its running state. A renamed definition reaches a live
-                # backend via the next provider.config.update (which carries the
-                # new config) or its next re-registration; assignments.update
-                # only governs which backends exist, not their live contents.
+            existing = registry.resolve_target(iid)
+            if existing is not None:
+                # Already hosted. NOTE (L2): the lifecycle is NOT recreated here
+                # (that would drop its running state). Phase 25: a changed
+                # served-model list IS refreshed in place — a live add of a
+                # served name reaches the driver via ``set_models`` (no restart)
+                # while the backend keeps serving. A renamed definition still
+                # reaches a live backend via the next provider.config.update or
+                # re-registration.
+                new_models = models_from_entry(entry)
+                if new_models and new_models != existing.models:
+                    registry.set_models(existing, new_models)
                 continue
             if make_handle is None:
                 # Defensive: every provider package supplies a make_handle
@@ -133,6 +139,12 @@ def install_assignment_handler(
             if cfg_state is not None:
                 cfg_state.modality = modality
             registry.add(handle)
+            # Phase 25: guarantee the handle + driver carry the full served-model
+            # list (preferring ``served_models``) even if the package's
+            # ``make_handle`` only read the legacy alias.
+            entry_models = models_from_entry(entry)
+            if entry_models:
+                registry.set_models(handle, entry_models)
             added.append(iid)
 
         # Retire hosted backends no longer assigned, busy-safe. Resolve each

@@ -33,6 +33,7 @@ from provider_lib.config import ProviderSettings
 from provider_lib.config_update import ConfigState, install_config_handlers
 from provider_lib.log_stream import install_log_streaming
 from provider_lib.metrics import filter_gpus, parse_gpu_assignment
+from provider_lib.models import ModelSpec, models_from_entry
 from provider_lib.ops import emit_backend_status_snapshot, install_backend_ops
 from provider_lib.registry import BackendHandle, BackendRegistry
 from provider_lib.serve import AgentServer
@@ -124,6 +125,18 @@ def make_lifecycle(
     )
 
 
+def _str_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _first_enabled_name(models: list[ModelSpec]) -> str | None:
+    """The first enabled served name (the multi-model ``alias`` mirror)."""
+    for spec in models:
+        if spec.enabled:
+            return spec.name
+    return None
+
+
 def build_registry(client: AdminClient, result: RegistrationResult) -> BackendRegistry:
     """Host one lifecycle per backend the admin placed on this agent (H3).
 
@@ -137,14 +150,19 @@ def build_registry(client: AdminClient, result: RegistrationResult) -> BackendRe
         if iid is None:  # pragma: no cover - admin always assigns an id
             continue
         definition = backend.get("definition") or {}
-        raw_alias = definition.get("alias")
-        alias = raw_alias if isinstance(raw_alias, str) else None
+        models = models_from_entry(definition)
+        alias = _first_enabled_name(models) or _str_or_none(definition.get("alias"))
         lifecycle = make_lifecycle(client, instance_id=iid)
         config_state = ConfigState()
         _apply_backend(lifecycle, backend, config_state)
-        # Port model overhaul: the handle carries its alias so the agent's single
-        # /v1 surface routes by model; no per-backend port.
-        registry.add(BackendHandle(str(iid), lifecycle, config_state, alias=alias))
+        # Port model overhaul + Phase 25: the handle carries its served models so
+        # the agent's single /v1 surface routes by any enabled name; no
+        # per-backend port. ``add`` indexes every enabled served name.
+        registry.add(
+            BackendHandle(str(iid), lifecycle, config_state, alias=alias, models=models)
+        )
+        if models:
+            lifecycle.driver.set_models(models)
     return registry
 
 
@@ -202,13 +220,18 @@ def install_command_handlers(
 
         def make_handle(entry: dict[str, Any]) -> BackendHandle:
             iid = str(entry["instance_id"])
-            raw_alias = entry.get("alias")
-            alias = raw_alias if isinstance(raw_alias, str) else None
+            models = models_from_entry(entry)
+            alias = _first_enabled_name(models) or _str_or_none(entry.get("alias"))
             lifecycle = make_lifecycle(client, instance_id=iid)
             config_state = ConfigState()
             _apply_assignment(lifecycle, entry, config_state)
-            # Port model overhaul: alias for model routing; no per-backend port.
-            return BackendHandle(iid, lifecycle, config_state, alias=alias)
+            # Port model overhaul + Phase 25: served models for model routing;
+            # no per-backend port. The shared assignments reconcile pushes the
+            # list to the driver via ``set_models`` after adding this handle, so
+            # the factory only needs to carry it on the handle itself.
+            return BackendHandle(
+                iid, lifecycle, config_state, alias=alias, models=models
+            )
 
     install_backend_ops(
         client,
