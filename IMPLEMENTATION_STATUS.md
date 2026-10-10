@@ -2,7 +2,7 @@
 
 **Overhaul branch:** `litellm-architecture-overhaul`
 **Last updated:** 2026-10-10 (**Phase 25 — Multi-model definitions: 🟡
-in progress (S0–S2 done).** One definition = one backend process serving multiple
+in progress (S0–S3 done).** One definition = one backend process serving multiple
 client-facing model names, each with its own modality + per-model config;
 provider declares capability (`x-multi-model`), admin owns the names, the
 driver routes. First consumer talkies (4 slugs → 1 def); later gufo /
@@ -3306,7 +3306,24 @@ satellites: embed/rerank/decision under one roof).
   scheduler name lookup + per-name acquire/instance boot, endpoint gates
   via per-model modality, `/v1/models` expansion, definition API
   (create/PATCH/GET + validation rules), assignment payload, per-name
-  litellm registration, fingerprint. ⬜
+  litellm registration, fingerprint. ✅ done — `ProviderModel` table +
+  `provider_types.multi_model` (migration `d5f9b2c8e041`, up/down/up +
+  autogenerate parity); `services/served_models.py` canonical accessors
+  (`resolve_models`/`resolve_served`/`served_models_payload`); scheduler
+  resolves served name → owning definition's single instance (per-name
+  FIFO acquire/release, shared boot/VRAM/capacity per instance,
+  definition-scoped eviction so sibling names never evict each other,
+  **per-instance boot lock** serializing `backend.start` across sibling
+  requests AND warm-up — acyclic `state.lock → _boot_lock`, TOCTOU
+  re-check, lock pruned on stop); all 9 v1 gates use `spec.modality`;
+  `/v1/models` lists every enabled name; definitions create/PATCH/GET
+  with §6 validation (multi_model required, global name uniqueness,
+  per-model config schema, alias sync to first enabled, name+modality
+  immutable while attached); assignment payload + served_models-aware
+  fingerprint; per-name litellm registration (tts/asr skip). Legacy
+  single-model byte-identical. Admin **655 green** (+50). Client
+  regenerated. Review: 3 rounds, CLEAN (rounds 2–3 caught warm-up
+  double-boot + boot-lock leak).
 - **S4.** frontend + client regen: multi-model definition form, served-
   name listing/badges. ⬜
 - **S5.** docs polish + optional deploy cutover (4 talkies defs → 1). ⬜
