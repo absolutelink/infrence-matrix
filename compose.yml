@@ -275,7 +275,11 @@ services:
   # provider-talkies (Phase 24, speech: tts + asr):
   #   build:
   #     context: .
-  #     dockerfile: provider/talkies/Dockerfile
+  #     # Driver-baked variant (runs on plain/rootful Podman with the device
+  #     # nodes below; baked driver version must match the host kernel driver
+  #     # — see provider/talkies/Dockerfile.cuda). Use provider/talkies/
+  #     # Dockerfile instead if the host has the NVIDIA Container Toolkit.
+  #     dockerfile: provider/talkies/Dockerfile.cuda
   #   restart: unless-stopped
   #   ports:
   #     - "8085:8081"

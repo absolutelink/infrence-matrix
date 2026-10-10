@@ -11,7 +11,10 @@ daemon exists (see its header).
 import re
 from pathlib import Path
 
+import pytest
+
 DOCKERFILE = Path(__file__).resolve().parents[1] / "Dockerfile"
+DOCKERFILE_CUDA = Path(__file__).resolve().parents[1] / "Dockerfile.cuda"
 STUB_BASE = Path(__file__).resolve().parents[1] / "Dockerfile.stubtest"
 
 
@@ -45,10 +48,13 @@ def test_stub_base_reproduces_the_hazards() -> None:
     assert any(i == "HEALTHCHECK" for i, _ in ins)
 
 
-def test_provider_dockerfile_overrides_every_base_hazard() -> None:
-    text = DOCKERFILE.read_text()
+DOCKERFILE_PATHS = [DOCKERFILE, DOCKERFILE_CUDA]
+
+
+@pytest.mark.parametrize("dockerfile", DOCKERFILE_PATHS, ids=lambda p: p.name)
+def test_provider_dockerfile_overrides_every_base_hazard(dockerfile: Path) -> None:
+    text = dockerfile.read_text()
     ins = _instructions(text)
-    kinds = [i for i, _ in ins]
 
     # B1: explicit exec-form ENTRYPOINT for the provider agent (the base's
     # talkies-entrypoint ignores "$@" and execs stock talkies).
@@ -60,7 +66,13 @@ def test_provider_dockerfile_overrides_every_base_hazard() -> None:
     # B2: the venv/COPY layers run as root; the FINAL user is talkies.
     users = [a for i, a in ins if i == "USER"]
     assert users == ["root", "talkies"]
-    assert kinds.index("USER") < kinds.index("RUN")  # root before the venv RUN
+    # (stage-aware: the cuda variant has driver-stage RUNs before the
+    # provider stage's USER root — pin the venv RUN after USER root instead)
+    venv_run_idx = next(
+        i for i, (kind, arg) in enumerate(ins) if kind == "RUN" and "uv venv" in arg
+    )
+    root_user_idx = next(i for i, (kind, _) in enumerate(ins) if kind == "USER")
+    assert root_user_idx < venv_run_idx
     assert users[-1] == "talkies"
     # The venv RUN makes the tree world-readable for the talkies user.
     run_text = " ".join(a for i, a in ins if i == "RUN")
@@ -94,3 +106,39 @@ def test_provider_dockerfile_overrides_every_base_hazard() -> None:
     # image in daemon-equipped validation runs.
     assert "ARG BASE_IMAGE=psyb0t/talkies:latest-cuda" in text
     assert re.search(r"FROM\s+\$\{BASE_IMAGE\}", text)
+
+
+def test_cuda_dockerfile_bakes_the_nvidia_userspace_driver() -> None:
+    """Dockerfile.cuda mirrors provider/llama-cpp/Dockerfile.cuda12: the RPM
+    Fusion driver stage + baked libs, so the image runs on hosts WITHOUT the
+    NVIDIA Container Toolkit (plain/rootful Podman + /dev/nvidia* devices)."""
+    text = DOCKERFILE_CUDA.read_text()
+    ins = _instructions(text)
+
+    # Stage 1 is the fedora RPM Fusion driver source with the host-matched
+    # version args (same defaults as the llama-cpp cuda12 job).
+    assert re.search(
+        r"FROM\s+registry\.fedoraproject\.org/fedora:44\s+AS\s+nvidia", text
+    )
+    assert "ARG NVIDIA_DRIVER_BRANCH=580" in text
+    assert "ARG NVIDIA_VERSION=580.178.04" in text
+    assert "rpmfusion" in text
+
+    # The driver libs + nvidia-smi are copied from the stage into
+    # /usr/local/nvidia (libcuda = driver API for torch in BOTH venvs,
+    # NVML + nvidia-smi = the provider's vram/gpu_usage metrics).
+    copy_text = " ".join(a for i, a in ins if i == "COPY")
+    for artifact in (
+        "libcuda.so*",
+        "libnvidia-ml.so*",
+        "libnvidia-ptxjitcompiler.so*",
+        "nvidia-smi",
+    ):
+        assert artifact in copy_text
+
+    # LD_LIBRARY_PATH PREPENDS the baked libs (base's cudnn/cublas entries
+    # must survive appended) and PATH gains /usr/local/nvidia/bin so the
+    # agent's nvidia-smi sampler resolves.
+    env_text = " ".join(a for i, a in ins if i == "ENV")
+    assert "LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}" in env_text
+    assert "/usr/local/nvidia/bin" in env_text

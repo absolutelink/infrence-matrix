@@ -163,10 +163,21 @@ The talkies agent runs a CUDA speech engine; one talkies process boots **per
 placed definition** (single-slug engine — the registry is read at import), so
 each definition pins its model into VRAM for its whole lifetime.
 
-- **Image**: `docker build -f provider/talkies/Dockerfile -t
-  matrix-provider-talkies .` (context = repo root). The base is
-  `psyb0t/talkies:latest-cuda` (`ARG BASE_IMAGE`); override only to relocate the
-  engine venv (`TALKIES_PYTHON`) or registry file (`TALKIES_MODELS_FILE`).
+- **Image**: two CI-built variants (context = repo root):
+  - `provider/talkies/Dockerfile` → `ghcr.io/<owner>/provider-talkies` —
+    toolkit-based; needs the NVIDIA Container Toolkit (`gpus: all`) at
+    runtime. Base `psyb0t/talkies:latest-cuda` (`ARG BASE_IMAGE`).
+  - `provider/talkies/Dockerfile.cuda` → `ghcr.io/<owner>/provider-talkies-cuda`
+    — **bakes the NVIDIA userspace driver** (libcuda/NVML/PTX-JIT +
+    `nvidia-smi`, from RPM Fusion) so it runs on plain/rootful Podman with
+    only the GPU device nodes passed (`--device /dev/nvidia0
+    --device /dev/nvidiactl --device /dev/nvidia-uvm
+    --device /dev/nvidia-uvm-tools`). The baked driver version **must match
+    the host kernel driver**; bump the `NVIDIA_DRIVER_BRANCH=580` /
+    `NVIDIA_VERSION=580.178.04` build-args per host (same contract as the
+    llama-cpp cuda12 image). **This is the variant for 10.100.2.111.**
+  Override only to relocate the engine venv (`TALKIES_PYTHON`) or registry
+  file (`TALKIES_MODELS_FILE`).
 - **GPU**: expose the NVIDIA device nodes (`/dev/nvidia0`, `/dev/nvidiactl`,
   `/dev/nvidia-uvm`, `/dev/nvidia-uvm-tools`) or use the Container Toolkit
   (`gpus: all`). The engine defaults to `TALKIES_DEVICE=cuda`.

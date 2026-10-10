@@ -1295,6 +1295,14 @@ admission governs). Canonical example:
 
 ### Dockerfile (base-image hazard overrides)
 
+Two variants, same provider layering and hazard overrides:
+`Dockerfile` (toolkit-based — runtime needs the NVIDIA Container Toolkit or
+`--gpus all`) and `Dockerfile.cuda` (**driver baked in** — additionally copies
+the NVIDIA userspace driver + `nvidia-smi` from RPM Fusion into
+`/usr/local/nvidia`, so it runs on hosts WITHOUT the toolkit (plain/rootful
+Podman + `/dev/nvidia*` device nodes); the baked driver version
+(`NVIDIA_DRIVER_BRANCH` / `NVIDIA_VERSION` build-args) MUST match the host
+kernel driver — same contract as `provider/llama-cpp/Dockerfile.cuda12`).
 Built on `psyb0t/talkies:latest-cuda` (`ARG BASE_IMAGE`); the image only layers
 the provider venv (`/opt/provider-venv`, python 3.14) on top — the heavy talkies
 ML layers are never rebuilt. The base ends as `USER talkies` (uid 1000) with a

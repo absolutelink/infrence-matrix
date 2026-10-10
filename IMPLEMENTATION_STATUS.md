@@ -3148,7 +3148,12 @@ work, and per-engine translation layers entirely.
   /opt venv build, `TALKIES_DATA_DIR=/data` inheritance, `:8000`
   HEALTHCHECK) and pre-owns `/models`+`/cache` for uid 1000 — pinned by
   daemon-free structural tests (no container runtime in the devbox;
-  **real `docker build` + run smoke is a deploy-host task**). provider/lib
+  **real `docker build` + run smoke is a deploy-host task**). **Follow-up:
+  added `Dockerfile.cuda`** — driver-baked variant (RPM Fusion userspace
+  driver + `nvidia-smi`, `NVIDIA_DRIVER_BRANCH`/`NVIDIA_VERSION` args)
+  mirroring `provider/llama-cpp/Dockerfile.cuda12`, so the agent runs on
+  the provider host's root Podman without the Container Toolkit; both
+  variants are CI-built and structurally pinned. provider/lib
   gained `TALKIES_*` env knobs. talkies 53 green, lib 204, mock 60.
   Review: 3 rounds, CLEAN.
 - **S3.** Admin: `tts`/`asr` in `_VALID_MODALITIES` + gating matrix,
@@ -3203,12 +3208,16 @@ work, and per-engine translation layers entirely.
   talkies deploy story (uid-1000 volume chown, seed slugs, VRAM).
   redis-keys: no new keys (verified).
 
-**Pending deploy verification (user):** CI now builds
-`provider-talkies` (`build-provider-talkies` job — validates the layered
-build); a `docker run` smoke on the GPU host remains (sequence in the
-`Dockerfile.stubtest` header), plus: admin migration `c4e8a1f7d902` apply,
-mock schema-consensus force-commit (fingerprint changed in S1), and
-end-to-end speech/transcriptions/voices smoke on 10.100.2.111.
+**Pending deploy verification (user):** CI now builds both talkies variants
+(`build-provider-talkies` toolkit-based + `build-provider-talkies-cuda`
+driver-baked — the latter mirrors `build-provider-llama-cpp-cuda12`: RPM
+Fusion userspace driver + `nvidia-smi` baked, `NVIDIA_DRIVER_BRANCH=580` /
+`NVIDIA_VERSION=580.178.04` build-args must match the host kernel driver;
+this is the variant for 10.100.2.111's root Podman). A `docker run` smoke
+on the GPU host remains (sequence in the `Dockerfile.stubtest` header),
+plus: admin migration `c4e8a1f7d902` apply, mock schema-consensus
+force-commit (fingerprint changed in S1), and end-to-end
+speech/transcriptions/voices smoke on 10.100.2.111.
 
 ---
 

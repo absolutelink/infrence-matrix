@@ -14,6 +14,7 @@ env:
   LLAMA_CPP_CUDA12_IMAGE: ${{ github.repository_owner }}/provider-llama-cpp-cuda12
   HALOGEN_FLASH_IMAGE: ${{ github.repository_owner }}/provider-halogen-flash
   TALKIES_IMAGE: ${{ github.repository_owner }}/provider-talkies
+  TALKIES_CUDA_IMAGE: ${{ github.repository_owner }}/provider-talkies-cuda
 
 jobs:
   test-admin:
@@ -416,6 +417,62 @@ jobs:
           build-args: |
             BUILDKIT_INLINE_CACHE=1
 
+  build-provider-talkies-cuda:
+    # Driver-baked talkies image (provider/talkies/Dockerfile.cuda): carries
+    # the NVIDIA userspace driver (RPM Fusion) so it runs on hosts WITHOUT
+    # the Container Toolkit (root Podman on the provider host + /dev/nvidia*
+    # devices). The baked driver version (NVIDIA_DRIVER_BRANCH /
+    # NVIDIA_VERSION) MUST match the provider host's kernel driver — bump
+    # these build-args when the host driver moves (same contract as
+    # build-provider-llama-cpp-cuda12).
+    needs: [test-admin, test-provider]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.TALKIES_CUDA_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=
+
+      - name: Build and push talkies (CUDA, driver baked) provider image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./provider/talkies/Dockerfile.cuda
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            NVIDIA_DRIVER_BRANCH=580
+            NVIDIA_VERSION=580.178.04
+
   # Per-provider-type images: llama-cpp, halogen-flash, and talkies are built
   # in CI.
   # Vulkan (ghcr.io/ggml-org/llama.cpp:full-vulkan) is built; CUDA 12
@@ -429,5 +486,8 @@ jobs:
   # type. halogen-flash's provider image is hardware-independent; the
   # halogen-flash server binary remains deployment-supplied. talkies layers
   # only the provider venv on the upstream psyb0t/talkies:latest-cuda base
-  # (NVIDIA GPU required at runtime, not at build). The mock
+  # (NVIDIA GPU required at runtime, not at build); the talkies-cuda variant
+  # additionally bakes the NVIDIA userspace driver + nvidia-smi (RPM Fusion
+  # builder stage) so it runs without the Container Toolkit, same contract as
+  # build-provider-llama-cpp-cuda12 (see build-provider-talkies-cuda). The mock
   # provider is built locally via compose.
