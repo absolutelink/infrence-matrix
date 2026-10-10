@@ -71,10 +71,16 @@ class PlacementDiff:
 
 
 def build_assignment_entry(
-    instance: ProviderInstance, definition: ProviderDefinition
+    session: Session, instance: ProviderInstance, definition: ProviderDefinition
 ) -> dict[str, Any]:
-    """One ``agent.assignments.update`` entry (ARCHITECTURE.md §5 payload)."""
-    from app.api.admin.providers import compute_config_fingerprint
+    """One ``agent.assignments.update`` entry (ARCHITECTURE.md §5 payload).
+
+    Phase 25: carries the canonical ``served_models`` list (always present —
+    single-model definitions send one synthesized entry) and a fingerprint that
+    covers the served list so a per-model edit is detected by the provider.
+    """
+    from app.api.admin.providers import compute_definition_fingerprint
+    from app.services.served_models import served_models_payload
 
     return {
         "instance_id": str(instance.id),
@@ -82,10 +88,11 @@ def build_assignment_entry(
         "alias": definition.alias,
         "modality": definition.modality,
         "backend_config": definition.backend_config,
-        "config_fingerprint": compute_config_fingerprint(definition.backend_config),
+        "config_fingerprint": compute_definition_fingerprint(session, definition),
         "capacity": definition.capacity,
         "idle_timeout_seconds": definition.idle_timeout_seconds,
         "vram_required_bytes": definition.vram_required_bytes,
+        "served_models": served_models_payload(session, definition),
     }
 
 
@@ -117,7 +124,7 @@ def reconcile_agent_placement(
     the assignment list is deterministic. Mutates the caller's session; the
     caller commits.
     """
-    from app.api.admin.providers import compute_config_fingerprint
+    from app.api.admin.providers import compute_definition_fingerprint
 
     placed_ids = {d.id for d in placed}
     existing = {
@@ -133,7 +140,7 @@ def reconcile_agent_placement(
     row_for_def: dict[uuid.UUID, ProviderInstance] = {}
 
     for definition in placed:
-        fp = compute_config_fingerprint(definition.backend_config)
+        fp = compute_definition_fingerprint(session, definition)
         inst = existing.get(definition.id)
         if inst is None:
             if not create_new:
@@ -161,7 +168,7 @@ def reconcile_agent_placement(
         removed.append(str(inst.id))
 
     assignments = [
-        build_assignment_entry(row_for_def[d.id], d)
+        build_assignment_entry(session, row_for_def[d.id], d)
         for d in placed
         if d.id in row_for_def
     ]

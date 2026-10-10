@@ -65,9 +65,10 @@ from app.api.v1.responses import (
     persist_turn_logged,
 )
 from app.core.db import engine
-from app.models import ProviderDefinition, ResponseRecord
+from app.models import ResponseRecord
 from app.services.alias_registry import ensure_registered
 from app.services.scheduler import NoProviderAvailable, QueueCleared, QueueTimeout
+from app.services.served_models import resolve_served
 from app.services.sse import to_dict
 
 logger = logging.getLogger("admin.v1.responses.compact")
@@ -133,18 +134,17 @@ async def compact_response(request: Request) -> Any:
         )
 
     with Session(engine) as session:
-        definition = session.exec(
-            select(ProviderDefinition).where(ProviderDefinition.alias == alias)
-        ).first()
-        if definition is None:
+        resolved = resolve_served(session, alias)
+        if resolved is None:
             raise HTTPException(
                 status_code=404, detail=f"unknown model alias '{alias}'"
             )
+        definition, spec = resolved
         if not definition.enabled:
             raise HTTPException(
                 status_code=404, detail=f"model alias '{alias}' is disabled"
             )
-        if definition.modality != "llm":
+        if spec.modality != "llm":
             raise HTTPException(
                 status_code=404,
                 detail=f"model alias '{alias}' is not a chat model",

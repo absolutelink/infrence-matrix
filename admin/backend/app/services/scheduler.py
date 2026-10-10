@@ -97,6 +97,7 @@ from app.models import (
     ProviderAgent,
     ProviderDefinition,
     ProviderInstance,
+    ProviderModel,
     ProviderType,
 )
 from app.services import redis_keys
@@ -211,6 +212,14 @@ class InferenceScheduler:
         # for, so concurrent acquires on different aliases can never both
         # target the same victim.
         self._evicting: set[str] = set()
+        # Per-instance boot locks (Phase 25). Two served names of one
+        # multi-model definition share ONE ProviderInstance but each holds its
+        # OWN per-name admission lock, so the per-name lock does not serialize
+        # their boots. This dict maps instance_id -> asyncio.Lock guarding the
+        # boot decision for that instance so exactly one backend.start fires
+        # per cold instance under concurrency (ARCHITECTURE.md §6 boot
+        # serialization). The per-name FIFO queues are untouched.
+        self._boot_locks: dict[str, asyncio.Lock] = {}
         # Agent ids with an in-flight proactive warm-up pass (see
         # ``warm_up_agent``). Serializes warm-up boots per agent so a
         # reconnect during an in-progress warm-up never double-boots.
@@ -255,7 +264,7 @@ class InferenceScheduler:
 
                 async with state.lock:
                     if state.waiters and state.waiters[0] == request_id:
-                        admission = await self._try_admit(alias, request_id, state)
+                        admission = await self._try_admit(alias, request_id)
                         if admission is not None:
                             state.waiters.popleft()
                             async with state.condition:
@@ -427,9 +436,20 @@ class InferenceScheduler:
     # ------------------------------------------------------------------
     # Admission attempt (head waiter only, under the per-alias lock)
     # ------------------------------------------------------------------
-    async def _try_admit(
-        self, alias: str, request_id: str, state: _AliasState
-    ) -> Admission | None:
+    def _boot_lock_for(self, instance_id: str) -> asyncio.Lock:
+        """Get-or-create the per-instance boot lock (Phase 25).
+
+        The get-or-create is synchronous (no ``await``), so it is atomic within
+        a single event-loop step — two coroutines can never create two locks
+        for the same instance.
+        """
+        lock = self._boot_locks.get(instance_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._boot_locks[instance_id] = lock
+        return lock
+
+    async def _try_admit(self, alias: str, request_id: str) -> Admission | None:
         definition = self._definition(alias)
         if definition is None or not definition.enabled:
             raise NoProviderAvailable(f"alias '{alias}' has no enabled definition")
@@ -462,7 +482,10 @@ class InferenceScheduler:
             # otherwise slip a request onto a backend that is stopping.
             if instance_id in self._evicting:
                 continue
-            if self._active_on(state, instance_id) >= definition.capacity:
+            # Phase 25: capacity is a per-instance pool shared by every served
+            # name on a multi-model definition, so count active slots across all
+            # alias states (== the per-name count for a single-model def).
+            if self._active_count_on_instance(instance_id) >= definition.capacity:
                 continue
             machine = instance.machine
             address = machine.reachable_address()
@@ -479,58 +502,84 @@ class InferenceScheduler:
                 and instance_id not in self._booted
             )
             if needs_boot:
-                # Single lock acquisition covers both the eviction of
-                # VRAM-freeing victims and the boot itself, so two
-                # concurrent acquires (even for different aliases on the
-                # same machine) can never both evict the same victim or
-                # both boot into the same space.
-                lock_token = await self._take_admission_lock(alias)
-                try:
-                    free = await self._free_vram(machine, instance_id)
-                    if definition.vram_required_bytes > free:
-                        free = await self._evict_for_space(
-                            machine,
-                            instance_id,
-                            alias,
-                            definition.vram_required_bytes,
-                            free,
-                        )
-                    if definition.vram_required_bytes > free:
-                        logger.debug(
-                            "alias %s: no VRAM free on machine %s after eviction "
-                            "attempts (%d needed, %d free); staying queued",
-                            alias,
-                            machine.uid,
-                            definition.vram_required_bytes,
-                            free,
-                        )
-                        continue
-                    # Phase 16 slice 4: per-agent max_running_backends cap.
-                    # An agent may run at most ProviderType.max_running_backends
-                    # of its (single-type) backends at once (0 = unlimited).
-                    # If the boot would exceed the cap, hot-swap evict an idle
-                    # same-agent backend LRU-first; if none is evictable the
-                    # boot falls through to the next candidate (stays queued).
-                    if not await self._ensure_agent_capacity(
-                        machine, instance_id, str(instance.agent_id), alias, definition
-                    ):
-                        logger.debug(
-                            "alias %s: agent %s at max_running_backends with no "
-                            "idle same-agent victim; staying queued",
-                            alias,
-                            instance.agent_id,
-                        )
-                        continue
-                    if not await self._boot(str(instance.agent_id), instance_id):
-                        continue
-                finally:
-                    await self._release_admission_lock(alias, lock_token)
-                # Remember the successful boot so a lagging DB mirror
-                # never causes a redundant second backend.start and so VRAM
-                # stays accounted for between requests.
-                await self._mark_booted(instance_id, machine.uid, definition)
+                # Phase 25: serialize the boot decision PER INSTANCE. Two
+                # served names of one multi-model definition share this
+                # instance but each holds its own per-name admission lock, so
+                # without this a concurrent acquire(mm-a)/acquire(mm-b) on a
+                # cold instance would BOTH dispatch backend.start. The first
+                # name to take the per-instance lock boots; a sibling that
+                # arrives meanwhile blocks here, then re-checks and finds the
+                # instance already booted (no second start). The per-name FIFO
+                # queues and their locks are untouched (ordering preserved).
+                async with self._boot_lock_for(instance_id):
+                    # TOCTOU re-check under the boot lock: a sibling served
+                    # name may have completed the boot while we waited.
+                    if instance_id in self._booted:
+                        needs_boot = False
+                    else:
+                        # Single sched-lock acquisition covers both the
+                        # eviction of VRAM-freeing victims and the boot itself,
+                        # so two concurrent acquires (even for different
+                        # aliases on the same machine) can never both evict the
+                        # same victim or both boot into the same space.
+                        lock_token = await self._take_admission_lock(alias)
+                        try:
+                            free = await self._free_vram(machine, instance_id)
+                            if definition.vram_required_bytes > free:
+                                free = await self._evict_for_space(
+                                    machine,
+                                    instance_id,
+                                    alias,
+                                    definition.id,
+                                    definition.vram_required_bytes,
+                                    free,
+                                )
+                            if definition.vram_required_bytes > free:
+                                logger.debug(
+                                    "alias %s: no VRAM free on machine %s after "
+                                    "eviction attempts (%d needed, %d free); "
+                                    "staying queued",
+                                    alias,
+                                    machine.uid,
+                                    definition.vram_required_bytes,
+                                    free,
+                                )
+                                continue
+                            # Phase 16 slice 4: per-agent max_running_backends
+                            # cap. An agent may run at most
+                            # ProviderType.max_running_backends of its
+                            # (single-type) backends at once (0 = unlimited). If
+                            # the boot would exceed the cap, hot-swap evict an
+                            # idle same-agent backend LRU-first; if none is
+                            # evictable the boot falls through to the next
+                            # candidate (stays queued).
+                            if not await self._ensure_agent_capacity(
+                                machine,
+                                instance_id,
+                                str(instance.agent_id),
+                                alias,
+                                definition,
+                            ):
+                                logger.debug(
+                                    "alias %s: agent %s at max_running_backends "
+                                    "with no idle same-agent victim; staying "
+                                    "queued",
+                                    alias,
+                                    instance.agent_id,
+                                )
+                                continue
+                            if not await self._boot(
+                                str(instance.agent_id), instance_id
+                            ):
+                                continue
+                        finally:
+                            await self._release_admission_lock(alias, lock_token)
+                        # Remember the successful boot so a lagging DB mirror
+                        # never causes a redundant second backend.start and so
+                        # VRAM stays accounted for between requests.
+                        await self._mark_booted(instance_id, machine.uid, definition)
 
-            elif instance_id not in self._booted:
+            if not needs_boot and instance_id not in self._booted:
                 # Running per the DB but this process never booted it (e.g.
                 # after an admin restart): adopt the hold so the ledger
                 # reflects the resident weights.
@@ -666,8 +715,20 @@ class InferenceScheduler:
         """Drop a stopped instance's VRAM hold from ledger + mirror.
 
         Idempotent: a no-op when this process doesn't hold the instance.
+
+        Phase 25: also reclaim the per-instance boot lock so ``_boot_locks``
+        does not grow unboundedly across definition delete/recreate churn. The
+        pop is done synchronously (before any ``await``) and ONLY when the lock
+        is not currently held: dropping a lock another coroutine is mid-boot on
+        would let a fresh ``_boot_lock_for`` mint a *different* lock and re-open
+        the double-boot race. A still-locked entry is left in place and dropped
+        on a later uncontended stop (the check-and-pop is atomic within one
+        event-loop step, so no coroutine can grab the lock between them).
         """
         self._booted.pop(instance_id, None)
+        lock = self._boot_locks.get(instance_id)
+        if lock is not None and not lock.locked():
+            del self._boot_locks[instance_id]
         with contextlib.suppress(Exception):
             await self._redis.hdel(redis_keys.vram_used_key(machine_uid), instance_id)
 
@@ -751,10 +812,11 @@ class InferenceScheduler:
         machine: Machine,
         target_instance_id: str,
         requesting_alias: str,
+        requesting_definition_id: uuid.UUID,
         required: int,
         free: int,
     ) -> int:
-        """Stop idle different-alias backends on ``machine`` to free VRAM.
+        """Stop idle different-definition backends on ``machine`` to free VRAM.
 
         Victims are LRU-ordered by ``last_request_at`` (null = oldest) and
         must have zero active in-process slots and a positive VRAM hold in
@@ -762,6 +824,11 @@ class InferenceScheduler:
         and would only cascade). Each accepted stop frees the victim's
         held VRAM; returns the updated free bytes. A NAK or delivery
         failure skips that victim and moves to the next.
+
+        Phase 25: the exclusion is by the requesting **definition id**, not
+        the requesting alias string — every served name on a multi-model
+        definition shares one instance and must never be an eviction victim
+        of a sibling name on the same definition.
 
         The caller holds ``im:sched:lock:{alias}`` plus the in-process
         per-alias ``state.lock`` for the whole call. Those serialize
@@ -771,7 +838,10 @@ class InferenceScheduler:
         """
         held = await self._machine_vram_held(machine)
         victims = self._eviction_candidates(
-            machine.uid, requesting_alias, target_instance_id, held
+            machine.uid,
+            requesting_definition_id,
+            target_instance_id,
+            held,
         )
         for victim in victims:
             if required <= free:
@@ -811,7 +881,7 @@ class InferenceScheduler:
     def _eviction_candidates(
         self,
         machine_uid: str,
-        requesting_alias: str,
+        requesting_definition_id: uuid.UUID,
         target_instance_id: str,
         held: dict[str, int],
         *,
@@ -823,9 +893,12 @@ class InferenceScheduler:
         Returns dicts with ``id``/``agent_id``/``alias``/``vram_bytes``/
         ``last_request_at``, LRU-ordered (oldest request first; ``None``
         sorts first). Instances with any active in-process slot (any
-        alias), already being evicted, or of the requesting alias itself
-        are excluded — we never evict something busy or the only home of
-        the alias that is asking for the space.
+        alias), already being evicted, or of the requesting **definition**
+        itself are excluded — we never evict something busy or the only home
+        of the definition that is asking for the space. Phase 25: the
+        exclusion is by definition id (not alias string) so sibling served
+        names on one multi-model definition (one shared instance) are never
+        victims of each other.
 
         Two eviction scopes share this builder:
 
@@ -861,7 +934,7 @@ class InferenceScheduler:
                 .join(Machine, col(ProviderAgent.machine_id) == col(Machine.id))
                 .where(
                     Machine.uid == machine_uid,
-                    ProviderDefinition.alias != requesting_alias,
+                    ProviderInstance.provider_definition_id != requesting_definition_id,
                 )
             )
             if agent_id is not None:
@@ -1021,7 +1094,7 @@ class InferenceScheduler:
         held = await self._machine_vram_held(machine)
         victims = self._eviction_candidates(
             machine.uid,
-            requesting_alias,
+            definition.id,
             target_instance_id,
             held,
             agent_id=agent_id,
@@ -1121,41 +1194,56 @@ class InferenceScheduler:
                     # and logs should not churn).
                     if self._is_loaded(instance_id):
                         continue
-                    lock_token = await self._take_admission_lock(definition.alias)
-                    try:
-                        free = await self._free_vram(machine, instance_id)
-                        if definition.vram_required_bytes > free:
-                            logger.debug(
-                                "warm-up agent %s: no VRAM for instance %s "
-                                "(%d needed, %d free); stopping warm-up",
-                                agent_id,
-                                instance_id,
-                                definition.vram_required_bytes,
-                                free,
+                    # Phase 25: serialize the boot decision PER INSTANCE, exactly
+                    # as the request path does. A warm-up boot (keyed by
+                    # definition.alias) and a concurrent request on a SIBLING
+                    # served name hold DIFFERENT per-name state.locks, so the
+                    # per-name lock does not serialize them; without this shared
+                    # per-instance lock both could dispatch backend.start on a
+                    # cold multi-model instance. Lock order stays acyclic
+                    # (state.lock -> _boot_lock), identical to _try_admit.
+                    async with self._boot_lock_for(instance_id):
+                        # TOCTOU re-check under the boot lock: a sibling served
+                        # name may have completed the boot while we waited.
+                        if self._is_loaded(instance_id):
+                            continue
+                        lock_token = await self._take_admission_lock(definition.alias)
+                        try:
+                            free = await self._free_vram(machine, instance_id)
+                            if definition.vram_required_bytes > free:
+                                logger.debug(
+                                    "warm-up agent %s: no VRAM for instance %s "
+                                    "(%d needed, %d free); stopping warm-up",
+                                    agent_id,
+                                    instance_id,
+                                    definition.vram_required_bytes,
+                                    free,
+                                )
+                                break
+                            cap = self._max_running_for_type(definition.provider_type)
+                            if (
+                                cap > 0
+                                and self._running_on_agent(agent_id, instance_id) >= cap
+                            ):
+                                logger.debug(
+                                    "warm-up agent %s: at max_running_backends=%d "
+                                    "before instance %s; stopping warm-up",
+                                    agent_id,
+                                    cap,
+                                    instance_id,
+                                )
+                                break
+                            if await self._boot(agent_id, instance_id):
+                                await self._mark_booted(
+                                    instance_id, machine.uid, definition
+                                )
+                                booted = True
+                            # else: a single backend failing to boot must not
+                            # strand the rest of the pass; fall through to next.
+                        finally:
+                            await self._release_admission_lock(
+                                definition.alias, lock_token
                             )
-                            break
-                        cap = self._max_running_for_type(definition.provider_type)
-                        if (
-                            cap > 0
-                            and self._running_on_agent(agent_id, instance_id) >= cap
-                        ):
-                            logger.debug(
-                                "warm-up agent %s: at max_running_backends=%d before "
-                                "instance %s; stopping warm-up",
-                                agent_id,
-                                cap,
-                                instance_id,
-                            )
-                            break
-                        if await self._boot(agent_id, instance_id):
-                            await self._mark_booted(
-                                instance_id, machine.uid, definition
-                            )
-                            booted = True
-                        # else: a single backend failing to boot must not
-                        # strand the rest of the pass; fall through to next.
-                    finally:
-                        await self._release_admission_lock(definition.alias, lock_token)
                 if not booted:
                     continue
                 logger.info(
@@ -1266,24 +1354,43 @@ class InferenceScheduler:
     # ------------------------------------------------------------------
     # DB reads
     # ------------------------------------------------------------------
-    def _candidates(self, alias: str) -> list[ProviderInstance]:
+    def _definition_for_name(
+        self, session: Session, name: str
+    ) -> ProviderDefinition | None:
+        """Resolve a served name (or single-model alias) to its owning
+        definition (Phase 25).
+
+        ``ProviderModel.name`` first (a multi-model served name maps to its
+        definition's single backend process), then ``ProviderDefinition.alias``
+        (single-model). The caller owns the session.
+        """
+        row = session.exec(
+            select(ProviderModel).where(ProviderModel.name == name)
+        ).first()
+        if row is not None:
+            return session.get(ProviderDefinition, row.definition_id)
+        return session.exec(
+            select(ProviderDefinition).where(ProviderDefinition.alias == name)
+        ).first()
+
+    def _candidates(self, name: str) -> list[ProviderInstance]:
         with Session(engine) as session:
+            # Phase 25: ``name`` may be a multi-model served name; resolve it to
+            # the owning definition and return that definition's instances (one
+            # backend process serves every served name).
+            definition = self._definition_for_name(session, name)
+            if definition is None or not definition.enabled:
+                return []
             # Phase 16: an instance is schedulable when its owning agent's
             # socket is connected and its definition is enabled.
             rows = session.exec(
                 select(ProviderInstance)
                 .join(
-                    ProviderDefinition,
-                    col(ProviderInstance.provider_definition_id)
-                    == col(ProviderDefinition.id),
-                )
-                .join(
                     ProviderAgent,
                     col(ProviderInstance.agent_id) == col(ProviderAgent.id),
                 )
                 .where(
-                    ProviderDefinition.alias == alias,
-                    col(ProviderDefinition.enabled) == True,  # noqa: E712
+                    ProviderInstance.provider_definition_id == definition.id,
                     col(ProviderAgent.websocket_connected) == True,  # noqa: E712
                 )
             ).all()
@@ -1291,11 +1398,9 @@ class InferenceScheduler:
                 session.expunge(row)
             return list(rows)
 
-    def _definition(self, alias: str) -> ProviderDefinition | None:
+    def _definition(self, name: str) -> ProviderDefinition | None:
         with Session(engine) as session:
-            definition = session.exec(
-                select(ProviderDefinition).where(ProviderDefinition.alias == alias)
-            ).first()
+            definition = self._definition_for_name(session, name)
             if definition is not None:
                 session.expunge(definition)
             return definition
@@ -1395,11 +1500,6 @@ class InferenceScheduler:
             state = _AliasState()
             self._states[alias] = state
         return state
-
-    def _active_on(self, state: _AliasState, instance_id: str) -> int:
-        return sum(
-            1 for slot in state.active.values() if slot.instance_id == instance_id
-        )
 
     async def _mirror_enqueue(
         self, alias: str, state: _AliasState, request_id: str

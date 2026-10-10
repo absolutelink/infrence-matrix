@@ -670,7 +670,7 @@ def test_patch_push_slower_than_idle_tx_timeout_still_200(
     assert inst is not None and inst.config_fingerprint == expected
 
 
-def test_build_payload_carries_modality() -> None:
+def test_build_payload_carries_modality(session: Session) -> None:
     """Phase 18 slice 3: the provider.config.update payload mirrors the
     definition's modality so the provider boots the right endpoint kind."""
     from app.services.config_update import _build_payload
@@ -681,9 +681,9 @@ def test_build_payload_carries_modality() -> None:
         backend_config={"artifacts": {}},
         modality="embedding",
     )
-    payload = _build_payload(emb, "fp-x")
+    payload = _build_payload(session, emb, "fp-x")
     assert payload["modality"] == "embedding"
     assert payload["config_fingerprint"] == "fp-x"
 
     llm = ProviderDefinition(alias="llm-cu", provider_type="mock", backend_config={})
-    assert _build_payload(llm, "fp-y")["modality"] == "llm"
+    assert _build_payload(session, llm, "fp-y")["modality"] == "llm"

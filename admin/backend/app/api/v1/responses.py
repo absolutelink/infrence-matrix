@@ -65,7 +65,6 @@ from sqlmodel import Session, select
 
 from app.core.db import engine
 from app.models import (
-    ProviderDefinition,
     ResponseRecord,
     TokenUsageSample,
 )
@@ -78,6 +77,7 @@ from app.services.scheduler import (
     QueueTimeout,
     SchedulerError,
 )
+from app.services.served_models import resolve_served
 from app.services.sse import SSEEmitter, _sse, event_type_of, to_dict
 
 logger = logging.getLogger("admin.v1.responses")
@@ -547,18 +547,17 @@ async def create_response(request: Request) -> Any:
 
     previous_response_id = body.get("previous_response_id")
     with Session(engine) as session:
-        definition = session.exec(
-            select(ProviderDefinition).where(ProviderDefinition.alias == alias)
-        ).first()
-        if definition is None:
+        resolved = resolve_served(session, alias)
+        if resolved is None:
             raise HTTPException(
                 status_code=404, detail=f"unknown model alias '{alias}'"
             )
+        definition, spec = resolved
         if not definition.enabled:
             raise HTTPException(
                 status_code=404, detail=f"model alias '{alias}' is disabled"
             )
-        if definition.modality != "llm":
+        if spec.modality != "llm":
             raise HTTPException(
                 status_code=404,
                 detail=f"model alias '{alias}' is not a chat model",

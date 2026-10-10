@@ -77,7 +77,9 @@ CONFIG_UPDATE_RETRY_DELAY = settings.CONFIG_UPDATE_RETRY_DELAY_SECONDS
 _push_in_flight: set[str] = set()
 
 
-def _build_payload(definition: ProviderDefinition, new_fp: str) -> dict[str, Any]:
+def _build_payload(
+    session: Session, definition: ProviderDefinition, new_fp: str
+) -> dict[str, Any]:
     """The provider.config.update payload derived from a definition.
 
     Includes the fields the provider actually consumes:
@@ -89,13 +91,20 @@ def _build_payload(definition: ProviderDefinition, new_fp: str) -> dict[str, Any
     reaper is admin-side (``InferenceScheduler._idle_reaper``); the
     provider does not adopt it. The target ``instance_id`` is added by the
     caller (per-backend addressing).
+
+    Phase 25: ``served_models`` (the canonical list) rides the same update so a
+    per-model config/enabled change reaches a live driver; the fingerprint above
+    already folds the served list in (``compute_definition_fingerprint``).
     """
+    from app.services.served_models import served_models_payload
+
     return {
         "backend_config": definition.backend_config,
         "config_fingerprint": new_fp,
         "modality": definition.modality,
         "idle_timeout_seconds": definition.idle_timeout_seconds,
         "capacity": definition.capacity,
+        "served_models": served_models_payload(session, definition),
     }
 
 
@@ -122,10 +131,10 @@ class UpdateResult:
         }
 
 
-def _instance_fingerprint(definition: ProviderDefinition) -> str:
-    from app.api.admin.providers import compute_config_fingerprint
+def _instance_fingerprint(session: Session, definition: ProviderDefinition) -> str:
+    from app.api.admin.providers import compute_definition_fingerprint
 
-    return compute_config_fingerprint(definition.backend_config)
+    return compute_definition_fingerprint(session, definition)
 
 
 def _connected_backends(session: Session, definition_id: Any) -> list[ProviderInstance]:
@@ -279,16 +288,13 @@ async def push_config_update(definition: ProviderDefinition) -> list[UpdateResul
     and tests). Backends with another push already in flight are skipped
     (omitted from the results) rather than queued behind it.
     """
-    from app.api.admin.providers import compute_config_fingerprint
-
-    new_fp = compute_config_fingerprint(definition.backend_config)
     with Session(engine) as session:
+        new_fp = _instance_fingerprint(session, definition)
         instances = _connected_backends(session, definition.id)
+        if not instances:
+            return []
+        payload = _build_payload(session, definition, new_fp)
 
-    if not instances:
-        return []
-
-    payload = _build_payload(definition, new_fp)
     pushed = await asyncio.gather(
         *(
             _push_guarded(str(inst.agent_id), str(inst.id), payload)
@@ -321,11 +327,11 @@ async def heal_stale_fingerprint(instance_id: str) -> bool:
         definition = session.get(ProviderDefinition, inst.provider_definition_id)
         if definition is None:
             return False
-        current_fp = _instance_fingerprint(definition)
+        current_fp = _instance_fingerprint(session, definition)
         if inst.config_fingerprint == current_fp:
             return False
         agent_id = str(agent.id)
-        payload = _build_payload(definition, current_fp)
+        payload = _build_payload(session, definition, current_fp)
 
     logger.info(
         "stale fingerprint for instance %s (%s != %s); pushing config.update",
@@ -357,10 +363,12 @@ async def heal_agent_stale_fingerprints(agent_id: str) -> int:
             definition = session.get(ProviderDefinition, inst.provider_definition_id)
             if definition is None:
                 continue
-            current_fp = _instance_fingerprint(definition)
+            current_fp = _instance_fingerprint(session, definition)
             if inst.config_fingerprint == current_fp:
                 continue
-            stale.append((str(inst.id), _build_payload(definition, current_fp)))
+            stale.append(
+                (str(inst.id), _build_payload(session, definition, current_fp))
+            )
 
     healed = 0
     for instance_id, payload in stale:

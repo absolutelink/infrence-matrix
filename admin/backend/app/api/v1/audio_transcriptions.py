@@ -36,19 +36,20 @@ from typing import Any, BinaryIO
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
-from sqlmodel import Session, select
+from sqlmodel import Session
 from starlette.datastructures import UploadFile
 
 from app.api.v1.responses import get_scheduler
 from app.core.config import settings
 from app.core.db import engine
-from app.models import AudioUsageSample, ProviderDefinition
+from app.models import AudioUsageSample
 from app.services import audio as audio_svc
 from app.services.scheduler import (
     NoProviderAvailable,
     QueueCleared,
     QueueTimeout,
 )
+from app.services.served_models import resolve_served
 
 logger = logging.getLogger("admin.v1.audio_transcriptions")
 
@@ -124,18 +125,17 @@ async def create_transcription(request: Request) -> Any:
         )
 
     with Session(engine) as session:
-        definition = session.exec(
-            select(ProviderDefinition).where(ProviderDefinition.alias == alias)
-        ).first()
-        if definition is None:
+        resolved = resolve_served(session, alias)
+        if resolved is None:
             raise HTTPException(
                 status_code=404, detail=f"unknown model alias '{alias}'"
             )
+        definition, spec = resolved
         if not definition.enabled:
             raise HTTPException(
                 status_code=404, detail=f"model alias '{alias}' is disabled"
             )
-        if definition.modality != "asr":
+        if spec.modality != "asr":
             raise HTTPException(
                 status_code=404,
                 detail=f"model alias '{alias}' is not a transcription (asr) model",

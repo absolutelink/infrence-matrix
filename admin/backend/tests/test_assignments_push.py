@@ -452,11 +452,11 @@ def test_build_assignment_entry_carries_modality(session: Session) -> None:
     agent = make_agent(session, machine, provider_type="mock", connected=True)
     emb = make_definition(session, alias="emb-entry", modality="embedding")
     emb_row = _row(session, agent, emb, status="stopped")
-    assert asg.build_assignment_entry(emb_row, emb)["modality"] == "embedding"
+    assert asg.build_assignment_entry(session, emb_row, emb)["modality"] == "embedding"
 
     llm = make_definition(session, alias="llm-entry")  # default modality llm
     llm_row = _row(session, agent, llm, status="stopped")
-    assert asg.build_assignment_entry(llm_row, llm)["modality"] == "llm"
+    assert asg.build_assignment_entry(session, llm_row, llm)["modality"] == "llm"
 
 
 async def test_reconcile_creates_row_and_refuses_busy_ghost(session: Session) -> None:

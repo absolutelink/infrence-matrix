@@ -457,7 +457,7 @@ async def test_evict_lru_order_oldest_first(
 
 
 async def test_evict_only_different_alias_victims(session: Session, aredis) -> None:
-    """_eviction_candidates never lists the requesting alias's instances."""
+    """_eviction_candidates never lists the requesting definition's instances."""
     machine = Machine(uid="sch-ev-diff", name="sch-ev-diff", host="127.0.0.1")
     machine.total_vram_bytes = 100
     session.add(machine)
@@ -492,18 +492,15 @@ async def test_evict_only_different_alias_victims(session: Session, aredis) -> N
 
     scheduler = InferenceScheduler(aredis)
     held = {str(inst_a.id): 40, str(inst_b.id): 40}
-    # Requesting dif-a (target inst_b): only dif-a's own instance would be
-    # a "different alias" victim — but the target is excluded and the
-    # requesting alias's instances are filtered by alias, so from dif-a's
-    # request the only candidate is... none of dif-a. Verify by requesting
-    # dif-b's space: candidate must be inst_a (dif-a, different alias).
+    # Requesting dif-b's space (target inst_b): the only candidate is inst_a
+    # (dif-a, a different definition). Phase 25: exclusion is by definition id.
     victims = scheduler._eviction_candidates(
-        "sch-ev-diff", "dif-b", str(inst_b.id), held
+        "sch-ev-diff", def_b.id, str(inst_b.id), held
     )
     assert [v["id"] for v in victims] == [str(inst_a.id)]
     # Symmetric: a dif-a request targeting inst_a can only evict inst_b.
     victims = scheduler._eviction_candidates(
-        "sch-ev-diff", "dif-a", str(inst_a.id), held
+        "sch-ev-diff", def_a.id, str(inst_a.id), held
     )
     assert [v["id"] for v in victims] == [str(inst_b.id)]
 
@@ -1279,14 +1276,13 @@ async def test_try_admit_skips_instance_in_evicting(
     await scheduler._mark_booted(str(instance.id), "sch-b1-unit", definition)
 
     # Without an in-flight stop the already-booted instance admits.
-    state = scheduler._state_for("b1u-a")
-    admission = await scheduler._try_admit("b1u-a", "r-ok", state)
+    admission = await scheduler._try_admit("b1u-a", "r-ok")
     assert admission is not None and admission.instance_id == str(instance.id)
     await scheduler.release("b1u-a", "r-ok")
 
     # Put the instance under eviction: the same admit must skip it.
     scheduler._evicting.add(str(instance.id))
-    admission = await scheduler._try_admit("b1u-a", "r-skip", state)
+    admission = await scheduler._try_admit("b1u-a", "r-skip")
     assert admission is None
     assert scheduler.active_count("b1u-a") == 0
     scheduler._evicting.discard(str(instance.id))
@@ -1299,7 +1295,7 @@ async def test_try_admit_skips_instance_in_evicting(
         s.add(inst)
         s.commit()
     scheduler._evicting.add(str(instance.id))
-    admission = await scheduler._try_admit("b1u-a", "r-boot-skip", state)
+    admission = await scheduler._try_admit("b1u-a", "r-boot-skip")
     assert admission is None
     assert (str(instance.id), "backend.start") not in boot_calls
 

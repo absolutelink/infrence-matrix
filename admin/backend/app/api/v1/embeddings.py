@@ -31,13 +31,14 @@ from typing import Any
 import litellm
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
-from sqlmodel import Session, select
+from sqlmodel import Session
 
 from app.api.v1.responses import get_scheduler, map_exception_to_error
 from app.core.db import engine
-from app.models import ProviderDefinition, TokenUsageSample
+from app.models import TokenUsageSample
 from app.services.alias_registry import ensure_registered
 from app.services.scheduler import NoProviderAvailable, QueueCleared, QueueTimeout
+from app.services.served_models import resolve_served
 from app.services.sse import to_dict
 
 logger = logging.getLogger("admin.v1.embeddings")
@@ -100,18 +101,17 @@ async def create_embedding(request: Request) -> Any:
         )
 
     with Session(engine) as session:
-        definition = session.exec(
-            select(ProviderDefinition).where(ProviderDefinition.alias == alias)
-        ).first()
-        if definition is None:
+        resolved = resolve_served(session, alias)
+        if resolved is None:
             raise HTTPException(
                 status_code=404, detail=f"unknown model alias '{alias}'"
             )
+        definition, spec = resolved
         if not definition.enabled:
             raise HTTPException(
                 status_code=404, detail=f"model alias '{alias}' is disabled"
             )
-        if definition.modality != "embedding":
+        if spec.modality != "embedding":
             raise HTTPException(
                 status_code=404,
                 detail=f"model alias '{alias}' is not an embedding model",

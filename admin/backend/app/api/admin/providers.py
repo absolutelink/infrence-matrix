@@ -92,6 +92,46 @@ def compute_config_fingerprint(backend_config: dict[str, Any]) -> str:
     return canonical_json_sha256(backend_config)
 
 
+def compute_definition_fingerprint(
+    session: Session, definition: ProviderDefinition
+) -> str:
+    """Config fingerprint covering the shared ``backend_config`` AND the
+    served-model list (Phase 25 / docs/multi-model-definitions.md §4).
+
+    A **single-model** definition (no ``ProviderModel`` rows) keeps the exact
+    legacy ``compute_config_fingerprint(backend_config)`` value — so existing
+    back-compat holds and no spurious ``provider.config.update`` fires. A
+    **multi-model** definition folds the canonical ``served_models`` list in,
+    so a per-model config/enabled edit changes the fingerprint and drives the
+    update flow (the provider refreshes its served list from the payload).
+    """
+    from app.models import ProviderModel
+    from app.services.served_models import resolve_models
+
+    has_rows = (
+        session.exec(
+            select(ProviderModel.id)
+            .where(ProviderModel.definition_id == definition.id)
+            .limit(1)
+        ).first()
+        is not None
+    )
+    if not has_rows:
+        return compute_config_fingerprint(definition.backend_config)
+    served = [
+        {
+            "name": spec.name,
+            "modality": spec.modality,
+            "backend_config": spec.backend_config,
+            "enabled": spec.enabled,
+        }
+        for spec in resolve_models(session, definition)
+    ]
+    return canonical_json_sha256(
+        {"backend_config": definition.backend_config, "served_models": served}
+    )
+
+
 def _machine_dict(machine: Machine) -> dict[str, Any]:
     return {
         "id": str(machine.id),
@@ -106,8 +146,12 @@ def _machine_dict(machine: Machine) -> dict[str, Any]:
 
 
 def _definition_dict(
-    definition: ProviderDefinition, config_fingerprint: str | None
+    session: Session,
+    definition: ProviderDefinition,
+    config_fingerprint: str | None,
 ) -> dict[str, Any]:
+    from app.services.served_models import served_models_payload
+
     return {
         "id": str(definition.id),
         "alias": definition.alias,
@@ -119,6 +163,9 @@ def _definition_dict(
         "capacity": definition.capacity,
         "vram_required_bytes": definition.vram_required_bytes,
         "model_metadata": definition.model_metadata,
+        # Phase 25: canonical served-model list (always present; single-model
+        # definitions send one synthesized entry). Additive — old agents ignore.
+        "served_models": served_models_payload(session, definition),
     }
 
 
@@ -195,6 +242,7 @@ def _gate_existing_type(
             ptype.status = "active"
             _apply_max_running_from_schema(ptype, schema)
             _apply_serves_modalities_from_schema(ptype, schema)
+            _apply_multi_model_from_schema(ptype, schema)
             return None
         # Stage the new schema; this agent is the first voter.
         ptype.pending_schema = schema
@@ -226,6 +274,7 @@ def _gate_existing_type(
             ptype.status = "active"
             _apply_max_running_from_schema(ptype, ptype.schema)
             _apply_serves_modalities_from_schema(ptype, ptype.schema)
+            _apply_multi_model_from_schema(ptype, ptype.schema)
             return None
         return _schema_refusal_detail(
             provider_type,
@@ -347,6 +396,21 @@ def _apply_serves_modalities_from_schema(
     ptype.serves_modalities = known or ["llm"]
 
 
+def _apply_multi_model_from_schema(ptype: ProviderType, schema: dict[str, Any]) -> None:
+    """Sync ``ProviderType.multi_model`` from a committed schema.
+
+    Phase 25: whether one backend process of this type can serve several
+    client-facing names is declared as a top-level ``x-multi-model`` bool in
+    the type's shipped ``schema.json`` (default false) — the exact mechanism
+    already used for ``x-max-running-backends`` / ``x-serves-modalities``.
+    When true, definitions of this type may carry a ``ProviderModel`` row set
+    (the definition CRUD gates ``served_models`` on this column). Mutates
+    ``ptype`` in the caller's session; the caller commits.
+    """
+    raw = schema.get("x-multi-model", False) if isinstance(schema, dict) else False
+    ptype.multi_model = bool(raw)
+
+
 def _bootstrap_type(
     session: Session, provider_type: str, schema: dict[str, Any]
 ) -> ProviderType:
@@ -372,6 +436,7 @@ def _bootstrap_type(
         raise RuntimeError(f"provider type '{provider_type}' bootstrap failed")
     _apply_max_running_from_schema(ptype, schema)
     _apply_serves_modalities_from_schema(ptype, schema)
+    _apply_multi_model_from_schema(ptype, schema)
     session.add(ptype)
     return ptype
 
@@ -578,7 +643,7 @@ async def register_provider(
     backends: list[dict[str, Any]] = [
         {
             "instance_id": str(rows[d.id].id),
-            "definition": _definition_dict(d, rows[d.id].config_fingerprint),
+            "definition": _definition_dict(session, d, rows[d.id].config_fingerprint),
         }
         for d in placed
         if d.id in rows

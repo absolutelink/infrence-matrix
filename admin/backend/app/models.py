@@ -174,6 +174,15 @@ class ProviderType(SQLModel, table=True):
         default_factory=lambda: ["llm"], sa_column=Column(JSON, nullable=False)
     )
 
+    # Phase 25: whether one backend process of this type can serve several
+    # client-facing model names (docs/multi-model-definitions.md §2/§3).
+    # Declared in the shipped schema.json (top-level `x-multi-model`, default
+    # false); read into this column at every schema-commit point exactly like
+    # max_running_backends / serves_modalities. When true, definitions of this
+    # type may carry a `ProviderModel` row set (per-model config validated
+    # against the schema's optional `x-served-model-config-schema`).
+    multi_model: bool = False
+
     # Staged schema awaiting consensus (None when nothing is pending).
     pending_schema: dict | None = Field(default=None, sa_column=Column(JSON))
     pending_fingerprint: str | None = Field(default=None, max_length=64)
@@ -360,6 +369,64 @@ class ProviderDefinition(SQLModel, table=True):
     agents: list[ProviderAgent] = Relationship(
         back_populates="definitions",
         link_model=DefinitionAgent,
+    )
+    # Phase 25: served-model rows for a multi-model definition (empty for a
+    # single-model one). Deleting the definition cascades the rows away.
+    models: list[ProviderModel] = Relationship(
+        back_populates="provider_definition",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan", "lazy": "selectin"},
+    )
+
+
+# ============================================================================
+# ProviderModel (Phase 25)
+# ============================================================================
+class ProviderModel(SQLModel, table=True):
+    """One client-facing model served by a **multi-model** definition's single
+    backend process (Phase 25 / docs/multi-model-definitions.md §3).
+
+    Used only by multi-model definitions (``ProviderType.multi_model``);
+    single-model definitions keep using ``ProviderDefinition.alias/modality/
+    backend_config`` unchanged (no rows here — backward compatible, no
+    backfill). The per-model ``modality`` is the endpoint-gating routing key
+    (v1 gates check THIS, not the definition's); ``backend_config`` holds
+    per-model engine knobs validated against the type's
+    ``x-served-model-config-schema`` when declared. ``name`` is globally unique
+    across all ``ProviderModel.name`` (this unique index) AND all
+    ``ProviderDefinition.alias`` (app-enforced on create/PATCH).
+    """
+
+    __tablename__ = "provider_models"
+    __table_args__ = (
+        Index("idx_provider_models_name", "name", unique=True),
+        Index("idx_provider_models_definition", "definition_id"),
+    )
+
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        sa_column=Column(_uuid_col(), primary_key=True),
+    )
+
+    definition_id: uuid.UUID = Field(
+        foreign_key="provider_definitions.id", ondelete="CASCADE"
+    )
+    # Client-facing model name (usable in any `model` field).
+    name: str = Field(max_length=255)
+    # llm | embedding | tts | asr — per-model routing key for endpoint gating.
+    modality: str = Field(max_length=32)
+    # Per-model engine config (validated against x-served-model-config-schema).
+    backend_config: dict = Field(
+        default_factory=dict, sa_column=Column(JSON, nullable=False)
+    )
+    # Disabled names 404 like a disabled definition.
+    enabled: bool = True
+
+    created_at: datetime = Field(default_factory=get_datetime_utc)
+    updated_at: datetime | None = None
+
+    provider_definition: ProviderDefinition = Relationship(
+        back_populates="models",
+        sa_relationship_kwargs={"lazy": "selectin"},
     )
 
 

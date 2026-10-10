@@ -63,9 +63,10 @@ from app.api.v1.responses import (
     stream_turn_events,
 )
 from app.core.db import engine
-from app.models import ProviderDefinition, ResponseRecord
+from app.models import ResponseRecord
 from app.services.alias_registry import ensure_registered
 from app.services.scheduler import InferenceScheduler
+from app.services.served_models import resolve_served
 from app.services.sse import SSEEmitter
 
 logger = logging.getLogger("admin.v1.responses_ws")
@@ -206,17 +207,19 @@ def _resolve_alias(
     session: Session, alias: str
 ) -> tuple[uuid.UUID, str] | dict[str, Any]:
     """Resolve an enabled llm alias to ``(definition_id, provider_type)`` or
-    return an error envelope (mirrors the HTTP 404s as WS envelopes)."""
-    definition = session.exec(
-        select(ProviderDefinition).where(ProviderDefinition.alias == alias)
-    ).first()
-    if definition is None:
+    return an error envelope (mirrors the HTTP 404s as WS envelopes).
+
+    Phase 25: ``alias`` may be a multi-model served name; the gate checks the
+    resolved **spec's** modality (not the definition's)."""
+    resolved = resolve_served(session, alias)
+    if resolved is None:
         return _error_envelope(404, "model_not_found", f"unknown model alias '{alias}'")
+    definition, spec = resolved
     if not definition.enabled:
         return _error_envelope(
             404, "model_not_found", f"model alias '{alias}' is disabled"
         )
-    if definition.modality != "llm":
+    if spec.modality != "llm":
         return _error_envelope(
             404, "model_not_found", f"model alias '{alias}' is not a chat model"
         )

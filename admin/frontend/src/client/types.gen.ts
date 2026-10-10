@@ -108,6 +108,10 @@ export type DefinitionCreate = {
      * Agents
      */
     agents?: Array<string> | null;
+    /**
+     * Served Models
+     */
+    served_models?: Array<ServedModelIn> | null;
 };
 
 /**
@@ -156,6 +160,10 @@ export type DefinitionPatch = {
      * Agents
      */
     agents?: Array<string> | null;
+    /**
+     * Served Models
+     */
+    served_models?: Array<ServedModelIn> | null;
 };
 
 /**
@@ -284,6 +292,36 @@ export type RegistrationRequest = {
      * Registered At
      */
     registered_at?: string | null;
+};
+
+/**
+ * ServedModelIn
+ *
+ * One entry of a multi-model definition's ``served_models`` list (Phase 25).
+ *
+ * Mirrors the canonical ``ModelSpec`` wire shape the agent consumes
+ * (``provider_lib.models``). ``backend_config`` is the per-model engine config
+ * validated against the type's ``x-served-model-config-schema`` when present.
+ */
+export type ServedModelIn = {
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Modality
+     */
+    modality?: string;
+    /**
+     * Backend Config
+     */
+    backend_config?: {
+        [key: string]: unknown;
+    };
+    /**
+     * Enabled
+     */
+    enabled?: boolean;
 };
 
 /**

@@ -50,11 +50,10 @@ from urllib.parse import quote
 
 import websockets
 from fastapi import APIRouter, WebSocket
-from sqlmodel import Session, select
+from sqlmodel import Session
 
 from app.core.config import settings
 from app.core.db import engine
-from app.models import ProviderDefinition
 from app.services.scheduler import (
     Admission,
     InferenceScheduler,
@@ -62,6 +61,7 @@ from app.services.scheduler import (
     QueueCleared,
     QueueTimeout,
 )
+from app.services.served_models import resolve_served
 
 logger = logging.getLogger("admin.v1.audio_transcriptions_ws")
 
@@ -96,14 +96,13 @@ def _resolve_asr_alias(alias: str) -> tuple[uuid.UUID, str] | str:
     """Resolve an enabled ``asr`` alias to ``(definition_id, provider_type)`` or
     return a short human-readable rejection reason (mapped to close 1008)."""
     with Session(engine) as session:
-        definition = session.exec(
-            select(ProviderDefinition).where(ProviderDefinition.alias == alias)
-        ).first()
-        if definition is None:
+        resolved = resolve_served(session, alias)
+        if resolved is None:
             return f"unknown model alias '{alias}'"
+        definition, spec = resolved
         if not definition.enabled:
             return f"model alias '{alias}' is disabled"
-        if definition.modality != "asr":
+        if spec.modality != "asr":
             return f"model alias '{alias}' is not a transcription (asr) model"
         return definition.id, definition.provider_type
 

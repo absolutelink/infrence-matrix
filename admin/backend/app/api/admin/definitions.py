@@ -61,7 +61,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
-from app.api.admin.providers import compute_config_fingerprint
+from app.api.admin.providers import (
+    compute_config_fingerprint,
+    compute_definition_fingerprint,
+)
 from app.api.admin.serializers import iso_utc
 from app.core.db import get_session
 from app.models import (
@@ -69,9 +72,11 @@ from app.models import (
     ProviderAgent,
     ProviderDefinition,
     ProviderInstance,
+    ProviderModel,
     ProviderType,
 )
 from app.services import alias_registry, assignments, config_update
+from app.services.served_models import resolve_models
 
 logger = logging.getLogger("admin.definitions")
 
@@ -84,6 +89,20 @@ _VALID_PLACEMENTS = ("any_of_type", "specific")
 # never valid and stays retired. Audio aliases are NOT litellm-registered
 # (the /v1/audio/* routes bypass litellm with direct httpx passthrough).
 _VALID_MODALITIES = ("llm", "embedding", "tts", "asr")
+
+
+class ServedModelIn(BaseModel):
+    """One entry of a multi-model definition's ``served_models`` list (Phase 25).
+
+    Mirrors the canonical ``ModelSpec`` wire shape the agent consumes
+    (``provider_lib.models``). ``backend_config`` is the per-model engine config
+    validated against the type's ``x-served-model-config-schema`` when present.
+    """
+
+    name: str = Field(min_length=1, max_length=255)
+    modality: str = Field(default="llm", max_length=32)
+    backend_config: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = True
 
 
 class DefinitionCreate(BaseModel):
@@ -103,6 +122,11 @@ class DefinitionCreate(BaseModel):
     # 'specific' hosts only on the listed agent ids (ProviderAgent.id).
     agent_placement: str = Field(default="any_of_type", max_length=32)
     agents: list[str] | None = None
+    # Phase 25: served-model list for a multi-model definition (only allowed
+    # when the type declares ``multi_model``). ``alias`` is synced to the first
+    # enabled entry; ``modality``/``backend_config`` stay the shared engine
+    # config. Absent/None = single-model (unchanged behavior).
+    served_models: list[ServedModelIn] | None = None
 
 
 class DefinitionPatch(BaseModel):
@@ -119,6 +143,10 @@ class DefinitionPatch(BaseModel):
     # Phase 16: placement (see DefinitionCreate).
     agent_placement: str | None = Field(default=None, max_length=32)
     agents: list[str] | None = None
+    # Phase 25: replace the served-model list (multi-model defs only). While
+    # instances are attached the NAMES are immutable (409) — only per-entry
+    # ``enabled`` toggles and per-model ``backend_config`` changes are allowed.
+    served_models: list[ServedModelIn] | None = None
 
 
 # Columns that are NOT NULL in the model: an explicit null in a PATCH
@@ -139,20 +167,29 @@ _NON_NULLABLE_FIELDS = frozenset(
 )
 
 
-def _ensure_litellm_registered(definition: ProviderDefinition) -> None:
-    """Warm the litellm alias registration for litellm-backed modalities only.
+def _ensure_litellm_registered(
+    session: Session, definition: ProviderDefinition
+) -> None:
+    """Warm the litellm alias registration for litellm-backed served names only.
 
+    Phase 25: registration is **per served name** with that name's modality.
     ``llm`` -> ``chat`` mode, ``embedding`` -> ``embedding`` mode. The Phase 24
     audio modalities (``tts``/``asr``) are served by direct httpx passthrough
     (litellm is bypassed — see ARCHITECTURE.md §7 Audio specifics), so their
-    aliases must NEVER be registered with litellm: a stale ``chat`` entry would
+    names must NEVER be registered with litellm: a stale ``chat`` entry would
     mis-declare them and the fake-stream APIError this registry exists to
     prevent would surface on the first (nonexistent) litellm call.
+
+    For a single-model definition ``resolve_models`` returns the one synthesized
+    entry (the alias), so behavior is unchanged.
     """
-    if definition.modality == "embedding":
-        alias_registry.ensure_registered(definition.alias, mode="embedding")
-    elif definition.modality == "llm":
-        alias_registry.ensure_registered(definition.alias, mode="chat")
+    for spec in resolve_models(session, definition):
+        if not spec.enabled:
+            continue
+        if spec.modality == "embedding":
+            alias_registry.ensure_registered(spec.name, mode="embedding")
+        elif spec.modality == "llm":
+            alias_registry.ensure_registered(spec.name, mode="chat")
 
 
 def _get_provider_type(session: Session, provider_type: str) -> ProviderType:
@@ -247,6 +284,154 @@ def _validate_modality(ptype: ProviderType, modality: str) -> None:
         )
 
 
+def _validate_served_model_config(
+    ptype: ProviderType, name: str, backend_config: dict[str, Any]
+) -> None:
+    """Validate one served model's per-model ``backend_config`` against the
+    type's ``x-served-model-config-schema`` when declared (Phase 25 §6).
+
+    Absent sub-schema = any JSON object accepted (still must survive the
+    canonical fingerprint serializer)."""
+    try:
+        compute_config_fingerprint(backend_config)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"served model '{name}' backend_config is not JSON-serializable: {exc}",
+        ) from exc
+    sub = (ptype.schema or {}).get("x-served-model-config-schema")
+    if sub is None:
+        return
+    errors = sorted(
+        jsonschema.Draft202012Validator(sub).iter_errors(backend_config),
+        key=lambda e: [str(p) for p in e.absolute_path],
+    )
+    if errors:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "served_model_config_schema_validation_failed",
+                "provider_type": ptype.name,
+                "served_model": name,
+                "errors": [
+                    {
+                        "path": "$"
+                        + "".join(
+                            f"[{part!r}]" if isinstance(part, int) else f".{part}"
+                            for part in err.absolute_path
+                        ),
+                        "message": err.message,
+                    }
+                    for err in errors
+                ],
+            },
+        )
+
+
+def _validate_served_models(
+    session: Session,
+    ptype: ProviderType,
+    served_models: list[ServedModelIn],
+    *,
+    definition_id: uuid.UUID | None = None,
+) -> list[ServedModelIn]:
+    """Validate a multi-model ``served_models`` list (Phase 25 §6).
+
+    Rules: (a) the type must declare ``multi_model``; (b) >=1 entry, names
+    unique within the list AND globally across all other ``ProviderModel.name``
+    and all ``ProviderDefinition.alias`` (excluding this definition when
+    ``definition_id`` is given), each modality in ``ptype.serves_modalities``,
+    each per-model config validated against ``x-served-model-config-schema``.
+    Returns the validated list; raises 422 on any violation.
+    """
+    if not ptype.multi_model:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"provider_type '{ptype.name}' does not declare multi_model "
+                "(x-multi-model); served_models is only valid for multi-model types"
+            ),
+        )
+    if not served_models:
+        raise HTTPException(
+            status_code=422,
+            detail="served_models must contain at least one entry",
+        )
+    # Names unique within the submitted list.
+    seen: set[str] = set()
+    for entry in served_models:
+        if entry.name in seen:
+            raise HTTPException(
+                status_code=422,
+                detail=f"duplicate served model name '{entry.name}' in request",
+            )
+        seen.add(entry.name)
+        # Per-model modality must be a known value hosted by the type.
+        _validate_modality(ptype, entry.modality)
+        _validate_served_model_config(ptype, entry.name, entry.backend_config)
+    # Global uniqueness: a served name may not equal any OTHER definition's
+    # alias, nor any OTHER definition's served name.
+    alias_q = select(ProviderDefinition.alias).where(
+        col(ProviderDefinition.alias).in_(list(seen))
+    )
+    if definition_id is not None:
+        alias_q = alias_q.where(col(ProviderDefinition.id) != definition_id)
+    clash_alias = session.exec(alias_q).first()
+    if clash_alias is not None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"served model name '{clash_alias}' collides with an existing "
+                "definition alias"
+            ),
+        )
+    name_q = select(ProviderModel.name).where(col(ProviderModel.name).in_(list(seen)))
+    if definition_id is not None:
+        name_q = name_q.where(col(ProviderModel.definition_id) != definition_id)
+    clash_name = session.exec(name_q).first()
+    if clash_name is not None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"served model name '{clash_name}' is already in use",
+        )
+    return served_models
+
+
+def _write_served_models(
+    session: Session,
+    definition: ProviderDefinition,
+    served_models: list[ServedModelIn],
+) -> None:
+    """Replace a definition's ``ProviderModel`` rows with ``served_models`` and
+    sync ``definition.alias`` to the first ENABLED name (Phase 25 §3).
+
+    Mutates the caller's session (rows deleted + added); the caller commits.
+    The alias is set in-memory so the caller's subsequent ``setattr`` loop /
+    commit persists it.
+    """
+    existing = session.exec(
+        select(ProviderModel).where(ProviderModel.definition_id == definition.id)
+    ).all()
+    for row in existing:
+        session.delete(row)
+    session.flush()
+    for entry in served_models:
+        session.add(
+            ProviderModel(
+                definition_id=definition.id,
+                name=entry.name,
+                modality=entry.modality,
+                backend_config=entry.backend_config,
+                enabled=entry.enabled,
+            )
+        )
+    session.flush()
+    # alias = first enabled served name (display/back-compat only).
+    first_enabled = next((e for e in served_models if e.enabled), None)
+    if first_enabled is not None:
+        definition.alias = first_enabled.name
+
+
 def _resolve_placement_agents(
     session: Session, placement: str, agents: list[str] | None, provider_type: str
 ) -> list[uuid.UUID]:
@@ -330,6 +515,7 @@ def _placement_agent_ids(session: Session, definition: ProviderDefinition) -> li
 
 
 def definition_dict(
+    session: Session,
     definition: ProviderDefinition,
     *,
     instances: list[ProviderInstance] | None = None,
@@ -353,6 +539,17 @@ def definition_dict(
         "agent_placement": definition.agent_placement,
         "created_at": iso_utc(definition.created_at),
         "updated_at": iso_utc(definition.updated_at),
+        # Phase 25: canonical served-model list (single-model defs return the
+        # one synthesized entry). Always present so the UI can render badges.
+        "served_models": [
+            {
+                "name": spec.name,
+                "modality": spec.modality,
+                "backend_config": spec.backend_config,
+                "enabled": spec.enabled,
+            }
+            for spec in resolve_models(session, definition)
+        ],
     }
     if placement_agents is not None:
         d["agents"] = placement_agents
@@ -401,14 +598,23 @@ async def create_definition(
     _validate_backend_config(ptype, body.backend_config)
     # Phase 18: the modality must be accepted and hosted by the type.
     _validate_modality(ptype, body.modality)
+    # Phase 25: served_models (multi-model only) validated before insert; the
+    # definition alias is synced to the first enabled served name.
+    served_models = body.served_models
+    if served_models is not None:
+        _validate_served_models(session, ptype, served_models)
     # Phase 16: validate placement + resolve specific agent ids (422 on an
     # unknown agent) BEFORE inserting, so a bad placement never persists.
     agent_ids = _resolve_placement_agents(
         session, body.agent_placement, body.agents, body.provider_type
     )
     definition = ProviderDefinition(
-        **body.model_dump(exclude={"agents"}),
+        **body.model_dump(exclude={"agents", "served_models"}),
     )
+    if served_models is not None:
+        first_enabled = next((e for e in served_models if e.enabled), None)
+        if first_enabled is not None:
+            definition.alias = first_enabled.name
     session.add(definition)
     try:
         # Flush so the definition id exists for the link FK, then write the
@@ -417,18 +623,21 @@ async def create_definition(
         session.flush()
         if agent_ids:
             _write_placement(session, definition, agent_ids)
+        # Phase 25: write the served-model rows in the same transaction.
+        if served_models is not None:
+            _write_served_models(session, definition, served_models)
         session.commit()
     except IntegrityError:
         session.rollback()
         raise HTTPException(
             status_code=409,
-            detail=f"alias already exists ('{body.alias}')",
+            detail=f"alias already exists ('{definition.alias}')",
         ) from None
     session.refresh(definition)
     # Warm the litellm alias registration before first use (checklist 4).
     # Audio modalities are bypassed (direct httpx passthrough — see
     # ``_ensure_litellm_registered``).
-    _ensure_litellm_registered(definition)
+    _ensure_litellm_registered(session, definition)
     # Phase 16 slice 5: a new definition is a placement change for every agent
     # of its type — push the updated assignment set to the live ones (an
     # any_of_type def now includes them; a specific def reaches only its links,
@@ -439,7 +648,7 @@ async def create_definition(
     )
     logger.info("created definition %s (%s)", definition.alias, definition.id)
     return definition_dict(
-        definition, instances=[], placement_agents=[str(a) for a in agent_ids]
+        session, definition, instances=[], placement_agents=[str(a) for a in agent_ids]
     )
 
 
@@ -451,6 +660,7 @@ def list_definitions(session: Session = Depends(get_session)) -> list[dict[str, 
     # `instances` is selectin-loaded on the relationship — no per-row SELECT.
     return [
         definition_dict(
+            session,
             d,
             instances=list(d.instances),
             placement_agents=_placement_agent_ids(session, d),
@@ -465,6 +675,7 @@ def get_definition(
 ) -> dict[str, Any]:
     definition = _get_definition(session, definition_id)
     return definition_dict(
+        session,
         definition,
         instances=list(definition.instances),
         placement_agents=_placement_agent_ids(session, definition),
@@ -565,7 +776,66 @@ async def patch_definition(
                 ),
             )
 
-    old_fp: str = compute_config_fingerprint(definition.backend_config)
+    # Phase 25: served_models (multi-model only) is not a column — pull it out
+    # of the setattr loop and handle it transactionally below. When it is
+    # present the alias is DERIVED (first enabled served name), so any explicit
+    # alias in the same PATCH is ignored. Use the typed ``body.served_models``
+    # (``changes`` holds a dumped list-of-dicts, which lacks attribute access).
+    served_models_touched = "served_models" in changes
+    served_models_raw = body.served_models if served_models_touched else None
+    changes.pop("served_models", None)
+    served_models_touched = served_models_raw is not None
+    if served_models_touched:
+        changes.pop("alias", None)
+        _validate_served_models(
+            session, ptype, served_models_raw, definition_id=definition.id
+        )
+        # Names AND per-model modalities are immutable while instances are
+        # attached (409): only enabled toggles + per-model config changes are
+        # allowed (spec §6.3; §3 marks modality immutable like name — flipping
+        # it would desync the admin routing key from the live engine).
+        attached = session.exec(
+            select(ProviderInstance).where(
+                ProviderInstance.provider_definition_id == definition.id
+            )
+        ).all()
+        if attached:
+            existing_by_name = {
+                row.name: row.modality
+                for row in session.exec(
+                    select(ProviderModel).where(
+                        ProviderModel.definition_id == definition.id
+                    )
+                ).all()
+            }
+            new_names = {entry.name for entry in served_models_raw}
+            if set(existing_by_name) != new_names:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"definition '{definition.alias}' has "
+                        f"{len(attached)} instance(s) attached; served model "
+                        "names are immutable — only enabled toggles and "
+                        "per-model config changes are allowed"
+                    ),
+                )
+            for entry in served_models_raw:
+                if entry.modality != existing_by_name[entry.name]:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"definition '{definition.alias}' has "
+                            f"{len(attached)} instance(s) attached; served "
+                            f"model '{entry.name}' modality is immutable "
+                            "(change the enabled flag or per-model config "
+                            "instead)"
+                        ),
+                    )
+
+    # Phase 25: the fingerprint covers (shared backend_config, served_models) so
+    # a per-model edit changes it and drives provider.config.update. Computed
+    # BEFORE any mutation so it reflects the pre-PATCH state.
+    old_fp: str = compute_definition_fingerprint(session, definition)
     old_capacity = definition.capacity
     # NOTE (N-6): a rapid double-PATCH can transiently read a stale row
     # here and push the older config; the reconnect/sweep self-heal
@@ -578,6 +848,10 @@ async def patch_definition(
     # change (atomic). resolved_agent_ids is None when placement is untouched.
     if resolved_agent_ids is not None:
         _write_placement(session, definition, resolved_agent_ids)
+    # Phase 25: replace the served-model rows in the same transaction and sync
+    # the alias to the first enabled name.
+    if served_models_raw is not None:
+        _write_served_models(session, definition, served_models_raw)
     try:
         session.commit()
     except IntegrityError:
@@ -599,6 +873,8 @@ async def patch_definition(
         resolved_agent_ids is not None
         or "enabled" in changes
         or "alias" in changes
+        or served_models_touched  # Phase 25: a served-list change (alias may
+        # have synced) must refresh every agent's assignment entries.
         or "provider_type" in changes  # L1: a retype (only allowed with zero
         # attached rows) changes which agents should host it — push the new type.
     )
@@ -612,12 +888,12 @@ async def patch_definition(
             provider_type,
             scheduler=getattr(request.app.state, "scheduler", None),
         )
-    _ensure_litellm_registered(definition)
+    _ensure_litellm_registered(session, definition)
 
     # The provider-visible state: the config (fingerprint) or a capacity
     # change. A type-only change with the SAME config is not a push trigger
     # (fingerprint identical).
-    new_fp: str = compute_config_fingerprint(definition.backend_config)
+    new_fp: str = compute_definition_fingerprint(session, definition)
     # SF-2: push when the provider-visible fields changed — the
     # backend_config fingerprint (restart-worthy) or capacity (adopted
     # at the provider without restart). idle_timeout_seconds is not a
@@ -675,6 +951,7 @@ async def patch_definition(
         )
     ).all()
     return definition_dict(
+        session,
         definition,
         instances=list(instances),
         config_update_results=results,

@@ -24,6 +24,7 @@ from sqlmodel import Session, select
 
 from app.api.admin.providers import (
     _apply_max_running_from_schema,
+    _apply_multi_model_from_schema,
     _apply_serves_modalities_from_schema,
     type_agents_of,
 )
@@ -131,6 +132,7 @@ def commit_pending(
     ptype.status = "active"
     _apply_max_running_from_schema(ptype, ptype.schema)
     _apply_serves_modalities_from_schema(ptype, ptype.schema)
+    _apply_multi_model_from_schema(ptype, ptype.schema)
     ptype.updated_at = datetime.now(UTC)
     session.add(ptype)
     session.commit()
