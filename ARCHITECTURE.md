@@ -276,6 +276,7 @@ must reference a registered type.
 | `schema` | Committed JSON Schema (2020-12) for this type's `backend_config`. Drives admin validation on write **and** the UI form render. |
 | `max_running_backends` | **Phase 16.** Per-agent cap on simultaneously `running` backends of this type, declared in the shipped `schema.json` (top-level `x-max-running-backends`, default unlimited). `1` for halogen-flash (single NPU). Enforced by the scheduler (§6). |
 | `serves_modalities` | **Phase 18.** Which client-facing endpoint kinds this type can host, declared in the shipped `schema.json` (top-level `x-serves-modalities`, default `["llm"]`). Values ∈ `llm` \| `embedding` \| `tts` \| `asr` (**Phase 24:** speech ships as the two concrete modalities `tts` + `asr`; the Phase 18 reserved `audio` bucket was never valid and stays retired). A `ProviderDefinition`'s `modality` must be in this list or create/PATCH is refused 422. `llama-cpp` (vulkan + cuda) declares `["llm","embedding"]`; `talkies` declares `["tts","asr"]`; every other type stays `["llm"]`. Read into the column at every schema-commit point exactly like `max_running_backends`. |
+| `multi_model` | **Phase 25.** Whether one backend process of this type can serve several client-facing models, declared in the shipped `schema.json` (top-level `x-multi-model`, default false). When true, definitions of this type may carry a `ProviderModel` row set (see §4 ProviderModel + `docs/multi-model-definitions.md`); the per-model config validates against the schema's optional `x-served-model-config-schema`. `talkies` declares it; gufo/halogen-flash adopt later. |
 | `schema_fingerprint` | SHA-256 of canonical `schema` (same canonicalization as `config_fingerprint`). |
 | `pending_schema` / `pending_fingerprint` | Staged schema awaiting consensus (null when none). |
 | `pending_voters` | JSON list of **agent ids** that have registered presenting `pending_fingerprint` (Phase 16: voters are agents, not backends). |
@@ -321,6 +322,24 @@ backend (`ProviderInstance`).
 > **Phase 16 removals:** `registration_token` (auth moves to the shared
 > `Machine.registration_secret`) and the shell/`awaiting_config` machinery
 > from Phase 14 (a definition is always typed and configured at create).
+
+### ProviderModel
+**Phase 25.** One client-facing model served by a **multi-model**
+definition's single backend process (`ProviderType.multi_model`). Full
+contract in `docs/multi-model-definitions.md`. Row: `{id, definition_id
+(CASCADE), name (globally unique vs all aliases + served names), modality
+(per-model routing key — endpoint gates check THIS, not the definition's),
+backend_config (per-model engine knobs, validated against the type's
+`x-served-model-config-schema`), enabled}`. A definition with rows serves
+ALL of them from ONE `ProviderInstance` (one boot; `vram_required_bytes`
+is the sum; capacity + idle timeout shared; names immutable while
+instances are attached). `alias` mirrors the first enabled name for
+display/back-compat; the definition-level `backend_config` holds the
+shared engine config. Single-model definitions have NO rows and are
+byte-for-byte unchanged. Every consumer resolves names through the
+canonical `resolve_models(definition)` accessor (rows when present, else
+the synthesized single entry from `alias/modality/backend_config`) —
+scheduler, `/v1/models`, assignment payloads, endpoint gates.
 
 ### ProviderInstance
 **One backend**: one `ProviderDefinition` running on one `ProviderAgent`.

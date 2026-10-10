@@ -1,7 +1,13 @@
 # Inference Matrix — Implementation Status
 
 **Overhaul branch:** `litellm-architecture-overhaul`
-**Last updated:** 2026-10-10 (**Phase 24 — Audio (talkies provider): ✅
+**Last updated:** 2026-10-10 (**Phase 25 — Multi-model definitions: 🟡
+planned (S0 done).** One definition = one backend process serving multiple
+client-facing model names, each with its own modality + per-model config;
+provider declares capability (`x-multi-model`), admin owns the names, the
+driver routes. First consumer talkies (4 slugs → 1 def); later gufo /
+halogen-flash. Spec: `docs/multi-model-definitions.md`. Prior: **Phase 24 —
+Audio (talkies provider): ✅
 SHIPPED (S0–S6 done; deployed + smoke-verified on 10.100.2.111).** Speech ships as two modalities — `tts` + `asr` — served by a new
 `talkies` provider type: a thin proxy agent around
 `psyb0t/talkies:latest-cuda` (Qwen3-TTS variants, Kokoro, Chatterbox Turbo;
@@ -3228,6 +3234,60 @@ still runs the pre-fix CI image via a manual `podman run` — after pushing
 inference-matrix-talkies-agent` to take it over (the unit file is already
 installed). Remaining follow-ups: `docker run` stubtest smoke, WS live-ASR
 relay smoke (S4 path untested against a real engine).
+
+---
+
+## Phase 25 — Multi-model definitions 🟡
+
+**Goal.** One `ProviderDefinition` = one backend process serving MULTIPLE
+client-facing model names (each with its own modality + per-model config).
+First consumer: `talkies` (collapse the 4 single-slug defs into one
+multi-slug process); later `gufo`, `halogen-flash` (main LLM + NPU
+satellites: embed/rerank/decision under one roof).
+
+**Locked decisions** — full spec in `docs/multi-model-definitions.md`:
+- Provider type declares capability via schema `x-multi-model: true` →
+  `ProviderType.multi_model`; per-model config validated against the
+  optional `x-served-model-config-schema`.
+- **Admin owns the names** (operator names each served model + picks its
+  modality; admin pushes names to the agent), **provider routes**
+  (driver maps inbound `model` name → engine-internal model).
+- New `ProviderModel` table (definition CASCADE, globally-unique `name`,
+  per-model `modality` = the endpoint routing key, per-model
+  `backend_config`, `enabled`). Single-model definitions keep using
+  `alias/modality/backend_config` unchanged — NO rows, NO backfill.
+- Canonical accessor `resolve_models(definition)` for every consumer
+  (scheduler, /v1/models, assignment/registration payloads, endpoint
+  gates, litellm registration).
+- One `ProviderInstance` per definition: sum VRAM, one boot, shared
+  capacity + idle timeout; names immutable while instances attached;
+  per-model config edits flow through `provider.config.update`
+  (fingerprint covers shared + per-model configs).
+- Scheduler: `acquire/release` keyed by the requested NAME (per-name FIFO
+  fairness) while boot/VRAM admission operates on the single owning
+  instance.
+- Control plane additive: `served_models` list on registration
+  `backends[].definition` + `agent.assignments.update` entries; old
+  agents ignore the key, new agents prefer it.
+- talkies: one process with
+  `TALKIES_ENABLED_MODELS=TALKIES_PRELOAD=<all enabled slugs>`,
+  name→slug rewrite on every audio surface, health pin over all slugs.
+
+**Slices.**
+- **S0.** This entry + spec doc + ARCHITECTURE §4. ✅ done.
+- **S1.** `provider_lib`: `ModelSpec`, multi-name `BackendHandle`,
+  `resolve_by_model` matches any enabled name, payload parsing prefers
+  `served_models`, mock multi-name backend. ⬜
+- **S2.** `provider/talkies`: multi-slug engine env, name→slug routing,
+  all-slug health pin, schema `x-multi-model` + per-model config schema. ⬜
+- **S3.** admin: `ProviderModel` + migration, `resolve_models`,
+  scheduler name lookup + per-name acquire/instance boot, endpoint gates
+  via per-model modality, `/v1/models` expansion, definition API
+  (create/PATCH/GET + validation rules), assignment payload, per-name
+  litellm registration, fingerprint. ⬜
+- **S4.** frontend + client regen: multi-model definition form, served-
+  name listing/badges. ⬜
+- **S5.** docs polish + optional deploy cutover (4 talkies defs → 1). ⬜
 
 ---
 
