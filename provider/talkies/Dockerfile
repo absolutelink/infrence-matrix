@@ -30,13 +30,20 @@ USER root
 # uv binary (managed python 3.14 download happens in the build).
 COPY --from=ghcr.io/astral-sh/uv /uv /usr/local/bin/uv
 
-# Provider sources (workspace subset: lib + this package only).
+# Workspace root manifests + provider sources. The root pyproject.toml/uv.lock
+# MUST be present: provider_talkies declares `matrix-provider-lib =
+# { workspace = true }`, and uv only resolves that against the workspace root
+# (this mirrors provider/llama-cpp/Dockerfile.cuda12 — other workspace members
+# are not needed for a --package sync). WORKDIR moves off /app so uv does not
+# pick up the talkies project manifest baked by the base image.
+WORKDIR /opt/matrix
+COPY pyproject.toml uv.lock /opt/matrix/
 COPY provider/lib /opt/matrix/provider/lib
 COPY provider/talkies /opt/matrix/provider/talkies
 
 RUN uv venv --python 3.14 /opt/provider-venv \
-    && uv pip install --python /opt/provider-venv/bin/python \
-        /opt/matrix/provider/lib /opt/matrix/provider/talkies \
+    && UV_PROJECT_ENVIRONMENT=/opt/provider-venv \
+       uv sync --frozen --package matrix-provider-talkies \
     && chmod -R a+rX /opt/provider-venv /opt/matrix
 
 # The agent runs as talkies (uid 1000) and writes under CACHE_DIR (/cache:

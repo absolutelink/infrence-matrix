@@ -107,6 +107,35 @@ def test_provider_dockerfile_overrides_every_base_hazard(dockerfile: Path) -> No
     assert "ARG BASE_IMAGE=psyb0t/talkies:latest-cuda" in text
     assert re.search(r"FROM\s+\$\{BASE_IMAGE\}", text)
 
+    # CI failure pin (build-provider-talkies): provider_talkies declares
+    # matrix-provider-lib = { workspace = true }, so the workspace root
+    # manifests must be copied and the install must go through
+    # `uv sync --frozen --package` (uv pip install cannot resolve workspace
+    # sources without the root) — same pattern as llama-cpp Dockerfile.cuda12.
+    copy_text = " ".join(a for i, a in ins if i == "COPY")
+    assert "pyproject.toml uv.lock /opt/matrix/" in copy_text
+    run_text_all = " ".join(a for i, a in ins if i == "RUN")
+    assert "uv sync --frozen --package matrix-provider-talkies" in run_text_all
+    assert "UV_PROJECT_ENVIRONMENT=/opt/provider-venv" in run_text_all
+    assert "uv pip install" not in run_text_all
+
+
+def test_cuda_dockerfile_base_arg_is_global_scoped() -> None:
+    """CI failure pin (build-provider-talkies-cuda): a stage-scoped ARG (one
+    declared after a FROM) is invisible to the NEXT stage's FROM —
+    'base name (${BASE_IMAGE}) should not be blank'. The ARG must precede the
+    first FROM (global scope) to be usable in a later FROM line."""
+    lines = DOCKERFILE_CUDA.read_text().splitlines()
+    first_from = next(
+        i for i, line in enumerate(lines) if line.strip().upper().startswith("FROM ")
+    )
+    arg_line = next(
+        i
+        for i, line in enumerate(lines)
+        if line.strip().startswith("ARG BASE_IMAGE=psyb0t/talkies:latest-cuda")
+    )
+    assert arg_line < first_from
+
 
 def test_cuda_dockerfile_bakes_the_nvidia_userspace_driver() -> None:
     """Dockerfile.cuda mirrors provider/llama-cpp/Dockerfile.cuda12: the RPM
