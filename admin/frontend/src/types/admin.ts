@@ -185,6 +185,17 @@ export interface ProviderDefinition {
   config_update_results?: ConfigUpdateResult[]
 }
 
+// Phase 24: a saved cloned voice for a tts definition (mirrors
+// admin/backend/app/api/admin/voices.py::_voice_dict).
+export interface TTSVoiceRow {
+  id: string
+  definition_id: string
+  name: string
+  ref_text: string | null
+  language: string | null
+  created_at: string
+}
+
 export interface ProviderInstance {
   id: string
   machine_id: string

@@ -8,6 +8,7 @@ import {
   ChevronRight,
   Code2,
   FormInput,
+  Mic,
   Pencil,
   Plus,
   Trash2,
@@ -86,13 +87,25 @@ import {
   useAgents,
   useDefinitions,
   useProviderType,
+  useVoices,
+  voiceKeys,
 } from "@/hooks/useAdminData"
 import useCustomToast from "@/hooks/useCustomToast"
+import {
+  isModality,
+  MAX_VOICE_BYTES,
+  modalityBadgeVariant,
+  modalityEndpointHint,
+  modalitySchema,
+  nextModalityOnTypeLoad,
+  servedModalitiesFor,
+} from "@/lib/audio"
 import { extractError } from "@/lib/errors"
 import type {
   ConfigUpdateResult,
   ProviderDefinition,
   ProviderTypeSummary,
+  TTSVoiceRow,
 } from "@/types/admin"
 
 export const Route = createFileRoute("/_layout/definitions")({
@@ -105,8 +118,9 @@ const definitionSchema = z.object({
   // Phase 16: provider_type is required (the Phase 14 shell is retired).
   provider_type: z.string().min(1, "provider_type is required").max(64),
   // Phase 18: endpoint kind this definition serves. Gated by the chosen
-  // provider type's serves_modalities in the dialog.
-  modality: z.enum(["llm", "embedding"]),
+  // provider type's serves_modalities in the dialog. Phase 24: `tts` + `asr`
+  // join the set (the reserved `audio` bucket is retired).
+  modality: modalitySchema,
   capacity: z
     .string()
     .refine((t) => Number.isInteger(Number(t)) && Number(t) >= 1, {
@@ -273,7 +287,7 @@ function DefinitionRow({
         </TableCell>
         <TableCell>
           <Badge
-            variant={d.modality === "embedding" ? "secondary" : "outline"}
+            variant={modalityBadgeVariant(d.modality)}
             className="capitalize"
           >
             {d.modality ?? "llm"}
@@ -369,9 +383,7 @@ function DefinitionDetail({
         <h4 className="mb-2 text-sm font-semibold">Modality</h4>
         <p className="text-xs text-muted-foreground">
           <span className="font-mono">{d.modality ?? "llm"}</span> —{" "}
-          {d.modality === "embedding"
-            ? "served by POST /v1/embeddings."
-            : "served by /v1/responses and /v1/chat/completions."}
+          {modalityEndpointHint(d.modality)}
         </p>
       </div>
       <div>
@@ -438,6 +450,222 @@ function DefinitionDetail({
           </>
         )}
       </div>
+      {d.modality === "tts" && <VoicesPanel definition={d} />}
+    </div>
+  )
+}
+
+/**
+ * Phase 24: saved-voice (cloned TTS voice) management for a `tts` definition.
+ * Lists the definition's `TTSVoice` rows, enrolls a new one from a wav clip
+ * (multipart → proxied to a running backend), and deletes rows. The rows are
+ * readable while the backend is stopped; enroll/delete require a connected,
+ * running backend — the server answers 503 otherwise, surfaced inline.
+ */
+function VoicesPanel({ definition }: { definition: ProviderDefinition }) {
+  const queryClient = useQueryClient()
+  const { showSuccessToast } = useCustomToast()
+  const {
+    data: voices = [],
+    isLoading,
+    error: listError,
+  } = useVoices(definition.id)
+  const [name, setName] = useState("")
+  const [refText, setRefText] = useState("")
+  const [language, setLanguage] = useState("")
+  const [file, setFile] = useState<File | null>(null)
+  const [formError, setFormError] = useState<string | null>(null)
+  const [confirmId, setConfirmId] = useState<string | null>(null)
+
+  const invalidate = () =>
+    queryClient.invalidateQueries({
+      queryKey: voiceKeys.forDefinition(definition.id),
+    })
+
+  const enroll = useMutation({
+    mutationFn: async () => {
+      if (!name.trim()) throw new Error("name is required")
+      if (!file) throw new Error("a wav clip is required")
+      if (file.size > MAX_VOICE_BYTES)
+        throw new Error("voice clip too large (max 32 MiB)")
+      return await AdminService.enrollVoice({
+        body: {
+          definition_id: definition.id,
+          name: name.trim(),
+          ref_text: refText.trim() || undefined,
+          language: language.trim() || undefined,
+          file,
+        },
+      })
+    },
+    onSuccess: () => {
+      invalidate()
+      setName("")
+      setRefText("")
+      setLanguage("")
+      setFile(null)
+      setFormError(null)
+      showSuccessToast("Voice enrolled")
+    },
+    onError: (err: Error) => setFormError(extractError(err)),
+  })
+
+  const remove = useMutation({
+    mutationFn: async (voiceId: string) =>
+      await AdminService.deleteVoice({ path: { voice_id: voiceId } }),
+    onSuccess: () => {
+      invalidate()
+      setConfirmId(null)
+      showSuccessToast("Voice deleted")
+    },
+    onError: (err: Error) => setFormError(extractError(err)),
+  })
+
+  return (
+    <div className="md:col-span-2 space-y-3 rounded-lg border p-3">
+      <div>
+        <h4 className="text-sm font-semibold">Voices</h4>
+        <p className="text-xs text-muted-foreground">
+          Saved cloned voices for{" "}
+          <span className="font-mono">{definition.alias}</span>. Enrollment
+          needs a running backend — the clip is pushed to the provider and the
+          row is created only after it accepts.
+        </p>
+      </div>
+
+      {(formError || listError) && (
+        <p className="rounded-md border border-destructive/40 bg-destructive/5 p-2 text-xs text-destructive">
+          {formError ?? extractError(listError)}
+        </p>
+      )}
+
+      {isLoading ? (
+        <p className="text-xs text-muted-foreground">Loading voices…</p>
+      ) : voices.length === 0 ? (
+        <p className="text-xs text-muted-foreground">No saved voices yet.</p>
+      ) : (
+        <div className="overflow-hidden rounded-md border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Name</TableHead>
+                <TableHead>Reference text</TableHead>
+                <TableHead>Language</TableHead>
+                <TableHead>Created</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {voices.map((v: TTSVoiceRow) => (
+                <TableRow key={v.id}>
+                  <TableCell className="font-medium">{v.name}</TableCell>
+                  <TableCell className="max-w-xs truncate text-xs text-muted-foreground">
+                    {v.ref_text ?? "—"}
+                  </TableCell>
+                  <TableCell className="text-xs">{v.language ?? "—"}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {v.created_at
+                      ? new Date(v.created_at).toLocaleString()
+                      : "—"}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    {confirmId === v.id ? (
+                      <div className="inline-flex items-center gap-1">
+                        <span className="text-xs text-muted-foreground">
+                          Delete?
+                        </span>
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          disabled={remove.isPending}
+                          onClick={() => remove.mutate(v.id)}
+                        >
+                          Confirm
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setConfirmId(null)}
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    ) : (
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        className="text-destructive hover:bg-destructive/10"
+                        aria-label={`Delete voice ${v.name}`}
+                        onClick={() => setConfirmId(v.id)}
+                      >
+                        <Trash2 />
+                      </Button>
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-3 border-t pt-3 sm:grid-cols-2">
+        <div className="space-y-1">
+          <label className="text-xs font-medium" htmlFor="voice-name">
+            Name
+          </label>
+          <Input
+            id="voice-name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="my-voice"
+          />
+        </div>
+        <div className="space-y-1">
+          <label className="text-xs font-medium" htmlFor="voice-file">
+            Wav clip
+          </label>
+          <Input
+            id="voice-file"
+            type="file"
+            accept=".wav,audio/wav"
+            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+          />
+        </div>
+        <div className="space-y-1">
+          <label className="text-xs font-medium" htmlFor="voice-ref">
+            Reference text (optional)
+          </label>
+          <Textarea
+            id="voice-ref"
+            value={refText}
+            rows={2}
+            onChange={(e) => setRefText(e.target.value)}
+            placeholder="Transcript of the clip…"
+          />
+        </div>
+        <div className="space-y-1">
+          <label className="text-xs font-medium" htmlFor="voice-lang">
+            Language (optional)
+          </label>
+          <Input
+            id="voice-lang"
+            value={language}
+            onChange={(e) => setLanguage(e.target.value)}
+            placeholder="en"
+          />
+        </div>
+        <div className="sm:col-span-2">
+          <Button
+            type="button"
+            onClick={() => enroll.mutate()}
+            disabled={enroll.isPending}
+          >
+            <Mic />
+            {enroll.isPending ? "Enrolling…" : "Enroll voice"}
+          </Button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -470,7 +698,7 @@ function DefinitionFormSheet({
     defaultValues: {
       alias: definition?.alias ?? "",
       provider_type: definition?.provider_type ?? "",
-      modality: definition?.modality === "embedding" ? "embedding" : "llm",
+      modality: isModality(definition?.modality) ? definition.modality : "llm",
       capacity: String(definition?.capacity ?? 1),
       vram_required_bytes: String(definition?.vram_required_bytes ?? 0),
       idle_timeout_seconds: String(definition?.idle_timeout_seconds ?? 300),
@@ -524,21 +752,20 @@ function DefinitionFormSheet({
   // Phase 18: which modalities the selected provider type can host. Gated by
   // its serves_modalities (intersected with the known enum); while the detail
   // is loading or declares none, fall back to just ["llm"].
-  const servedModalities = useMemo<string[]>(() => {
-    const known = ["llm", "embedding"]
-    const raw = (typeDetail?.serves_modalities as string[] | undefined) ?? []
-    const list = raw.filter((m) => known.includes(m))
-    return list.length > 0 ? list : ["llm"]
-  }, [typeDetail])
+  const servedModalities = useMemo<string[]>(
+    () => servedModalitiesFor(typeDetail),
+    [typeDetail],
+  )
 
   // When the chosen type doesn't serve the current modality (e.g. after a
   // provider_type switch), reset to a served value — mirrors the
-  // backend_config reset on a type change.
+  // backend_config reset on a type change. nextModalityOnTypeLoad returns null
+  // while the type detail is still loading so a cold provider-type cache can't
+  // clobber a stored tts/asr/embedding modality (see @/lib/audio).
   useEffect(() => {
-    if (!servedModalities.includes(modality)) {
-      form.setValue("modality", servedModalities[0] as "llm" | "embedding")
-    }
-  }, [servedModalities, modality, form])
+    const next = nextModalityOnTypeLoad(typeDetail, modality)
+    if (next) form.setValue("modality", next)
+  }, [typeDetail, modality, form])
 
   // Controlled backend_config editor state: `rawMode` toggles between
   // the schema form and the raw-JSON escape hatch.

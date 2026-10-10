@@ -16,6 +16,7 @@ import type {
   ProviderTypeSummary,
   ResponsesList,
   SchedulerStats,
+  TTSVoiceRow,
   UsageStats,
 } from "@/types/admin"
 
@@ -40,6 +41,11 @@ export const instanceStatsKeys = { all: ["stats", "instances"] as const }
 export const providerTypeKeys = {
   all: ["provider-types"] as const,
   detail: (name: string) => ["provider-types", name] as const,
+}
+// Phase 24: saved-voice catalog for a tts definition (admin /admin/api/voices).
+export const voiceKeys = {
+  all: ["voices"] as const,
+  forDefinition: (definitionId: string) => ["voices", definitionId] as const,
 }
 export const logsKeys = {
   all: ["instance-logs"] as const,
@@ -246,5 +252,23 @@ export function useProviderType(name: string | null, refetchInterval = 10000) {
       ),
     enabled: name !== null && name !== "",
     refetchInterval,
+  })
+}
+
+// Phase 24: list the saved voices (TTSVoice rows) for a tts definition. The
+// rows are readable while the backend is stopped, so no polling interval —
+// callers refetch after an enroll/delete mutation.
+export function useVoices(definitionId: string | undefined, enabled = true) {
+  return useQuery({
+    queryKey: voiceKeys.forDefinition(definitionId ?? ""),
+    queryFn: async () =>
+      cast<TTSVoiceRow[]>(
+        (
+          await AdminService.listVoices({
+            query: { definition_id: definitionId as string },
+          })
+        ).data,
+      ),
+    enabled: enabled && definitionId != null && definitionId !== "",
   })
 }
