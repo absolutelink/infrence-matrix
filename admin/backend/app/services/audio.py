@@ -1,6 +1,6 @@
 """Shared Phase 24 (audio) helpers for the /v1 and /admin/api audio routes.
 
-Two concerns live here so the speech / transcription / voices routes and the
+Three concerns live here so the speech / transcription / voices routes and the
 admin enrollment router stay thin:
 
 * **Agent address resolution** — the audio data plane bypasses litellm and
@@ -10,7 +10,15 @@ admin enrollment router stay thin:
   (client ``GET /v1/audio/voices`` and admin enrollment) resolve the same
   address from a *connected* agent hosting the definition, preferring one
   whose backend is loaded (running/in_use) so the agent answers instead of
-  503-ing a stopped backend.
+  503-ing a stopped backend. ``loaded_base_url_for_definition`` answers the
+  stricter "is a serving process already up?" question the voices route uses
+  to proxy slot-free without booting.
+
+* **Voice catalog cache** — ``GET /v1/audio/voices`` serves from
+  ``ProviderDefinition.model_metadata`` (populated by the talkies driver's
+  ``backend.metadata`` scrape) when no backend is loaded, so a catalog read
+  never boots a stopped model. ``cache_voices_for_definition`` /
+  ``invalidate_voices_cache`` keep that cache fresh / stale-on-write.
 
 * **Cheap clip-duration sniffing** — ``AudioUsageSample.audio_seconds`` is
   derived only when it is free: a canonical WAV header (RIFF/WAVE ``fmt `` +
@@ -19,6 +27,7 @@ admin enrollment router stay thin:
   ``None``.
 """
 
+import copy
 import struct
 import uuid
 from typing import Any
@@ -29,6 +38,7 @@ from app.models import (
     ProviderAgent,
     ProviderDefinition,
     ProviderInstance,
+    get_datetime_utc,
 )
 from app.services.scheduler import RUNNING_BACKEND_STATUSES
 
@@ -70,6 +80,142 @@ def agent_base_url_for_definition(
         if fallback is None:
             fallback = url
     return fallback
+
+
+def loaded_base_url_for_definition(
+    session: Session, definition: ProviderDefinition
+) -> str | None:
+    """``http://{machine}:{agent.base_port}`` for a connected agent whose
+    backend for ``definition`` is **loaded** (running/in_use), else ``None``.
+
+    Like :func:`agent_base_url_for_definition` but WITHOUT the stopped-agent
+    fallback: it answers "is a serving process already up?" so the voices
+    route can proxy slot-free to a live backend instead of booting one on
+    demand. A stopped backend yields ``None`` (the caller falls back to the
+    cache / boot-on-demand path).
+    """
+    rows = session.exec(
+        select(ProviderInstance, ProviderAgent)
+        .join(ProviderAgent, col(ProviderInstance.agent_id) == col(ProviderAgent.id))
+        .where(
+            ProviderInstance.provider_definition_id == definition.id,
+            col(ProviderAgent.websocket_connected) == True,  # noqa: E712
+        )
+    ).all()
+    for inst, agent in rows:
+        if inst.backend_status not in RUNNING_BACKEND_STATUSES:
+            continue
+        machine = agent.machine
+        address = machine.reachable_address() if machine else None
+        if not address:
+            continue
+        return f"http://{address}:{agent.base_port}"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Voice catalog cache (``ProviderDefinition.model_metadata``)
+#
+# The talkies driver embeds each tts entry's live voice list in its
+# ``backend.metadata`` payload (``{"models": [{"id", ..., "voices": [...]},
+# ...]}``), which the admin persists verbatim. ``GET /v1/audio/voices`` serves
+# from that cache when no backend is loaded, so a catalog read never boots a
+# stopped model. Enrollment / deletion invalidates it (the next read is live).
+# ---------------------------------------------------------------------------
+
+
+def _metadata_models(definition: ProviderDefinition) -> list[dict[str, Any]]:
+    """The ``models`` list inside ``model_metadata`` (empty when absent)."""
+    metadata = definition.model_metadata
+    if isinstance(metadata, dict):
+        models = metadata.get("models")
+        if isinstance(models, list):
+            return models
+    return []
+
+
+def cached_voices_for_definition(
+    definition: ProviderDefinition, name: str
+) -> list[Any] | None:
+    """Cached voice list for served ``name`` in ``definition.model_metadata``,
+    or ``None`` when no entry for that id carries a ``voices`` list.
+
+    Voice objects are returned verbatim (already tagged with the served name by
+    the driver's ``voices`` proxy).
+    """
+    for entry in _metadata_models(definition):
+        if isinstance(entry, dict) and entry.get("id") == name:
+            voices = entry.get("voices")
+            if isinstance(voices, list):
+                return voices
+    return None
+
+
+def cache_voices_for_definition(
+    session: Session,
+    definition: ProviderDefinition,
+    name: str,
+    voices: list[Any],
+) -> None:
+    """Refresh the cached voice list for served ``name`` on ``definition``.
+
+    Patches the matching entry's ``voices`` key when one exists; otherwise
+    inserts a minimal ``{"id": name, "voices": voices}`` entry so the first
+    live read seeds the cache even when the driver predates voice embedding.
+    The FULL ``model_metadata`` dict is deep-copied and only its ``"models"``
+    key replaced, so any other top-level keys survive; the fresh structure also
+    ensures SQLModel sees a real change (in-place mutation of the loaded dict
+    would share objects with the tracked original and never flush).
+    """
+    metadata = (
+        copy.deepcopy(definition.model_metadata)
+        if isinstance(definition.model_metadata, dict)
+        else {}
+    )
+    models = metadata.get("models")
+    if not isinstance(models, list):
+        models = []
+    fresh_voices = copy.deepcopy(voices)
+    for entry in models:
+        if isinstance(entry, dict) and entry.get("id") == name:
+            entry["voices"] = fresh_voices
+            break
+    else:
+        models.append({"id": name, "voices": fresh_voices})
+    metadata["models"] = models
+    definition.model_metadata = metadata
+    definition.updated_at = get_datetime_utc()
+    session.add(definition)
+    session.commit()
+
+
+def invalidate_voices_cache(session: Session, definition: ProviderDefinition) -> None:
+    """Strip the ``voices`` key from every entry in ``model_metadata``.
+
+    Called after a successful voice enroll / delete: the catalog changed on
+    disk, so any cached list is stale. Enrollment requires a running backend
+    anyway, so the next ``GET /v1/audio/voices`` is live and re-seeds the
+    cache. No-op when nothing is cached. The full dict is deep-copied and only
+    ``"models"`` replaced (other top-level keys survive; see
+    :func:`cache_voices_for_definition` for why in-place mutation is wrong).
+    """
+    if not isinstance(definition.model_metadata, dict):
+        return
+    metadata = copy.deepcopy(definition.model_metadata)
+    models = metadata.get("models")
+    if not isinstance(models, list):
+        return
+    changed = False
+    for entry in models:
+        if isinstance(entry, dict) and "voices" in entry:
+            del entry["voices"]
+            changed = True
+    if changed:
+        metadata["models"] = models
+        definition.model_metadata = metadata
+        definition.updated_at = get_datetime_utc()
+        session.add(definition)
+        session.commit()
 
 
 def wav_duration_seconds(prefix: bytes, total_bytes: int | None = None) -> float | None:

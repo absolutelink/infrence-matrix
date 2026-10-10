@@ -203,6 +203,10 @@ async def enroll_voice(
         session.add(voice)
         session.commit()
     session.refresh(voice)
+    # The on-disk catalog changed: drop any cached voice list so the next
+    # ``GET /v1/audio/voices`` reads live (enrollment required a running
+    # backend anyway) and re-seeds the cache.
+    audio_svc.invalidate_voices_cache(session, definition)
     logger.info("enrolled voice '%s' for definition %s", name, definition.alias)
     return {"ok": True, "voice": _voice_dict(voice)}
 
@@ -246,5 +250,7 @@ async def delete_voice(
 
     session.delete(voice)
     session.commit()
+    # Catalog changed on disk: invalidate the cached voice list (see enroll).
+    audio_svc.invalidate_voices_cache(session, definition)
     logger.info("deleted voice '%s' for definition %s", voice.name, definition.alias)
     return {"ok": True, "id": voice_id}

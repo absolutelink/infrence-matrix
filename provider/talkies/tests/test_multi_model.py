@@ -579,3 +579,94 @@ def test_env_concurrency_map_max_per_slug() -> None:
     assert tenv.resolve_model_concurrency_map(
         {"limits": {"model_concurrency": 1}}, mixed
     ) == {TTS_SLUG: 4}
+
+
+# ---------------------------------------------------------------------------
+# list_models: voice-catalog embedding (backend.metadata scrape)
+# ---------------------------------------------------------------------------
+
+
+async def test_list_models_embeds_voices_per_tts_entry(tmp_path) -> None:
+    """Each tts entry carries its live catalog (fetched via the driver's voices
+    proxy, retagged to the served name); asr entries carry no voices key."""
+    engine, _stub = make_stub_engine(slugs=[TTS_SLUG, ASR_SLUG])
+    async with serve_stub(engine) as (_url, port):
+        driver = _connected_multi(tmp_path, port)
+        try:
+            models = await driver.list_models()
+            by_id = {m["id"]: m for m in models}
+            assert "voices" in by_id["a"]
+            assert {v["voice"] for v in by_id["a"]["voices"]} == {"Vivian", "clone1"}
+            assert {v["model"] for v in by_id["a"]["voices"]} == {"a"}
+            assert "voices" not in by_id["b"]  # asr entry: no voices
+        finally:
+            await driver.aclose()
+
+
+async def test_list_models_legacy_embeds_voices(tmp_path) -> None:
+    """Legacy single-slug tts definition embeds its voices list under the alias."""
+    engine, _stub = make_stub_engine()
+    async with serve_stub(engine) as (_url, port):
+        driver = TalkiesBackend(make_settings(tmp_path), {"model": {"slug": TTS_SLUG}})
+        driver.apply_config({"model": {"slug": TTS_SLUG}})
+        driver.backend_port = port
+        driver.slug = TTS_SLUG
+        driver._auth_token = "stub-token"
+        driver._data_dir = tmp_path / "data"
+        driver.set_alias("my-tts")
+        driver.modality = "tts"
+        try:
+            models = await driver.list_models()
+            assert models[0]["id"] == "my-tts"
+            assert "voices" in models[0]
+            assert {v["voice"] for v in models[0]["voices"]} == {"Vivian", "clone1"}
+        finally:
+            await driver.aclose()
+
+
+async def test_list_models_voices_failure_omits_key(tmp_path) -> None:
+    """A per-entry voices-fetch failure omits only that entry's voices key —
+    the other entries still publish (a scrape must never fail a boot)."""
+    driver = TalkiesBackend(make_settings(tmp_path), {})
+    driver.set_models(
+        [
+            ModelSpec(name="a", modality="tts", backend_config={"slug": TTS_SLUG}),
+            ModelSpec(name="b", modality="tts", backend_config={"slug": ASR_SLUG}),
+            ModelSpec(name="c", modality="asr", backend_config={"slug": ASR_SLUG}),
+        ]
+    )
+
+    async def flaky_voices(model: str | None = None, *, timeout: float | None = None):  # noqa: ARG001
+        if model == "a":
+            raise RuntimeError("engine down")
+        return {"voices": [{"voice": "Vivian", "model": model}]}
+
+    driver.voices = flaky_voices  # type: ignore[method-assign]
+    models = await driver.list_models()
+    by_id = {m["id"]: m for m in models}
+    assert set(by_id) == {"a", "b", "c"}  # every entry still returned
+    assert "voices" not in by_id["a"]  # failed fetch -> key omitted
+    assert by_id["b"]["voices"] == [{"voice": "Vivian", "model": "b"}]
+    assert "voices" not in by_id["c"]  # asr never fetched
+
+
+async def test_list_models_uses_short_voices_timeout(tmp_path) -> None:
+    """The boot-ack scrape passes the short per-entry timeout (not the 15 s
+    client default) so a hung engine cannot stall the boot ack."""
+    driver = TalkiesBackend(make_settings(tmp_path), {})
+    driver.set_models(
+        [
+            ModelSpec(name="a", modality="tts", backend_config={"slug": TTS_SLUG}),
+            ModelSpec(name="b", modality="tts", backend_config={"slug": ASR_SLUG}),
+        ]
+    )
+    seen: list[tuple[str | None, float | None]] = []
+
+    async def spy_voices(model: str | None = None, *, timeout: float | None = None):
+        seen.append((model, timeout))
+        return {"voices": [{"voice": "Vivian", "model": model}]}
+
+    driver.voices = spy_voices  # type: ignore[method-assign]
+    await driver.list_models()
+    assert {m for m, _ in seen} == {"a", "b"}
+    assert all(t == driver_mod._VOICES_SCRAPE_TIMEOUT for _, t in seen)

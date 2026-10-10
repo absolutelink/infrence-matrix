@@ -280,3 +280,54 @@ def test_delete_agent_5xx_maps_502_keeps_row(
 def test_delete_unknown_voice_404(client: TestClient) -> None:
     resp = client.delete(f"/admin/api/voices/{__import__('uuid').uuid4()}")
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# voice-catalog cache invalidation
+# ---------------------------------------------------------------------------
+def _seed_cached_voices(session: Session, definition: ProviderDefinition) -> None:
+    definition.model_metadata = {
+        "models": [{"id": definition.alias, "voices": [{"voice": "stale"}]}],
+        "capabilities": {"keep": True},
+    }
+    session.add(definition)
+    session.commit()
+
+
+@respx.mock
+def test_enroll_strips_voices_cache(client: TestClient, session: Session) -> None:
+    definition = seed_tts(session, alias="en-cache", machine_uid="en-cache-m")
+    _seed_cached_voices(session, definition)
+    respx.put(f"{AGENT}/v1/audio/voices/myvoice").mock(
+        return_value=httpx.Response(200, json={"object": "voice", "voice_id": "myvoice"})
+    )
+    resp = client.post(
+        "/admin/api/voices",
+        data={"definition_id": str(definition.id), "name": "myvoice"},
+        files={"file": ("ref.wav", b"x", "audio/wav")},
+    )
+    assert resp.status_code == 200
+    session.refresh(definition)
+    # voices stripped, other top-level keys preserved
+    assert definition.model_metadata["capabilities"] == {"keep": True}
+    entry = next(m for m in definition.model_metadata["models"] if m["id"] == "en-cache")
+    assert "voices" not in entry
+
+
+@respx.mock
+def test_delete_strips_voices_cache(client: TestClient, session: Session) -> None:
+    definition = seed_tts(session, alias="del-cache", machine_uid="del-cache-m")
+    _seed_cached_voices(session, definition)
+    voice = TTSVoice(definition_id=definition.id, name="gone")
+    session.add(voice)
+    session.commit()
+    session.refresh(voice)
+    respx.delete(f"{AGENT}/v1/audio/voices/gone").mock(
+        return_value=httpx.Response(200, json={"deleted": True})
+    )
+    resp = client.delete(f"/admin/api/voices/{voice.id}")
+    assert resp.status_code == 200
+    session.refresh(definition)
+    assert definition.model_metadata["capabilities"] == {"keep": True}
+    entry = next(m for m in definition.model_metadata["models"] if m["id"] == "del-cache")
+    assert "voices" not in entry

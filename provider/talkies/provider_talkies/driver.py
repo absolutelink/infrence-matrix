@@ -80,6 +80,12 @@ _STDERR_TAIL_LINES = 5
 # prefetch + first-load wait.
 _BOOT_HEARTBEAT_SECONDS = 15.0
 _HEARTBEAT_REASON_CHARS = 160
+# Per-entry voices-fetch budget during the ``backend.metadata`` scrape. The
+# scrape runs on the blocking boot-ack path (ops.py awaits it before settling
+# ``backend.start``), so a hung engine must not stall boot for the full 15 s
+# proxy timeout — a short budget bounds the worst case (entries are fetched
+# concurrently, so total ~= this value, not N x it).
+_VOICES_SCRAPE_TIMEOUT = 5.0
 
 # The talkies committed backend_config schema (Phase 24): the sectioned
 # shape the admin registers, validates against, and renders in the UI.
@@ -549,9 +555,19 @@ class TalkiesBackend(BackendDriver):
 
         Multi-model: one entry per enabled served name with its own modality.
         Legacy (no served list): the single alias/slug entry (Phase 24).
+
+        Each ``tts`` entry is extended with a ``voices`` list — the live voice
+        catalog for that served name, fetched through :meth:`voices` (the same
+        proxy the client route uses, so the per-slug filter / name retag is not
+        duplicated). The fetches run **concurrently** (``asyncio.gather`` with
+        ``return_exceptions=True``) under a short per-call timeout so the whole
+        scrape stays off the boot-ack critical path. The scrape is best-effort:
+        a per-entry failure omits the ``voices`` key for that entry only (the
+        other entries still publish) — a metadata scrape must never fail a boot
+        that already succeeded. ``asr`` entries carry no ``voices`` key.
         """
         if self._models:
-            return [
+            entries: list[dict[str, Any]] = [
                 {
                     "id": spec.name,
                     "object": "model",
@@ -560,15 +576,33 @@ class TalkiesBackend(BackendDriver):
                 }
                 for spec in self._models
             ]
-        slug = self._require_slug()
-        return [
-            {
-                "id": self.alias or slug,
-                "object": "model",
-                "owned_by": "talkies",
-                "modality": self.modality,
-            }
-        ]
+        else:
+            slug = self._require_slug()
+            entries = [
+                {
+                    "id": self.alias or slug,
+                    "object": "model",
+                    "owned_by": "talkies",
+                    "modality": self.modality,
+                }
+            ]
+        tts_entries = [e for e in entries if e.get("modality") == "tts"]
+        if not tts_entries:
+            return entries
+        results = await asyncio.gather(
+            *(
+                self.voices(entry["id"], timeout=_VOICES_SCRAPE_TIMEOUT)
+                for entry in tts_entries
+            ),
+            return_exceptions=True,
+        )
+        for entry, result in zip(tts_entries, results, strict=True):
+            if isinstance(result, BaseException):
+                logger.debug("voices scrape failed for %r: %r", entry["id"], result)
+                continue
+            voices = result.get("voices") if isinstance(result, dict) else None
+            entry["voices"] = voices if isinstance(voices, list) else []
+        return entries
 
     def _http_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -707,18 +741,21 @@ class TalkiesBackend(BackendDriver):
             return self.slugs[0]
         return self._slug_for_name(model)
 
-    async def voices(self, model: str | None = None) -> dict[str, Any]:
+    async def voices(
+        self, model: str | None = None, *, timeout: float = 15.0
+    ) -> dict[str, Any]:
         """GET /v1/audio/voices passthrough, filtered to the routed model.
 
         ``model`` is the served NAME the route resolved this request to; it is
         mapped to its engine slug (name -> slug) before forwarding. Upstream
-        talkies ignores its own ``model`` query filter and returns the
-        catalogs of ALL loaded models (multi-model processes), so the response
-        is filtered here to the routed slug and each entry's ``model`` field
-        is rewritten back to the served NAME the client asked with. When
-        ``model`` is absent (legacy single-slug / direct call) the primary slug
-        is used. Custom-voices enrollment stays per-definition (shared data
-        dir, spec §7).
+        talkies ignores its own ``model`` query filter and returns the catalogs
+        of ALL loaded models (multi-model processes), so the response is
+        filtered here to the routed slug and each entry's ``model`` field is
+        rewritten back to the served NAME the client asked with. When ``model``
+        is absent (legacy single-slug / direct call) the primary slug is used.
+        Custom-voices enrollment stays per-definition (shared data dir, spec §7).
+        ``timeout`` bounds the upstream call (the metadata scrape passes a short
+        budget; the client route keeps the default).
         """
         client = self._http_client()
         slug = self._voice_slug(model)
@@ -726,7 +763,7 @@ class TalkiesBackend(BackendDriver):
             f"{self.base_url}/v1/audio/voices",
             params={"model": slug},
             headers=self._auth_headers(),
-            timeout=15.0,
+            timeout=timeout,
         )
         if resp.status_code != 200:
             raise HTTPException(
