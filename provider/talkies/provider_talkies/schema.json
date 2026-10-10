@@ -1,16 +1,106 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "talkies backend_config",
-  "description": "Sectioned backend_config for the talkies provider (Phase 24). One talkies process runs per backend definition: the engine is launched as `<TALKIES_PYTHON> -m uvicorn talkies.server:app --host 127.0.0.1 --port <private>` with the TALKIES_* environment below, enabled to exactly this definition's registry slug. x-flag names the exact upstream env var this maps to; env.py remains the executable mapping. There is deliberately NO x-max-running-backends cap: VRAM admission governs how many talkies processes share a machine.",
+  "description": "Sectioned backend_config for the talkies provider (Phase 24, multi-model in Phase 25). One talkies process runs per backend definition: the engine is launched as `<TALKIES_PYTHON> -m uvicorn talkies.server:app --host 127.0.0.1 --port <private>` with the TALKIES_* environment below, enabled to the definition's served slug set. A multi-model definition (x-multi-model) serves several client-facing names from that one process, each name carrying its own per-model config (x-served-model-config-schema); the shared top-level `model` section is then optional and only the legacy single-slug path uses it. x-flag names the exact upstream env var this maps to; env.py remains the executable mapping. There is deliberately NO x-max-running-backends cap: VRAM admission governs how many talkies processes share a machine.",
   "type": "object",
   "x-serves-modalities": ["tts", "asr"],
+  "x-multi-model": true,
+  "x-served-model-config-schema": {
+    "type": "object",
+    "title": "Served model config",
+    "description": "Per-model backend_config for one served name on a multi-model talkies definition: the talkies registry slug it maps to, an optional prefetch revision, optional per-model request defaults, and optional per-model limits. The shared engine/security/limits sections live on the definition's top-level backend_config.",
+    "additionalProperties": false,
+    "required": ["slug"],
+    "properties": {
+      "slug": {
+        "type": "string",
+        "minLength": 1,
+        "title": "Registry slug",
+        "description": "Slug of the bundled (or custom-registry) talkies model this served name routes to, e.g. 'qwen3-tts-1.7b-custom' or 'whisper-large-v3-turbo'. Must exist in the registry JSON at TALKIES_MODELS_FILE; an unknown slug fails the start.",
+        "x-flag": "TALKIES_ENABLED_MODELS",
+        "x-order": 1
+      },
+      "revision": {
+        "type": ["string", "null"],
+        "default": null,
+        "minLength": 1,
+        "title": "Snapshot revision",
+        "description": "Optional immutable HuggingFace commit for the prefetch snapshot_download. null/absent = the registry entry's own revision (or the repo default).",
+        "x-flag": "prefetch revision",
+        "x-order": 2
+      },
+      "defaults": {
+        "type": "object",
+        "title": "Request Defaults",
+        "description": "Per-model synthesis/transcription defaults used as fallbacks when a client request omits the field, overriding the definition's shared defaults. They never override an explicit request value.",
+        "additionalProperties": false,
+        "properties": {
+          "voice": {
+            "type": ["string", "null"],
+            "default": null,
+            "title": "Default voice",
+            "description": "Default TTS voice name (must exist in the model's voice catalog). null/absent = the engine's model default.",
+            "x-order": 1
+          },
+          "language": {
+            "type": ["string", "null"],
+            "default": null,
+            "title": "Default language",
+            "description": "Default language label for synthesis / ASR source hint. null/absent = the engine's registry default.",
+            "x-order": 2
+          },
+          "response_format": {
+            "type": ["string", "null"],
+            "enum": ["mp3", "opus", "aac", "flac", "wav", "pcm", null],
+            "default": null,
+            "title": "Default response format",
+            "description": "Default SPEECH response_format ('pcm' selects Qwen3 incremental raw PCM + X-Sample-Rate). Applies to /v1/audio/speech only — a transcription response_format always comes from the client request and is never defaulted from here. null/absent = the engine default (mp3).",
+            "x-order": 3
+          },
+          "speed": {
+            "type": ["number", "null"],
+            "default": null,
+            "minimum": 0.25,
+            "maximum": 4.0,
+            "title": "Default speed",
+            "description": "Default speech speed multiplier (0.25-4.0; backend support varies). null/absent = 1.0.",
+            "x-order": 4
+          },
+          "instructions": {
+            "type": ["string", "null"],
+            "default": null,
+            "title": "Default instructions",
+            "description": "Default Qwen3 mode instruction/voice-description text (emotion/style prompt for CustomVoice, required voice description for VoiceDesign). null/absent = none.",
+            "x-order": 5
+          }
+        }
+      },
+      "limits": {
+        "type": "object",
+        "title": "Per-model Limits",
+        "description": "Per-model admission limit for this served slug, overriding the definition's shared limits.model_concurrency.",
+        "additionalProperties": false,
+        "properties": {
+          "model_concurrency": {
+            "type": "integer",
+            "default": 1,
+            "minimum": 1,
+            "maximum": 1024,
+            "title": "Model concurrency",
+            "description": "Active inference requests the engine admits for THIS slug (HTTP ASR + TTS + live WS together; excess fails 429, never queues). Exported in the TALKIES_MODEL_CONCURRENCY '<slug>=N' map.",
+            "x-flag": "TALKIES_MODEL_CONCURRENCY",
+            "x-order": 1
+          }
+        }
+      }
+    }
+  },
   "additionalProperties": false,
-  "required": ["model"],
   "properties": {
     "model": {
       "type": "object",
       "title": "Model",
-      "description": "The single talkies registry slug this backend serves. The driver prefetches its snapshot into $TALKIES_DATA_DIR/models/<slug> before spawn and exports it as TALKIES_ENABLED_MODELS / TALKIES_PRELOAD.",
+      "description": "The single talkies registry slug this legacy (single-model) backend serves. Optional on a multi-model definition (whose per-model configs live on each served name); when present the driver prefetches its snapshot into $TALKIES_DATA_DIR/models/<slug> before spawn and exports it as TALKIES_ENABLED_MODELS / TALKIES_PRELOAD.",
       "x-order": 1,
       "additionalProperties": false,
       "required": ["slug"],

@@ -99,6 +99,8 @@ class MockBackend(BackendDriver):
             "alloy": {"voice_id": "alloy", "name": "alloy", "language": "en"},
             "echo": {"voice_id": "echo", "name": "echo", "language": "en"},
         }
+        # Phase 25: the served name the last voice op targeted (assertable).
+        self.last_voice_model: str | None = None
         # Phase 9: artifact tracking for storage.prune_unused. The mock
         # downloads nothing; tests can seed this list directly.
         self.resolved_artifacts: list[str] = []
@@ -677,8 +679,13 @@ class MockBackend(BackendDriver):
         body = json.dumps({"text": text}).encode()
         return 200, {"content-type": "application/json"}, body
 
-    async def voices(self) -> dict[str, Any]:
-        """Return the in-memory voice catalog."""
+    async def voices(self, model: str | None = None) -> dict[str, Any]:
+        """Return the in-memory voice catalog.
+
+        ``model`` (the resolved served name, Phase 25 multi-model) is recorded
+        for assertion; the mock's catalog is name-agnostic (single store).
+        """
+        self.last_voice_model = model
         return {
             "object": "list",
             "data": [
@@ -697,8 +704,10 @@ class MockBackend(BackendDriver):
         wav: bytes,
         ref_text: str | None,
         language: str | None,
+        model: str | None = None,
     ) -> dict[str, Any]:
         """Store a saved voice in the in-memory catalog (fake enrollment)."""
+        self.last_voice_model = model
         entry: dict[str, Any] = {"voice_id": name, "name": name}
         if language is not None:
             entry["language"] = language
@@ -709,16 +718,18 @@ class MockBackend(BackendDriver):
             "object": "voice",
             "voice_id": name,
             "name": name,
+            "model": model,
             "language": language,
             "ref_text": ref_text,
             "size_bytes": len(wav),
             "deleted": False,
         }
 
-    async def voice_delete(self, name: str) -> dict[str, Any]:
+    async def voice_delete(self, name: str, model: str | None = None) -> dict[str, Any]:
         """Remove a saved voice from the in-memory catalog."""
+        self.last_voice_model = model
         existed = self._voices.pop(name, None) is not None
-        return {"object": "voice", "voice_id": name, "deleted": existed}
+        return {"object": "voice", "voice_id": name, "model": model, "deleted": existed}
 
     async def transcribe_stream(self, websocket: WebSocket) -> None:
         """Live ASR bridge fake: send one canned transcript, then drain until

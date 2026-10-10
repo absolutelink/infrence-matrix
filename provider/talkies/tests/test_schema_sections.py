@@ -36,7 +36,9 @@ CANONICAL_CONFIG: dict[str, Any] = {
 # fleet consensus contract (docs/ws-protocol.md §2). If you change
 # schema.json, every known talkies instance must re-register with the new
 # file (or the operator force-commits); update this pin deliberately.
-SHIPPED_SCHEMA_FP = "8299a8e312cb293acffaad7a8c539b9094fa8a7fa18bc881bd9d84a22d0e87a1"
+# Phase 25 S2: x-multi-model + x-served-model-config-schema added, top-level
+# `model` made optional (re-pinned from the Phase 24 8299a8e3...).
+SHIPPED_SCHEMA_FP = "0c1864d75dfb9f923b521a78d8e6329830ab2e8d8a592a727f87f6a170f77ac9"
 
 
 def test_shipped_schema_loads_and_is_valid_2020_12() -> None:
@@ -82,10 +84,44 @@ def test_minimal_config_validates() -> None:
     assert validate_backend_config(SCHEMA, {"model": {"slug": "kokoro-82m"}}) == []
 
 
-def test_slug_required() -> None:
-    assert any("model" in e for e in validate_backend_config(SCHEMA, {}))
+def test_slug_required_when_model_present() -> None:
+    # Phase 25: the top-level `model` section is now OPTIONAL (a multi-model
+    # definition carries per-model configs on each served name instead), so an
+    # empty / served_models-only config validates. When `model` IS present its
+    # slug is still required (legacy single-slug defs keep working unchanged).
+    assert validate_backend_config(SCHEMA, {}) == []
     errors = validate_backend_config(SCHEMA, {"model": {}})
     assert any("slug" in e for e in errors)
+
+
+def test_schema_declares_multi_model_capability() -> None:
+    # Phase 25 S2: talkies declares the multi-model capability and ships a
+    # per-model config schema (the per-model portion of the top-level
+    # model + defaults + limits sections).
+    assert SCHEMA["x-multi-model"] is True
+    per_model = SCHEMA["x-served-model-config-schema"]
+    assert per_model["type"] == "object"
+    assert per_model["required"] == ["slug"]
+    assert set(per_model["properties"]) == {"slug", "revision", "defaults", "limits"}
+    assert per_model["additionalProperties"] is False
+
+
+def test_served_model_config_validates() -> None:
+    per_model = SCHEMA["x-served-model-config-schema"]
+    Draft202012Validator.check_schema(per_model)
+    ok = {
+        "slug": "qwen3-tts-1.7b-custom",
+        "revision": "abc123",
+        "defaults": {"voice": "Vivian", "response_format": "wav", "speed": 1.0},
+        "limits": {"model_concurrency": 3},
+    }
+    assert validate_backend_config(per_model, ok) == []
+    # slug required; unknown keys rejected.
+    assert any("slug" in e for e in validate_backend_config(per_model, {}))
+    assert any(
+        "nonsense" in e
+        for e in validate_backend_config(per_model, {"slug": "s", "nonsense": 1})
+    )
 
 
 def test_schema_rejects_unknown_keys_everywhere() -> None:

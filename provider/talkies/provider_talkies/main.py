@@ -43,6 +43,7 @@ from provider_lib.metrics import (
     gpu_uuid,
     parse_gpu_assignment,
 )
+from provider_lib.models import ModelSpec, models_from_entry
 from provider_lib.ops import emit_backend_status_snapshot, install_backend_ops
 from provider_lib.registry import BackendHandle, BackendRegistry
 from provider_lib.serve import AgentServer
@@ -147,13 +148,21 @@ def _apply_modality(driver: TalkiesBackend, source: dict[str, Any]) -> None:
         driver.modality = raw
 
 
+def _first_enabled_name(models: list[ModelSpec]) -> str | None:
+    """The first enabled served name (the multi-model ``alias`` mirror)."""
+    for spec in models:
+        if spec.enabled:
+            return spec.name
+    return None
+
+
 def _apply_backend(
     lifecycle: BackendLifecycle,
     backend: dict[str, Any],
     config_state: ConfigState | None = None,
 ) -> None:
-    """Adopt capacity + backend_config + alias + fingerprint from ONE
-    registration backend dict into its talkies lifecycle/driver."""
+    """Adopt capacity + backend_config + alias + served models + fingerprint
+    from ONE registration backend dict into its talkies lifecycle/driver."""
     definition = backend.get("definition") or {}
     iid = backend.get("instance_id")
     if iid is not None:
@@ -170,6 +179,9 @@ def _apply_backend(
         backend_config = definition.get("backend_config")
         if isinstance(backend_config, dict):
             driver.apply_config(backend_config)
+        # Phase 25: adopt the served-model list (prefers ``served_models``) so
+        # the driver's name -> slug map is current before any start.
+        driver.set_models(models_from_entry(definition))
     if config_state is not None:
         fp = definition.get("config_fingerprint")
         config_state.applied_fingerprint = fp if isinstance(fp, str) else None
@@ -197,6 +209,8 @@ def _apply_assignment(
         backend_config = entry.get("backend_config")
         if isinstance(backend_config, dict):
             driver.apply_config(backend_config)
+        # Phase 25: same served-model adoption on the assignment path.
+        driver.set_models(models_from_entry(entry))
     fp = entry.get("config_fingerprint")
     config_state.applied_fingerprint = fp if isinstance(fp, str) else None
 
@@ -205,8 +219,8 @@ def build_registry(client: AdminClient, result: RegistrationResult) -> BackendRe
     """Host one drivable lifecycle per backend the admin placed on this agent.
 
     The agent's single ``/v1`` surface routes inference by the request ``model``
-    (= definition alias); each backend's talkies engine binds its own private
-    port.
+    (any enabled served name — Phase 25 multi-model); each backend's talkies
+    engine binds its own private port.
     """
     registry = BackendRegistry()
     for backend in result.backends:
@@ -214,26 +228,34 @@ def build_registry(client: AdminClient, result: RegistrationResult) -> BackendRe
         if iid is None:  # pragma: no cover - admin always assigns an id
             continue
         definition = backend.get("definition") or {}
+        models = models_from_entry(definition)
         raw_alias = definition.get("alias")
-        alias = raw_alias if isinstance(raw_alias, str) else None
+        alias = _first_enabled_name(models) or (
+            raw_alias if isinstance(raw_alias, str) else None
+        )
         backend_config = definition.get("backend_config") or {}
         lifecycle = make_lifecycle(client, backend_config, instance_id=str(iid))
         config_state = ConfigState()
         _apply_backend(lifecycle, backend, config_state)
-        registry.add(BackendHandle(str(iid), lifecycle, config_state, alias=alias))
+        registry.add(
+            BackendHandle(str(iid), lifecycle, config_state, alias=alias, models=models)
+        )
     return registry
 
 
 def make_handle(client: AdminClient, entry: dict[str, Any]) -> BackendHandle:
     """Build a drivable talkies lifecycle for a newly-assigned backend."""
     iid = str(entry["instance_id"])
+    models = models_from_entry(entry)
     raw_alias = entry.get("alias")
-    alias = raw_alias if isinstance(raw_alias, str) else None
+    alias = _first_enabled_name(models) or (
+        raw_alias if isinstance(raw_alias, str) else None
+    )
     backend_config = entry.get("backend_config") or {}
     lifecycle = make_lifecycle(client, backend_config, instance_id=iid)
     config_state = ConfigState()
     _apply_assignment(lifecycle, entry, config_state)
-    return BackendHandle(iid, lifecycle, config_state, alias=alias)
+    return BackendHandle(iid, lifecycle, config_state, alias=alias, models=models)
 
 
 def install_command_handlers(

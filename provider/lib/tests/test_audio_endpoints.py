@@ -44,6 +44,8 @@ class AudioDriver(BackendDriver):
         self.voice_put_calls = 0
         self.voice_delete_calls = 0
         self.transcribe_stream_calls = 0
+        # Phase 25: the served name the last voice op received (assertable).
+        self.last_voice_model: str | None = None
 
     async def start(self) -> None:
         pass
@@ -91,8 +93,9 @@ class AudioDriver(BackendDriver):
         body = json.dumps({"text": form.get("prompt", "x"), "tag": self.tag}).encode()
         return 200, {"content-type": "application/json"}, body
 
-    async def voices(self) -> dict[str, Any]:
+    async def voices(self, model: str | None = None) -> dict[str, Any]:
         self.voices_calls += 1
+        self.last_voice_model = model
         return {"object": "list", "data": [{"voice_id": "alloy"}]}
 
     async def voice_put(
@@ -101,12 +104,15 @@ class AudioDriver(BackendDriver):
         wav: bytes,
         ref_text: str | None,
         language: str | None,
+        model: str | None = None,
     ) -> dict[str, Any]:
         self.voice_put_calls += 1
+        self.last_voice_model = model
         return {"object": "voice", "voice_id": name, "size_bytes": len(wav)}
 
-    async def voice_delete(self, name: str) -> dict[str, Any]:
+    async def voice_delete(self, name: str, model: str | None = None) -> dict[str, Any]:
         self.voice_delete_calls += 1
+        self.last_voice_model = model
         return {"object": "voice", "voice_id": name, "deleted": True}
 
     async def transcribe_stream(self, websocket: Any) -> None:
@@ -302,7 +308,30 @@ async def test_voices_routes_do_not_consume_slots() -> None:
         assert driver.voices_calls == 1
         assert driver.voice_put_calls == 1
         assert driver.voice_delete_calls == 1
+        # Phase 25: the requested served name is threaded to the driver on
+        # every voice op (catalog + enrollment), not dropped at the seam.
+        assert driver.last_voice_model == "m"
         await lifecycle.release_slot()
+
+
+async def test_voice_ops_thread_requested_model_name() -> None:
+    """Phase 25: the voices GET/PUT/DELETE routes pass the request's ``model``
+    (query param) down to the driver hook so a multi-model driver can resolve
+    name -> engine model."""
+    driver = AudioDriver()
+    lifecycle, client = await _make(driver)
+    async with client:
+        await client.get("/v1/audio/voices", params={"model": "alpha"})
+        assert driver.last_voice_model == "alpha"
+        await client.put(
+            "/v1/audio/voices/v1", params={"model": "beta"}, content=b"RIFF"
+        )
+        assert driver.last_voice_model == "beta"
+        await client.delete("/v1/audio/voices/v1", params={"model": "gamma"})
+        assert driver.last_voice_model == "gamma"
+        # No model query param -> None (legacy single-model callers).
+        await client.get("/v1/audio/voices")
+        assert driver.last_voice_model is None
 
 
 async def test_voices_503_when_not_started() -> None:

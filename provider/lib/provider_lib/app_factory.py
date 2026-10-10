@@ -453,9 +453,10 @@ def create_provider_app(
 
     @app.get("/v1/audio/voices")
     async def audio_voices(request: Request) -> JSONResponse:
-        lifecycle = _resolve_lifecycle({"model": request.query_params.get("model")})
+        model = request.query_params.get("model")
+        lifecycle = _resolve_lifecycle({"model": model})
         try:
-            result = await lifecycle.voices()
+            result = await lifecycle.voices(model)
         except BackendNotReady as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except NotImplementedError as exc:
@@ -465,12 +466,13 @@ def create_provider_app(
     @app.put("/v1/audio/voices/{name:path}")
     async def audio_voice_put(name: str, request: Request) -> JSONResponse:
         _validate_voice_name(name)
-        lifecycle = _resolve_lifecycle({"model": request.query_params.get("model")})
+        model = request.query_params.get("model")
+        lifecycle = _resolve_lifecycle({"model": model})
         wav = await _read_body_capped(request, MAX_VOICE_BYTES)
         ref_text = request.query_params.get("ref_text")
         language = request.query_params.get("language")
         try:
-            result = await lifecycle.voice_put(name, wav, ref_text, language)
+            result = await lifecycle.voice_put(name, wav, ref_text, language, model)
         except BackendNotReady as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except NotImplementedError as exc:
@@ -480,9 +482,10 @@ def create_provider_app(
     @app.delete("/v1/audio/voices/{name:path}")
     async def audio_voice_delete(name: str, request: Request) -> JSONResponse:
         _validate_voice_name(name)
-        lifecycle = _resolve_lifecycle({"model": request.query_params.get("model")})
+        model = request.query_params.get("model")
+        lifecycle = _resolve_lifecycle({"model": model})
         try:
-            result = await lifecycle.voice_delete(name)
+            result = await lifecycle.voice_delete(name, model)
         except BackendNotReady as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except NotImplementedError as exc:

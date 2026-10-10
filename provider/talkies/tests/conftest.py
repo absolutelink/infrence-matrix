@@ -72,6 +72,19 @@ def model_dir(tmp_path: Path) -> Path:
     return d
 
 
+@pytest.fixture
+def model_dirs(tmp_path: Path) -> dict[str, Path]:
+    """Pre-populated prefetch targets for BOTH registry slugs (multi-model
+    start: every served slug must be cached so no network is touched)."""
+    out: dict[str, Path] = {}
+    for slug in (TTS_SLUG, ASR_SLUG):
+        d = tmp_path / "models" / "models" / slug
+        d.mkdir(parents=True)
+        (d / "model.safetensors").write_bytes(b"weights")
+        out[slug] = d
+    return out
+
+
 def make_settings(
     tmp_path: Path,
     python: str = "/opt/venv/bin/python",
@@ -127,6 +140,9 @@ FAKE_ENGINE_SCRIPT = textwrap.dedent(
 
     PRELOAD = [s for s in os.environ.get("TALKIES_PRELOAD", "").split(",") if s]
     PS_EMPTY = os.environ.get("FAKE_TALKIES_PS_EMPTY") == "1"
+    # Optional override of the /api/ps set (comma list) so a test can pin a
+    # SUBSET of the preloaded slugs and prove the all-slug health gate.
+    PS_SLUGS = [s for s in os.environ.get("FAKE_TALKIES_PS_SLUGS", "").split(",") if s]
     TOKEN = os.environ.get("TALKIES_AUTH_TOKEN", "")
 
 
@@ -154,7 +170,8 @@ FAKE_ENGINE_SCRIPT = textwrap.dedent(
                 if not self._authed():
                     self._send(401, {"detail": "unauthorized"})
                     return
-                models = [] if PS_EMPTY else [{"id": s} for s in PRELOAD]
+                resident = PS_SLUGS or PRELOAD
+                models = [] if PS_EMPTY else [{"id": s} for s in resident]
                 self._send(200, {"models": models})
             else:
                 self._send(404, {"detail": "not found"})
@@ -211,16 +228,28 @@ def spawn_state(tmp_path: Path) -> Path:
 # ----------------------------------------------------------------------
 
 
-def make_stub_engine(slug: str = TTS_SLUG, token: str = "stub-token") -> Any:
-    """FastAPI app mimicking the talkies server surface the driver proxies."""
+def make_stub_engine(
+    slug: str = TTS_SLUG,
+    token: str = "stub-token",
+    slugs: list[str] | None = None,
+) -> Any:
+    """FastAPI app mimicking the talkies server surface the driver proxies.
+
+    ``slugs`` (Phase 25 multi-model) is the set of engine slugs the stub
+    accepts on speech / transcriptions and reports resident in ``/api/ps``;
+    when omitted it is exactly ``[slug]`` (the Phase 24 single-slug stub). The
+    forwarded ``model`` is echoed back in every handler so a test can assert
+    the driver's name -> slug rewrite at the engine boundary.
+    """
     from fastapi import FastAPI, Form, Header, HTTPException, UploadFile, WebSocket
     from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+    valid = list(slugs) if slugs else [slug]
     stub: dict[str, Any] = {
         "last_speech": None,
         "last_transcription": None,
         "last_voices_query": None,
-        "ps_models": [slug],
+        "ps_models": list(valid),
     }
 
     app = FastAPI()
@@ -231,7 +260,7 @@ def make_stub_engine(slug: str = TTS_SLUG, token: str = "stub-token") -> Any:
 
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
-        return {"ok": True, "device": "cpu", "models": [slug]}
+        return {"ok": True, "device": "cpu", "models": list(stub["ps_models"])}
 
     @app.get("/api/ps")
     def ps(authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -241,7 +270,7 @@ def make_stub_engine(slug: str = TTS_SLUG, token: str = "stub-token") -> Any:
     @app.post("/v1/audio/speech")
     async def speech(body: dict[str, Any]) -> Response:
         stub["last_speech"] = body
-        if body.get("model") != slug:
+        if body.get("model") not in valid:
             raise HTTPException(status_code=404, detail="unknown model")
         if str(body.get("input") or "") == "boom":
             raise HTTPException(status_code=400, detail="input rejected")
@@ -283,7 +312,7 @@ def make_stub_engine(slug: str = TTS_SLUG, token: str = "stub-token") -> Any:
             "filename": file.filename if file else None,
             "bytes": body,
         }
-        if model != slug:
+        if model not in valid:
             raise HTTPException(status_code=404, detail="unknown model")
         return JSONResponse({"text": f"stub transcript for {model}"})
 
@@ -298,13 +327,13 @@ def make_stub_engine(slug: str = TTS_SLUG, token: str = "stub-token") -> Any:
             "voices": [
                 {
                     "voice": "Vivian",
-                    "model": slug,
+                    "model": model or slug,
                     "default": True,
                     "origin": "builtin",
                 },
                 {
                     "voice": "clone1",
-                    "model": slug,
+                    "model": model or slug,
                     "default": False,
                     "origin": "custom",
                 },

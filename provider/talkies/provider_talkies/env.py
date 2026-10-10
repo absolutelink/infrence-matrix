@@ -9,9 +9,11 @@ therefore launches the ASGI app directly:
     <TALKIES_PYTHON> -m uvicorn talkies.server:app --host 127.0.0.1 --port <p>
 
 with the env built here. One process per backend definition: the enabled
-set is exactly that definition's single slug (the registry is read only
-at import, so a config change requires a restart — which is exactly the
-Phase 9 config-update flow).
+set is exactly that definition's served slugs (Phase 25 multi-model: one
+process serves several names, each mapped to a registry slug; a legacy
+single-slug definition serves exactly one). The registry is read only at
+import, so a config change requires a restart — which is exactly the
+Phase 9 config-update flow.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from provider_lib.config import ProviderSettings
+    from provider_lib.models import ModelSpec
 
 # talkies response_format -> the Content-Type its encoder answers with
 # (src/talkies/tts.py _FORMATS). The SpeechStream contract fixes response
@@ -62,6 +65,142 @@ def resolve_revision(config: dict[str, Any]) -> str | None:
     if isinstance(revision, str) and revision.strip():
         return revision.strip()
     return None
+
+
+# ---------------------------------------------------------------------------
+# Phase 25 multi-model: per-served-model extraction.
+#
+# A served model's ``backend_config`` is the per-model object declared by the
+# type's ``x-served-model-config-schema`` (talkies: ``{slug, revision?,
+# defaults?, limits?}``). A LEGACY single-model definition instead synthesizes
+# one spec whose ``backend_config`` is the FULL sectioned config (``model.slug``
+# nested), so every extractor below reads BOTH shapes: the flat per-model key
+# first, then the legacy nested ``model`` section. This keeps the multi-slug
+# path and the byte-identical legacy path on one code path.
+# ---------------------------------------------------------------------------
+
+
+def model_slug(backend_config: Any) -> str | None:
+    """The talkies slug of one served model (per-model or legacy shape)."""
+    if not isinstance(backend_config, dict):
+        return None
+    slug = backend_config.get("slug")
+    if isinstance(slug, str) and slug.strip():
+        return slug.strip()
+    model = backend_config.get("model")
+    if isinstance(model, dict):
+        slug = model.get("slug")
+        if isinstance(slug, str) and slug.strip():
+            return slug.strip()
+    return None
+
+
+def model_revision(backend_config: Any) -> str | None:
+    """The optional prefetch revision of one served model (either shape)."""
+    if not isinstance(backend_config, dict):
+        return None
+    revision = backend_config.get("revision")
+    if isinstance(revision, str) and revision.strip():
+        return revision.strip()
+    model = backend_config.get("model")
+    if isinstance(model, dict):
+        revision = model.get("revision")
+        if isinstance(revision, str) and revision.strip():
+            return revision.strip()
+    return None
+
+
+def model_concurrency(backend_config: Any) -> int | None:
+    """The per-model ``limits.model_concurrency`` (either shape), else ``None``."""
+    if not isinstance(backend_config, dict):
+        return None
+    limits = backend_config.get("limits")
+    n = limits.get("model_concurrency") if isinstance(limits, dict) else None
+    return n if isinstance(n, int) and n >= 1 else None
+
+
+def resolve_slugs(config: dict[str, Any], models: list[ModelSpec] | None) -> list[str]:
+    """Ordered-unique slugs across the enabled served models.
+
+    With no served-model list (legacy path / ``set_models`` not yet called)
+    this is exactly the single ``model.slug`` from the shared config — so a
+    legacy definition boots one slug, byte-identical to Phase 24.
+
+    A multi-model definition (non-empty ``models``) whose enabled served model
+    lacks a ``backend_config.slug`` is a config error and raises with an
+    accurate message (NOT the misleading legacy ``requires model.slug``).
+    """
+    if not models:
+        return [resolve_slug(config)]
+    slugs: list[str] = []
+    seen: set[str] = set()
+    for spec in models:
+        if not getattr(spec, "enabled", True):
+            continue
+        slug = model_slug(getattr(spec, "backend_config", None))
+        if not slug:
+            raise RuntimeError(
+                f"talkies served model {getattr(spec, 'name', '?')!r} is "
+                "missing backend_config.slug"
+            )
+        if slug not in seen:
+            seen.add(slug)
+            slugs.append(slug)
+    if not slugs:
+        raise RuntimeError(
+            "talkies multi-model definition has no enabled served models"
+        )
+    return slugs
+
+
+def resolve_revisions(
+    config: dict[str, Any], models: list[ModelSpec] | None
+) -> dict[str, str]:
+    """``slug -> revision`` for prefetch (only slugs with a revision).
+
+    Legacy (no models): the single ``model.revision`` mapped onto its slug.
+    """
+    if not models:
+        revision = resolve_revision(config)
+        return {resolve_slug(config): revision} if revision else {}
+    out: dict[str, str] = {}
+    for spec in models:
+        if not getattr(spec, "enabled", True):
+            continue
+        bc = getattr(spec, "backend_config", None)
+        slug = model_slug(bc)
+        revision = model_revision(bc)
+        if slug and revision:
+            out[slug] = revision
+    return out
+
+
+def resolve_model_concurrency_map(
+    config: dict[str, Any], models: list[ModelSpec] | None
+) -> dict[str, int]:
+    """``slug -> model_concurrency`` merged across served models.
+
+    Each slug takes its own ``limits.model_concurrency`` when set, else the
+    shared top-level default (``resolve_model_concurrency(config)``). When
+    SEVERAL served names map to the SAME slug (one shared engine pool) the
+    maximum across them wins — never last-write-wins. Legacy (no models)
+    collapses to ``{slug: default}`` — the Phase 24 single-slug value.
+    """
+    default = resolve_model_concurrency(config)
+    if not models:
+        return {resolve_slug(config): default}
+    out: dict[str, int] = {}
+    for spec in models:
+        if not getattr(spec, "enabled", True):
+            continue
+        bc = getattr(spec, "backend_config", None)
+        slug = model_slug(bc)
+        if not slug:
+            continue
+        n = model_concurrency(bc) or default
+        # Same slug from two names => one engine pool: keep the widest.
+        out[slug] = max(out.get(slug, 0), n)
+    return out or {resolve_slug(config): default}
 
 
 def resolve_data_dir(settings: ProviderSettings) -> Path:
@@ -139,26 +278,36 @@ def build_env(
     settings: ProviderSettings,
     data_dir: Path,
     auth_token: str,
+    models: list[ModelSpec] | None = None,
 ) -> dict[str, str]:
     """Full subprocess environment: the agent env plus the TALKIES_* set.
 
     The registry is read only at talkies import, so every knob here is
     fixed for the process lifetime (a config change = a restart).
+
+    ``models`` is the served-model list (Phase 25 multi-model): every enabled
+    slug is enabled + preloaded (comma-joined) and gets its own
+    ``TALKIES_MODEL_CONCURRENCY`` entry (``slug1=N,slug2=M``). When omitted
+    (legacy single-slug definition) this collapses to exactly the Phase 24
+    single-slug env.
     """
-    slug = resolve_slug(config)
+    slugs = resolve_slugs(config, models)
+    enabled = ",".join(slugs)
+    concurrency_map = resolve_model_concurrency_map(config, models)
+    concurrency = ",".join(f"{slug}={n}" for slug, n in concurrency_map.items())
     env = dict(os.environ)
     env.update(
         {
-            # Exactly this definition's slug is enabled and preloaded, so
-            # `backend running` <=> the model is resident (TTL 0 pins it).
+            # Every served slug is enabled and preloaded, so `backend running`
+            # <=> all models resident (TTL 0 pins them).
             "TALKIES_MODELS_FILE": str(settings.TALKIES_MODELS_FILE),
-            "TALKIES_ENABLED_MODELS": slug,
-            "TALKIES_PRELOAD": slug,
+            "TALKIES_ENABLED_MODELS": enabled,
+            "TALKIES_PRELOAD": enabled,
             "TALKIES_MODEL_TTL": str(resolve_model_ttl(config)),
             "TALKIES_DATA_DIR": str(data_dir),
             "TALKIES_DEVICE": resolve_device(config),
             "TALKIES_AUTH_TOKEN": auth_token,
-            "TALKIES_MODEL_CONCURRENCY": f"{slug}={resolve_model_concurrency(config)}",
+            "TALKIES_MODEL_CONCURRENCY": concurrency,
             # The server must never reach for the Hub at request time; the
             # driver's prefetch pass (offline flag cleared in-process only)
             # is the single point of network egress.

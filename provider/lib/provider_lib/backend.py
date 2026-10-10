@@ -198,11 +198,14 @@ class BackendDriver(ABC):
         """
         raise NotImplementedError("this backend has no audio/transcription surface")
 
-    async def voices(self) -> dict[str, Any]:
+    async def voices(self, model: str | None = None) -> dict[str, Any]:
         """Return the saved-voice catalog (GET passthrough).
 
-        Optional; the default raises NotImplementedError -> HTTP 501. Catalog
-        reads do not consume an inference slot.
+        ``model`` is the resolved served-model name the request targeted
+        (Phase 25 multi-model): a driver serving several names routes the
+        catalog read to the right engine model. Optional; the default raises
+        NotImplementedError -> HTTP 501. Catalog reads do not consume an
+        inference slot.
         """
         raise NotImplementedError("this backend has no voice catalog surface")
 
@@ -212,19 +215,24 @@ class BackendDriver(ABC):
         wav: bytes,
         ref_text: str | None,
         language: str | None,
+        model: str | None = None,
     ) -> dict[str, Any]:
         """Write a saved voice clip into the agent-side store (enrollment).
 
         The driver decides the on-disk layout (e.g. a ``custom-voices/`` dir
-        with ``<name>.wav`` + sibling ``.txt``/``.lang`` sidecars). Returns a
+        with ``<name>.wav`` + sibling ``.txt``/``.lang`` sidecars). ``model`` is
+        the resolved served-model name the request targeted (Phase 25
+        multi-model), so enrollment lands in the right model's scope. Returns a
         JSON-serializable summary dict. Optional; default -> HTTP 501. Does
         not consume an inference slot.
         """
         raise NotImplementedError("this backend has no voice enrollment surface")
 
-    async def voice_delete(self, name: str) -> dict[str, Any]:
-        """Remove a saved voice from the agent-side store. Returns a summary
-        dict. Optional; default -> HTTP 501. Does not consume a slot."""
+    async def voice_delete(self, name: str, model: str | None = None) -> dict[str, Any]:
+        """Remove a saved voice from the agent-side store. ``model`` is the
+        resolved served-model name the request targeted (Phase 25 multi-model).
+        Returns a summary dict. Optional; default -> HTTP 501. Does not consume
+        a slot."""
         raise NotImplementedError("this backend has no voice enrollment surface")
 
     async def transcribe_stream(self, websocket: WebSocket) -> None:
@@ -589,10 +597,14 @@ class BackendLifecycle:
         finally:
             await self.release_slot()
 
-    async def voices(self) -> dict[str, Any]:
-        """Voice catalog passthrough (no slot; requires a serving backend)."""
+    async def voices(self, model: str | None = None) -> dict[str, Any]:
+        """Voice catalog passthrough (no slot; requires a serving backend).
+
+        ``model`` (the resolved served name the request targeted) is threaded
+        through to the driver unchanged (Phase 25 multi-model).
+        """
         self._require_serving()
-        return await self._driver.voices()
+        return await self._driver.voices(model)
 
     async def voice_put(
         self,
@@ -600,15 +612,16 @@ class BackendLifecycle:
         wav: bytes,
         ref_text: str | None,
         language: str | None,
+        model: str | None = None,
     ) -> dict[str, Any]:
         """Saved-voice enrollment write (no slot; requires a serving backend)."""
         self._require_serving()
-        return await self._driver.voice_put(name, wav, ref_text, language)
+        return await self._driver.voice_put(name, wav, ref_text, language, model)
 
-    async def voice_delete(self, name: str) -> dict[str, Any]:
+    async def voice_delete(self, name: str, model: str | None = None) -> dict[str, Any]:
         """Saved-voice removal (no slot; requires a serving backend)."""
         self._require_serving()
-        return await self._driver.voice_delete(name)
+        return await self._driver.voice_delete(name, model)
 
     def _owned_stream(self, upstream: AsyncIterator[Any]) -> AsyncIterator[Any]:
         """Return a consumer stream whose slot is owned by a pump task.
