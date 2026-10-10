@@ -949,8 +949,10 @@ in IMPLEMENTATION_STATUS.md Phase 24):
   (`custom-voices/`); enrollment is admin-UI only and rides the agent HTTP
   surface — **no new WS frame kinds**.
 - **Persistence:** audio requests are not conversation turns — no
-  `ResponseRecord`; usage samples carry chars + audio seconds (tts) or
-  audio seconds (asr).
+  `ResponseRecord`; `AudioUsageSample` rows carry chars + audio seconds
+  (tts: input chars + wav-header duration; asr: transcript chars +
+  `verbose_json` duration when present — samples persist only on clean
+  upstream completion).
 
 ---
 

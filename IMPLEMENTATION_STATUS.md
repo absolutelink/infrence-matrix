@@ -2,7 +2,7 @@
 
 **Overhaul branch:** `litellm-architecture-overhaul`
 **Last updated:** 2026-10-09 (**Phase 24 — Audio (talkies provider): 🟡 in
-progress (S0–S2 done).** Speech ships as two modalities — `tts` + `asr` — served by a new
+progress (S0–S3 done).** Speech ships as two modalities — `tts` + `asr` — served by a new
 `talkies` provider type: a thin proxy agent around
 `psyb0t/talkies:latest-cuda` (Qwen3-TTS variants, Kokoro, Chatterbox Turbo;
 Whisper/Parakeet/Canary/Sherpa ASR). Client surface: `POST /v1/audio/speech`
@@ -3155,7 +3155,18 @@ work, and per-engine translation layers entirely.
   `audio_speech.py` + `audio_transcriptions.py` (httpx passthrough, usage
   samples), `audio_voices.py` (client GET proxy) + `/admin/api` enrollment
   + `TTSVoice` model/migration, un-stub `stubs.py`,
-  `scripts/generate-client.sh`. ⬜
+  `scripts/generate-client.sh`. ✅ done — direct-httpx passthrough (no
+  litellm for audio); speech relay uses a `handed_off` ownership flag
+  (closes the post-acquire leak window; shielded release identical to chat
+  discipline); usage persisted only on clean upstream EOF
+  (`AudioUsageSample`: chars + wav-header seconds; transcription:
+  transcript chars + verbose_json duration when present); multipart
+  streamed to the agent with an fstat pre-cap (100 MiB setting);
+  enrollment `/admin/api/voices` relays real statuses (503/502/4xx), row
+  created only on agent 2xx, IntegrityError upsert; stats blanking
+  generalized to non-llm modalities; autogenerate-parity test for the two
+  new tables (migration `c4e8a1f7d902`, up/down/up clean). Admin suite
+  **585 green** (514 baseline + 71). Review: 2 rounds, CLEAN.
 - **S4.** Admin WS live-ASR relay (`audio_transcriptions_ws.py`, Phase 21
   precedent): auth → modality gate → slot hold for connection lifetime →
   bidirectional byte relay → shielded release on every teardown path. ⬜
