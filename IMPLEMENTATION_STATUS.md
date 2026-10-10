@@ -1,8 +1,8 @@
 # Inference Matrix — Implementation Status
 
 **Overhaul branch:** `litellm-architecture-overhaul`
-**Last updated:** 2026-10-09 (**Phase 24 — Audio (talkies provider): 🟡 in
-progress (S0–S5 done).** Speech ships as two modalities — `tts` + `asr` — served by a new
+**Last updated:** 2026-10-09 (**Phase 24 — Audio (talkies provider): 🟢 code
+complete (S0–S6 done) — deploy verification pending.** Speech ships as two modalities — `tts` + `asr` — served by a new
 `talkies` provider type: a thin proxy agent around
 `psyb0t/talkies:latest-cuda` (Qwen3-TTS variants, Kokoro, Chatterbox Turbo;
 Whisper/Parakeet/Canary/Sherpa ASR). Client surface: `POST /v1/audio/speech`
@@ -3057,7 +3057,7 @@ so `avg gen latency` shows `—` for every provider.
 
 ---
 
-## Phase 24 — Audio (talkies provider) 🟡
+## Phase 24 — Audio (talkies provider) 🟢
 
 **Goal.** Add speech I/O to the matrix: OpenAI-compatible
 `/v1/audio/speech` (TTS), `/v1/audio/transcriptions` (ASR, file + live WS
@@ -3196,7 +3196,18 @@ work, and per-engine translation layers entirely.
   raw `request.json()`/`form()`) — follow-up: declare Pydantic request
   models + regen client. Review: 2 rounds, CLEAN.
 - **S6.** Docs polish: `provider/README.md` talkies worked example,
-  `redis-keys.md` if new keys, `development.md`/compose notes. ⬜
+  `redis-keys.md` if new keys, `development.md`/compose notes. ✅ done —
+  provider README gained the `/v1/audio/*` surface + talkies worked
+  example; ws-protocol notes **no new frame kinds** (data plane only);
+  development/deployment guides cover the GPU-free mock path and the
+  talkies deploy story (uid-1000 volume chown, seed slugs, VRAM).
+  redis-keys: no new keys (verified).
+
+**Pending deploy verification (user):** real `docker build` + run smoke of
+`provider/talkies/Dockerfile` on a daemon host (sequence in the
+`Dockerfile.stubtest` header), admin migration `c4e8a1f7d902` apply,
+mock schema-consensus force-commit (fingerprint changed in S1), and
+end-to-end speech/transcriptions/voices smoke on 10.100.2.111.
 
 ---
 
