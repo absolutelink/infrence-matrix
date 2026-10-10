@@ -28,7 +28,13 @@ FROM ${BASE_IMAGE}
 USER root
 
 # uv binary (managed python 3.14 download happens in the build).
+# UV_PYTHON_INSTALL_DIR must live OUTSIDE /root: `uv venv --python 3.14`
+# symlinks the venv interpreter to the managed install, and the agent runs as
+# talkies (uid 1000) which cannot traverse /root — the default location under
+# the build user's HOME yields "exec /opt/provider-venv/bin/python:
+# Permission denied" at container start.
 COPY --from=ghcr.io/astral-sh/uv /uv /usr/local/bin/uv
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
 
 # Workspace root manifests + provider sources. The root pyproject.toml/uv.lock
 # MUST be present: provider_talkies declares `matrix-provider-lib =
@@ -44,7 +50,7 @@ COPY provider/talkies /opt/matrix/provider/talkies
 RUN uv venv --python 3.14 /opt/provider-venv \
     && UV_PROJECT_ENVIRONMENT=/opt/provider-venv \
        uv sync --frozen --package matrix-provider-talkies \
-    && chmod -R a+rX /opt/provider-venv /opt/matrix
+    && chmod -R a+rX /opt/provider-venv /opt/uv-python /opt/matrix
 
 # The agent runs as talkies (uid 1000) and writes under CACHE_DIR (/cache:
 # provider_config.json) and MODELS_DIR (/models: prefetched snapshots,

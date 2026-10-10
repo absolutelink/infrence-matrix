@@ -119,6 +119,15 @@ def test_provider_dockerfile_overrides_every_base_hazard(dockerfile: Path) -> No
     assert "UV_PROJECT_ENVIRONMENT=/opt/provider-venv" in run_text_all
     assert "uv pip install" not in run_text_all
 
+    # Deploy failure pin: `uv venv --python 3.14` symlinks the venv python to
+    # the managed interpreter under $HOME/.local/share/uv — under /root the
+    # uid-1000 talkies user cannot traverse it and the container dies with
+    # "exec /opt/provider-venv/bin/python: Permission denied". The managed
+    # install dir must be world-readable and covered by the chmod.
+    env_text_all = " ".join(a for i, a in ins if i == "ENV")
+    assert "UV_PYTHON_INSTALL_DIR=/opt/uv-python" in env_text_all
+    assert "chmod -R a+rX /opt/provider-venv /opt/uv-python" in run_text_all
+
 
 def test_cuda_dockerfile_base_arg_is_global_scoped() -> None:
     """CI failure pin (build-provider-talkies-cuda): a stage-scoped ARG (one
