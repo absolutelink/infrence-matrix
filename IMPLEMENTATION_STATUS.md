@@ -1,8 +1,8 @@
 # Inference Matrix — Implementation Status
 
 **Overhaul branch:** `litellm-architecture-overhaul`
-**Last updated:** 2026-10-09 (**Phase 24 — Audio (talkies provider): 🟢 code
-complete (S0–S6 done) — deploy verification pending.** Speech ships as two modalities — `tts` + `asr` — served by a new
+**Last updated:** 2026-10-10 (**Phase 24 — Audio (talkies provider): ✅
+SHIPPED (S0–S6 done; deployed + smoke-verified on 10.100.2.111).** Speech ships as two modalities — `tts` + `asr` — served by a new
 `talkies` provider type: a thin proxy agent around
 `psyb0t/talkies:latest-cuda` (Qwen3-TTS variants, Kokoro, Chatterbox Turbo;
 Whisper/Parakeet/Canary/Sherpa ASR). Client surface: `POST /v1/audio/speech`
@@ -3057,7 +3057,7 @@ so `avg gen latency` shows `—` for every provider.
 
 ---
 
-## Phase 24 — Audio (talkies provider) 🟢
+## Phase 24 — Audio (talkies provider) ✅
 
 **Goal.** Add speech I/O to the matrix: OpenAI-compatible
 `/v1/audio/speech` (TTS), `/v1/audio/transcriptions` (ASR, file + live WS
@@ -3208,16 +3208,26 @@ work, and per-engine translation layers entirely.
   talkies deploy story (uid-1000 volume chown, seed slugs, VRAM).
   redis-keys: no new keys (verified).
 
-**Pending deploy verification (user):** CI now builds both talkies variants
-(`build-provider-talkies` toolkit-based + `build-provider-talkies-cuda`
-driver-baked — the latter mirrors `build-provider-llama-cpp-cuda12`: RPM
-Fusion userspace driver + `nvidia-smi` baked, `NVIDIA_DRIVER_BRANCH=580` /
-`NVIDIA_VERSION=580.178.04` build-args must match the host kernel driver;
-this is the variant for 10.100.2.111's root Podman). A `docker run` smoke
-on the GPU host remains (sequence in the `Dockerfile.stubtest` header),
-plus: admin migration `c4e8a1f7d902` apply, mock schema-consensus
-force-commit (fingerprint changed in S1), and end-to-end
-speech/transcriptions/voices smoke on 10.100.2.111.
+**Deploy status (2026-10-10):** admin deployed to `matrix-app` (migration
+`c4e8a1f7d902` live, VERSION `dev` matches providers). talkies agent
+deployed on 10.100.2.111 (root Podman quadlet
+`inference-matrix-talkies-agent`, image `provider-talkies-cuda:develop`,
+AGENT_ID `lfai-node-01-talkies`, port 8083, volumes
+`/var/lib/inference-matrix/talkies-models` +
+`/var/data/inference-matrix/talkies-cache` chowned to uid 1000). Four
+definitions placed (`qwen3-tts-1.7b-custom`, `qwen3-tts-1.7b`,
+`qwen3-tts-1.7b-design` tts + `whisper-large-v3-turbo` asr, 6/6/6/4 GiB
+VRAM budgets on the 32 GB Tesla PG500-216). **End-to-end smoke green:**
+speech→wav (24 kHz), streamed pcm, transcription round-trip of the
+synthesized clip, live voice catalog, admin voice enrollment → clone
+synthesis → re-transcription. Two deploy-caught fixes landed: uv-managed
+python moved out of `/root` (uid-1000 could not exec the venv symlink) and
+`wav_duration_seconds` placeholder-size fallback. **Open:** the quadlet
+still runs the pre-fix CI image via a manual `podman run` — after pushing
+`f9b946f` and the CI rebuild, `systemctl restart
+inference-matrix-talkies-agent` to take it over (the unit file is already
+installed). Remaining follow-ups: `docker run` stubtest smoke, WS live-ASR
+relay smoke (S4 path untested against a real engine).
 
 ---
 
