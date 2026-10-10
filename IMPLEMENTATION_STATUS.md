@@ -2,7 +2,7 @@
 
 **Overhaul branch:** `litellm-architecture-overhaul`
 **Last updated:** 2026-10-10 (**Phase 25 — Multi-model definitions: 🟡
-planned (S0 done).** One definition = one backend process serving multiple
+in progress (S0–S1 done).** One definition = one backend process serving multiple
 client-facing model names, each with its own modality + per-model config;
 provider declares capability (`x-multi-model`), admin owns the names, the
 driver routes. First consumer talkies (4 slugs → 1 def); later gufo /
@@ -3277,7 +3277,17 @@ satellites: embed/rerank/decision under one roof).
 - **S0.** This entry + spec doc + ARCHITECTURE §4. ✅ done.
 - **S1.** `provider_lib`: `ModelSpec`, multi-name `BackendHandle`,
   `resolve_by_model` matches any enabled name, payload parsing prefers
-  `served_models`, mock multi-name backend. ⬜
+  `served_models`, mock multi-name backend. ✅ done — `models.py`
+  (`ModelSpec` + `models_from_entry`: prefer `served_models`, legacy-trio
+  fallback, invalid entries skipped w/ warning); registry indexes every
+  **enabled** served name (all-disabled ⇒ unroutable, no stale-alias
+  resurrection; cross-handle collisions warn last-write-wins);
+  `BackendDriver.set_models` hook + live refresh via assignments
+  reconcile + `provider.config.update` (ordered before restart); mock
+  serves multi-name defs (list_models + echo). Alias-only construction
+  (llama-cpp/gufo/halogen) synthesizes one spec — byte-identical legacy.
+  lib 234 green (+30), mock 63; llama-cpp/gufo/halogen/halogen-flash
+  regression-clean. Review: 2 rounds, CLEAN.
 - **S2.** `provider/talkies`: multi-slug engine env, name→slug routing,
   all-slug health pin, schema `x-multi-model` + per-model config schema. ⬜
 - **S3.** admin: `ProviderModel` + migration, `resolve_models`,

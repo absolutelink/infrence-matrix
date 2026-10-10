@@ -100,11 +100,17 @@ v1 endpoint gates, alias registration.
   `acquire/release` key stays the **requested name** (per-name FIFO
   fairness), while boot/VRAM admission operates on the single owning
   instance.
-- **Agent**: `BackendHandle` carries the model list;
-  `registry.resolve_by_model` matches any enabled name. The driver
-  receives the request unchanged and routes internally by `model`
-  (talkies rewrites name→slug on the forwarded request; the name→slug
-  map comes from the served-model configs).
+- **Agent**: `BackendHandle` carries `models: list[ModelSpec]` (alias-only
+  construction synthesizes a single spec — legacy providers unchanged);
+  `registry.resolve_by_model` matches any **enabled** name (all-disabled
+  lists are unroutable — no stale-alias fallback; cross-handle name
+  collisions warn, last-write-wins). `BackendDriver.set_models(models)`
+  (default no-op) is called at handle build, on assignment refresh, and on
+  `provider.config.update` **before** any restart, so a served-list change
+  reaches a live driver without a process restart where supported. The
+  driver routes internally by `request.model` (talkies rewrites name→slug
+  on the forwarded request; the name→slug map comes from the served-model
+  configs).
 - **`/v1/models`** (admin): lists every enabled served name with its
   `modality` marker and `owned_by` = the owning definition's provider
   type.
