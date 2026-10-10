@@ -3352,6 +3352,18 @@ satellites: embed/rerank/decision under one roof).
   deployed first; run it after deploy (create the multi-model def, verify
   name→slug routing + per-name gates, then delete the 4 old defs).
 
+**CI fix (post-S5):** the Phase 25 push exposed a **pre-existing**
+scheduler race — `acquire` appended the waiter, then awaited
+`_mirror_enqueue` (a Redis round-trip) **outside** the `try/except
+BaseException` that runs the shielded `_drop_waiter`; a cancellation
+delivered in that window escaped unguarded and left a ghost waiter
+(CI-flaky `test_cancelled_acquire_removes_waiter`, ~10% locally). Fix:
+the `try` now opens immediately after the append so every post-append
+await is cleanup-guarded; deterministic regression test
+`test_cancel_during_mirror_enqueue_removes_waiter` (parks the task at
+that exact await via monkeypatch — fails 100% without the fix). Original
+test 0/50 flakes after. Admin **656 green**.
+
 ---
 
 ## Known Limitations

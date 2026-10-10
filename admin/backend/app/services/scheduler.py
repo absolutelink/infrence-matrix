@@ -246,10 +246,16 @@ class InferenceScheduler:
         async with state.condition:
             state.waiters.append(request_id)
             state.changed += 1
-        await self._mirror_enqueue(alias, state, request_id)
-
-        deadline = enqueued_at + self._queue_timeout
+        # The try MUST open immediately after the append: every await that
+        # follows (including the mirror enqueue — a full Redis round-trip)
+        # runs with the shielded ``_drop_waiter`` cleanup armed. A
+        # cancellation delivered while suspended at ``_mirror_enqueue``
+        # previously escaped unguarded and left a ghost in ``waiters``
+        # (CI-flaky test_cancelled_acquire_removes_waiter).
         try:
+            await self._mirror_enqueue(alias, state, request_id)
+
+            deadline = enqueued_at + self._queue_timeout
             while True:
                 async with state.condition:
                     if request_id in state.cleared:

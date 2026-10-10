@@ -803,6 +803,51 @@ async def test_cancelled_acquire_removes_waiter(
     assert await aredis.smembers(redis_keys.sched_active_key("cq-a")) == {"r1"}
 
 
+async def test_cancel_during_mirror_enqueue_removes_waiter(
+    session: Session,
+    aredis,
+    boot_calls,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deterministic regression for the CI-flaky ghost-waiter race.
+
+    The waiter is appended to ``state.waiters`` BEFORE ``_mirror_enqueue``
+    (a Redis round-trip). If the try/except guarding the shielded
+    ``_drop_waiter`` cleanup did not open until after that await, a
+    cancellation delivered while the task is suspended inside
+    ``_mirror_enqueue`` escaped unguarded and left a ghost in the deque.
+    This test parks the task at exactly that await (no timing luck) and
+    cancels there; it fails 100% without the fix.
+    """
+    make_stack(session, machine_uid="sch-cancel-mq", alias="mq-a", capacity=1)
+    scheduler = InferenceScheduler(aredis)
+    await scheduler.acquire("mq-a", "r1")
+
+    parked = asyncio.Event()
+    real_enqueue = scheduler._mirror_enqueue
+
+    async def _hang_on_enqueue(alias, state, request_id):
+        parked.set()
+        await asyncio.Event().wait()  # cancelled here by the test
+        await real_enqueue(alias, state, request_id)
+
+    monkeypatch.setattr(scheduler, "_mirror_enqueue", _hang_on_enqueue)
+
+    task = asyncio.create_task(scheduler.acquire("mq-a", "r2"))
+    await wait_until(lambda: parked.is_set())
+    assert "r2" in scheduler._states["mq-a"].waiters
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The shielded _drop_waiter ran during the unwind: no ghost remains,
+    # in-process or in the Redis mirror.
+    assert list(scheduler._states["mq-a"].waiters) == []
+    assert await aredis.lrange(redis_keys.sched_queue_key("mq-a"), 0, -1) == []
+    assert await aredis.smembers(redis_keys.sched_active_key("mq-a")) == {"r1"}
+
+
 # ---------------------------------------------------------------------------
 # Queue timeout
 # ---------------------------------------------------------------------------
