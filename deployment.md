@@ -189,11 +189,13 @@ each definition pins its model into VRAM for its whole lifetime.
 - **Version hard-fail**: as with every provider, the talkies `VERSION` must
   exactly match the admin `VERSION` or registration 409s — deploy the admin
   first, then recreate every talkies agent.
-- **Smoke status**: the real `docker build` + `docker run` smoke is **still
-  pending on the deploy host** (no container runtime in the dev sandbox). The
-  `provider/talkies/Dockerfile.stubtest` header has the exact build+run
-  sequence (stub base → provider image → expect the agent, not stock talkies,
-  attempting registration).
+- **Smoke status**: CI builds the provider image via the
+  `build-provider-talkies` job in `build-and-push.yml` (validates the
+  layered build on every push to `main`/`develop`). The `docker run` smoke
+  on the GPU host is still pending (no container runtime in the dev
+  sandbox). The `provider/talkies/Dockerfile.stubtest` header has the
+  exact build+run sequence (stub base → provider image → expect the
+  agent, not stock talkies, attempting registration).
 
 ## Database
 

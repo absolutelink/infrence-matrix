@@ -3203,9 +3203,10 @@ work, and per-engine translation layers entirely.
   talkies deploy story (uid-1000 volume chown, seed slugs, VRAM).
   redis-keys: no new keys (verified).
 
-**Pending deploy verification (user):** real `docker build` + run smoke of
-`provider/talkies/Dockerfile` on a daemon host (sequence in the
-`Dockerfile.stubtest` header), admin migration `c4e8a1f7d902` apply,
+**Pending deploy verification (user):** CI now builds
+`provider-talkies` (`build-provider-talkies` job — validates the layered
+build); a `docker run` smoke on the GPU host remains (sequence in the
+`Dockerfile.stubtest` header), plus: admin migration `c4e8a1f7d902` apply,
 mock schema-consensus force-commit (fingerprint changed in S1), and
 end-to-end speech/transcriptions/voices smoke on 10.100.2.111.
 
